@@ -1,3 +1,0 @@
-name: ftm_datalake-archive
-storage:
-  uri: ./tests/fixtures/archive
