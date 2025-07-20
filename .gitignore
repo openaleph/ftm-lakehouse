@@ -1,7 +1,6 @@
-_wip
-archive/*
-.anystore/*
-tests/fixtures/**/.ftm-datalake/*
+data
+# duckdb tmp
+.tmp
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

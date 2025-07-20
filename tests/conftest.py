@@ -1,31 +1,21 @@
-import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock
 
-import aiobotocore.awsrequest
-import aiobotocore.endpoint
-import aiohttp
-import aiohttp.client_reqrep
-import aiohttp.typedefs
 import boto3
-import botocore.awsrequest
-import botocore.model
 import pytest
 import requests
+from anystore import get_store
+from anystore.mirror import mirror
+from moto.server import ThreadedMotoServer
 
-from ftm_datalake.archive import get_dataset
-from ftm_datalake.archive.cache import get_cache
-from ftm_datalake.archive.dataset import INFO_PREFIX, DatasetArchive
-from ftm_datalake.crawl import crawl
-
-# from anystore import get_store
-# from anystore.mirror import mirror
-
+from ftm_lakehouse.lake.base import (
+    DatasetLakehouse,
+    Lakehouse,
+    get_dataset,
+    get_lakehouse,
+)
 
 FIXTURES_PATH = (Path(__file__).parent / "fixtures").absolute()
 
@@ -35,25 +25,22 @@ def fixtures_path() -> Path:
     return FIXTURES_PATH
 
 
-@pytest.fixture(scope="session")
-def test_dataset(tmp_path_factory) -> DatasetArchive:
-    tmp_path = tmp_path_factory.mktemp("test-archive")
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    dataset = get_dataset("test_dataset", uri=tmp_path / "archive")
-    crawl(FIXTURES_PATH / "src", dataset)
-    return dataset
+@pytest.fixture(scope="function")
+def tmp_lake(tmp_path) -> Lakehouse:
+    return get_lakehouse(tmp_path)
 
 
-@pytest.hookimpl()
-def pytest_sessionfinish():
-    p = FIXTURES_PATH / "archive" / "test_dataset" / ".ftm_datalake"
-    shutil.rmtree(p / INFO_PREFIX, ignore_errors=True)
+@pytest.fixture(scope="function")
+def tmp_dataset(tmp_path) -> DatasetLakehouse:
+    lake = get_lakehouse(tmp_path)
+    return lake.get_dataset("tmp_dataset")
 
 
-@pytest.fixture(autouse=True)
-def clear_memory_cache():
-    get_cache.cache_clear()
-    get_cache()._store = {}
+@pytest.fixture(autouse=True, scope="function")
+def cache_clear():
+    get_dataset.cache_clear()
+    get_lakehouse.cache_clear()
+    yield
 
 
 # https://pawamoy.github.io/posts/local-http-server-fake-files-testing-purposes/
@@ -80,92 +67,20 @@ def http_server():
     return
 
 
-def setup_s3():
-    s3 = boto3.resource("s3", region_name="us-east-1")
-    s3.create_bucket(Bucket="ftm_datalake")
-    # from_store = get_store(uri=FIXTURES_PATH / "src", serialization_mode="raw")
-    # to_store = get_store(uri="s3://ftm_datalake", serialization_mode="raw")
-    # mirror(from_store, to_store)
-
-
-# Mock s3 for fsspec
-# https://github.com/aio-libs/aiobotocore/issues/755
-
-
-class MockAWSResponse(aiobotocore.awsrequest.AioAWSResponse):
-    """
-    Mocked AWS Response.
-
-    https://github.com/aio-libs/aiobotocore/issues/755
-    https://gist.github.com/giles-betteromics/12e68b88e261402fbe31c2e918ea4168
-    """
-
-    def __init__(self, response: botocore.awsrequest.AWSResponse):
-        self._moto_response = response
-        self.status_code = response.status_code
-        self.raw = MockHttpClientResponse(response)
-
-    # adapt async methods to use moto's response
-    async def _content_prop(self) -> bytes:
-        return self._moto_response.content
-
-    async def _text_prop(self) -> str:
-        return self._moto_response.text
-
-
-class MockHttpClientResponse(aiohttp.client_reqrep.ClientResponse):
-    """
-    Mocked HTP Response.
-
-    See <MockAWSResponse> Notes
-    """
-
-    def __init__(self, response: botocore.awsrequest.AWSResponse):
-        """
-        Mocked Response Init.
-        """
-
-        async def read(self: MockHttpClientResponse, n: int = -1) -> bytes:
-            return response.content
-
-        self.content = MagicMock(aiohttp.StreamReader)
-        self.content.read = read
-        self.response = response
-
-        self._loop = None
-
-    @property
-    def raw_headers(self) -> Any:
-        """
-        Return the headers encoded the way that aiobotocore expects them.
-        """
-        return {
-            k.encode("utf-8"): str(v).encode("utf-8")
-            for k, v in self.response.headers.items()
-        }.items()
-
-
+# http://docs.getmoto.org/en/latest/docs/server_mode.html
 @pytest.fixture(scope="session", autouse=True)
-def patch_aiobotocore() -> None:
-    """
-    Pytest Fixture Supporting S3FS Mocks.
-
-    See <MockAWSResponse> Notes
-    """
-
-    def factory(original: Callable[[Any, Any], Any]) -> Callable[[Any, Any], Any]:
-        """
-        Response Conversion Factory.
-        """
-
-        def patched_convert_to_response_dict(
-            http_response: botocore.awsrequest.AWSResponse,
-            operation_model: botocore.model.OperationModel,
-        ) -> Any:
-            return original(MockAWSResponse(http_response), operation_model)
-
-        return patched_convert_to_response_dict
-
-    aiobotocore.endpoint.convert_to_response_dict = factory(
-        aiobotocore.endpoint.convert_to_response_dict
-    )
+def moto_server():
+    """Fixture to run a mocked AWS server for testing with some data buckets."""
+    server = ThreadedMotoServer(port=8888)
+    server.start()
+    host, port = server.get_host_and_port()
+    endpoint = f"http://{host}:{port}"
+    s3 = boto3.resource("s3", region_name="us-east-1", endpoint_url=endpoint)
+    s3.create_bucket(Bucket="lakehouse")
+    s3.create_bucket(Bucket="data")
+    s3.create_bucket(Bucket="s3_dataset")
+    from_store = get_store(uri=FIXTURES_PATH / "src", serialization_mode="raw")
+    to_store = get_store(uri="s3://data", serialization_mode="raw")
+    mirror(from_store, to_store, use_worker=False)
+    yield endpoint
+    server.stop()

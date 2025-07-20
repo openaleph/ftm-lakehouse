@@ -1,35 +1,47 @@
-from ftm_datalake.archive import get_dataset
-from ftm_datalake.crawl import crawl
+from moto import mock_aws
+
+from ftm_lakehouse.crawl import crawl
 
 
-def test_crawl(tmp_path, fixtures_path):
-    url = "http://localhost:8000/src"
-    dataset = get_dataset("test", uri=tmp_path / "test1")
-    crawl(url, dataset)
-    files1 = [f for f in dataset.iter_files(use_db=False)]
-    assert len(files1) == 74
-    files1 = [f for f in dataset.iter_files()]
-    assert len(files1) == 74
+@mock_aws
+def test_crawl(tmp_lake, fixtures_path):
+    dataset = tmp_lake.get_dataset("test1")
+    res = crawl("http://localhost:8000/src", dataset)
+    assert res.done == 4
+    files1 = [f for f in dataset.archive.iter_files()]
+    assert len(files1) == 4
 
-    dataset = get_dataset("test", uri=tmp_path / "test2")
-    crawl(fixtures_path / "src", dataset)
-    files2 = [f for f in dataset.iter_files()]
-    assert len(files2) == 74
+    dataset = tmp_lake.get_dataset("test2")
+    res = crawl(fixtures_path / "src", dataset)
+    assert res.done == 4
+    files2 = [f for f in dataset.archive.iter_files()]
+    assert len(files2) == 4
 
     files1 = {f.key for f in files1}
     files2 = {f.key for f in files2}
     assert not files1 - files2, files1 - files2
     assert not files2 - files1, files2 - files1
 
-    file = dataset.lookup_file("testdir/test.txt")
-    assert file.content_hash == "2aae6c35c94fcfb415dbe95f408b9ce91ee846ed"
+    file = dataset.archive.lookup_file("2aae6c35c94fcfb415dbe95f408b9ce91ee846ed")
     assert file.key == "testdir/test.txt"
     assert file.name == "test.txt"
 
+    entities = list(dataset.statements.iterate())
+    assert len(entities) == 4
+    # entities = list(dataset.statements.iterate(origin="crawl"))
+    # assert len(entities) == 4
 
-def test_crawl_globs(tmp_path, fixtures_path):
-    dataset = get_dataset("test", uri=tmp_path / "test3")
-    res = crawl(fixtures_path / "src", dataset, include="*.pdf")
-    assert res.done == 12
-    res = crawl(fixtures_path / "src", dataset, exclude="*.pdf")
-    assert res.done == 74 - 12
+    # dataset = tmp_lake.get_dataset("test3")
+    # res = crawl("s3://data", dataset)
+    # assert res.done == 4
+    # files = [f for f in dataset.archive.iter_files()]
+    # assert len(files) == 4
+
+
+def test_crawl_globs(tmp_dataset, fixtures_path):
+    res = crawl(fixtures_path / "src", tmp_dataset, exclude_glob="*.pdf")
+    assert res.done == 3
+    assert len([f for f in tmp_dataset.archive.iter_files()]) == 3
+    res = crawl(fixtures_path / "src", tmp_dataset, glob="*.pdf")
+    assert res.done == 1
+    assert len([f for f in tmp_dataset.archive.iter_files()]) == 4

@@ -1,3 +1,3 @@
 ::: mkdocs-typer2
-    :module: ftm_datalake.cli
-    :name: ftm-datalake
+    :module: ftm_lakehouse.cli
+    :name: ftm-lakehouse

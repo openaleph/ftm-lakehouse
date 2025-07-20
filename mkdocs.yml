@@ -1,21 +1,22 @@
-site_name: ftm-datalake
-site_url: https://openaleph.org/docs/lib/ftm-datalake
-repo_url: https://github.com/openaleph/ftm-datalake
+site_name: ftm-lakehouse
+site_url: https://openaleph.org/docs/lib/ftm-lakehouse
+repo_url: https://github.com/openaleph/ftm-lakehouse
 nav:
   - Intro: index.md
   - quickstart.md
   - RFC: rfc.md
   - Documentation:
-    - crawl.md
+    - import.md
+    - retrieve.md
     - make.md
+    - crawl.md
     - configuration.md
     - cache.md
     - api.md
-  - Adapters:
-    - sync/aleph.md
-    - sync/memorious.md
   - Reference:
-      - ftm-datalake.cli: reference/cli.md
+      - cli: reference/cli.md
+      - io: reference/io.md
+      - lake: reference/lake.md
 theme:
   name: material
   logo: https://cdn.investigativedata.org/style/logos/darc/svg/DARC-Logo-RGB-Horizontal-Neg.svg
@@ -37,7 +38,7 @@ extra:
     - icon: material/web
       link: https://dataresearchcenter.org
     - icon: material/github
-      link: https://github.com/openaleph/ftm-datalake
+      link: https://github.com/openaleph/ftm-lakehouse
     - icon: material/linkedin
       link: https://www.linkedin.com/company/dataresearchcenter/
 markdown_extensions:

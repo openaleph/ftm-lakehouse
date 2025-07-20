@@ -1,41 +1,67 @@
-from anystore.store import MemoryStore
+import yaml
+from anystore.io import smart_read, smart_stream_json
+from anystore.util import ensure_uri
 
-from ftm_datalake.archive import Archive, configure_archive, get_archive, get_dataset
+from ftm_lakehouse.lake.base import get_lakehouse
 
 
-def test_config(fixtures_path, monkeypatch, tmp_path):
-    config = Archive._from_uri(fixtures_path / "archive.yml")
-    archive = get_archive()
-    assert config.storage.uri.strip(".") in archive._storage.uri
-    assert archive._storage.uri.endswith("tests/fixtures/archive")
-    assert archive._storage.serialization_mode == "raw"
-    assert archive.checksum_algorithm == "sha1"
-    assert archive.metadata_prefix == ".ftm_datalake"
+def test_config_initialization(fixtures_path, tmp_path):
+    # by environment (pytest env in pyproject.toml)
+    lake = get_lakehouse()
+    assert lake.storage.uri == ensure_uri(fixtures_path / "lake")
+    assert lake.storage.serialization_mode == "raw"
+    assert lake.cache.uri == ensure_uri(fixtures_path / "lake/.cache/ftm_lakehouse")
+    assert lake.cache.raise_on_nonexist is False
 
-    # overwrite some settings
-    # monkeypatch.setenv("LEAKRFC_STORE__URI", "other-files")
-    # monkeypatch.setenv("LEAKRFC_CACHE__URI", "redis://localhost")
-    # archive = configure_archive()
-    # assert archive.cache.scheme == "redis"
-    # assert archive.store.uri.endswith("other-files")
+    # by config uri
+    # not implemented
+    # uri = fixtures_path / "s3_lake" / "config.yml"
+    # lake = get_lakehouse(uri)
+    # assert lake.storage.uri == "s3://lakehouse"
 
-    dataset = get_dataset("test_dataset")
+    # by path uri
+    lake = get_lakehouse(tmp_path)
+    assert lake.storage.uri == ensure_uri(tmp_path)
+
+    # dataset
+    lake = get_lakehouse(fixtures_path / "lake")
+    dataset = lake.get_dataset("test_dataset")
     assert dataset.name == "test_dataset"
-    assert dataset._storage.uri == f"{archive._storage.uri}/test_dataset"
+    assert dataset.storage.uri == ensure_uri(fixtures_path / "lake/test_dataset")
+    assert dataset.cache.uri == ensure_uri(
+        fixtures_path / "lake/test_dataset/.cache/ftm_lakehouse"
+    )
 
-    dataset = archive.get_dataset("test_dataset")
-    assert dataset.name == "test_dataset"
-    assert dataset._storage.uri == f"{archive._storage.uri}/test_dataset"
+    # not implemented
+    # dataset = get_dataset("external_dataset")
+    # assert dataset.storage.uri == "s3://s3_dataset"
+    # assert dataset.cache.uri == ensure_uri(
+    #     fixtures_path / "lake/.cache/ftm_lakehouse/external_dataset"
+    # )
 
-    dataset = get_dataset("test_dataset", uri="foo")
-    assert dataset._storage.uri.endswith("foo")
 
-    archive = get_archive(tmp_path / "foo.ftm_datalake")
-    assert archive.is_zip
-    dataset = archive.get_dataset("test")
-    assert dataset._storage.uri == archive._storage.uri
-    assert dataset._make_path() == "test"
+def test_config_edit(tmp_path):
+    lake = get_lakehouse(tmp_path)
+    dataset = lake.get_dataset("test_dataset")
+    dataset.make_config(title="A nice title")
+    assert dataset.load_model().title == "A nice title"
+    assert len([k for k in dataset.storage.iterate_keys(prefix="versions")]) == 1
+    data = yaml.safe_load(smart_read(tmp_path / "test_dataset/config.yml"))
+    assert data["title"] == "A nice title"
+    assert "description" not in data
 
-    dataset = get_dataset("test_dataset", tmp_path / "foo2.ftm_datalake")
-    assert dataset.is_zip
-    assert dataset._make_path() == "test_dataset"
+    dataset.make_config(description="The description")
+    assert dataset.load_model().title == "A nice title"
+    assert dataset.load_model().description == "The description"
+    assert len([k for k in dataset.storage.iterate_keys(prefix="versions")]) == 2
+    data = yaml.safe_load(smart_read(tmp_path / "test_dataset/config.yml"))
+    assert data["title"] == "A nice title"
+    assert data["description"] == "The description"
+
+    dataset.make_index()
+    assert len([k for k in dataset.storage.iterate_keys(prefix="versions")]) == 3
+    data = {}
+    for line in smart_stream_json(tmp_path / "test_dataset/index.json"):
+        data = line
+    assert data["title"] == "A nice title"
+    assert data["description"] == "The description"

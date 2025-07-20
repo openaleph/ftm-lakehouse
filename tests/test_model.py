@@ -1,44 +1,43 @@
-from datetime import datetime
-
+from anystore import get_store
+from followthemoney.dataset import DefaultDataset
 from ftmq.model import Dataset
-from nomenklatura.dataset import DefaultDataset
 from rigour.mime.types import PLAIN
 
-from ftm_datalake.model import ORIGIN_ORIGINAL, DatasetModel, File
+from ftm_lakehouse.model import DatasetModel, File
 
 
 def test_model():
-    uri = "http://localhost:8000/src/utf.txt"
-    file_id = "default-file-2928064cd9a743af30b720634dcffacdd84de23d"
+    checksum = "2928064cd9a743af30b720634dcffacdd84de23d"
+    file_id = "file-f47cdafce4cd4c82eb97334b0a215f4af587173a"
+    store = get_store("http://localhost:8000")
 
-    file = File.from_uri(uri, content_hash="ch-root")
-    assert file.origin == ORIGIN_ORIGINAL == "original"
+    file = File.from_info(store.info("src/utf.txt"), checksum=checksum)
+    assert file.key == "src/utf.txt"
     assert file.name == "utf.txt"
     assert file.mimetype == PLAIN
     assert file.dataset == DefaultDataset.name
     assert file.id == file_id
-    data = file.model_dump()
-    assert data["origin"] == ORIGIN_ORIGINAL
+    assert file.size == 19
+    assert file.to_dict() == {
+        "created_at": "2024-09-29T20:52:24Z",
+        "updated_at": "2024-09-29T20:52:24Z",
+        "size": 19,
+        "key": "src/utf.txt",
+        "dataset": "default",
+        "checksum": "2928064cd9a743af30b720634dcffacdd84de23d",
+    }
 
-    proxy = file.to_proxy()
-    assert proxy.id == file.id
-    assert proxy.dataset.name == file.dataset
-    assert proxy.first("fileName") == file.name
-
-    # documents
-    doc = file.to_document()
-    assert doc.key == file.key
-    assert doc.content_hash == file.content_hash
-    assert doc.size == file.size
-    assert doc.mimetype == PLAIN
-    assert doc.dataset == file.dataset
-    assert doc.created_at < datetime.now()
-    assert doc.updated_at < datetime.now()
-    assert doc.created_at <= doc.updated_at
+    entity = file.to_entity()
+    assert entity.id == file_id
+    assert entity.dataset.name == file.dataset
+    assert entity.first("fileName") == file.name
+    assert entity.first("contentHash") == checksum
+    assert entity.first("fileSize") == "19"
+    assert entity.first("mimeType") == PLAIN
 
 
 def test_model_dataset(fixtures_path):
-    config = fixtures_path / "archive/test_dataset/.ftm_datalake/config.yml"
+    config = fixtures_path / "lake/test_dataset/config.yml"
     dataset = DatasetModel.from_yaml_uri(config)
     assert isinstance(dataset, Dataset)
     assert Dataset(**dataset.model_dump())
