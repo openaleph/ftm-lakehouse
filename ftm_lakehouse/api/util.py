@@ -5,14 +5,13 @@ from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from ftm_lakehouse import __version__
-from ftm_lakehouse.lake.base import get_lakehouse
+from ftm_lakehouse import __version__, io
 from ftm_lakehouse.model import File
 from ftm_lakehouse.settings import Settings
 
 settings = Settings()
 log = get_logger(__name__)
-lake = get_lakehouse()
+
 DEFAULT_ERROR = HTTPException(404)
 BASE_HEADER = {"x-ftm-lakehouse-version": __version__}
 
@@ -24,6 +23,7 @@ def get_file_header(file: File) -> dict[str, str]:
             "x-ftm-lakehouse-dataset": file.dataset,
             "x-ftm-lakehouse-sha1": file.checksum,
             "x-ftm-lakehouse-name": file.name,
+            "x-ftm-lakehouse-path": file.key,
             "x-ftm-lakehouse-size": str(file.size),
             "x-mimetype": file.mimetype,
             "content-type": file.mimetype,
@@ -59,8 +59,10 @@ class Errors:
 
 
 def get_file_info(dataset: str, content_hash: str) -> File:
-    archive = lake.get_dataset(dataset).archive
-    return archive.lookup_file(content_hash)
+    file = io.lookup_file(dataset, content_hash)
+    if file is not None:
+        return file
+    raise DEFAULT_ERROR
 
 
 def ensure_path_context(dataset: str, content_hash: str) -> Context:
@@ -73,10 +75,11 @@ def ensure_path_context(dataset: str, content_hash: str) -> Context:
 
 
 def stream_file(ctx: Context) -> StreamingResponse:
-    archive = lake.get_dataset(ctx.dataset).archive
-    file = archive.lookup_file(ctx.content_hash)
+    stream = io.stream_file(ctx.dataset, ctx.content_hash)
+    if stream is None:
+        raise DEFAULT_ERROR
     return StreamingResponse(
-        archive.stream_file(file),
+        stream,
         headers=ctx.headers,
         media_type=ctx.file.mimetype,
     )

@@ -194,15 +194,17 @@ class DatasetLakehouse(Generic[DM], LakeMixin):
         """Job status result storage interface"""
         return DatasetJobs(name=self.name, uri=self.storage.uri)
 
-    @skip_if_latest(path.INDEX, [tag.STATEMENTS_UPDATED])
+    @skip_if_latest(path.INDEX, [tag.STATEMENTS_UPDATED, tag.FRAGMENTS_UPDATED])
     def make(self) -> None:
         """
         Run a full update for the dataset:
+        - Flush fragments into statement store
         - Export statements.csv
         - Export statistics.json
         - Export entities.ftm.json
         - Export index.json
         """
+        self.fragments.flush()
         self.statements.export()
         self.statements.export_statistics()
         self.entities.export()
