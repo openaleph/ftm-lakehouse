@@ -62,7 +62,7 @@ mkdocs-material = "^9.5.49"
 mkdocs-click = "^0.8.1"
 mkdocs-autorefs = "^1.2.0"
 mkdocstrings-python = "^1.12.2"
-mkdocs-typer2 = "^0.1.5"
+mkdocs-typer2 = "^0.1.6"
 
 [build-system]
 requires = ["poetry-core"]
