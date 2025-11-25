@@ -16,7 +16,7 @@ from ftmq.types import StatementEntities, ValueEntities
 from ftmq.util import ensure_entity
 
 from ftm_lakehouse.lake.base import DM, DatasetLakehouse, get_dataset
-from ftm_lakehouse.model import CrudOperation, Cruds, File
+from ftm_lakehouse.model import File
 
 DS: TypeAlias = str | Dataset | DatasetLakehouse
 
@@ -134,27 +134,6 @@ def iterate_entities(
     dataset = ensure_dataset(dataset)
     yield from dataset.statements.iterate(
         entity_ids=entity_ids, origin=origin, bucket=bucket
-    )
-
-
-def write_cruds(dataset: DS, cruds: Cruds) -> int:
-    dataset = ensure_dataset(dataset)
-    i = 0
-    for crud in cruds:
-        dataset.cruds.put(crud)
-        i += 1
-    return i
-
-
-def stream_cruds(
-    dataset: DS,
-    entity_id: str | None = None,
-    include_done: bool | None = False,
-    operation: CrudOperation | None = None,
-) -> Cruds:
-    dataset = ensure_dataset(dataset)
-    yield from dataset.cruds.iterate(
-        entity_id=entity_id, include_done=include_done, operation=operation
     )
 
 

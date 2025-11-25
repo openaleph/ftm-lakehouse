@@ -13,7 +13,6 @@ from ftm_lakehouse.conventions import path, tag
 from ftm_lakehouse.decorators import skip_if_latest, versioned
 from ftm_lakehouse.exceptions import ImproperlyConfigured
 from ftm_lakehouse.lake.archive import DatasetLakeArchive
-from ftm_lakehouse.lake.crud import DatasetCruds
 from ftm_lakehouse.lake.entities import DatasetEntities
 from ftm_lakehouse.lake.fragments import DatasetFragments
 from ftm_lakehouse.lake.jobs import DatasetJobs
@@ -185,11 +184,6 @@ class DatasetLakehouse(Generic[DM], LakeMixin):
         )
 
     @cached_property
-    def cruds(self) -> DatasetCruds:
-        """Crud operations interface"""
-        return DatasetCruds(name=self.name, uri=self.storage.uri)
-
-    @cached_property
     def jobs(self) -> DatasetJobs:
         """Job status result storage interface"""
         return DatasetJobs(name=self.name, uri=self.storage.uri)
@@ -268,12 +262,6 @@ def get_archive(name: str) -> DatasetLakeArchive:
 def get_statements(name: str) -> DatasetStatements:
     dataset = get_dataset(name)
     return dataset.statements
-
-
-@cache
-def get_cruds(name: str) -> DatasetCruds:
-    dataset = get_dataset(name)
-    return dataset.cruds
 
 
 def load_config(storage: BaseStore, **data) -> SDict:

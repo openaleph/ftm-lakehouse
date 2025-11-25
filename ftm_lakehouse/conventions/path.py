@@ -117,37 +117,6 @@ ENTITIES = "entities"
 ENTITIES_JSON = f"{ENTITIES}/entities.ftm.json"
 """aggregated entities file path"""
 
-CRUD = f"{ENTITIES}/crud"
-"""entities crud operations prefix"""
-
-CRUD_CURRENT = "current.json"
-"""crud current (existing) path name"""
-
-
-def crud_prefix(entity_id: str) -> str:
-    """
-    Get crud operation prefix for given entity id
-
-    Args:
-        entity_id: Entity ID
-    """
-    return f"{CRUD}/{entity_id}"
-
-
-def crud_path(entity_id: str, uuid: str | None = None) -> str:
-    """
-    Get crud operation path for given entity id
-
-    Args:
-        entity_id: Entity ID
-        uuid: identifier, omit to generate one
-    """
-    return f"{crud_prefix(entity_id)}/{ensure_uuid(uuid)}.json"
-
-
-def crud_current(entity_id: str) -> str:
-    return f"{crud_prefix(entity_id)}/{CRUD_CURRENT}"
-
 
 STATEMENTS = f"{ENTITIES}/statements"
 """entities statements prefix"""
