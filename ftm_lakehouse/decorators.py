@@ -11,8 +11,9 @@ from ftm_lakehouse.lake.mixins import LakeMixin, StorageMixin
 def versioned(path: str) -> Callable[..., Any]:
     """
     Write the returning pydantic object of the wrapped function to `path` (yml
-    or json) and store a time-based version of it (`uuid7`) in the versions
-    subfolder. The wrapped function must return a pydantic object.
+    or json) and store a time-based version of it in a snapshot directory
+    (versions/YYYY/MM/timestamp/filename). The wrapped function must return a
+    pydantic object.
 
     Classes using this decorator need to subclass from
     [StorageMixin][ftm_lakehouse.mixins.StorageMixin]

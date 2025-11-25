@@ -18,19 +18,31 @@ def test_dataset_metadata(monkeypatch, tmp_path):
     # now exists
     assert dataset.storage.exists(path.CONFIG)
     # with 1 version
-    versions = dataset.storage.iterate_keys(prefix="versions/config.yml")
-    assert len([v for v in versions]) == 1
+    versions = [
+        v
+        for v in dataset.storage.iterate_keys(prefix="versions")
+        if v.endswith("config.yml")
+    ]
+    assert len(versions) == 1
     # patch data
     dataset.make_config(description="A good description")
     assert dataset.model.description == "A good description"
-    versions = dataset.storage.iterate_keys(prefix="versions/config.yml")
-    assert len([v for v in versions]) == 2
+    versions = [
+        v
+        for v in dataset.storage.iterate_keys(prefix="versions")
+        if v.endswith("config.yml")
+    ]
+    assert len(versions) == 2
     # index.json
     assert not dataset.storage.exists(path.INDEX)
     dataset.make_index()
     assert dataset.storage.exists(path.INDEX)
-    versions = dataset.storage.iterate_keys(prefix="versions/index.json")
-    assert len([v for v in versions]) == 1
+    versions = [
+        v
+        for v in dataset.storage.iterate_keys(prefix="versions")
+        if v.endswith("index.json")
+    ]
+    assert len(versions) == 1
 
     # higher level
     dataset = io.get_dataset_metadata("new_dataset")
@@ -38,8 +50,12 @@ def test_dataset_metadata(monkeypatch, tmp_path):
     dataset = io.update_dataset_metadata("new_dataset", category="leak")
     assert dataset.category == io.get_dataset_metadata("new_dataset").category == "leak"
     dataset = get_dataset("new_dataset")
-    versions = dataset.storage.iterate_keys(prefix="versions/config.yml")
-    assert len([v for v in versions]) == 3
+    versions = [
+        v
+        for v in dataset.storage.iterate_keys(prefix="versions")
+        if v.endswith("config.yml")
+    ]
+    assert len(versions) == 3
 
     # DatasetModel subclass
     class Dataset(DatasetModel):
@@ -49,13 +65,21 @@ def test_dataset_metadata(monkeypatch, tmp_path):
     assert isinstance(dataset.model, Dataset)
     dataset.make_config(user_id=17)
     assert dataset.model.user_id == 17
-    versions = dataset.storage.iterate_keys(prefix="versions/config.yml")
-    assert len([v for v in versions]) == 4
+    versions = [
+        v
+        for v in dataset.storage.iterate_keys(prefix="versions")
+        if v.endswith("config.yml")
+    ]
+    assert len(versions) == 4
     # extra data is not in index.json:
     index = dataset.make_index()
     assert not hasattr(index, "user_id")
-    versions = dataset.storage.iterate_keys(prefix="versions/index.json")
-    assert len([v for v in versions]) == 2
+    versions = [
+        v
+        for v in dataset.storage.iterate_keys(prefix="versions")
+        if v.endswith("index.json")
+    ]
+    assert len(versions) == 2
 
     # non existing dataset (won't be created implicitly)
     assert not io.has_dataset("foo")

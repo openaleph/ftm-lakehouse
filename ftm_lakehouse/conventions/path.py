@@ -6,7 +6,7 @@ information interchange between different processing stages.
 All path convention helpers are dataset-specific and relative to their dataset root.
 """
 
-from anystore.util import ensure_uuid, get_extension
+from datetime import datetime, timezone
 
 from ftm_lakehouse.util import make_checksum_key
 
@@ -23,15 +23,25 @@ VERSIONS = "versions"
 """versions prefix"""
 
 
-def version(name: str, uuid: str | None = None) -> str:
+def version(name: str, ts: str | None = None) -> str:
     """
-    Get a version metadata path, e.g. for index.json or stats.json
+    Get a versioned snapshot path for a file, e.g. for index.json or config.yml
+
+    Layout: versions/YYYY/MM/YYYY-MM-DDTHH:MM:SS/<name>
 
     Args:
-        uuid: identifier, omit to generate one (based on time based uuid7)
+        name: The file name to version (e.g. "config.yml", "index.json")
+        ts: ISO timestamp, omit to use current time
+
+    Returns:
+        Path like "versions/2025/01/2025-01-15T10:30:00/config.yml"
     """
-    ext = get_extension(name)
-    return f"{VERSIONS}/{name}/{ensure_uuid(uuid)}.{ext}"
+    if ts is None:
+        ts = datetime.now(timezone.utc).isoformat()
+
+    year = ts[:4]
+    month = ts[5:7]
+    return f"{VERSIONS}/{year}/{month}/{ts}/{name}"
 
 
 LOCK = ".LOCK"
