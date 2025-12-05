@@ -19,7 +19,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/openaleph/ftm-datalake
+          images: ghcr.io/openaleph/ftm-lakehouse
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}

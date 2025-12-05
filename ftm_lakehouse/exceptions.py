@@ -1,0 +1,2 @@
+class ImproperlyConfigured(BaseException):
+    pass

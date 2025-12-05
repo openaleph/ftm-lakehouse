@@ -1,105 +1,199 @@
 # Quickstart
 
-## Install
+This guide will help you get started with `ftm-lakehouse` in minutes.
 
-Requires python 3.11 or later.
+## Installation
 
-```bash
-pip install ftm-datalake
-```
-
-## Build a dataset
-
-`ftm-datalake` stores _metadata_ for the files that then refers to the actual _source files_.
-
-For example, take this public file listing archive: [https://data.ddosecrets.com/Patriot%20Front/patriotfront/2021/Organizational%20Documents%20and%20Notes/](https://data.ddosecrets.com/Patriot%20Front/patriotfront/2021/Organizational%20Documents%20and%20Notes/)
-
-Crawl these documents into a _dataset_:
+Requires Python 3.11 or later.
 
 ```bash
-ftm-datalake -d ddos_patriotfront crawl "https://data.ddosecrets.com/Patriot%20Front/patriotfront/2021/Organizational%20Documents%20and%20Notes"
+pip install ftm-lakehouse
 ```
 
-The _metadata_ and _source files_ are now stored in the archive (`./data` by default).
+## Basic Concepts
 
-## Inspect files and archive
+`ftm-lakehouse` organizes data into **datasets**. Each dataset contains:
 
-All _metadata_ and other information lives in the `ddos_patriotfront/.ftm-datalake` subdirectory. Files are keyed and accessible by their (relative) path.
+- **Entities**: Structured [FollowTheMoney](https://followthemoney.tech) data
+- **Archive**: Source documents and files
 
-Retrieve file metadata:
+## Using the Python API
+
+### Working with Entities
+
+```python
+from ftm_lakehouse import io
+from followthemoney import model
+
+# Create a dataset
+dataset = io.ensure_dataset("my_dataset")
+
+# Create an entity
+person = model.make_entity("Person")
+person.make_id("jane-doe")
+person.add("name", "Jane Doe")
+person.add("nationality", "us")
+
+# Write the entity
+io.write_entity("my_dataset", person, origin="manual")
+
+# Flush to storage
+io.flush("my_dataset")
+
+# Read it back
+entity = io.get_entity("my_dataset", person.id)
+print(f"Found: {entity.caption}")
+```
+
+### Working with Files
+
+```python
+from ftm_lakehouse import io
+
+# Archive a file
+file = io.archive_file("my_dataset", "/path/to/document.pdf")
+print(f"Archived: {file.checksum}")
+
+# Retrieve it
+with io.open_file("my_dataset", file.checksum) as fh:
+    content = fh.read()
+```
+
+### Bulk Operations
+
+For large imports, use bulk writers:
+
+```python
+from ftm_lakehouse import io
+
+# Write many entities efficiently
+with io.entity_writer("my_dataset", origin="bulk_import") as writer:
+    for entity in large_entity_source():
+        writer.add_entity(entity)
+
+# Flush and export
+dataset = io.ensure_dataset("my_dataset")
+dataset.entities.flush()
+dataset.entities.export_statements()
+dataset.entities.export()
+```
+
+## Using the CLI
+
+### Create a Dataset
 
 ```bash
-ftm-datalake -d ddos_patriotfront head Event.pdf
+# Initialize a dataset
+ftm-lakehouse -d my_dataset make
 ```
 
-Retrieve actual file blob:
+### Crawl Documents
 
 ```bash
-ftm-datalake -d ddos_patriotfront get Event.pdf > Event.pdf
+# Crawl from a local directory
+ftm-lakehouse -d my_dataset crawl /path/to/documents
+
+# Crawl from HTTP source
+ftm-lakehouse -d my_dataset crawl https://example.com/files/
 ```
 
-Show all files metadata present in the dataset archive:
+### Import Entities
 
 ```bash
-ftm-datalake -d ddos_patriotfront ls
+# Import from JSON lines file
+cat entities.ftm.json | ftm-lakehouse -d my_dataset write-entities
 ```
 
-Show only the file paths:
+### Export Data
 
 ```bash
-ftm-datalake -d ddos_patriotfront ls --keys
+# Generate all exports
+ftm-lakehouse -d my_dataset make --exports
+
+# Stream entities
+ftm-lakehouse -d my_dataset stream-entities
 ```
 
-Show only the checksums (sha1 by default):
+### Work with Archive
 
 ```bash
-ftm-datalake -d ddos_patriotfront ls --checksums
+# List archived files
+ftm-lakehouse -d my_dataset archive ls
+
+# Get file metadata
+ftm-lakehouse -d my_dataset archive head <checksum>
+
+# Retrieve file content
+ftm-lakehouse -d my_dataset archive get <checksum> -o output.pdf
 ```
 
-### Tracking changes
+## Configuration
 
-The [`make`](./make.md) command (re-)generates the datasets metadata.
-
-Delete a file:
+Set the storage location via environment variable:
 
 ```bash
-rm ./data/ddos_patriotfront/Event.pdf
+# Local storage
+export LAKEHOUSE_URI=./data
+
+# S3 storage
+export LAKEHOUSE_URI=s3://my-bucket/lakehouse
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
 ```
 
-Now regenerate:
+For persistent journal storage (recommended for production):
 
 ```bash
-ftm-datalake -d ddos_patriotfront make
+export LAKEHOUSE_JOURNAL_URI=postgresql://user:pass@localhost/journal
 ```
 
-The result output will indicate that 1 file was deleted.
+## Complete Example
 
-## configure storage
+Here's a complete workflow:
 
-```yaml
-storage_config:
-  uri: s3://my_bucket
-  backend_kwargs:
-    endpoint_url: https://s3.example.org
-    aws_access_key_id: ${AWS_ACCESS_KEY_ID}
-    aws_secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+```python
+from ftm_lakehouse import io, get_dataset
+from followthemoney import model
+
+def main():
+    dataset_name = "quickstart_demo"
+
+    # 1. Create or get the dataset
+    dataset = io.ensure_dataset(dataset_name)
+
+    # 2. Create some entities
+    entities = []
+    for name in ["Alice Smith", "Bob Jones", "Carol White"]:
+        person = model.make_entity("Person")
+        person.make_id(name.lower().replace(" ", "-"))
+        person.add("name", name)
+        entities.append(person)
+
+    # 3. Write entities
+    count = io.write_entities(dataset_name, entities, origin="demo")
+    print(f"Wrote {count} entities")
+
+    # 4. Flush and export
+    dataset.entities.flush()
+    dataset.entities.export_statements()
+    dataset.entities.export()
+
+    # 5. Query entities
+    print("\nAll entities:")
+    for entity in io.stream_entities(dataset_name):
+        print(f"  - {entity.caption}")
+
+    # 6. Get specific entity
+    alice = io.get_entity(dataset_name, "alice-smith")
+    print(f"\nFound Alice: {alice.caption}")
+
+if __name__ == "__main__":
+    main()
 ```
 
-### dataset config.yml
+## Next Steps
 
-Follows the specification in [`ftmq.model.Dataset`](https://github.com/dataresearchcenter/ftmq/blob/main/ftmq/model/dataset.py):
-
-```yaml
-name: my_dataset #  also known as "foreign_id"
-title: An awesome leak
-description: >
-  Incidunt eum asperiores impedit. Nobis est dolorem et quam autem quo. Name
-  labore sequi maxime qui non voluptatum ducimus voluptas. Exercitationem enim
-  similique asperiores quod et quae maiores. Et accusantium accusantium error
-  et alias aut omnis eos. Omnis porro sit eum et.
-updated_at: 2024-09-25
-index_url: https://static.example.org/my_dataset/index.json
-# add more metadata
-
-ftm-datalake: # see above
-```
+- [Working with Entities](usage/entities.md) - Deep dive into entity operations
+- [Working with Files](usage/archive.md) - Learn about the file archive
+- [CLI Reference](usage/cli.md) - Complete CLI documentation
+- [Configuration](usage/configuration.md) - Advanced configuration options

@@ -1,0 +1,24 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: openaleph
+      POSTGRES_PASSWORD: openaleph
+      POSTGRES_DATABASE: openaleph
+
+  redis:
+    image: redis:alpine
+    command: ["redis-server", "--save", "3600", "10"]
+
+  minio:
+    image: quay.io/minio/minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: openaleph
+      MINIO_ROOT_PASSWORD: openaleph
+      MINIO_REGION_NAME: eu-central-1
+    command: server /data --console-address ":9001"
+    volumes:
+      - ./data-minio:/data

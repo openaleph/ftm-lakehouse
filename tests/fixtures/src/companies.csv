@@ -1,0 +1,4 @@
+id,name,jurisdiction,incorporation_date,status
+ACME001,Acme Corporation,us,2010-05-15,active
+GLOB002,Global Industries Ltd,gb,2005-03-22,active
+TECH003,TechStart Inc,de,2018-11-30,dissolved

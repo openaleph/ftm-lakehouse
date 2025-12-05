@@ -1,0 +1,9 @@
+content_type: structured
+coverage:
+  frequency: unknown
+name: test_dataset
+prefix: test-dataset
+title: A nice title
+updated_at: '2025-06-25T10:16:55'
+uri: file:///home/elliot/Projects/aleph-next/leak-rfc/tests/fixtures/lake/test_dataset
+

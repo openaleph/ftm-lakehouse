@@ -1,21 +1,23 @@
-site_name: ftm-datalake
-site_url: https://openaleph.org/docs/lib/ftm-datalake
-repo_url: https://github.com/openaleph/ftm-datalake
+site_name: ftm-lakehouse
+site_url: https://openaleph.org/docs/lib/ftm-lakehouse
+repo_url: https://github.com/openaleph/ftm-lakehouse
 nav:
   - Intro: index.md
   - quickstart.md
   - RFC: rfc.md
-  - Documentation:
-    - crawl.md
-    - make.md
-    - configuration.md
-    - cache.md
-    - api.md
-  - Adapters:
-    - sync/aleph.md
-    - sync/memorious.md
+  - Usage:
+    - Working with Entities: usage/entities.md
+    - Working with Files: usage/archive.md
+    - Working with Mappings: usage/mappings.md
+    - CLI Reference: usage/cli.md
+    - Configuration: usage/configuration.md
   - Reference:
-      - ftm-datalake.cli: reference/cli.md
+    - ftm_lakehouse.io: reference/io.md
+    - ftm_lakehouse.logic: reference/logic.md
+    - ftm_lakehouse.entities: reference/entities.md
+    - ftm_lakehouse.archive: reference/archive.md
+    - ftm_lakehouse.mappings: reference/mappings.md
+    - ftm_lakehouse.lakehouse: reference/lakehouse.md
 theme:
   name: material
   logo: https://cdn.investigativedata.org/style/logos/darc/svg/DARC-Logo-RGB-Horizontal-Neg.svg
@@ -25,7 +27,6 @@ theme:
     - navigation.instant
     - navigation.tracking
     - navigation.sections
-    # - navigation.footer
     - toc.follow
     - content.code.copy
 extra_css:
@@ -37,7 +38,7 @@ extra:
     - icon: material/web
       link: https://dataresearchcenter.org
     - icon: material/github
-      link: https://github.com/openaleph/ftm-datalake
+      link: https://github.com/openaleph/ftm-lakehouse
     - icon: material/linkedin
       link: https://www.linkedin.com/company/dataresearchcenter/
 markdown_extensions:
