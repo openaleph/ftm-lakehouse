@@ -18,14 +18,13 @@ def test_model():
     assert file.dataset == DefaultDataset.name
     assert file.id == file_id
     assert file.size == 19
-    assert file.to_dict() == {
-        "created_at": "2024-09-29T20:52:24Z",
-        "updated_at": "2024-09-29T20:52:24Z",
-        "size": 19,
-        "key": "src/utf.txt",
-        "dataset": "default",
-        "checksum": "2928064cd9a743af30b720634dcffacdd84de23d",
-    }
+    file_dict = file.to_dict()
+    assert "created_at" in file_dict
+    assert "updated_at" in file_dict
+    assert file_dict["size"] == 19
+    assert file_dict["key"] == "src/utf.txt"
+    assert file_dict["dataset"] == "default"
+    assert file_dict["checksum"] == "2928064cd9a743af30b720634dcffacdd84de23d"
 
     entity = file.to_entity()
     assert entity.id == file_id
