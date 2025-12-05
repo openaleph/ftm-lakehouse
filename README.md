@@ -24,7 +24,7 @@ pip install ftm-lakehouse
 
 ## Documentation
 
-[openaleph.org/lib/ftm-lakehouse](https://openaleph.org/lib/ftm-lakehouse)
+[openaleph.org/docs/lib/ftm-lakehouse](https://openaleph.org/docs/lib/ftm-lakehouse)
 
 ## Development
 
