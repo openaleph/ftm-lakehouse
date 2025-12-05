@@ -47,15 +47,19 @@ def version(name: str, ts: str | None = None) -> str:
 LOCK = ".LOCK"
 """dataset-wide lock key"""
 
+LOCK_PREFIX = ".locks/lakehouse"
+"""Prefix for specific locks"""
+
+CACHE_PREFIX = ".cache/lakehouse"
+"""Prefix for dataset cache"""
+
 ARCHIVE = "archive"
 """archive prefix"""
 
 
 def file_path(checksum: str) -> str:
     """
-    Get a file path.
-
-        ./archive/
+    Get a file path for the archive.
 
     Args:
         checksum: SHA1 checksum of file
@@ -90,41 +94,20 @@ MAPPING = "mapping.yml"
 """mapping file name"""
 
 
-def mapping_prefix(uuid: str | None = None) -> str:
+def mapping_yml(content_hash: str) -> str:
     """
-    Get a mapping path prefix
+    Get the mapping.yml path for the given file SHA1
 
     Args:
         uuid: identifier, omit to generate one
     """
-    return f"{MAPPINGS}/{ensure_uuid(uuid)}"
-
-
-def mapping_yml(uuid: str | None = None) -> str:
-    """
-    Get a mapping.yml
-
-    Args:
-        uuid: identifier, omit to generate one
-    """
-    return f"{mapping_prefix(uuid)}/{MAPPING}"
-
-
-def mapping_source(uuid: str, source: str) -> str:
-    """
-    Get a mapping source file path
-
-    Args:
-        uuid: mapping identifier
-        source: Source file path
-    """
-    return f"{mapping_prefix(uuid)}/{source}"
+    return f"{MAPPINGS}/{content_hash}/{MAPPING}"
 
 
 ENTITIES = "entities"
 """entities prefix"""
 
-ENTITIES_JSON = f"{ENTITIES}/entities.ftm.json"
+ENTITIES_JSON = "entities.ftm.json"
 """aggregated entities file path"""
 
 

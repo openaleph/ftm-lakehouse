@@ -2,15 +2,15 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Generator
 
 import boto3
 import pytest
 import requests
-from anystore import get_store
-from anystore.mirror import mirror
+from boto3.resources.base import ServiceResource
 from moto.server import ThreadedMotoServer
 
-from ftm_lakehouse.lake.base import (
+from ftm_lakehouse.lake import (
     DatasetLakehouse,
     Lakehouse,
     get_dataset,
@@ -68,19 +68,12 @@ def http_server():
 
 
 # http://docs.getmoto.org/en/latest/docs/server_mode.html
-@pytest.fixture(scope="session", autouse=True)
-def moto_server():
+@pytest.fixture(scope="session")
+def moto_server() -> Generator[ServiceResource, None, None]:
     """Fixture to run a mocked AWS server for testing with some data buckets."""
     server = ThreadedMotoServer(port=8888)
     server.start()
     host, port = server.get_host_and_port()
     endpoint = f"http://{host}:{port}"
-    s3 = boto3.resource("s3", region_name="us-east-1", endpoint_url=endpoint)
-    s3.create_bucket(Bucket="lakehouse")
-    s3.create_bucket(Bucket="data")
-    s3.create_bucket(Bucket="s3_dataset")
-    from_store = get_store(uri=FIXTURES_PATH / "src", serialization_mode="raw")
-    to_store = get_store(uri="s3://data", serialization_mode="raw")
-    mirror(from_store, to_store, use_worker=False)
-    yield endpoint
+    yield boto3.resource("s3", region_name="us-east-1", endpoint_url=endpoint)
     server.stop()

@@ -18,7 +18,7 @@ from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 
 from ftm_lakehouse.api.util import DEFAULT_ERROR, Context, ensure_path_context
-from ftm_lakehouse.settings import ApiSettings
+from ftm_lakehouse.core.settings import ApiSettings
 
 settings = ApiSettings()
 log = get_logger(__name__)

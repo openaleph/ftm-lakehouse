@@ -5,18 +5,19 @@ nav:
   - Intro: index.md
   - quickstart.md
   - RFC: rfc.md
-  - Documentation:
-    - import.md
-    - retrieve.md
-    - make.md
-    - crawl.md
-    - configuration.md
-    - cache.md
-    - api.md
+  - Usage:
+    - Working with Entities: usage/entities.md
+    - Working with Files: usage/archive.md
+    - Working with Mappings: usage/mappings.md
+    - CLI Reference: usage/cli.md
+    - Configuration: usage/configuration.md
   - Reference:
-      - cli: reference/cli.md
-      - io: reference/io.md
-      - lake: reference/lake.md
+    - ftm_lakehouse.io: reference/io.md
+    - ftm_lakehouse.logic: reference/logic.md
+    - ftm_lakehouse.entities: reference/entities.md
+    - ftm_lakehouse.archive: reference/archive.md
+    - ftm_lakehouse.mappings: reference/mappings.md
+    - ftm_lakehouse.lakehouse: reference/lakehouse.md
 theme:
   name: material
   logo: https://cdn.investigativedata.org/style/logos/darc/svg/DARC-Logo-RGB-Horizontal-Neg.svg
@@ -26,7 +27,6 @@ theme:
     - navigation.instant
     - navigation.tracking
     - navigation.sections
-    # - navigation.footer
     - toc.follow
     - content.code.copy
 extra_css:

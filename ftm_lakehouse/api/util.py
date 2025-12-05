@@ -6,8 +6,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ftm_lakehouse import __version__, io
+from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.model import File
-from ftm_lakehouse.settings import Settings
 
 settings = Settings()
 log = get_logger(__name__)

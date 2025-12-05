@@ -6,7 +6,7 @@ from fastapi.responses import StreamingResponse
 from ftm_lakehouse import __version__
 from ftm_lakehouse.api.auth import Token, create_access_token, ensure_auth_context
 from ftm_lakehouse.api.util import Context, Errors, ensure_path_context, stream_file
-from ftm_lakehouse.settings import ApiSettings, Settings
+from ftm_lakehouse.core.settings import ApiSettings, Settings
 
 log = get_logger(__name__)
 

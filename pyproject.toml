@@ -1,7 +1,7 @@
 [project]
 name = "ftm-lakehouse"
 version = "0.0.4"
-description = "Data standard, storage and retrieval for leaks and document collections"
+description = "Data standard, storage and retrieval for structured and unstructured FollowTheMoney data"
 authors = [
     { name = "Data and Research Center", email = "hi@dataresearchcenter.org" },
     { name = "Simon Wörpel", email = "simon.woerpel@pm.me" },
@@ -17,15 +17,13 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 requires-python = ">=3.11,<4"
 dependencies = [
-    "ftmq[postgres] (>=4.0.2,<5.0.0)",
+    "ftmq[lake] (>=4.3.3,<5.0.0)",
     "jinja2 (>=3.1.5,<4.0.0)",
-    "duckdb (>=1.3.2,<2.0.0)",
-    "deltalake (>=1.1.0,<2.0.0)",
-    "pandas (>=2.3.1,<3.0.0)",
-    "pyarrow (>=20.0.0,<21.0.0)",
+    "followthemoney (>=4.3.4,<5.0.0)",
 ]
 
 [project.optional-dependencies]
@@ -34,6 +32,7 @@ api = [
     "uvicorn (>=0.34.0,<0.35.0)",
     "pyjwt (>=2.10.1,<3.0.0)",
 ]
+openaleph = ["openaleph-procrastinate (>=5.1.2,<6.0.0)"]
 
 [project.scripts]
 ftm-lakehouse = "ftm_lakehouse.cli:cli"
@@ -70,8 +69,10 @@ requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.pytest_env]
-LAKEHOUSE_URI = "tests/fixtures/lake"
+DEBUG = 1
 AWS_SECRET_ACCESS_KEY = "ftm-lakehouse"
 AWS_ACCESS_KEY_ID = "ftm-lakehouse"
-DEBUG = 1
 FSSPEC_S3_ENDPOINT_URL = "http://localhost:8888"
+FTM_FRAGMENTS_URI = "sqlite:///:memory:"
+LAKEHOUSE_URI = "tests/fixtures/lake"
+LAKEHOUSE_JOURNAL_URI = "sqlite:///:memory:"
