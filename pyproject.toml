@@ -38,10 +38,10 @@ openaleph = ["openaleph-procrastinate (>=5.1.2,<6.0.0)"]
 ftm-lakehouse = "ftm_lakehouse.cli:cli"
 
 [project.urls]
-Homepage = "https://docs.investigraph.dev/lib/ftm-lakehouse"
-Documentation = "https://docs.investigraph.dev/lib/ftm-lakehouse"
-Repository = "https://github.com/dataresearchcenter/ftm-lakehouse"
-Issues = "https://github.com/dataresearchcenter/ftm-lakehouse/issues"
+Homepage = "https://openaleph.org/docs/lib/ftm-lakehouse"
+Documentation = "https://openaleph.org/docs/lib/ftm-lakehouse"
+Repository = "https://github.com/openaleph/ftm-lakehouse"
+Issues = "https://github.com/openaleph/ftm-lakehouse/issues"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.2"
