@@ -7,7 +7,7 @@ from ftm_lakehouse.lake import (
     get_mappings,
 )
 
-__version__ = "0.0.4"
+__version__ = "0.1.0"
 
 __all__ = [
     "io",
