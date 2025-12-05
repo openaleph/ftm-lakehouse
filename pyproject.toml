@@ -61,7 +61,7 @@ httpx = ">=0.27.2,<0.29.0"
 mkdocs-material = "^9.5.49"
 mkdocs-click = "^0.8.1"
 mkdocs-autorefs = "^1.2.0"
-mkdocstrings-python = "^1.12.2"
+mkdocstrings-python = "^2.0.1"
 mkdocs-typer2 = "^0.1.5"
 
 [build-system]
