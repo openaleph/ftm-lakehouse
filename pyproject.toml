@@ -1,6 +1,6 @@
 [project]
 name = "ftm-lakehouse"
-version = "0.1.0"
+version = "0.1.1"
 description = "Data standard, storage and retrieval for structured and unstructured FollowTheMoney data"
 authors = [
     { name = "Data and Research Center", email = "hi@dataresearchcenter.org" },
