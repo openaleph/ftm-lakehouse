@@ -8,7 +8,8 @@ from anystore.types import BytesGenerator, Uri
 from banal import clean_dict
 from ftmq.store.lake import DEFAULT_ORIGIN
 
-from ftm_lakehouse.conventions import path
+from ftm_lakehouse.conventions import path, tag
+from ftm_lakehouse.core.decorators import touch
 from ftm_lakehouse.core.mixins import LakeMixin
 from ftm_lakehouse.model import File, Files
 
@@ -52,6 +53,7 @@ class DatasetArchive(LakeMixin):
             prefix=path.ARCHIVE, glob="**/*.json", model=File
         )
 
+    @touch(tag.ARCHIVE_UPDATED)
     def archive_file(
         self,
         uri: Uri,
@@ -99,6 +101,7 @@ class DatasetArchive(LakeMixin):
         )
         return file
 
+    @touch(tag.ARCHIVE_UPDATED)
     def delete_file(self, file: File) -> None:
         """Delete the given file and its metadata from the storage"""
         self.log.warn("Deleting file from archive ...", checksum=file.checksum)

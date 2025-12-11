@@ -80,10 +80,34 @@ def skip_if_latest(key: str, dependencies: Iterable[str]) -> Callable[..., Any]:
     return _decorator
 
 
+def touch(tag: str) -> Callable[..., Any]:
+    """
+    Touch the given tag when the wrapped function successfully executes.
+
+    Uses `LakeMixin.tags.touch` context manager to set a timestamp tag after the
+    function completes without raising an exception.
+
+    Methods using this decorator need to subclass from
+    [LakeMixin][ftm_lakehouse.mixins.LakeMixin]
+
+    Args:
+        tag: The tag key to touch on successful execution
+    """
+
+    def _decorator(func: Callable[..., Any]):
+        def _inner(self: "LakeMixin", *args, **kwargs):
+            with self.tags.touch(tag):
+                return func(self, *args, **kwargs)
+
+        return _inner
+
+    return _decorator
+
+
 def storage_cache(key_func: Callable[..., str | None], **kwargs):
     """
     extend @anystore.decorators.anycache decorator to inject proper cache
-    storage and key prefix
+    storage and key prefix to the LakeMixin
     """
 
     def _decorator(func: Callable[..., Any]):

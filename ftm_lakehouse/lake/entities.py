@@ -21,7 +21,7 @@ from ftmq.model import DatasetStats
 from ftmq.types import StatementEntities, ValueEntities
 
 from ftm_lakehouse.conventions import path, tag
-from ftm_lakehouse.core.decorators import skip_if_latest
+from ftm_lakehouse.core.decorators import skip_if_latest, touch
 from ftm_lakehouse.core.mixins import LakeMixin
 from ftm_lakehouse.logic.entities import aggregate_statements
 from ftm_lakehouse.service.journal import JournalWriter
@@ -70,6 +70,7 @@ class DatasetEntities(LakeMixin):
     # Write operations
     # -------------------------------------------------------------------------
 
+    @touch(tag.JOURNAL_UPDATED)
     def add(self, entity: EntityProxy, origin: str | None = None) -> None:
         """
         Add an entity to the journal for later flushing to the lake.
@@ -78,9 +79,9 @@ class DatasetEntities(LakeMixin):
             entity: The entity to add
             origin: Optional origin/source identifier
         """
-        with self.tags.touch(tag.JOURNAL_UPDATED):
-            self._store._journal.add_entity(entity, origin)
+        self._store._journal.add_entity(entity, origin)
 
+    @touch(tag.JOURNAL_UPDATED)
     def add_statement(self, stmt: Statement, origin: str | None = None) -> None:
         """
         Add a statement to the journal for later flushing to the lake.
@@ -89,11 +90,10 @@ class DatasetEntities(LakeMixin):
             stmt: The statement to add
             origin: Optional origin/source identifier (overrides stmt.origin)
         """
-        with self.tags.touch(tag.JOURNAL_UPDATED):
-            if origin:
-                stmt.origin = origin
-            with self._store._journal.writer(origin=origin) as w:
-                w.add_statement(stmt)
+        if origin:
+            stmt.origin = origin
+        with self._store._journal.writer(origin=origin) as w:
+            w.add_statement(stmt)
 
     @contextlib.contextmanager
     def bulk(self, origin: str | None = None) -> Generator[JournalWriter, None, None]:

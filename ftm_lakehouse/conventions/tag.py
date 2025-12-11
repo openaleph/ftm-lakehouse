@@ -22,6 +22,9 @@ JOURNAL_FLUSHING = "journal/flushing"
 STORE_OPTIMIZED = "statements/store_optimized"
 """Statement store was optimized and compacted"""
 
+ARCHIVE_UPDATED = "archive/last_updated"
+"""Archive last updated (file added or removed)"""
+
 
 def key(key: str) -> str:
     return join_relpaths(TAGS, key)
