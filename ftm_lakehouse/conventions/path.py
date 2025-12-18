@@ -50,8 +50,11 @@ LOCK = ".LOCK"
 LOCK_PREFIX = ".locks/lakehouse"
 """Prefix for specific locks"""
 
-CACHE_PREFIX = ".cache/lakehouse"
+CACHE_PREFIX = ".cache"
 """Prefix for dataset cache"""
+
+CACHE_NAME = "lakehouse"
+"""Default cache name"""
 
 ARCHIVE = "archive"
 """archive prefix"""

@@ -72,7 +72,10 @@ class CacheMixin(NamedUri):
         The cache will live in:
         ./lake/[dataset]/.cache/lakehouse
         """
-        uri = join_uri(self.uri, path.CACHE_PREFIX)
+        return self.get_cache()
+
+    def get_cache(self, name: str | None = path.CACHE_NAME) -> Store:
+        uri = join_uri(self.uri, f"{path.CACHE_PREFIX}/{name or path.CACHE_NAME}")
         store = get_store(uri, raise_on_nonexist=False)
         assert isinstance(store, Store)
         return store
