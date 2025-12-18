@@ -5,6 +5,7 @@ from anystore.store import get_store_for_uri
 from anystore.store.base import BaseStore
 from anystore.store.virtual import get_virtual_path, open_virtual
 from anystore.types import BytesGenerator, Uri
+from anystore.util import DEFAULT_HASH_ALGORITHM
 from banal import clean_dict
 from ftmq.store.lake import DEFAULT_ORIGIN
 
@@ -59,6 +60,7 @@ class DatasetArchive(LakeMixin):
         uri: Uri,
         remote_store: BaseStore | None = None,
         file: File | None = None,
+        checksum: str | None = None,
         **data: Any,
     ) -> File:
         """
@@ -69,17 +71,23 @@ class DatasetArchive(LakeMixin):
             uri: Local or remote uri to the file
             remote_store: Fetch the uri as key from this store
             file: Optional metadata file obj to patch
+            checksum: Content hash (don't compute again)
             data: Optional data to store in file obj `raw` field
         """
         if remote_store is None:
             remote_store, uri = get_store_for_uri(uri)
 
-        with open_virtual(uri, remote_store) as i:
+        with open_virtual(
+            uri,
+            remote_store,
+            checksum=DEFAULT_HASH_ALGORITHM if checksum is None else None,
+        ) as i:
+            i.checksum = checksum or i.checksum
             if i.checksum is None:
-                raise RuntimeError(f"Invalid checksum for `{uri}`")
+                raise RuntimeError(f"No checksum for `{uri}`")
             if file is None:
                 info = remote_store.info(uri)
-                file = File.from_info(info, i.checksum)
+                file = File.from_info(info, i.checksum, **data)
             # ensure checksum
             file.checksum = i.checksum
             with self.storage.open(file.archive_path, mode="wb") as o:
