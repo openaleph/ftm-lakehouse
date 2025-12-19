@@ -21,10 +21,13 @@ class DatasetArchive(LakeMixin):
         key = path.file_path_meta(checksum)
         return self.storage.exists(key)
 
-    def lookup_file(self, checksum: str) -> File:
+    def lookup_file(self, checksum: str) -> File | None:
         """Get the file metadata for the given checksum"""
         key = path.file_path_meta(checksum)
-        return self.storage.get(key, model=File)
+        try:
+            return self.storage.get(key, model=File)
+        except FileNotFoundError:
+            return
 
     def stream_file(self, file: File) -> BytesGenerator:
         """Stream the given file contents as a bytes line stream"""
@@ -77,6 +80,7 @@ class DatasetArchive(LakeMixin):
         if remote_store is None:
             remote_store, uri = get_store_for_uri(uri)
 
+        store = True
         with open_virtual(
             uri,
             remote_store,
@@ -85,28 +89,45 @@ class DatasetArchive(LakeMixin):
             i.checksum = checksum or i.checksum
             if i.checksum is None:
                 raise RuntimeError(f"No checksum for `{uri}`")
+            if self.lookup_file(i.checksum) is not None:
+                self.log.info(
+                    "Source file already existing, updating metadata only",
+                    checksum=i.checksum,
+                    from_uri=uri,
+                    to_store=self.storage.uri,
+                )
+                store = False
             if file is None:
                 info = remote_store.info(uri)
                 file = File.from_info(info, i.checksum, **data)
-            # ensure checksum
+            # ensure checksum on file metadata
             file.checksum = i.checksum
-            with self.storage.open(file.archive_path, mode="wb") as o:
-                o.write(i.read())
 
-        # adjust metadata
-        file.store = str(self.storage.uri)
-        file.dataset = self.name
+            if store:  # skip if we already have that source
+                with self.storage.open(file.archive_path, mode="wb") as o:
+                    o.write(i.read())
+
+        # extra data
         file.extra = clean_dict(data)
 
         # store metadata
-        self.storage.put(file.archive_path_meta, file, model=File)
+        file_info = self.archive_file_info(file)
 
         self.log.info(
-            f"Added `{file.key} ({file.checksum})`",
+            f"Archived `{file.key} ({file.checksum})`",
             checksum=file.checksum,
             from_uri=uri,
             to_store=self.storage.uri,
+            updated_existing=not store,
         )
+        return file_info
+
+    @touch(tag.ARCHIVE_UPDATED)
+    def archive_file_info(self, file: File) -> File:
+        # ensure correct metadata
+        file.store = str(self.storage.uri)
+        file.dataset = self.name
+        self.storage.put(file.archive_path_meta, file, model=File)
         return file
 
     @touch(tag.ARCHIVE_UPDATED)
