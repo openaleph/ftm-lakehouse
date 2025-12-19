@@ -40,3 +40,42 @@ def test_model_dataset(fixtures_path):
     dataset = DatasetModel.from_yaml_uri(config)
     assert isinstance(dataset, Dataset)
     assert Dataset(**dataset.model_dump())
+
+
+def test_file_extra_fields():
+    """Test that unknown fields are collected into the extra dict."""
+    file = File(
+        dataset="test",
+        checksum="abc123",
+        key="test.txt",
+        name="test.txt",
+        store="s3://bucket",
+        size=100,
+        foo="bar",
+        custom_field="value",
+    )
+    assert file.extra == {"foo": "bar", "custom_field": "value"}
+
+    # Test merging with existing extra dict
+    file2 = File(
+        dataset="test",
+        checksum="abc123",
+        key="test.txt",
+        name="test.txt",
+        store="s3://bucket",
+        size=100,
+        extra={"existing": "data"},
+        new_field="new_value",
+    )
+    assert file2.extra == {"existing": "data", "new_field": "new_value"}
+
+    # Test normal creation without extra fields
+    file3 = File(
+        dataset="test",
+        checksum="abc123",
+        key="test.txt",
+        name="test.txt",
+        store="s3://bucket",
+        size=100,
+    )
+    assert file3.extra == {}

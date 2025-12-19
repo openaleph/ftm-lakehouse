@@ -9,6 +9,7 @@ from followthemoney import StatementEntity
 from followthemoney.dataset import DefaultDataset
 from ftmq.types import StatementEntities
 from ftmq.util import make_entity
+from pydantic import model_validator
 
 from ftm_lakehouse.conventions import path
 from ftm_lakehouse.util import mime_to_schema
@@ -23,6 +24,19 @@ class File(Stats):
     """SHA1 checksum (often referred to as `content_hash`)"""
     extra: dict[str, Any] = {}
     """Arbitrary extra data (e.g. `memorious` header result)"""
+
+    @model_validator(mode="before")
+    @classmethod
+    def collect_extra_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        known_fields = set(cls.model_fields.keys())
+        extra = data.get("extra", {})
+        extra_fields = {k: v for k, v in data.items() if k not in known_fields}
+        if extra_fields:
+            data = {k: v for k, v in data.items() if k in known_fields}
+            data["extra"] = {**extra, **extra_fields}
+        return data
 
     def to_entity(self) -> StatementEntity:
         """Make an entity for this obj"""
