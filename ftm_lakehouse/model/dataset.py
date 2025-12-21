@@ -7,10 +7,10 @@ from ftmq.model import Catalog, Dataset
 class CatalogModel(Catalog):
     storage: StoreModel | None = None
     """Lakehouse storage base path"""
-    public_url_prefix: str | None = None
-    """Rewrite public archive urls"""
 
 
 class DatasetModel(Dataset):
     storage: StoreModel | None = None
     """Set storage for external lakehouse"""
+    public_url_template: str | None = None
+    """Compute public urls to source files (e.g. when using a CDN)"""
