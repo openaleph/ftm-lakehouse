@@ -40,11 +40,11 @@ class Mapping(BaseModel):
     filters: dict[str, str] | None = {}
     filters_not: dict[str, str] | None = {}
 
-    def make_mapping(self, csv_path: str, dataset: str) -> QueryMapping:
-        """Create a QueryMapping from this configuration."""
+    def make_mapping(self, content_hash: str, dataset: str) -> QueryMapping:
+        """Create a FtM QueryMapping from this configuration."""
         mapping_data = self.model_dump(by_alias=True)
         mapping_data.pop("database", None)
-        mapping_data["csv_url"] = csv_path
+        mapping_data["csv_url"] = content_hash
         return model.make_mapping(mapping_data, key_prefix=dataset)
 
 
