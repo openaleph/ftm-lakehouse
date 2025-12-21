@@ -6,10 +6,10 @@ from rigour.mime.types import PLAIN
 from ftm_lakehouse.model.file import File
 
 
-def test_model_file():
+def test_model_file(fixtures_path):
     checksum = "2928064cd9a743af30b720634dcffacdd84de23d"
     file_id = "file-4ab9a436dae7c583dbc437dbc7f014d8d084c081"
-    store = get_store("http://localhost:8000")
+    store = get_store(fixtures_path)
 
     file = File.from_info(store.info("src/utf.txt"), checksum=checksum)
     assert file.checksum == checksum
