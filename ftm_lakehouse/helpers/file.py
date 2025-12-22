@@ -1,10 +1,12 @@
 from functools import lru_cache
 from pathlib import Path
 
+from anystore.functools import weakref_cache as cache
 from anystore.util import make_data_checksum
-from followthemoney import StatementEntity, model
+from followthemoney import Schema, StatementEntity, model
 from ftmq.types import StatementEntities
 from ftmq.util import make_entity
+from rigour.mime import normalize_mimetype, types
 
 MAX_LRU = 10_000
 
@@ -56,3 +58,40 @@ def make_folders(path: Path, dataset: str | None = None) -> StatementEntities:
             parent_id = folder.id
             yield folder
     yield make_folder(path.name, parent_id)
+
+
+MIME_SCHEMAS = {
+    (types.PDF, types.DOCX, types.WORD): model["Pages"],
+    (types.HTML, types.XML): model["HyperText"],
+    (types.CSV, types.EXCEL, types.XLS, types.XLSX): model["Table"],
+    (types.PNG, types.GIF, types.JPEG, types.TIFF, types.DJVU, types.PSD): model[
+        "Image"
+    ],
+    (types.OUTLOOK, types.OPF, types.RFC822): model["Email"],
+    (types.PLAIN, types.RTF): model["PlainText"],
+}
+
+
+@cache
+def mime_to_schema(mimetype: str) -> Schema:
+    """
+    Map a mimetype to a
+    [FollowTheMoney](https://followthemoney.tech/explorer/schemata/Document/)
+    File schema.
+
+    Examples:
+        >>> mime_to_schema("application/pdf")
+        "Pages"
+
+    Args:
+        mimetype: The mimetype (will be normalized using `rigour.mime`)
+
+    Returns:
+        The schema name as string
+    """
+    mimetype = normalize_mimetype(mimetype)
+    for mtypes, schema in MIME_SCHEMAS.items():
+        if mimetype in mtypes:
+            if schema is not None:
+                return schema
+    return model["Document"]

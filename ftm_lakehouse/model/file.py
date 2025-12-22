@@ -11,8 +11,7 @@ from ftmq.util import make_entity
 from pydantic import ConfigDict, computed_field, model_validator
 
 from ftm_lakehouse.core.conventions import path
-from ftm_lakehouse.helpers.file import make_file_id, make_folders
-from ftm_lakehouse.util import mime_to_schema
+from ftm_lakehouse.helpers.file import make_file_id, make_folders, mime_to_schema
 
 
 class File(Stats):
@@ -74,6 +73,12 @@ class File(Stats):
 
     @computed_field
     @property
+    def path(self) -> str:
+        # "key" can be misleading in the codebase so this is an alias
+        return self.key
+
+    @computed_field
+    @property
     def parent(self) -> str | None:
         for parent in reversed(list(self.make_parents())):
             return parent.id
@@ -81,12 +86,12 @@ class File(Stats):
     @property
     def blob_path(self) -> str:
         """Relative path to blob in dataset archive"""
-        return path.file_blob(self.checksum)
+        return path.archive_blob(self.checksum)
 
     @property
     def meta_path(self) -> str:
         """Relative path for this file's metadata json in dataset archive"""
-        return path.file_meta(self.checksum, self.id)
+        return path.archive_meta(self.checksum, self.id)
 
     @classmethod
     def from_info(cls, info: Stats, checksum: str, **data) -> Self:

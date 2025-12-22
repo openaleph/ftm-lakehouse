@@ -25,6 +25,15 @@ STORE_OPTIMIZED = "statements/store_optimized"
 ARCHIVE_UPDATED = "archive/last_updated"
 """Archive last updated (file added or removed)"""
 
+EXPORTS_STATEMENTS = "exports/statements"
+"""Statements CSV export last updated"""
+
+ENTITIES_JSON = "exports/entities_json"
+"""Entities JSON export last updated"""
+
+STATISTICS = "exports/statistics"
+"""Statistics export last updated"""
+
 
 def key(key: str) -> str:
     return join_relpaths(TAGS, key)

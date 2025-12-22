@@ -1,15 +1,11 @@
-from functools import cache
-from typing import Any, TypeVar
+from typing import Any
 
 from anystore.model import BaseModel
-from anystore.types import Uri
+from anystore.types import M, SDict, Uri
 from anystore.util import dump_json_model, dump_yaml_model, get_extension
-from followthemoney import model
-from ftmq.util import SDict
+from followthemoney import StatementEntity
+from ftmq.util import make_entity as _make_entity
 from jinja2 import Template
-from rigour.mime import normalize_mimetype, types
-
-T = TypeVar("T", bound=BaseModel)
 
 
 def make_checksum_key(ch: str) -> str:
@@ -46,43 +42,6 @@ def render(tmpl: str, data: dict[str, Any]) -> str:
     return template.render(**data)
 
 
-MIME_SCHEMAS = {
-    (types.PDF, types.DOCX, types.WORD): model.get("Pages"),
-    (types.HTML, types.XML): model.get("HyperText"),
-    (types.CSV, types.EXCEL, types.XLS, types.XLSX): model.get("Table"),
-    (types.PNG, types.GIF, types.JPEG, types.TIFF, types.DJVU, types.PSD): model.get(
-        "Image"
-    ),
-    (types.OUTLOOK, types.OPF, types.RFC822): model.get("Email"),
-    (types.PLAIN, types.RTF): model.get("PlainText"),
-}
-
-
-@cache
-def mime_to_schema(mimetype: str) -> str:
-    """
-    Map a mimetype to a
-    [FollowTheMoney](https://followthemoney.tech/explorer/schemata/Document/)
-    File schema.
-
-    Examples:
-        >>> mime_to_schema("application/pdf")
-        "Pages"
-
-    Args:
-        mimetype: The mimetype (will be normalized using `rigour.mime`)
-
-    Returns:
-        The schema name as string
-    """
-    mimetype = normalize_mimetype(mimetype)
-    for mtypes, schema in MIME_SCHEMAS.items():
-        if mimetype in mtypes:
-            if schema is not None:
-                return schema.name
-    return "Document"
-
-
 def dump_model(key: Uri, obj: BaseModel) -> bytes:
     """Dump a pydantic model to bytes, either json or yaml (inferred from key
     extension)"""
@@ -96,7 +55,7 @@ def dump_model(key: Uri, obj: BaseModel) -> bytes:
     return data
 
 
-def load_model(key: Uri, data: bytes, model: type[T]) -> T:
+def load_model(key: Uri, data: bytes, model: type[M]) -> M:
     """Load a bytes string as a pydantic model, either json or yaml
     (inferred from key extension)"""
     ext = get_extension(key)
@@ -116,3 +75,7 @@ def check_dataset(name: str, data: SDict) -> str:
             f"`{data['name']}` (should be: `{name}`)",
         )
     return name
+
+
+def make_entity(data: SDict, dataset: str) -> StatementEntity:
+    return _make_entity(data, StatementEntity, dataset)
