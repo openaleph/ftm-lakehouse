@@ -13,7 +13,7 @@ from sqlalchemy.engine import Connection, Engine, Transaction, create_engine
 from sqlalchemy.pool import StaticPool
 
 from ftm_lakehouse.core.settings import Settings
-from ftm_lakehouse.logic.statements import pack_statement
+from ftm_lakehouse.helpers.statements import pack_statement
 
 settings = Settings()
 log = get_logger(__name__)

@@ -3,12 +3,12 @@
 from datetime import datetime
 from typing import Generator
 
+from anystore.types import Uri
 from anystore.util import join_uri
 from followthemoney import Statement
 from ftmq.model.stats import DatasetStats
 from ftmq.query import Query
 from ftmq.store.lake import (
-    PARTITION_BY,
     LakeQueryView,
     LakeStore,
     LakeWriter,
@@ -19,7 +19,7 @@ from ftmq.types import StatementEntities
 from ftm_lakehouse.core.conventions import path
 
 # Use same partitions as ftmq but exclude dataset (handled at directory level)
-PARTITIONS = [p for p in PARTITION_BY if p != "dataset"]
+PARTITIONS = ["bucket", "origin"]
 
 
 class ParquetStore:
@@ -35,7 +35,7 @@ class ParquetStore:
     Layout: statements/bucket={bucket}/origin={origin}/{auto-identifier}.parquet
     """
 
-    def __init__(self, uri: str, dataset: str) -> None:
+    def __init__(self, uri: Uri, dataset: str) -> None:
         self.uri = join_uri(uri, path.STATEMENTS)
         self.dataset = dataset
         self._store = LakeStore(
