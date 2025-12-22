@@ -36,9 +36,9 @@ class EntityMapping(BaseModel):
 class Mapping(BaseModel):
     """A single mapping query configuration."""
 
-    entities: dict[str, EntityMapping] | None = {}
-    filters: dict[str, str] | None = {}
-    filters_not: dict[str, str] | None = {}
+    entities: dict[str, EntityMapping] = {}
+    filters: dict[str, str] = {}
+    filters_not: dict[str, str] = {}
 
     def make_mapping(self, content_hash: str, dataset: str) -> QueryMapping:
         """Create a FtM QueryMapping from this configuration."""
