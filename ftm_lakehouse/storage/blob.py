@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import IO, ContextManager, Literal
 
+from anystore.io import DEFAULT_MODE
 from anystore.store.virtual import get_virtual_path
 from anystore.types import BytesGenerator
 
@@ -46,9 +47,11 @@ class BlobStore(ByteStorage[Literal[True]]):
         """Stream blob bytes for the given checksum."""
         yield from self._store.stream(self._blob_path(checksum))
 
-    def open(self, checksum: str) -> ContextManager[IO[bytes]]:
+    def open(
+        self, checksum: str, mode: Literal["rb", "wb"] | None = None
+    ) -> ContextManager[IO[bytes]]:
         """Get a file handle for the blob."""
-        return self._store.open(self._blob_path(checksum), mode="rb")
+        return self._store.open(self._blob_path(checksum), mode=mode or DEFAULT_MODE)
 
     def local_path(self, checksum: str) -> ContextManager[Path]:
         """
