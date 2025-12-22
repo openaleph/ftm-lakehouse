@@ -3,6 +3,9 @@
 from typing import Generator, Self, TypeAlias
 
 from anystore.logging import get_logger
+from followthemoney import EntityProxy, Statement, StatementEntity
+from ftmq.store.lake import DEFAULT_ORIGIN, get_schema_bucket
+from ftmq.util import ensure_entity
 from sqlalchemy import Column, Index, MetaData, String, Table, Text, delete, select
 from sqlalchemy.dialects.postgresql import insert as psql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -10,6 +13,7 @@ from sqlalchemy.engine import Connection, Engine, Transaction, create_engine
 from sqlalchemy.pool import StaticPool
 
 from ftm_lakehouse.core.settings import Settings
+from ftm_lakehouse.logic.statements import pack_statement
 
 settings = Settings()
 log = get_logger(__name__)
@@ -44,7 +48,8 @@ class JournalWriter:
 
     def __init__(self, store: "JournalStore", origin: str | None = None) -> None:
         self.store = store
-        self.origin = origin
+        self.dataset = store.dataset
+        self.origin = origin or DEFAULT_ORIGIN
         self.batch: list[dict] = []
         self.conn: Connection = store.engine.connect()
         self.tx: Transaction | None = None
@@ -98,7 +103,7 @@ class JournalWriter:
         canonical_id: str,
         data: str,
     ) -> None:
-        """Add a row to the journal batch."""
+        """Add a raw row to the journal batch."""
         self.batch.append(
             {
                 "id": row_id,
@@ -112,6 +117,32 @@ class JournalWriter:
 
         if len(self.batch) >= WRITE_BATCH_SIZE:
             self._upsert_batch()
+
+    def add_statement(self, stmt: Statement) -> None:
+        """Add a statement to the journal."""
+        if stmt.entity_id is None or stmt.id is None:
+            return
+
+        canonical_id = stmt.canonical_id or stmt.entity_id
+        stmt.canonical_id = canonical_id
+        origin = stmt.origin or self.origin
+        stmt.dataset = self.dataset
+
+        self.add(
+            row_id=stmt.id,
+            dataset=self.dataset,
+            bucket=get_schema_bucket(stmt.schema),
+            origin=origin,
+            canonical_id=canonical_id,
+            data=pack_statement(stmt),
+        )
+
+    def add_entity(self, entity: EntityProxy) -> None:
+        """Add all statements from an entity to the journal."""
+        entity = ensure_entity(entity, StatementEntity, self.dataset)
+        for stmt in entity.statements:
+            stmt.origin = stmt.origin or self.origin
+            self.add_statement(stmt)
 
     def flush(self) -> None:
         """Flush pending rows and commit transaction."""
