@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Iterable, Literal
 
-from anystore.store import BaseStore
+from anystore.store import BaseStore, get_store
 from anystore.tags import Tags as AnyTags
 from anystore.types import Uri
 
@@ -24,8 +24,10 @@ class TagStore(AnyTags):
     relative paths from there.
     """
 
+    store = BaseStore[datetime, Literal[False]]
+
     def __init__(self, uri: Uri, tenant: str | None = None) -> None:
-        store = BaseStore[datetime, Literal[False]](
+        store = get_store(
             uri=uri, raise_on_nonexist=False, key_prefix=path.tag(tenant=tenant)
         )
         super().__init__(store)

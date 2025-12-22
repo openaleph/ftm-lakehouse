@@ -48,7 +48,7 @@ class BlobStore(ByteStorage[Literal[True]]):
 
     def open(self, checksum: str) -> ContextManager[IO[bytes]]:
         """Get a file handle for the blob."""
-        return self._store.open(self._blob_path(checksum))
+        return self._store.open(self._blob_path(checksum), mode="rb")
 
     def local_path(self, checksum: str) -> ContextManager[Path]:
         """

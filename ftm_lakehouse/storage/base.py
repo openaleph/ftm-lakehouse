@@ -1,7 +1,7 @@
 from typing import Generic
 
 from anystore.serialize import Mode
-from anystore.store import BaseStore
+from anystore.store import BaseStore, get_store
 from anystore.types import M, Raise, Uri, V
 
 
@@ -17,7 +17,7 @@ class BaseStorage(Generic[V, Raise]):
 
     def __init__(self, uri: Uri) -> None:
         self.uri = uri
-        self._store = BaseStore[V, Raise](
+        self._store = get_store(
             uri=uri,
             serialization_mode=self.serialization_mode,
             raise_on_nonexist=self.raise_on_nonexist,
@@ -44,7 +44,7 @@ class ModelStorage(BaseStorage[M, Raise]):
 
     def __init__(self, uri: Uri) -> None:
         self.uri = uri
-        self._store = BaseStore[M, Raise](
+        self._store = get_store(
             uri=uri,
             serialization_mode=self.serialization_mode,
             model=self.model,
