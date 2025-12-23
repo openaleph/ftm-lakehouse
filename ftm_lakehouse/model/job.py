@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta
 from functools import cached_property
-from typing import Self
+from typing import Self, TypeVar
 
 from anystore.logging import BoundLogger, get_logger
 from anystore.model import BaseModel
@@ -10,6 +10,10 @@ from anystore.util import ensure_uuid
 from pydantic import computed_field, field_validator
 
 DEFAULT_USER = "__system__"
+
+
+J = TypeVar("J", bound="JobModel")
+DJ = TypeVar("DJ", bound="DatasetJobModel")
 
 
 class JobModel(BaseModel):
@@ -73,7 +77,7 @@ class DatasetJobModel(JobModel):
     @cached_property
     def log(self) -> BoundLogger:
         return get_logger(
-            __name__,
+            f"{self.dataset}.{self.name}",
             run_id=self.run_id,
             dataset=self.dataset,
         )

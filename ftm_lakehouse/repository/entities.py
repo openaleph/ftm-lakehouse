@@ -84,6 +84,14 @@ class EntityRepository(BaseRepository):
         with self.bulk(origin) as writer:
             writer.add_entity(entity)
 
+    def add_many(
+        self, entities: Iterable[EntityProxy], origin: str | None = None
+    ) -> None:
+        """Add an entity iterator to the journal."""
+        with self.bulk(origin) as writer:
+            for entity in entities:
+                writer.add_entity(entity)
+
     def flush(self) -> int:
         """
         Flush statements from journal to parquet store.
@@ -129,18 +137,16 @@ class EntityRepository(BaseRepository):
     def query(
         self,
         entity_ids: Iterable[str] | None = None,
-        origin: str | None = None,
-        bucket: str | None = None,
         flush_first: bool = True,
+        **filters,
     ) -> StatementEntities:
         """
         Query entities from the parquet store.
 
         Args:
             entity_ids: Filter by entity IDs
-            origin: Filter by origin
-            bucket: Filter by schema bucket
             flush_first: Flush journal before querying (default True)
+            **filters: Additional query filter kwargs
 
         Yields:
             StatementEntity objects matching the query
@@ -148,13 +154,9 @@ class EntityRepository(BaseRepository):
         if flush_first:
             self.flush()
 
-        q = Query()
         if entity_ids:
-            q = q.where(entity_id__in=list(entity_ids))
-        if origin:
-            q = q.where(origin=origin)
-        if bucket:
-            q = q.where(bucket=bucket)
+            filters["entity_id__in"] = list(entity_ids)
+        q = Query().where(**filters)
 
         yield from self._statements.query(q)
 
@@ -162,11 +164,10 @@ class EntityRepository(BaseRepository):
         self,
         entity_id: str,
         origin: str | None = None,
-        bucket: str | None = None,
         flush_first: bool = True,
     ) -> StatementEntity | None:
         """Get a single entity by ID."""
-        for entity in self.query([entity_id], origin, bucket, flush_first):
+        for entity in self.query([entity_id], flush_first, origin=origin):
             return entity
         return None
 

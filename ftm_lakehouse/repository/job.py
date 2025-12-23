@@ -2,19 +2,17 @@
 
 import contextlib
 from datetime import datetime
-from typing import Generator, Generic, TypeVar
+from typing import Generator, Generic
 
 from anystore.logging import get_logger
 from anystore.types import Uri
 
 from ftm_lakehouse.core.conventions import path
-from ftm_lakehouse.model import JobModel
+from ftm_lakehouse.model.job import J, JobModel
 from ftm_lakehouse.repository.base import BaseRepository
 from ftm_lakehouse.storage.base import ModelStorage
 
 log = get_logger(__name__)
-
-J = TypeVar("J", bound=JobModel)
 
 
 class JobRun(Generic[J]):

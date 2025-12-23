@@ -12,6 +12,7 @@ from ftm_lakehouse.repository.archive import ArchiveRepository
 from ftm_lakehouse.repository.entities import EntityRepository
 from ftm_lakehouse.repository.job import J, JobRepository
 from ftm_lakehouse.repository.mapping import MappingRepository
+from ftm_lakehouse.storage.tags import TagStore
 
 
 @cache
@@ -42,3 +43,12 @@ def get_jobs(dataset: str, model: type[J], uri: Uri | None = None) -> JobReposit
     settings = Settings()
     uri = uri or f"{settings.uri}/{dataset}"
     return JobRepository(dataset, uri, model)
+
+
+@cache
+def get_tags(
+    dataset: str, uri: Uri | None = None, tenant: str | None = None
+) -> TagStore:
+    settings = Settings()
+    uri = uri or f"{settings.uri}/{dataset}"
+    return TagStore(uri, tenant)

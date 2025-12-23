@@ -34,6 +34,9 @@ ENTITIES_JSON = "exports/entities_json"
 STATISTICS = "exports/statistics"
 """Statistics export last updated"""
 
+OP_CRAWL = "operations/crawl/last_run"
+"""Last crawl (import files) execution"""
+
 
 def key(key: str) -> str:
     return join_relpaths(TAGS, key)
@@ -42,8 +45,3 @@ def key(key: str) -> str:
 def mapping_tag(content_hash: str) -> str:
     """Get the tag key for a mapping execution."""
     return f"mappings/{content_hash}/last_processed"
-
-
-def mapping_config_tag(content_hash: str) -> str:
-    """Get the tag key for when a mapping config was last updated."""
-    return f"mappings/{content_hash}/config_updated"

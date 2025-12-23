@@ -4,7 +4,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from anystore.model import BaseModel
+from pydantic import Field
 
 
 class CrudResource(str, Enum):

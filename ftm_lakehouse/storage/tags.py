@@ -6,6 +6,7 @@ from typing import Iterable, Literal
 from anystore.store import BaseStore, get_store
 from anystore.tags import Tags as AnyTags
 from anystore.types import Uri
+from anystore.util import join_uri
 
 from ftm_lakehouse.core.conventions import path
 
@@ -54,3 +55,6 @@ class TagStore(AnyTags):
         ts = timestamp or datetime.now()
         self.put(key, ts)
         return ts
+
+    def __repr__(self) -> str:
+        return f"<{self.__class__.__name__}({join_uri(self.store.uri, self.store.key_prefix or "")})>"  # noqa: B950

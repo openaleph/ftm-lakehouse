@@ -1,5 +1,6 @@
 from typing import Generic
 
+from anystore.io import ensure_uri
 from anystore.serialize import Mode
 from anystore.store import BaseStore, get_store
 from anystore.types import M, Raise, Uri, V
@@ -24,6 +25,9 @@ class BaseStorage(Generic[V, Raise]):
             serialization_mode=self.serialization_mode,
             raise_on_nonexist=self.raise_on_nonexist,
         )
+
+    def __repr__(self) -> str:
+        return f"<{self.__class__.__name__}({ensure_uri(self.uri)})>"
 
 
 class ByteStorage(BaseStorage[bytes, Raise]):

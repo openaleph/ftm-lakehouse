@@ -14,3 +14,6 @@ class BaseRepository:
             storage=self.uri,
         )
         self._tags = TagStore(uri)
+
+    def __repr__(self) -> str:
+        return f"<{self.__class__.__name__}({self.dataset})>"
