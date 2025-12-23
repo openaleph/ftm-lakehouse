@@ -2,7 +2,6 @@ from typing import Generic
 
 from anystore.types import Uri
 
-from ftm_lakehouse.core.freshness import is_latest
 from ftm_lakehouse.model.job import DJ
 from ftm_lakehouse.repository.archive import ArchiveRepository
 from ftm_lakehouse.repository.entities import EntityRepository
@@ -65,7 +64,7 @@ class DatasetJobOperation(Generic[DJ]):
 
         if not force:
             if target and dependencies:
-                if is_latest(self.tags, target, dependencies):
+                if self.tags.is_latest(target, dependencies):
                     self.job.log.info(
                         f"Already up-to-date: `{target}`, skipping ...",
                         target=target,
