@@ -4,6 +4,8 @@ from anystore.serialize import Mode
 from anystore.store import BaseStore, get_store
 from anystore.types import M, Raise, Uri, V
 
+from ftm_lakehouse.exceptions import ImproperlyConfigured
+
 
 class BaseStorage(Generic[V, Raise]):
     """
@@ -42,13 +44,28 @@ class ModelStorage(BaseStorage[M, Raise]):
     model: type[M]
     _store: BaseStore[M, Raise]
 
-    def __init__(self, uri: Uri) -> None:
+    def __init__(
+        self,
+        uri: Uri,
+        model: type[M] | None = None,
+        raise_on_nonexist: bool | None = None,
+        **kwargs,
+    ) -> None:
         self.uri = uri
+        resolved_model = getattr(self, "model", None) or model
+        if resolved_model is None:
+            raise ImproperlyConfigured(
+                "Must specify model class for `ModelStorage`, not None!"
+            )
+        self.model = resolved_model
+        if raise_on_nonexist is not None:
+            self.raise_on_nonexist = raise_on_nonexist
         self._store = get_store(
             uri=uri,
             serialization_mode=self.serialization_mode,
             model=self.model,
             raise_on_nonexist=self.raise_on_nonexist,
+            **kwargs,
         )
 
 
