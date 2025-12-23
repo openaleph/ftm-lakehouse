@@ -21,9 +21,12 @@ class DatasetJobOperation(Generic[DJ]):
     A (long-running) operation for a specific dataset that updates tags and
     checks dependencies for freshness to be able to skip this operation. The job
     result is stored after successful run.
+
+    Subclasses can either set class attributes `target` and `dependencies`,
+    or override `get_target()` and `get_dependencies()` for dynamic values.
     """
 
-    target: str  # tag that gets touched after successful run
+    target: str = ""  # tag that gets touched after successful run
     dependencies: list[str] = []  # dependencies for freshness check
 
     def __init__(
@@ -43,36 +46,47 @@ class DatasetJobOperation(Generic[DJ]):
         self.jobs = jobs or get_jobs(job.dataset, job.__class__, lake_uri)
         self.tags = tags or get_tags(job.dataset, lake_uri)
 
+    def get_target(self) -> str:
+        """Return the target tag. Override for dynamic values."""
+        return self.target
+
+    def get_dependencies(self) -> list[str]:
+        """Return the dependencies. Override for dynamic values."""
+        return self.dependencies
+
     def handle(self, run: JobRun, *args, **kwargs) -> None:
         raise NotImplementedError
 
     def run(self, force: bool | None = False, *args, **kwargs) -> DJ:
         """Execute the handle function, force to run it regardless of freshness
         dependencies"""
+        target = self.get_target()
+        dependencies = self.get_dependencies()
+
         if not force:
-            if self.target and self.dependencies:
-                if is_latest(self.tags, self.target, self.dependencies):
+            if target and dependencies:
+                if is_latest(self.tags, target, dependencies):
                     self.job.log.info(
-                        f"Already up-to-date: `{self.target}`, skipping ...",
-                        target=self.target,
-                        dependencies=self.dependencies,
+                        f"Already up-to-date: `{target}`, skipping ...",
+                        target=target,
+                        dependencies=dependencies,
                     )
                     self.job.stop()
                     return self.job
 
         # Execute: Store target tag and job result on successful context leave
-        with self.jobs.run(self.job) as run, self.tags.touch(self.target) as now:
+        with self.jobs.run(self.job) as run, self.tags.touch(target) as now:
             self.job.log.info(
-                f"Start `{self.target}` ...",
-                target=self.target,
-                dependencies=self.dependencies,
+                f"Start `{target}` ...",
+                target=target,
+                dependencies=dependencies,
                 started=now,
             )
             _ = self.handle(run, *args, **kwargs)
         self.log.info(
-            f"Done `{self.target}`.",
-            target=self.target,
-            dependencies=self.dependencies,
+            f"Done `{target}`.",
+            target=target,
+            dependencies=dependencies,
             started=now,
             took=run.job.took,
             errors=run.job.errors,

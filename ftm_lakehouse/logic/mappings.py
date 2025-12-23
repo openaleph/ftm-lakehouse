@@ -53,7 +53,7 @@ def map_entities(mapping: DatasetMapping, csv_path: Path) -> Entities:
     See Also:
 
         - [FollowTheMoney Mappings](https://followthemoney.tech/docs/mappings/)
-        - `DatasetMappings.process` for high-level mapping workflow
+        - `operations.MappingOperation` for high-level mapping workflow
     """
     origin = mapping_origin(mapping.content_hash)
     for query in mapping.queries:

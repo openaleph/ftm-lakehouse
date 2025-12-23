@@ -204,25 +204,6 @@ def mapping(content_hash: str) -> str:
     return f"{MAPPINGS}/{content_hash}/{MAPPING}"
 
 
-def mapping_version(content_hash: str, ts: str | None = None) -> str:
-    """
-    Get a versioned snapshot path for a mapping file.
-
-    Versions are stored within the mapping's directory for locality.
-
-    Layout: mappings/{content_hash}/versions/YYYY/MM/timestamp/mapping.yml
-
-    Args:
-        content_hash: SHA1 checksum of the source file
-        ts: ISO timestamp, omit to use current time
-    """
-    if ts is None:
-        ts = datetime.now(timezone.utc).isoformat()
-    year = ts[:4]
-    month = ts[5:7]
-    return f"{MAPPINGS}/{content_hash}/{VERSIONS}/{year}/{month}/{ts}/{MAPPING}"
-
-
 ENTITIES = "entities"
 """Base path for storing entities data"""
 
