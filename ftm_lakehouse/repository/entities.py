@@ -6,10 +6,10 @@ from typing import Generator, Iterable
 
 from anystore.store import get_store
 from anystore.types import Uri
-from followthemoney import Statement, StatementEntity
+from followthemoney import EntityProxy, Statement, StatementEntity
+from ftmq.io import smart_read_proxies, smart_write_proxies
 from ftmq.query import Query
-from ftmq.types import StatementEntities
-from ftmq.util import EntityProxy
+from ftmq.types import StatementEntities, ValueEntities
 
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.core.settings import Settings
@@ -57,6 +57,7 @@ class EntityRepository(BaseRepository):
         super().__init__(dataset, uri)
         self._journal = JournalStore(dataset, journal_uri or settings.journal_uri)
         self._statements = ParquetStore(uri, dataset)
+        self._store = get_store(self.uri)
 
     @contextmanager
     def bulk(self, origin: str | None = None) -> Generator[JournalWriter, None, None]:
@@ -137,7 +138,7 @@ class EntityRepository(BaseRepository):
     def query(
         self,
         entity_ids: Iterable[str] | None = None,
-        flush_first: bool = True,
+        flush_first: bool = False,
         **filters,
     ) -> StatementEntities:
         """
@@ -164,41 +165,39 @@ class EntityRepository(BaseRepository):
         self,
         entity_id: str,
         origin: str | None = None,
-        flush_first: bool = True,
+        flush_first: bool = False,
     ) -> StatementEntity | None:
         """Get a single entity by ID."""
         for entity in self.query([entity_id], flush_first, origin=origin):
             return entity
         return None
 
-    def iterate(self) -> StatementEntities:
+    def stream(self, flush_first: bool | None = False) -> ValueEntities:
         """
         Stream entities from the exported JSON file.
 
         This reads from the pre-exported entities.ftm.json file,
         not directly from the parquet store.
         """
-        from ftmq.io import smart_read_proxies
+        if flush_first:
+            self.flush()
+            self.export()
 
-        store = get_store(self.uri)
-        uri = store.get_key(path.ENTITIES_JSON)
+        uri = self._store.get_key(path.ENTITIES_JSON)
         yield from smart_read_proxies(uri)
 
     def export_statements(self) -> None:
         """Export parquet store to sorted CSV file."""
-        store = get_store(self.uri)
-        store.ensure_parent(path.EXPORTS_STATEMENTS)
-        output_uri = store.get_key(path.EXPORTS_STATEMENTS)
-        self._statements.export_csv(output_uri)
+        output_uri = self._store.get_key(path.EXPORTS_STATEMENTS)
+        self._store.ensure_parent(path.EXPORTS_STATEMENTS)
+        with self._tags.touch(path.EXPORTS_STATEMENTS):
+            self._statements.export_csv(output_uri)
 
     def export(self) -> None:
         """Export statements to entities.ftm.json file."""
-        from ftmq.io import smart_write_proxies
-
-        store = get_store(self.uri)
-        store.ensure_parent(path.ENTITIES_JSON)
-        output_uri = store.get_key(path.ENTITIES_JSON)
-        smart_write_proxies(output_uri, self._statements.query())
+        output_uri = self._store.get_key(path.ENTITIES_JSON)
+        with self._tags.touch(path.ENTITIES_JSON):
+            smart_write_proxies(output_uri, self._statements.query())
 
     def get_statistics(self):
         """Compute statistics from the parquet store."""

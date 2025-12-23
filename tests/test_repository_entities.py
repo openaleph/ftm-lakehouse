@@ -3,6 +3,7 @@ from collections import defaultdict
 from followthemoney import Statement, StatementEntity, model
 from followthemoney.dataset import DefaultDataset
 from followthemoney.statement.serialize import read_csv_statements
+from ftmq.io import smart_read_proxies
 from ftmq.query import Query
 from ftmq.store.lake import query_duckdb
 from ftmq.util import make_entity
@@ -43,7 +44,7 @@ def test_repository_entities_local(tmp_path):
     assert repo._statements.stats().entity_count == 0
 
     # This auto flushes the journal:
-    entities = list(repo.query())
+    entities = list(repo.query(flush_first=True))
     # after flush:
     assert len(entities) == 2
     assert repo._journal.count() == 0
@@ -95,7 +96,7 @@ def test_repository_entities_multi_origin(tmp_path):
         writer.add_entity(entity)
 
     # Query merged entity (all origins)
-    merged = repo.get("multi-origin")
+    merged = repo.get("multi-origin", flush_first=True)
     assert merged is not None
     assert "John Smith" in merged.get("name")
     assert "1980-01-15" in merged.get("birthDate")
@@ -190,5 +191,45 @@ def test_repository_entities_export_csv(tmp_path):
         assert entity.id == original["id"]
         assert entity.schema.name == original["schema"]
         # Compare properties (values are sets in StatementEntity)
+        for prop, values in original["properties"].items():
+            assert set(entity.get(prop)) == set(values)
+
+
+def test_repository_entities_export_json(tmp_path):
+    """Test exporting entities to JSON."""
+    repo = EntityRepository("test", tmp_path)
+
+    # Add entities from different origins
+    with repo.bulk(origin="import") as writer:
+        writer.add_entity(make_entity(JANE))
+        writer.add_entity(make_entity(JOHN))
+
+    # Flush to parquet first
+    repo.flush()
+
+    # JSON should not exist yet
+    json_path = tmp_path / "entities.ftm.json"
+    assert not json_path.exists()
+
+    # Export to JSON
+    repo.export()
+
+    # JSON should exist at expected path (hardcoded to detect convention changes)
+    assert json_path.exists()
+
+    # Read entities back from JSON
+    json_entities = list(smart_read_proxies(json_path))
+    assert len(json_entities) == 2
+
+    # Build lookup by entity ID
+    entities_by_id = {e.id: e for e in json_entities}
+    assert set(entities_by_id.keys()) == {"jane", "john"}
+
+    # Compare to original input entities
+    original_entities = {"jane": JANE, "john": JOHN}
+    for entity_id, original in original_entities.items():
+        entity = entities_by_id[entity_id]
+        assert entity.id == original["id"]
+        assert entity.schema.name == original["schema"]
         for prop, values in original["properties"].items():
             assert set(entity.get(prop)) == set(values)
