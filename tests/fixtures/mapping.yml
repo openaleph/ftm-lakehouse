@@ -1,0 +1,11 @@
+dataset: test_dataset
+content_hash: abc123def456
+
+queries:
+  - entities:
+      company:
+        schema: Company
+        key: id
+        properties:
+          name: 
+            column: name
