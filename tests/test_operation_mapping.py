@@ -79,16 +79,14 @@ def test_operation_mapping(fixtures_path, tmp_path):
         assert entity.schema.name == "Company"
         assert content_hash in entity.get("proof")
 
-    # Flush and export
-    op.entities.flush()
-    op.entities.export_statements()
-    op.entities.export()
+    # Query all entities (flush_first to ensure we get everything)
+    all_entities = list(op.entities.query(flush_first=True))
+    assert len(all_entities) == 3
 
-    # Check origin in exported entities (stream reads from exported JSON)
-    exported = list(op.entities.stream())
-    assert len(exported) == 3
-
-    for entity in exported:
-        origins = entity.context.get("origin", [])
+    # Verify origin is tracked on entities
+    for entity in all_entities:
+        # StatementEntity tracks origins via to_context_dict()
+        ctx = entity.to_context_dict()
+        origins = ctx.get("origin", [])
         assert origin in origins
         assert f"mapping:{content_hash}" in origins

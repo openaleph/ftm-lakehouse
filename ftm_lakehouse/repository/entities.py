@@ -7,7 +7,8 @@ from typing import Generator, Iterable
 from anystore.store import get_store
 from anystore.types import Uri
 from followthemoney import EntityProxy, Statement, StatementEntity
-from ftmq.io import smart_read_proxies, smart_write_proxies
+from ftmq.io import smart_read_proxies
+from ftmq.model.stats import DatasetStats
 from ftmq.query import Query
 from ftmq.types import StatementEntities, ValueEntities
 
@@ -172,41 +173,19 @@ class EntityRepository(BaseRepository):
             return entity
         return None
 
-    def stream(self, flush_first: bool | None = False) -> ValueEntities:
+    def stream(self) -> ValueEntities:
         """
         Stream entities from the exported JSON file.
 
         This reads from the pre-exported entities.ftm.json file,
         not directly from the parquet store.
         """
-        if flush_first:
-            self.flush()
-            self.export()
-
         uri = self._store.get_key(path.ENTITIES_JSON)
         yield from smart_read_proxies(uri)
 
-    def export_statements(self) -> None:
-        """Export parquet store to sorted CSV file."""
-        output_uri = self._store.get_key(path.EXPORTS_STATEMENTS)
-        self._store.ensure_parent(path.EXPORTS_STATEMENTS)
-        with self._tags.touch(path.EXPORTS_STATEMENTS):
-            self._statements.export_csv(output_uri)
-
-    def export(self) -> None:
-        """Export statements to entities.ftm.json file."""
-        output_uri = self._store.get_key(path.ENTITIES_JSON)
-        with self._tags.touch(path.ENTITIES_JSON):
-            smart_write_proxies(output_uri, self._statements.query())
-
-    def get_statistics(self):
+    def make_statistics(self) -> DatasetStats:
         """Compute statistics from the parquet store."""
         return self._statements.stats()
-
-    def export_statistics(self, versions) -> None:
-        """Export statistics to versioned JSON file."""
-        stats = self.get_statistics()
-        versions.make(path.STATISTICS, stats)
 
     def get_changes(
         self,

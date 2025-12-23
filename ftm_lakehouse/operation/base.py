@@ -1,7 +1,9 @@
 from typing import Generic
 
+from anystore.model import BaseModel
 from anystore.types import Uri
 
+from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.model.job import DJ
 from ftm_lakehouse.repository.archive import ArchiveRepository
 from ftm_lakehouse.repository.entities import EntityRepository
@@ -13,6 +15,7 @@ from ftm_lakehouse.repository.factories import (
 )
 from ftm_lakehouse.repository.job import JobRepository, JobRun
 from ftm_lakehouse.storage.tags import TagStore
+from ftm_lakehouse.storage.versions import VersionStore
 
 
 class DatasetJobOperation(Generic[DJ]):
@@ -37,13 +40,16 @@ class DatasetJobOperation(Generic[DJ]):
         jobs: JobRepository | None = None,
         lake_uri: Uri | None = None,
     ) -> None:
+        settings = Settings()
+        self.uri = lake_uri or settings.uri
         self.dataset = job.dataset
         self.job = job
         self.log = job.log
-        self.archive = archive or get_archive(job.dataset, lake_uri)
-        self.entities = entities or get_entities(job.dataset, lake_uri)
-        self.jobs = jobs or get_jobs(job.dataset, job.__class__, lake_uri)
-        self.tags = tags or get_tags(job.dataset, lake_uri)
+        self.archive = archive or get_archive(job.dataset, self.uri)
+        self.entities = entities or get_entities(job.dataset, self.uri)
+        self.jobs = jobs or get_jobs(job.dataset, job.__class__, self.uri)
+        self.tags = tags or get_tags(job.dataset, self.uri)
+        self.versions: dict[str, VersionStore] = {}
 
     def get_target(self) -> str:
         """Return the target tag. Override for dynamic values."""
@@ -81,7 +87,7 @@ class DatasetJobOperation(Generic[DJ]):
                 dependencies=dependencies,
                 started=now,
             )
-            _ = self.handle(run, *args, **kwargs)
+            _ = self.handle(run, *args, force=force, **kwargs)
         self.log.info(
             f"Done `{target}`.",
             target=target,
@@ -94,6 +100,12 @@ class DatasetJobOperation(Generic[DJ]):
         if result is not None:
             return result
         raise RuntimeError("Result is `None`")
+
+    def make_version(self, key: Uri, data: BaseModel) -> str:
+        clz = data.__class__.__name__
+        if clz not in self.versions:
+            self.versions[clz] = VersionStore(self.uri, data.__class__)
+        return self.versions[clz].make(key, data)
 
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__}({self.dataset})>"
