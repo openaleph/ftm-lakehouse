@@ -8,7 +8,7 @@ from anystore.types import Uri
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.model.mapping import DatasetMapping
 from ftm_lakehouse.repository.base import BaseRepository
-from ftm_lakehouse.storage.versions import VersionStore
+from ftm_lakehouse.storage.versions import VersionedModelStore
 
 log = get_logger(__name__)
 
@@ -40,7 +40,7 @@ class MappingRepository(BaseRepository):
 
     def __init__(self, dataset: str, uri: Uri) -> None:
         super().__init__(dataset, uri)
-        self._versions = VersionStore(uri, DatasetMapping)
+        self._versions = VersionedModelStore(uri, DatasetMapping)
 
     def exists(self, content_hash: str) -> bool:
         """Check if a mapping configuration exists."""

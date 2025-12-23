@@ -1,6 +1,5 @@
 from typing import Generic
 
-from anystore.model import BaseModel
 from anystore.types import Uri
 
 from ftm_lakehouse.core.settings import Settings
@@ -12,6 +11,7 @@ from ftm_lakehouse.repository.factories import (
     get_entities,
     get_jobs,
     get_tags,
+    get_versions,
 )
 from ftm_lakehouse.repository.job import JobRepository, JobRun
 from ftm_lakehouse.storage.tags import TagStore
@@ -36,8 +36,9 @@ class DatasetJobOperation(Generic[DJ]):
         job: DJ,
         archive: ArchiveRepository | None = None,
         entities: EntityRepository | None = None,
-        tags: TagStore | None = None,
         jobs: JobRepository | None = None,
+        tags: TagStore | None = None,
+        versions: VersionStore | None = None,
         lake_uri: Uri | None = None,
     ) -> None:
         settings = Settings()
@@ -49,7 +50,7 @@ class DatasetJobOperation(Generic[DJ]):
         self.entities = entities or get_entities(job.dataset, self.uri)
         self.jobs = jobs or get_jobs(job.dataset, job.__class__, self.uri)
         self.tags = tags or get_tags(job.dataset, self.uri)
-        self.versions: dict[str, VersionStore] = {}
+        self.versions = versions or get_versions(job.dataset, self.uri)
 
     def get_target(self) -> str:
         """Return the target tag. Override for dynamic values."""
@@ -100,12 +101,6 @@ class DatasetJobOperation(Generic[DJ]):
         if result is not None:
             return result
         raise RuntimeError("Result is `None`")
-
-    def make_version(self, key: Uri, data: BaseModel) -> str:
-        clz = data.__class__.__name__
-        if clz not in self.versions:
-            self.versions[clz] = VersionStore(self.uri, data.__class__)
-        return self.versions[clz].make(key, data)
 
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__}({self.dataset})>"

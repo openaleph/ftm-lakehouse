@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import Generic
 
+from anystore.model import BaseModel
 from anystore.types import M, Uri
 from anystore.util import join_relpaths
 
@@ -12,9 +13,9 @@ from ftm_lakehouse.storage.base import ByteStorage
 from ftm_lakehouse.storage.tags import TagStore
 
 
-class VersionStore(ByteStorage, Generic[M]):
+class VersionedModelStore(ByteStorage, Generic[M]):
     """
-    Timestamped snapshot storage.
+    Timestamped snapshot storage for a given model type.
 
     Stores versioned copies of serialized pydantic models in a snapshot
     directory (versions/YYYY/MM/timestamp/filename) while also writing
@@ -74,3 +75,17 @@ class VersionStore(ByteStorage, Generic[M]):
             if version_key.endswith(key):
                 versions.append(version_key)
         return sorted(versions)
+
+
+class VersionStore(ByteStorage):
+    def __init__(self, uri: Uri) -> None:
+        super().__init__(uri)
+        self.versions: dict[str, VersionedModelStore] = {}
+        self.exists = self._store.exists
+        self.get = self._store.get
+
+    def make(self, key: str, obj: BaseModel) -> str:
+        clz = obj.__class__.__name__
+        if clz not in self.versions:
+            self.versions[clz] = VersionedModelStore(self.uri, obj.__class__)
+        return self.versions[clz].make(key, obj)

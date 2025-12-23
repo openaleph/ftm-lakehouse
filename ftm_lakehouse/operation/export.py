@@ -73,7 +73,7 @@ class BaseExportOperation(DatasetJobOperation[J]):
     def export_statistics(self) -> None:
         self.ensure_flush()
         stats = self.entities.make_statistics()
-        self.make_version(path.STATISTICS, stats)
+        self.versions.make(path.STATISTICS, stats)
 
 
 class ExportStatementsOperation(BaseExportOperation[ExportStatementsJob]):
@@ -147,6 +147,6 @@ class ExportIndexOperation(BaseExportOperation[ExportIndexJob]):
             uri = join_uri(self.entities.uri, path.STATISTICS)
             dataset.resources.append(make_statistics_resource(uri))
 
-        self.make_version(path.INDEX, dataset)
+        self.versions.make(path.INDEX, dataset)
 
         run.job.done = 1

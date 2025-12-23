@@ -5,7 +5,7 @@ public convenience.
 """
 
 from anystore.functools import weakref_cache as cache
-from anystore.types import M, Uri
+from anystore.types import Uri
 
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.repository.archive import ArchiveRepository
@@ -47,12 +47,10 @@ def get_jobs(dataset: str, model: type[J], uri: Uri | None = None) -> JobReposit
 
 
 @cache
-def get_versions(
-    dataset: str, model: type[M], uri: Uri | None = None
-) -> VersionStore[M]:
-    settings = Settings()
+def get_versions(dataset: str, uri: Uri | None = None) -> VersionStore:
+    settings = Settings
     uri = uri or f"{settings.uri}/{dataset}"
-    return VersionStore(uri, model)
+    return VersionStore(uri)
 
 
 @cache

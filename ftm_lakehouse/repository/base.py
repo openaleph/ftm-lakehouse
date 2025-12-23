@@ -2,6 +2,7 @@ from anystore.logging import get_logger
 from anystore.types import Uri
 
 from ftm_lakehouse.storage.tags import TagStore
+from ftm_lakehouse.storage.versions import VersionStore
 
 
 class BaseRepository:
@@ -14,6 +15,7 @@ class BaseRepository:
             storage=self.uri,
         )
         self._tags = TagStore(uri)
+        self._versions = VersionStore(uri)
 
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__}({self.dataset})>"

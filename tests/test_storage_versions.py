@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from anystore.model import BaseModel
 
-from ftm_lakehouse.storage.versions import VersionStore
+from ftm_lakehouse.storage.versions import VersionedModelStore
 
 
 class VersionedData(BaseModel):
@@ -16,7 +16,7 @@ class VersionedData(BaseModel):
 
 def test_storage_versions_make(tmp_path):
     """Test creating a versioned snapshot."""
-    store = VersionStore(tmp_path, model=VersionedData)
+    store = VersionedModelStore(tmp_path, model=VersionedData)
 
     # No tag before make
     assert not (tmp_path / "tags/lakehouse/config.json").exists()
@@ -46,7 +46,7 @@ def test_storage_versions_make(tmp_path):
 
 def test_storage_versions_make_hardcoded_path(tmp_path):
     """Test versioned path structure with hardcoded timestamp."""
-    store = VersionStore(tmp_path, model=VersionedData)
+    store = VersionedModelStore(tmp_path, model=VersionedData)
 
     data = VersionedData(name="test_dataset")
 
@@ -71,7 +71,7 @@ def test_storage_versions_make_hardcoded_path(tmp_path):
 
 def test_storage_versions_get(tmp_path):
     """Test retrieving current version."""
-    store = VersionStore(tmp_path, model=VersionedData)
+    store = VersionedModelStore(tmp_path, model=VersionedData)
 
     data = VersionedData(name="retrieved_dataset")
     store.make("data.json", data)
@@ -83,7 +83,7 @@ def test_storage_versions_get(tmp_path):
 
 def test_storage_versions_exists(tmp_path):
     """Test checking if main key exists."""
-    store = VersionStore(tmp_path, model=VersionedData)
+    store = VersionedModelStore(tmp_path, model=VersionedData)
 
     assert not store.exists("missing.json")
 
@@ -93,7 +93,7 @@ def test_storage_versions_exists(tmp_path):
 
 def test_storage_versions_list_versions(tmp_path):
     """Test listing all versioned copies."""
-    store = VersionStore(tmp_path, model=VersionedData)
+    store = VersionedModelStore(tmp_path, model=VersionedData)
 
     # No versions initially
     assert store.list_versions("stats.json") == []
@@ -115,7 +115,7 @@ def test_storage_versions_list_versions(tmp_path):
 
 def test_storage_versions_multiple_files(tmp_path):
     """Test versioning multiple different files."""
-    store = VersionStore(tmp_path, model=VersionedData)
+    store = VersionedModelStore(tmp_path, model=VersionedData)
 
     store.make("config.json", VersionedData(name="config"))
     store.make("index.json", VersionedData(name="index"))
@@ -131,7 +131,7 @@ def test_storage_versions_multiple_files(tmp_path):
 
 def test_storage_versions_nested_path(tmp_path):
     """Test versioning files in nested directories."""
-    store = VersionStore(tmp_path, model=VersionedData)
+    store = VersionedModelStore(tmp_path, model=VersionedData)
 
     data = VersionedData(name="nested")
     versioned_path = store.make("exports/statistics.json", data)
@@ -158,7 +158,7 @@ def test_storage_versions_nested_path(tmp_path):
 
 def test_storage_versions_preserves_data(tmp_path):
     """Test that versioned copies preserve data correctly."""
-    store = VersionStore(tmp_path, model=VersionedData)
+    store = VersionedModelStore(tmp_path, model=VersionedData)
 
     # Create initial version
     v1_data = VersionedData(name="version1")
@@ -188,7 +188,7 @@ def test_storage_versions_yaml_serialization(tmp_path):
     """Test that .yml files are serialized as YAML."""
     import yaml
 
-    store = VersionStore(tmp_path, model=VersionedData)
+    store = VersionedModelStore(tmp_path, model=VersionedData)
 
     data = VersionedData(name="yaml_test")
     versioned_path = store.make("config.yml", data)
