@@ -61,3 +61,4 @@ class MappingOperation(DatasetJobOperation[MappingJob]):
                 for entity in map_entities(mapping, csv_path):
                     bulk.add_entity(entity)
                     run.job.done += 1
+        self.entities.flush()

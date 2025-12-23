@@ -133,6 +133,8 @@ class CrawlOperation(DatasetJobOperation[CrawlJob]):
             self.handle_crawl(task, run)
             run.job.pending -= 1
             run.job.touch()
+        if self.job.make_entities:
+            self.entities.flush()
 
 
 def crawl(

@@ -84,8 +84,8 @@ def test_operation_mapping(fixtures_path, tmp_path):
     op.entities.export_statements()
     op.entities.export()
 
-    # Check origin in exported entities
-    exported = list(op.entities.iterate())
+    # Check origin in exported entities (stream reads from exported JSON)
+    exported = list(op.entities.stream())
     assert len(exported) == 3
 
     for entity in exported:
