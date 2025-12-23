@@ -109,6 +109,8 @@ class ParquetStore:
         self,
         vacuum: bool = False,
         vacuum_keep_hours: int = 0,
+        bucket: str | None = None,
+        origin: str | None = None,
     ) -> None:
         """
         Optimize the store by compacting small files.
@@ -116,9 +118,11 @@ class ParquetStore:
         Args:
             vacuum: Also delete old file versions
             vacuum_keep_hours: Hours of history to retain when vacuuming
+            bucket: Filter optimization to specific bucket partition
+            origin: Filter optimization to specific origin partition
         """
         writer = self._store.writer()
-        writer.optimize(vacuum, vacuum_keep_hours)
+        writer.optimize(vacuum, vacuum_keep_hours, bucket=bucket, origin=origin)
 
     @property
     def version(self) -> int:

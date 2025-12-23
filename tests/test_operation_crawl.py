@@ -1,5 +1,5 @@
 from ftm_lakehouse.core.conventions import tag
-from ftm_lakehouse.operation.crawl import CRAWL_ORIGIN, CrawlJob, CrawlOperation, crawl
+from ftm_lakehouse.operation.crawl import CRAWL_ORIGIN, CrawlJob, CrawlOperation
 
 DATASET = "carpet_crawlers"
 
@@ -65,16 +65,3 @@ def test_operation_crawl_globs(fixtures_path, tmp_path):
     assert res.done == 1
     entities = list(op.entities.query(origin=CRAWL_ORIGIN))
     assert len(entities) == 5 + 1  # files + folder
-
-
-def test_operation_crawl_function(fixtures_path, tmp_path):
-    """Test the crawl() convenience function."""
-    result = crawl(
-        dataset=DATASET,
-        uri=fixtures_path / "src",
-        lake_uri=tmp_path,
-        make_entities=True,
-    )
-    assert result.done == 5
-    assert result.running is False
-    assert result.stopped is not None

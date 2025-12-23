@@ -194,7 +194,3 @@ class EntityRepository(BaseRepository):
     ) -> Generator[tuple[datetime, str, Statement], None, None]:
         """Get statement changes for a version range."""
         yield from self._statements.get_changes(start_version, end_version)
-
-    def optimize(self, vacuum: bool = False, vacuum_keep_hours: int = 0) -> None:
-        """Optimize the parquet store."""
-        self._statements.optimize(vacuum, vacuum_keep_hours)
