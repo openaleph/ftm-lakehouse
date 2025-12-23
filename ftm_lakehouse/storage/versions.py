@@ -32,7 +32,7 @@ class VersionStore(ByteStorage, Generic[M]):
         super().__init__(uri)
         self._tags = TagStore(uri)
         self.model = model
-        self.delete = self._store.delete
+        self.exists = self._store.exists
         self.iterate_keys = self._store.iterate_keys
 
     def make(self, key: Uri, data: M) -> str:
@@ -59,10 +59,6 @@ class VersionStore(ByteStorage, Generic[M]):
     def get(self, key: str) -> M:
         """Get the current version of a file."""
         return load_model(key, self._store.get(key), model=self.model)
-
-    def exists(self, key: str) -> bool:
-        """Check if the main key exists."""
-        return self._store.exists(key)
 
     def list_versions(self, key: str) -> list[str]:
         """

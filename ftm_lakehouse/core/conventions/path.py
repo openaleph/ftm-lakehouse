@@ -63,7 +63,7 @@ Dataset Layout
 
 from datetime import datetime, timezone
 
-from anystore.util import join_relpaths
+from anystore.util import ensure_uuid, join_relpaths
 
 from ftm_lakehouse.util import make_checksum_key
 
@@ -261,6 +261,15 @@ JOBS = "jobs"
 
 JOB_RUNS = f"{JOBS}/runs"
 """Job runs result storage prefix"""
+
+
+def job_prefix(name: str) -> str:
+    return f"{JOB_RUNS}/{name}"
+
+
+def job_run(name: str, run_id: str | None = None) -> str:
+    return f"{job_prefix(name)}/{run_id or ensure_uuid()}.json"
+
 
 QUEUE = "queue"
 """Base path for global CRUD action queue"""

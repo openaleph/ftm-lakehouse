@@ -7,7 +7,7 @@ from typing import Self
 from anystore.logging import BoundLogger, get_logger
 from anystore.model import BaseModel
 from anystore.util import ensure_uuid
-from pydantic import field_validator
+from pydantic import computed_field, field_validator
 
 DEFAULT_USER = "__system__"
 
@@ -26,13 +26,10 @@ class JobModel(BaseModel):
     exc: str | None = None
     took: timedelta = timedelta()
 
+    @computed_field
     @property
     def name(self) -> str:
-        return self.get_name()
-
-    @classmethod
-    def get_name(cls) -> str:
-        return cls.__name__
+        return self.__class__.__name__
 
     @field_validator("run_id", mode="before")
     @classmethod
