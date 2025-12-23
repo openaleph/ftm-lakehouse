@@ -32,6 +32,7 @@ class VersionStore(ByteStorage, Generic[M]):
         super().__init__(uri)
         self._tags = TagStore(uri)
         self.model = model
+        self.delete = self._store.delete
         self.exists = self._store.exists
         self.iterate_keys = self._store.iterate_keys
 
