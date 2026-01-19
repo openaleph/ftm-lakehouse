@@ -24,7 +24,7 @@ export LAKEHOUSE_URI=s3://my-bucket/lakehouse
 export AWS_ACCESS_KEY_ID=your_key
 export AWS_SECRET_ACCESS_KEY=your_secret
 
-# With persistent journal (recommended for production)
+# With persistent journal (for production)
 export LAKEHOUSE_JOURNAL_URI=postgresql://user:pass@localhost/journal
 ```
 
@@ -68,14 +68,51 @@ export AWS_REGION=us-east-1
 export LAKEHOUSE_URI=s3://bucket-name/prefix
 export AWS_ACCESS_KEY_ID=your_key
 export AWS_SECRET_ACCESS_KEY=your_secret
-export AWS_ENDPOINT_URL=https://minio.example.com
+export AWS_ENDPOINT_URL=https://minlake.example.com
 ```
 
 ### Google Cloud Storage
 
+Requires extra install: `pip install gcsfs`
+
 ```bash
 export LAKEHOUSE_URI=gs://bucket-name/prefix
 export GOOGLE_APPLICATION_CREDENTIALS=/path/to/credentials.json
+```
+
+### Azure Blob Storage
+
+Requires extra install: `pip install adlfs`
+
+```bash
+export LAKEHOUSE_URI=az://container-name/prefix
+export AZURE_STORAGE_ACCOUNT_NAME=your_account
+export AZURE_STORAGE_ACCOUNT_KEY=your_key
+```
+
+Or using connection string:
+
+```bash
+export LAKEHOUSE_URI=az://container-name/prefix
+export AZURE_STORAGE_CONNECTION_STRING="DefaultEndpointsProtocol=https;AccountName=...;AccountKey=...;EndpointSuffix=core.windows.net"
+```
+
+Or using SAS token:
+
+```bash
+export LAKEHOUSE_URI=az://container-name/prefix
+export AZURE_STORAGE_ACCOUNT_NAME=your_account
+export AZURE_STORAGE_SAS_TOKEN="?sv=2021-06-08&ss=b&srt=sco&sp=rwdlacyx..."
+```
+
+Or using Azure AD / Service Principal:
+
+```bash
+export LAKEHOUSE_URI=az://container-name/prefix
+export AZURE_STORAGE_ACCOUNT_NAME=your_account
+export AZURE_STORAGE_TENANT_ID=your_tenant_id
+export AZURE_STORAGE_CLIENT_ID=your_client_id
+export AZURE_STORAGE_CLIENT_SECRET=your_client_secret
 ```
 
 ## Journal Database

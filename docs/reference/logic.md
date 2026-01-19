@@ -1,6 +1,6 @@
 # logic
 
-The logic module contains core business logic for entity processing, mapping transformations, and document crawling. These functions are designed to be used by client applications building on top of the data lakehouse.
+The logic module contains pure stateless transformation functions with no infrastructure dependencies. Functions here take inputs and produce outputs without side effects.
 
 ## Entity Aggregation
 
@@ -44,56 +44,45 @@ for entity in map_entities(mapping, csv_path):
         heading_level: 3
         show_root_heading: true
 
-## Document Crawling
+## Statement Serialization
 
-Crawl local or remote document collections into a dataset:
+Pack and unpack statements for efficient storage:
 
 ```python
-from ftm_lakehouse import get_dataset
-from ftm_lakehouse.logic import crawl
+from ftm_lakehouse.logic import pack_statement, unpack_statement
+from followthemoney import Statement
 
-dataset = get_dataset("my_dataset")
+# Pack a statement to string
+packed = pack_statement(stmt)
 
-# Crawl local directory
-result = crawl("/path/to/documents", dataset, glob="*.pdf")
-print(f"Crawled {result.done} files")
-
-# Crawl S3 bucket
-result = crawl(
-    "s3://my-bucket/docs",
-    dataset,
-    prefix="2024/",
-    exclude_glob="*.tmp"
-)
+# Unpack back to Statement
+stmt = unpack_statement(packed)
 ```
 
-::: ftm_lakehouse.logic.crawl
-    options:
-        heading_level: 3
-        show_root_heading: true
+### pack_statement
 
-### CrawlJob
+```python
+def pack_statement(stmt: Statement) -> str
+```
 
-::: ftm_lakehouse.logic.CrawlJob
-    options:
-        heading_level: 4
-        show_root_heading: true
-        members:
-            - uri
-            - skip_existing
-            - cache_key_uri
-            - prefix
-            - exclude_prefix
-            - glob
-            - exclude_glob
+Pack a Statement into a null-byte joined string for compact storage.
 
-### CrawlWorker
+**Args:**
 
-::: ftm_lakehouse.logic.CrawlWorker
-    options:
-        heading_level: 4
-        show_root_heading: true
-        members:
-            - get_tasks
-            - handle_task
-            - run
+- `stmt`: A FollowTheMoney Statement object
+
+**Returns:** Serialized string representation
+
+### unpack_statement
+
+```python
+def unpack_statement(data: str) -> Statement
+```
+
+Unpack a null-byte joined string back into a Statement.
+
+**Args:**
+
+- `data`: Serialized statement string from `pack_statement`
+
+**Returns:** Reconstructed Statement object

@@ -46,16 +46,16 @@ A statement represents a single fact: one property value for one entity from one
 This statement-based storage model makes it possible to merge data from multiple sources while preserving full provenance, perform incremental updates without reprocessing entire datasets, and use standard file-based tools (sorting, filtering) rather than requiring database infrastructure.
 
 ```python
-from ftm_lakehouse import io
+from ftm_lakehouse import lake
 
 # Write entities
-io.write_entities("my_dataset", entities, origin="import")
+lake.write_entities("my_dataset", entities, origin="import")
 
 # Read an entity
-entity = io.get_entity("my_dataset", "entity-id-123")
+entity = lake.get_entity("my_dataset", "entity-id-123")
 
 # Query entities
-for entity in io.iterate_entities("my_dataset", origin="crawl"):
+for entity in lake.iterate_entities("my_dataset", origin="crawl"):
     process(entity)
 ```
 
@@ -70,13 +70,13 @@ The **archive** interface manages source documents and files:
 Files are automatically deduplicated across the archive.
 
 ```python
-from ftm_lakehouse import io
+from ftm_lakehouse import lake
 
 # Archive a file
-file = io.archive_file("my_dataset", "/path/to/document.pdf")
+file = lake.archive_file("my_dataset", "/path/to/document.pdf")
 
 # Retrieve file content
-with io.open_file("my_dataset", file.checksum) as fh:
+with lake.open_file("my_dataset", file.checksum) as fh:
     content = fh.read()
 ```
 

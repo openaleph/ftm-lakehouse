@@ -1,6 +1,6 @@
 # Working with Files
 
-The archive interface manages source documents and files in `ftm-lakehouse`. It provides content-addressable storage with automatic deduplication.
+The archive repository manages source documents and files in `ftm-lakehouse`. It provides content-addressable storage with automatic deduplication.
 
 ## Overview
 
@@ -14,50 +14,95 @@ The archive stores files using their SHA1 checksum as the key. This design enabl
 ## Quick Start
 
 ```python
-from ftm_lakehouse import get_archive
+from ftm_lakehouse import ensure_dataset
 
-archive = get_archive("my_dataset")
+dataset = ensure_dataset("my_dataset")
 
 # Archive a file
-file = archive.archive_file("/path/to/document.pdf")
+file = dataset.archive.put("/path/to/document.pdf")
 print(f"Archived: {file.name} ({file.checksum})")
 
-# Add file to archive from HTTP URL
-file = archive.archive_file("https://example.com/report.pdf")
+# Archive from HTTP URL
+file = dataset.archive.put("https://example.com/report.pdf")
 print(f"Archived: {file.name} ({file.checksum})")
 
 # Retrieve file content
-with archive.open_file(file) as fh:
+with dataset.archive.open(file) as fh:
     content = fh.read()
 
 # Stream bytes (memory efficient for large files)
-for chunk in archive.stream_file(file):
+for chunk in dataset.archive.stream(file):
     process_chunk(chunk)
 
 # Get file metadata
-file = archive.lookup_file("da39a3ee5e6b4b0d3255bfef95601890afd80709")
+file = dataset.archive.get("da39a3ee5e6b4b0d3255bfef95601890afd80709")
 print(f"Size: {file.size}, Type: {file.mimetype}")
 
-# Check if file with sha1 checksum exists
-assert archive.exists("da39a3ee5e6b4b0d3255bfef95601890afd80709")
+# Check if file exists
+if dataset.archive.exists("da39a3ee5e6b4b0d3255bfef95601890afd80709"):
+    print("File exists")
 ```
 
-## Using higher level io helper
-
-The `ftm_lakehouse.io` module provides high level interface to the archive. Instead of using a `File` object to pass to the archive lookup methods (as seen above), simply pass the checksum as string. This shorthand interface is intended to use in client applications.
+Alternatively, use the shortcut to get the repository directly:
 
 ```python
-from ftm_lakehouse import io
+from ftm_lakehouse import lake
 
-checksum = "abc123..."
+archive = lake.get_archive("my_dataset")
+file = archive.put("/path/to/document.pdf")
+```
 
-# Open as file handle
-with io.open_file("my_dataset", checksum) as fh:
+## Archiving Files
+
+### From Local Path
+
+```python
+from ftm_lakehouse import ensure_dataset
+
+dataset = ensure_dataset("my_dataset")
+
+file = dataset.archive.put("/path/to/document.pdf")
+print(f"Checksum: {file.checksum}")
+print(f"Size: {file.size}")
+print(f"MIME type: {file.mimetype}")
+```
+
+### From URL
+
+```python
+file = dataset.archive.put("https://example.com/report.pdf")
+```
+
+### From Bytes
+
+```python
+file = dataset.archive.put_bytes(
+    data=pdf_bytes,
+    name="report.pdf",
+    mimetype="application/pdf",
+)
+```
+
+## Reading Files
+
+### Open as File Handle
+
+```python
+from ftm_lakehouse import get_dataset
+
+dataset = get_dataset("my_dataset")
+file = dataset.archive.get(checksum)
+
+with dataset.archive.open(file) as fh:
     content = fh.read()
-    # Process content...
+```
 
-# Stream bytes (memory efficient for large files)
-for chunk in io.stream_file("my_dataset", checksum):
+### Stream Bytes
+
+For large files, streaming is more memory efficient:
+
+```python
+for chunk in dataset.archive.stream(file):
     process_chunk(chunk)
 ```
 
@@ -66,10 +111,7 @@ for chunk in io.stream_file("my_dataset", checksum):
 For tools that require a local file path:
 
 ```python
-from ftm_lakehouse import io
-
-# Get a (temporary) local path
-with io.get_local_path("my_dataset", checksum) as path:
+with dataset.archive.local_path(file) as path:
     # path is a pathlib.Path object
     subprocess.run(["pdftotext", str(path), "output.txt"])
 ```
@@ -80,12 +122,14 @@ with io.get_local_path("my_dataset", checksum) as path:
 
 ## File Metadata
 
-### Lookup File Info
+### Get File Info
 
 ```python
-from ftm_lakehouse import io
+from ftm_lakehouse import get_dataset
 
-file = io.lookup_file("my_dataset", checksum)
+dataset = get_dataset("my_dataset")
+
+file = dataset.archive.get(checksum)
 if file:
     print(f"Name: {file.name}")
     print(f"Key: {file.key}")
@@ -101,21 +145,21 @@ from ftm_lakehouse import get_dataset
 
 dataset = get_dataset("my_dataset")
 
-for file in dataset.archive.iter_files():
+for file in dataset.archive.iterate():
     print(f"{file.key}: {file.checksum}")
 ```
 
 ## File to Entity Conversion
 
-Files can be converted to [FollowTheMoney](https://followthemoney.tech/explorer/schemata/Document/) entities. In the following example, the _dataset_ interface is used to access both the _archive_ service and the _entities_ service.
+Files can be converted to [FollowTheMoney](https://followthemoney.tech/explorer/schemata/Document/) entities:
 
 ```python
-from ftm_lakehouse import get_dataset
+from ftm_lakehouse import ensure_dataset
 
-dataset = get_dataset("my_dataset")
+dataset = ensure_dataset("my_dataset")
 
 # Archive a file
-file = dataset.archive.archive_file("/path/to/document.pdf")
+file = dataset.archive.put("/path/to/document.pdf")
 
 # Convert to FtM entity
 entity = file.to_entity()
@@ -151,7 +195,7 @@ ftm-lakehouse -d my_dataset archive get <checksum> -o output.pdf
 
 Files are stored in a content-addressable layout:
 
-```bash
+```
 my_dataset/
   archive/
     00/
@@ -163,3 +207,37 @@ my_dataset/
 ```
 
 The checksum is split into directory segments for better filesystem performance.
+
+## Complete Example
+
+```python
+from ftm_lakehouse import ensure_dataset
+
+
+def main():
+    dataset = ensure_dataset("documents")
+
+    # Archive some files
+    files = []
+    for path in ["/path/to/doc1.pdf", "/path/to/doc2.pdf"]:
+        file = dataset.archive.put(path)
+        files.append(file)
+        print(f"Archived: {file.name} ({file.checksum})")
+
+    # Convert to entities
+    with dataset.entities.bulk(origin="archive") as writer:
+        for file in files:
+            entity = file.to_entity()
+            writer.add_entity(entity)
+
+    dataset.entities.flush()
+
+    # List all archived files
+    print("\nAll files:")
+    for file in dataset.archive.iterate():
+        print(f"  - {file.name}: {file.size} bytes")
+
+
+if __name__ == "__main__":
+    main()
+```

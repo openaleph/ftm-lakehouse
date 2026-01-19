@@ -148,10 +148,11 @@ class EntityRepository(BaseRepository):
         """
         Query entities from the parquet store.
 
+        Additional filter kwargs are passed to ftmq Query.
+
         Args:
             entity_ids: Filter by entity IDs
             flush_first: Flush journal before querying (default True)
-            **filters: Additional query filter kwargs
 
         Yields:
             StatementEntity objects matching the query

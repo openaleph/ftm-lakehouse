@@ -1,7 +1,5 @@
 # Quickstart
 
-This guide will help you get started with `ftm-lakehouse` in minutes.
-
 ## Installation
 
 Requires Python 3.11 or later.
@@ -19,14 +17,25 @@ pip install ftm-lakehouse
 
 ## Using the Python API
 
+### Get a Dataset
+
+```python
+from ftm_lakehouse import get_dataset, ensure_dataset
+
+# Get existing dataset
+dataset = get_dataset("my_dataset")
+
+# Or create if it doesn't exist
+dataset = ensure_dataset("my_dataset", title="My Dataset")
+```
+
 ### Working with Entities
 
 ```python
-from ftm_lakehouse import io
+from ftm_lakehouse import ensure_dataset
 from followthemoney import model
 
-# Create a dataset
-dataset = io.ensure_dataset("my_dataset")
+dataset = ensure_dataset("my_dataset")
 
 # Create an entity
 person = model.make_entity("Person")
@@ -35,27 +44,29 @@ person.add("name", "Jane Doe")
 person.add("nationality", "us")
 
 # Write the entity
-io.write_entity("my_dataset", person, origin="manual")
+dataset.entities.add(person, origin="manual")
 
 # Flush to storage
-io.flush("my_dataset")
+dataset.entities.flush()
 
 # Read it back
-entity = io.get_entity("my_dataset", person.id)
+entity = dataset.entities.get(person.id)
 print(f"Found: {entity.caption}")
 ```
 
 ### Working with Files
 
 ```python
-from ftm_lakehouse import io
+from ftm_lakehouse import ensure_dataset
+
+dataset = ensure_dataset("my_dataset")
 
 # Archive a file
-file = io.archive_file("my_dataset", "/path/to/document.pdf")
+file = dataset.archive.put("/path/to/document.pdf")
 print(f"Archived: {file.checksum}")
 
 # Retrieve it
-with io.open_file("my_dataset", file.checksum) as fh:
+with dataset.archive.open(file) as fh:
     content = fh.read()
 ```
 
@@ -64,18 +75,29 @@ with io.open_file("my_dataset", file.checksum) as fh:
 For large imports, use bulk writers:
 
 ```python
-from ftm_lakehouse import io
+from ftm_lakehouse import ensure_dataset
+
+dataset = ensure_dataset("my_dataset")
 
 # Write many entities efficiently
-with io.entity_writer("my_dataset", origin="bulk_import") as writer:
+with dataset.entities.bulk(origin="bulk_import") as writer:
     for entity in large_entity_source():
         writer.add_entity(entity)
 
-# Flush and export
-dataset = io.ensure_dataset("my_dataset")
+# Flush to parquet store
 dataset.entities.flush()
-dataset.entities.export_statements()
-dataset.entities.export()
+```
+
+### Query Entities
+
+```python
+# Query with filters
+for entity in dataset.entities.query(origin="import"):
+    print(entity.caption)
+
+# Stream from exported JSON
+for entity in dataset.entities.stream():
+    print(entity.caption)
 ```
 
 ## Using the CLI
@@ -83,7 +105,6 @@ dataset.entities.export()
 ### Create a Dataset
 
 ```bash
-# Initialize a dataset
 ftm-lakehouse -d my_dataset make
 ```
 
@@ -100,7 +121,6 @@ ftm-lakehouse -d my_dataset crawl https://example.com/files/
 ### Import Entities
 
 ```bash
-# Import from JSON lines file
 cat entities.ftm.json | ftm-lakehouse -d my_dataset write-entities
 ```
 
@@ -147,52 +167,9 @@ For persistent journal storage (recommended for production):
 export LAKEHOUSE_JOURNAL_URI=postgresql://user:pass@localhost/journal
 ```
 
-## Complete Example
-
-Here's a complete workflow:
-
-```python
-from ftm_lakehouse import io, get_dataset
-from followthemoney import model
-
-def main():
-    dataset_name = "quickstart_demo"
-
-    # 1. Create or get the dataset
-    dataset = io.ensure_dataset(dataset_name)
-
-    # 2. Create some entities
-    entities = []
-    for name in ["Alice Smith", "Bob Jones", "Carol White"]:
-        person = model.make_entity("Person")
-        person.make_id(name.lower().replace(" ", "-"))
-        person.add("name", name)
-        entities.append(person)
-
-    # 3. Write entities
-    count = io.write_entities(dataset_name, entities, origin="demo")
-    print(f"Wrote {count} entities")
-
-    # 4. Flush and export
-    dataset.entities.flush()
-    dataset.entities.export_statements()
-    dataset.entities.export()
-
-    # 5. Query entities
-    print("\nAll entities:")
-    for entity in io.stream_entities(dataset_name):
-        print(f"  - {entity.caption}")
-
-    # 6. Get specific entity
-    alice = io.get_entity(dataset_name, "alice-smith")
-    print(f"\nFound Alice: {alice.caption}")
-
-if __name__ == "__main__":
-    main()
-```
-
 ## Next Steps
 
+- [Usage Guide](usage.md) - Complete API usage guide
 - [Working with Entities](usage/entities.md) - Deep dive into entity operations
 - [Working with Files](usage/archive.md) - Learn about the file archive
 - [CLI Reference](usage/cli.md) - Complete CLI documentation

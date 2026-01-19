@@ -198,7 +198,7 @@ class JournalStore:
 
     Args:
         dataset: Dataset name (used for table name and filtering)
-        journal_uri: SQLAlchemy database URI
+        uri: SQLAlchemy database URI
     """
 
     def __init__(

@@ -4,20 +4,24 @@ repo_url: https://github.com/openaleph/ftm-lakehouse
 nav:
   - Intro: index.md
   - quickstart.md
+  - usage.md
   - RFC: rfc.md
-  - Usage:
+  - functionality.md
+  - architecture.md
+  - Detailed Usage:
     - Working with Entities: usage/entities.md
     - Working with Files: usage/archive.md
     - Working with Mappings: usage/mappings.md
     - CLI Reference: usage/cli.md
     - Configuration: usage/configuration.md
   - Reference:
-    - ftm_lakehouse.io: reference/io.md
+    - ftm_lakehouse.lake: reference/lake.md
+    - ftm_lakehouse.core: reference/core.md
+    - ftm_lakehouse.model: reference/model.md
+    - ftm_lakehouse.storage: reference/storage.md
+    - ftm_lakehouse.repository: reference/repository.md
+    - ftm_lakehouse.operation: reference/operation.md
     - ftm_lakehouse.logic: reference/logic.md
-    - ftm_lakehouse.entities: reference/entities.md
-    - ftm_lakehouse.archive: reference/archive.md
-    - ftm_lakehouse.mappings: reference/mappings.md
-    - ftm_lakehouse.lakehouse: reference/lakehouse.md
 theme:
   name: material
   logo: https://cdn.investigativedata.org/style/logos/darc/svg/DARC-Logo-RGB-Horizontal-Neg.svg
@@ -48,7 +52,11 @@ markdown_extensions:
       pygments_lang_class: true
   - pymdownx.inlinehilite
   - pymdownx.snippets
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.details
   - admonition
   - pymdownx.tasklist:

@@ -80,7 +80,7 @@ lakehouse/
 Some thoughts on this:
 
 - The entity data is not versioned here. In OpenSanctions, we're actually using a subfolder called `artifacts/[run_id]` to identify different ETL runs. This may not apply as well to Aleph, since it has no strong segregation of individual ETL runs.
-    - In the current implementation for the [deltalake](https://delta-lake.github.io/delta-rs/) statement store data is versioned, but the versions not necessarily match to specific ETL runs.
+    - In the current implementation for the [deltalake](https://delta-io.github.io/delta-rs/) statement store data is versioned, but the versions not necessarily match to specific ETL runs.
 - This still doesn't have a nice way to do garbage collection on the archive without refcounting on entities.
 - We may want the entity object structure in the lake to be a new format, e.g. with a `dataset` field and `statements` lists on each entity (instead of `properties`).
 
