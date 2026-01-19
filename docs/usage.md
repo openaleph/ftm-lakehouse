@@ -175,9 +175,9 @@ dataset.update_model(
 For managing multiple datasets:
 
 ```python
-from ftm_lakehouse import get_catalog
+from ftm_lakehouse import get_lakehouse
 
-catalog = get_catalog()
+catalog = get_lakehouse()
 
 # List all datasets
 for dataset in catalog.list_datasets():

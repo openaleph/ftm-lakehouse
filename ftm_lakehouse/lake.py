@@ -6,8 +6,8 @@ This module is the recommended entry point for client applications:
 ```python
 from ftm_lakehouse import lake
 
-# Get the lake (catalog)
-catalog = lake.get_lake()
+# Get the lakehouse (catalog)
+catalog = lake.get_lakehouse()
 
 # Get a dataset
 dataset = lake.get_dataset("my_data")
@@ -43,7 +43,7 @@ log = get_logger(__name__)
 DM = TypeVar("DM", bound=DatasetModel)
 
 
-def get_lake(
+def get_lakehouse(
     uri: Uri | None = None,
     model_class: type[DM] = DatasetModel,
 ) -> Catalog[DM]:
@@ -63,10 +63,6 @@ def get_lake(
     return Catalog(uri=storage_uri, model_class=model_class)
 
 
-# Alias for backwards compatibility
-get_catalog = get_lake
-
-
 def get_dataset(
     name: str,
     model_class: type[DM] = DatasetModel,
@@ -83,7 +79,7 @@ def get_dataset(
     Returns:
         Dataset instance
     """
-    catalog = get_catalog(model_class=model_class)
+    catalog = get_lakehouse(model_class=model_class)
     return catalog.get_dataset(name, **data)
 
 

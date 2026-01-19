@@ -13,7 +13,7 @@ from ftm_lakehouse import __version__
 from ftm_lakehouse.catalog import Catalog
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.dataset import Dataset
-from ftm_lakehouse.lake import get_catalog, get_dataset
+from ftm_lakehouse.lake import get_dataset, get_lakehouse
 from ftm_lakehouse.operation.crawl import crawl
 from ftm_lakehouse.operation.export import (
     ExportEntitiesJob,
@@ -60,7 +60,7 @@ def write_obj(obj: BaseModel | None, out: str) -> None:
 class CatalogContext(ErrorHandler):
     def __enter__(self) -> Catalog:
         if not STATE["catalog"]:
-            STATE["catalog"] = get_catalog()
+            STATE["catalog"] = get_lakehouse()
         catalog = STATE["catalog"]
         assert catalog is not None
         return catalog
@@ -98,7 +98,7 @@ def cli_ftm_lakehouse(
         raise typer.Exit()
     settings_ = Settings()
     configure_logging(level=settings_.log_level)
-    catalog = get_catalog(uri)
+    catalog = get_lakehouse(uri)
     STATE["catalog"] = catalog
     if dataset:
         # if dataset_uri:

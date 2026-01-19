@@ -158,7 +158,7 @@ See [Operation Reference](reference/operation.md) for API details.
 The public interface that clients use.
 
 ```
-lake.py          # Convenience functions: get_lake(), get_dataset(), get_archive(), etc.
+lake.py          # Convenience functions: get_lakehouse(), get_dataset(), get_archive(), etc.
 catalog.py       # Catalog class - multi-dataset management
 dataset.py       # Dataset class - single dataset interface
 ```
@@ -170,7 +170,7 @@ dataset.py       # Dataset class - single dataset interface
 
 **Convenience functions in `lake.py`:**
 
-- `get_lake()` / `get_catalog()` - Get the catalog
+- `get_lakehouse()` - Get the catalog
 - `get_dataset()` / `ensure_dataset()` - Get or create a dataset
 - `get_entities()` / `get_archive()` / `get_mappings()` - Repository shortcuts
 
@@ -219,8 +219,8 @@ Complete directory structure:
 
 ```
 ftm_lakehouse/
-├── __init__.py              # Exports: Catalog, Dataset, get_lake, etc.
-├── lake.py                  # get_lake(), get_dataset(), ensure_dataset()
+├── __init__.py              # Exports: Catalog, Dataset, get_lakehouse, etc.
+├── lake.py                  # get_lakehouse(), get_dataset(), ensure_dataset()
 ├── catalog.py               # Catalog class
 ├── dataset.py               # Dataset class
 ├── cli.py                   # CLI entry point (typer-based)

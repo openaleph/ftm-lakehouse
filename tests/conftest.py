@@ -13,7 +13,7 @@ from moto.server import ThreadedMotoServer
 
 from ftm_lakehouse.catalog import Catalog
 from ftm_lakehouse.dataset import Dataset
-from ftm_lakehouse.lake import get_catalog
+from ftm_lakehouse.lake import get_lakehouse
 from ftm_lakehouse.repository import factories
 
 FIXTURES_PATH = (Path(__file__).parent / "fixtures").absolute()
@@ -26,12 +26,12 @@ def fixtures_path() -> Path:
 
 @pytest.fixture(scope="function")
 def tmp_catalog(tmp_path) -> Catalog:
-    return get_catalog(tmp_path)
+    return get_lakehouse(tmp_path)
 
 
 @pytest.fixture(scope="function")
 def tmp_dataset(tmp_path) -> Dataset:
-    catalog = get_catalog(tmp_path)
+    catalog = get_lakehouse(tmp_path)
     return catalog.get_dataset("tmp_dataset")
 
 

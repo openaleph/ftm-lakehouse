@@ -7,7 +7,7 @@ from ftm_lakehouse import lake
 
 dataset = lake.get_dataset("my_data")
 dataset = lake.ensure_dataset("my_data", title="My Dataset")
-catalog = lake.get_catalog()
+catalog = lake.get_lakehouse()
 
 # Repository shortcuts
 entities = lake.get_entities("my_data")
@@ -15,7 +15,7 @@ archive = lake.get_archive("my_data")
 mappings = lake.get_mappings("my_data")
 ```
 
-::: ftm_lakehouse.lake.get_catalog
+::: ftm_lakehouse.lake.get_lakehouse
     options:
         heading_level: 2
 
