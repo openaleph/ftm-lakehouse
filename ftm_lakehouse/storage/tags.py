@@ -57,4 +57,5 @@ class TagStore(AnyTags):
         return ts
 
     def __repr__(self) -> str:
-        return f"<{self.__class__.__name__}({join_uri(self.store.uri, self.store.key_prefix or "")})>"  # noqa: B950
+        prefix = self.store.key_prefix or ""
+        return f"<{self.__class__.__name__}({join_uri(self.store.uri, prefix)})>"
