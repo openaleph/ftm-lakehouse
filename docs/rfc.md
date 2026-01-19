@@ -37,32 +37,32 @@ lakehouse/
     [dataset]/
         index.json                  # dataset index
         config.yml                  # dataset configuration
-        statistics.json             # computed statistics
 
         versions/                   # versioned snapshots
-            YYYY/MM/YYYY-MM-DDTHH:MM:SS/
-                index.json
-                config.yml
+            YYYY/MM/...
 
         .LOCK                       # dataset-wide lock
-        .locks/lakehouse/           # specific operation locks
-        .cache/lakehouse/           # dataset cache
+        locks/{tenant}/             # operation-specific locks
+        tags/{tenant}/              # workflow state / cache
+        queue/{tenant}/             # task queues
 
-        archive/
+        archive/                    # content-addressed file storage
             # SHA1 checksum split into directory segments:
-            00/de/ad/
-                00deadbeef123456789012345678901234567890           # file blob
-                00deadbeef123456789012345678901234567890.json      # file metadata
-                00deadbeef123456789012345678901234567890.txt       # extracted text
+            ab/cd/ef/{checksum}/
+                data                # file blob (stored once per checksum)
+                {file_id}.json      # metadata (one per source path, keyed by File.id)
+                {origin}.txt        # extracted text (one per OCR engine/origin)
 
         mappings/
-            [content_hash]/
-                mapping.yml         # mapping configuration
+            {content_hash}/
+                mapping.yml         # current CSV mapping configuration
+                versions/           # versioned snapshots
+                    YYYY/MM/...
 
         entities/
-            statements/             # Delta Lake statement store
-                origin=[origin]/    # partitioned by origin
-                    *.parquet       # statement data
+            statements/             # statement store (partitioned parquet)
+                origin={origin}/
+                    *.parquet
 
         entities.ftm.json           # aggregated entities export
 
@@ -73,26 +73,14 @@ lakehouse/
 
         jobs/
             runs/
-                [job_type]/
-                    [timestamp].json  # job run results
-
-        tags/                       # workflow state tracking
-            statements/
-                last_updated
-            journal/
-                last_updated
-                last_flushed
-                flushing            # lock for flush operation
-            mappings/
-                [content_hash]/
-                    last_processed
-                    config_updated
+                {job_type}/
+                    {timestamp}.json  # job run results
 ```
 
 Some thoughts on this:
 
 - The entity data is not versioned here. In OpenSanctions, we're actually using a subfolder called `artifacts/[run_id]` to identify different ETL runs. This may not apply as well to Aleph, since it has no strong segregation of individual ETL runs.
-    - In the current implementation for the [deltalake](https://delta-io.github.io/delta-rs/) statement store data is versioned, but the versions not necessarily match to specific ETL runs.
+    - In the current implementation for the [deltalake](https://delta-lake.github.io/delta-rs/) statement store data is versioned, but the versions not necessarily match to specific ETL runs.
 - This still doesn't have a nice way to do garbage collection on the archive without refcounting on entities.
 - We may want the entity object structure in the lake to be a new format, e.g. with a `dataset` field and `statements` lists on each entity (instead of `properties`).
 
