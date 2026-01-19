@@ -27,17 +27,20 @@ J = TypeVar("J", bound=BaseExportJob)
 
 class ExportStatementsJob(BaseExportJob):
     target: str = path.EXPORTS_STATEMENTS
-    dependencies: list[str] = [tag.STATEMENTS_UPDATED, tag.JOURNAL_FLUSHED]
+    # Include JOURNAL_UPDATED so we don't skip when there's unflushed data
+    dependencies: list[str] = [tag.STATEMENTS_UPDATED, tag.JOURNAL_UPDATED]
 
 
 class ExportEntitiesJob(BaseExportJob):
     target: str = path.ENTITIES_JSON
-    dependencies: list[str] = [tag.STATEMENTS_UPDATED]
+    # Include JOURNAL_UPDATED so we don't skip when there's unflushed data
+    dependencies: list[str] = [tag.STATEMENTS_UPDATED, tag.JOURNAL_UPDATED]
 
 
 class ExportStatisticsJob(BaseExportJob):
     target: str = path.STATISTICS
-    dependencies: list[str] = [tag.STATEMENTS_UPDATED]
+    # Include JOURNAL_UPDATED so we don't skip when there's unflushed data
+    dependencies: list[str] = [tag.STATEMENTS_UPDATED, tag.JOURNAL_UPDATED]
 
 
 class ExportIndexJob(BaseExportJob):
@@ -56,7 +59,7 @@ class BaseExportOperation(DatasetJobOperation[J]):
         return self.job.dependencies
 
     def ensure_flush(self) -> None:
-        if self.tags.is_latest(tag.JOURNAL_FLUSHED, [tag.JOURNAL_UPDATED]):
+        if not self.tags.is_latest(tag.JOURNAL_FLUSHED, [tag.JOURNAL_UPDATED]):
             self.entities.flush()
 
     def export_statements(self) -> None:
@@ -122,12 +125,14 @@ class ExportIndexOperation(BaseExportOperation[ExportIndexJob]):
 
         if run.job.include_statements_csv:
             if force or not self.tags.is_latest(
-                path.STATEMENTS, [tag.STATEMENTS_UPDATED]
+                path.EXPORTS_STATEMENTS, [tag.STATEMENTS_UPDATED]
             ):
-                with self.tags.touch(path.STATEMENTS):
+                with self.tags.touch(path.EXPORTS_STATEMENTS):
                     self.export_statements()
-            uri = join_uri(self.entities.uri, path.STATEMENTS)
-            dataset.resources.append(make_statements_resource(uri))
+            uri = join_uri(self.entities.uri, path.EXPORTS_STATEMENTS)
+            # Only add resource for HTTP URLs (DataResource requires http/https)
+            if uri.startswith("http"):
+                dataset.resources.append(make_statements_resource(uri))
 
         if run.job.include_entities_json:
             if force or not self.tags.is_latest(
@@ -136,7 +141,9 @@ class ExportIndexOperation(BaseExportOperation[ExportIndexJob]):
                 with self.tags.touch(path.ENTITIES_JSON):
                     self.export_entities()
             uri = join_uri(self.entities.uri, path.ENTITIES_JSON)
-            dataset.resources.append(make_entities_resource(uri))
+            # Only add resource for HTTP URLs (DataResource requires http/https)
+            if uri.startswith("http"):
+                dataset.resources.append(make_entities_resource(uri))
 
         if run.job.include_statistics:
             if force or not self.tags.is_latest(
@@ -145,7 +152,9 @@ class ExportIndexOperation(BaseExportOperation[ExportIndexJob]):
                 with self.tags.touch(path.STATISTICS):
                     self.export_statistics()
             uri = join_uri(self.entities.uri, path.STATISTICS)
-            dataset.resources.append(make_statistics_resource(uri))
+            # Only add resource for HTTP URLs (DataResource requires http/https)
+            if uri.startswith("http"):
+                dataset.resources.append(make_statistics_resource(uri))
 
         self.versions.make(path.INDEX, dataset)
 

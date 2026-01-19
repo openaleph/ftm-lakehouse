@@ -1,8 +1,6 @@
 from typing import Any
 
-from anystore.model import BaseModel
-from anystore.types import M, SDict, Uri
-from anystore.util import dump_json_model, dump_yaml_model, get_extension
+from anystore.types import SDict
 from followthemoney import StatementEntity
 from ftmq.util import make_entity as _make_entity
 from jinja2 import Template
@@ -40,30 +38,6 @@ def render(tmpl: str, data: dict[str, Any]) -> str:
     """
     template = Template(tmpl)
     return template.render(**data)
-
-
-def dump_model(key: Uri, obj: BaseModel) -> bytes:
-    """Dump a pydantic model to bytes, either json or yaml (inferred from key
-    extension)"""
-    ext = get_extension(key)
-    if ext == "yml":
-        data = dump_yaml_model(obj, clean=True, newline=True)
-    elif ext == "json":
-        data = dump_json_model(obj, clean=True, newline=True)
-    else:
-        raise ValueError(f"Invalid extension: `{ext}`")
-    return data
-
-
-def load_model(key: Uri, data: bytes, model: type[M]) -> M:
-    """Load a bytes string as a pydantic model, either json or yaml
-    (inferred from key extension)"""
-    ext = get_extension(key)
-    if ext == "yml":
-        return model.from_yaml_str(data.decode())
-    elif ext == "json":
-        return model.from_json_str(data.decode())
-    raise ValueError(f"Invalid extension: `{ext}`")
 
 
 def check_dataset(name: str, data: SDict) -> str:

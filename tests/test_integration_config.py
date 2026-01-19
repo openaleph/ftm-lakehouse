@@ -2,66 +2,39 @@ import yaml
 from anystore.io import smart_read, smart_stream_json
 from anystore.util import ensure_uri
 
-from ftm_lakehouse.lake import get_lakehouse
+from ftm_lakehouse import get_catalog, get_dataset
 
 
 def test_config_initialization(fixtures_path, tmp_path):
     # by environment (pytest env in pyproject.toml)
-    lake = get_lakehouse()
-    assert lake.storage.uri == ensure_uri(fixtures_path / "lake")
-    assert lake.storage.serialization_mode == "raw"
-    assert lake.cache.uri == ensure_uri(fixtures_path / "lake/.cache/lakehouse")
-    assert lake.cache.raise_on_nonexist is False
-
-    # by config uri
-    # not implemented
-    # uri = fixtures_path / "s3_lake" / "config.yml"
-    # lake = get_lakehouse(uri)
-    # assert lake.storage.uri == "s3://lakehouse"
+    catalog = get_catalog()
+    assert catalog.uri == ensure_uri(fixtures_path / "lake")
 
     # by path uri
-    lake = get_lakehouse(tmp_path)
-    assert lake.storage.uri == ensure_uri(tmp_path)
+    catalog = get_catalog(tmp_path)
+    assert catalog.uri == ensure_uri(tmp_path)
 
     # dataset
-    lake = get_lakehouse(fixtures_path / "lake")
-    dataset = lake.get_dataset("test_dataset")
+    catalog = get_catalog(fixtures_path / "lake")
+    dataset = catalog.get_dataset("test_dataset")
     assert dataset.name == "test_dataset"
-    assert dataset.storage.uri == ensure_uri(fixtures_path / "lake/test_dataset")
-    assert dataset.cache.uri == ensure_uri(
-        fixtures_path / "lake/test_dataset/.cache/lakehouse"
-    )
-
-    # not implemented
-    # dataset = get_dataset("external_dataset")
-    # assert dataset.storage.uri == "s3://s3_dataset"
-    # assert dataset.cache.uri == ensure_uri(
-    #     fixtures_path / "lake/.cache/ftm_lakehouse/external_dataset"
-    # )
+    assert dataset.uri == ensure_uri(fixtures_path / "lake/test_dataset")
 
 
 def test_config_edit(tmp_path):
-    lake = get_lakehouse(tmp_path)
-    dataset = lake.get_dataset("test_dataset")
-    dataset.make_config(title="A nice title")
-    assert dataset.load_model().title == "A nice title"
-    assert len([k for k in dataset.storage.iterate_keys(prefix="versions")]) == 1
+    catalog = get_catalog(tmp_path)
+    dataset = catalog.get_dataset("test_dataset")
+    dataset.update_model(title="A nice title")
+    assert dataset.model.title == "A nice title"
+    assert len([k for k in dataset._store.iterate_keys(prefix="versions")]) == 1
     data = yaml.safe_load(smart_read(tmp_path / "test_dataset/config.yml"))
     assert data["title"] == "A nice title"
     assert "description" not in data
 
-    dataset.make_config(description="The description")
-    assert dataset.load_model().title == "A nice title"
-    assert dataset.load_model().description == "The description"
-    assert len([k for k in dataset.storage.iterate_keys(prefix="versions")]) == 2
+    dataset.update_model(description="The description")
+    assert dataset.model.title == "A nice title"
+    assert dataset.model.description == "The description"
+    assert len([k for k in dataset._store.iterate_keys(prefix="versions")]) == 2
     data = yaml.safe_load(smart_read(tmp_path / "test_dataset/config.yml"))
-    assert data["title"] == "A nice title"
-    assert data["description"] == "The description"
-
-    dataset.make_index()
-    assert len([k for k in dataset.storage.iterate_keys(prefix="versions")]) == 3
-    data = {}
-    for line in smart_stream_json(tmp_path / "test_dataset/index.json"):
-        data = line
     assert data["title"] == "A nice title"
     assert data["description"] == "The description"

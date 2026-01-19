@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Generic
 
-from anystore.model import BaseModel
+from anystore.mixins import BaseModel
 from anystore.types import M, Uri
 from anystore.util import join_relpaths
 

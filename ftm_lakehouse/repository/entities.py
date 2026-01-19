@@ -6,6 +6,7 @@ from typing import Generator, Iterable
 
 from anystore.store import get_store
 from anystore.types import Uri
+from anystore.util import Took
 from followthemoney import EntityProxy, Statement, StatementEntity
 from ftmq.io import smart_read_proxies
 from ftmq.model.stats import DatasetStats
@@ -104,42 +105,44 @@ class EntityRepository(BaseRepository):
         Returns:
             Number of statements flushed
         """
-        total_count = 0
-        current_bucket: str | None = None
-        current_origin: str | None = None
-        bulk = None
+        with self._tags.touch(tag.JOURNAL_FLUSHED), Took() as t:
+            total_count = 0
+            current_bucket: str | None = None
+            current_origin: str | None = None
+            bulk = None
 
-        for _, bucket, origin, _, data in self._journal.flush():
-            # Flush and get new writer when partition changes
-            if bucket != current_bucket or origin != current_origin:
-                if bulk is not None:
-                    bulk.flush()
-                current_bucket = bucket
-                current_origin = origin
-                bulk = self._statements.writer(origin)
+            for _, bucket, origin, _, data in self._journal.flush():
+                # Flush and get new writer when partition changes
+                if bucket != current_bucket or origin != current_origin:
+                    if bulk is not None:
+                        bulk.flush()
+                    current_bucket = bucket
+                    current_origin = origin
+                    bulk = self._statements.writer(origin)
 
-            assert bulk is not None
-            stmt = unpack_statement(data)
-            bulk.add_statement(stmt)
-            total_count += 1
+                assert bulk is not None
+                stmt = unpack_statement(data)
+                bulk.add_statement(stmt)
+                total_count += 1
 
-        # Flush final batch
-        if bulk is not None:
-            bulk.flush()
+            # Flush final batch
+            if bulk is not None:
+                bulk.flush()
 
-        if total_count > 0:
-            self._tags.set(tag.STATEMENTS_UPDATED)
-            self.log.info(
-                "Flushed statements from journal to lake",
-                count=total_count,
-            )
+            if total_count > 0:
+                self._tags.set(tag.STATEMENTS_UPDATED)
+                self.log.info(
+                    "Flushed statements from journal to lake",
+                    count=total_count,
+                    took=t.took,
+                )
 
-        return total_count
+            return total_count
 
     def query(
         self,
         entity_ids: Iterable[str] | None = None,
-        flush_first: bool = False,
+        flush_first: bool = True,
         **filters,
     ) -> StatementEntities:
         """
@@ -166,7 +169,7 @@ class EntityRepository(BaseRepository):
         self,
         entity_id: str,
         origin: str | None = None,
-        flush_first: bool = False,
+        flush_first: bool = True,
     ) -> StatementEntity | None:
         """Get a single entity by ID."""
         for entity in self.query([entity_id], flush_first, origin=origin):

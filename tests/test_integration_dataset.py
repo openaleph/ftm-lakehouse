@@ -1,8 +1,7 @@
-"""This is how OpenAleph uses dataset metadata"""
+"""Integration tests for Dataset API - how tenants use dataset metadata."""
 
-from ftm_lakehouse import io
-from ftm_lakehouse.conventions import path
-from ftm_lakehouse.lake import get_dataset
+from ftm_lakehouse import get_dataset
+from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.model import DatasetModel
 
 
@@ -13,73 +12,54 @@ def test_dataset_metadata(monkeypatch, tmp_path):
     dataset = get_dataset("new_dataset")
     assert dataset.name == dataset.model.name == "new_dataset"
     # doesn't exist yet
-    assert not dataset.storage.exists(path.CONFIG)
-    dataset.make_config()
+    assert not dataset._store.exists(path.CONFIG)
+    dataset.update_model()
     # now exists
-    assert dataset.storage.exists(path.CONFIG)
+    assert dataset._store.exists(path.CONFIG)
     # with 1 version
     versions = [
         v
-        for v in dataset.storage.iterate_keys(prefix="versions")
+        for v in dataset._store.iterate_keys(prefix="versions")
         if v.endswith("config.yml")
     ]
     assert len(versions) == 1
     # patch data
-    dataset.make_config(description="A good description")
+    dataset.update_model(description="A good description")
     assert dataset.model.description == "A good description"
     versions = [
         v
-        for v in dataset.storage.iterate_keys(prefix="versions")
+        for v in dataset._store.iterate_keys(prefix="versions")
         if v.endswith("config.yml")
     ]
     assert len(versions) == 2
-    # index.json
-    assert not dataset.storage.exists(path.INDEX)
-    dataset.make_index()
-    assert dataset.storage.exists(path.INDEX)
-    versions = [
-        v
-        for v in dataset.storage.iterate_keys(prefix="versions")
-        if v.endswith("index.json")
-    ]
-    assert len(versions) == 1
 
-    # higher level
-    dataset = io.get_dataset_metadata("new_dataset")
-    assert dataset.name == "new_dataset"
-    dataset = io.update_dataset_metadata("new_dataset", category="leak")
-    assert dataset.category == io.get_dataset_metadata("new_dataset").category == "leak"
-    dataset = get_dataset("new_dataset")
+    # access model directly
+    model = dataset.model
+    assert model.name == "new_dataset"
+    dataset.update_model(category="leak")
+    assert dataset.model.category == "leak"
     versions = [
         v
-        for v in dataset.storage.iterate_keys(prefix="versions")
+        for v in dataset._store.iterate_keys(prefix="versions")
         if v.endswith("config.yml")
     ]
     assert len(versions) == 3
 
     # DatasetModel subclass
-    class Dataset(DatasetModel):
+    class MyDatasetModel(DatasetModel):
         user_id: int = 0
 
-    dataset = get_dataset("new_dataset", dataset_model=Dataset)
-    assert isinstance(dataset.model, Dataset)
-    dataset.make_config(user_id=17)
+    dataset = get_dataset("new_dataset", model_class=MyDatasetModel)
+    assert isinstance(dataset.model, MyDatasetModel)
+    dataset.update_model(user_id=17)
     assert dataset.model.user_id == 17
     versions = [
         v
-        for v in dataset.storage.iterate_keys(prefix="versions")
+        for v in dataset._store.iterate_keys(prefix="versions")
         if v.endswith("config.yml")
     ]
     assert len(versions) == 4
-    # extra data is not in index.json:
-    index = dataset.make_index()
-    assert not hasattr(index, "user_id")
-    versions = [
-        v
-        for v in dataset.storage.iterate_keys(prefix="versions")
-        if v.endswith("index.json")
-    ]
-    assert len(versions) == 2
 
-    # non existing dataset (won't be created implicitly)
-    assert not io.exists("foo")
+    # non existing dataset
+    other = get_dataset("foo")
+    assert not other.exists()

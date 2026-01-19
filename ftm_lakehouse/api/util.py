@@ -5,7 +5,7 @@ from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from ftm_lakehouse import __version__, io
+from ftm_lakehouse import __version__, lake
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.model import File
 
@@ -59,10 +59,11 @@ class Errors:
 
 
 def get_file_info(dataset: str, content_hash: str) -> File:
-    file = io.lookup_file(dataset, content_hash)
-    if file is not None:
-        return file
-    raise DEFAULT_ERROR
+    try:
+        archive = lake.get_archive(dataset)
+        return archive.get(content_hash)
+    except FileNotFoundError:
+        raise DEFAULT_ERROR
 
 
 def ensure_path_context(dataset: str, content_hash: str) -> Context:
@@ -75,9 +76,11 @@ def ensure_path_context(dataset: str, content_hash: str) -> Context:
 
 
 def stream_file(ctx: Context) -> StreamingResponse:
-    stream = io.stream_file(ctx.dataset, ctx.content_hash)
-    if stream is None:
+    archive = lake.get_archive(ctx.dataset)
+    file = archive.get(ctx.content_hash)
+    if file is None:
         raise DEFAULT_ERROR
+    stream = archive.stream(file)
     return StreamingResponse(
         stream,
         headers=ctx.headers,

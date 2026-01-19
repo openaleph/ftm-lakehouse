@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
 
 from ftm_lakehouse.api import app
-from ftm_lakehouse.logic.crawl import crawl
+from ftm_lakehouse.operation.crawl import crawl
 
 DATASET = "tmp_dataset"
 SHA1 = "2aae6c35c94fcfb415dbe95f408b9ce91ee846ed"
@@ -19,12 +19,20 @@ def _check_headers(res):
     return True
 
 
-def test_api(fixtures_path, tmp_lake, monkeypatch):
-    monkeypatch.setenv("LAKEHOUSE_URI", tmp_lake.uri)
+def test_api(fixtures_path, tmp_catalog, monkeypatch):
+    monkeypatch.setenv("LAKEHOUSE_URI", tmp_catalog.uri)
     client = TestClient(app)
 
-    dataset = tmp_lake.get_dataset(DATASET)
-    crawl(fixtures_path / "src", dataset)
+    dataset = tmp_catalog.get_dataset(DATASET)
+    dataset.ensure()
+    crawl(
+        dataset.name,
+        fixtures_path / "src",
+        archive=dataset.archive,
+        entities=dataset.entities,
+        jobs=dataset.jobs,
+        make_entities=True,
+    )
 
     from ftm_lakehouse.api.util import settings
 

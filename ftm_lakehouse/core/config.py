@@ -1,11 +1,11 @@
 """Configuration loading utilities."""
 
 import yaml
-from anystore.store import BaseStore
+from anystore.store.base import BaseStore
 from anystore.types import SDict
 from anystore.util import dict_merge
 
-from ftm_lakehouse.conventions import path
+from ftm_lakehouse.core.conventions import path
 
 
 def load_config(storage: BaseStore, **data) -> SDict:

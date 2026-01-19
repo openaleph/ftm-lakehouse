@@ -124,9 +124,24 @@ class JournalWriter:
             return
 
         canonical_id = stmt.canonical_id or stmt.entity_id
-        stmt.canonical_id = canonical_id
         origin = stmt.origin or self.origin
-        stmt.dataset = self.dataset
+
+        # Create new Statement with correct values (Statement is immutable)
+        stmt = Statement(
+            id=stmt.id,
+            entity_id=stmt.entity_id,
+            canonical_id=canonical_id,
+            prop=stmt.prop,
+            schema=stmt.schema,
+            value=stmt.value,
+            dataset=self.dataset,
+            lang=stmt.lang,
+            original_value=stmt.original_value,
+            external=stmt.external,
+            first_seen=stmt.first_seen,
+            last_seen=stmt.last_seen,
+            origin=origin,
+        )
 
         self.add(
             row_id=stmt.id,
@@ -141,7 +156,6 @@ class JournalWriter:
         """Add all statements from an entity to the journal."""
         entity = ensure_entity(entity, StatementEntity, self.dataset)
         for stmt in entity.statements:
-            stmt.origin = stmt.origin or self.origin
             self.add_statement(stmt)
 
     def flush(self) -> None:

@@ -10,12 +10,9 @@ import requests
 from boto3.resources.base import ServiceResource
 from moto.server import ThreadedMotoServer
 
-from ftm_lakehouse.lake import (
-    DatasetLakehouse,
-    Lakehouse,
-    get_dataset,
-    get_lakehouse,
-)
+from ftm_lakehouse.catalog import Catalog
+from ftm_lakehouse.dataset import Dataset
+from ftm_lakehouse.lake import get_catalog
 
 FIXTURES_PATH = (Path(__file__).parent / "fixtures").absolute()
 
@@ -26,21 +23,14 @@ def fixtures_path() -> Path:
 
 
 @pytest.fixture(scope="function")
-def tmp_lake(tmp_path) -> Lakehouse:
-    return get_lakehouse(tmp_path)
+def tmp_catalog(tmp_path) -> Catalog:
+    return get_catalog(tmp_path)
 
 
 @pytest.fixture(scope="function")
-def tmp_dataset(tmp_path) -> DatasetLakehouse:
-    lake = get_lakehouse(tmp_path)
-    return lake.get_dataset("tmp_dataset")
-
-
-@pytest.fixture(autouse=True, scope="function")
-def cache_clear():
-    get_dataset.cache_clear()
-    get_lakehouse.cache_clear()
-    yield
+def tmp_dataset(tmp_path) -> Dataset:
+    catalog = get_catalog(tmp_path)
+    return catalog.get_dataset("tmp_dataset")
 
 
 # https://pawamoy.github.io/posts/local-http-server-fake-files-testing-purposes/

@@ -44,8 +44,8 @@ def test_operation_export_statements(tmp_path):
 
     assert op.get_target() == path.EXPORTS_STATEMENTS
     assert op.get_target() == "exports/statements.csv"
-    assert op.get_dependencies() == [tag.STATEMENTS_UPDATED, tag.JOURNAL_FLUSHED]
-    assert op.get_dependencies() == ["statements/last_updated", "journal/last_flushed"]
+    assert op.get_dependencies() == [tag.STATEMENTS_UPDATED, tag.JOURNAL_UPDATED]
+    assert op.get_dependencies() == ["statements/last_updated", "journal/last_updated"]
 
     # Run the export operation
     result = op.run()
@@ -76,8 +76,8 @@ def test_operation_export_entities(tmp_path):
 
     assert op.get_target() == path.ENTITIES_JSON
     assert op.get_target() == "entities.ftm.json"
-    assert op.get_dependencies() == [tag.STATEMENTS_UPDATED]
-    assert op.get_dependencies() == ["statements/last_updated"]
+    assert op.get_dependencies() == [tag.STATEMENTS_UPDATED, tag.JOURNAL_UPDATED]
+    assert op.get_dependencies() == ["statements/last_updated", "journal/last_updated"]
 
     # Run the export operation
     result = op.run()
@@ -108,8 +108,8 @@ def test_operation_export_statistics(tmp_path):
 
     assert op.get_target() == path.STATISTICS
     assert op.get_target() == "statistics.json"
-    assert op.get_dependencies() == [tag.STATEMENTS_UPDATED]
-    assert op.get_dependencies() == ["statements/last_updated"]
+    assert op.get_dependencies() == [tag.STATEMENTS_UPDATED, tag.JOURNAL_UPDATED]
+    assert op.get_dependencies() == ["statements/last_updated", "journal/last_updated"]
 
     # Run the export operation
     result = op.run()
