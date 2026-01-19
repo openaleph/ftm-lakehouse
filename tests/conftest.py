@@ -1,3 +1,4 @@
+import shutil
 import subprocess
 import sys
 import time
@@ -13,6 +14,7 @@ from moto.server import ThreadedMotoServer
 from ftm_lakehouse.catalog import Catalog
 from ftm_lakehouse.dataset import Dataset
 from ftm_lakehouse.lake import get_catalog
+from ftm_lakehouse.repository import factories
 
 FIXTURES_PATH = (Path(__file__).parent / "fixtures").absolute()
 
@@ -31,6 +33,36 @@ def tmp_catalog(tmp_path) -> Catalog:
 def tmp_dataset(tmp_path) -> Dataset:
     catalog = get_catalog(tmp_path)
     return catalog.get_dataset("tmp_dataset")
+
+
+@pytest.fixture(autouse=True, scope="function")
+def clear_factory_caches():
+    """Clear cached factories between tests to prevent cross-test pollution."""
+    # Clear before test
+    factories.get_archive.cache_clear()
+    factories.get_entities.cache_clear()
+    factories.get_mappings.cache_clear()
+    factories.get_jobs.cache_clear()
+    factories.get_versions.cache_clear()
+    factories.get_tags.cache_clear()
+    yield
+    # Clear after test
+    factories.get_archive.cache_clear()
+    factories.get_entities.cache_clear()
+    factories.get_mappings.cache_clear()
+    factories.get_jobs.cache_clear()
+    factories.get_versions.cache_clear()
+    factories.get_tags.cache_clear()
+
+
+@pytest.fixture(autouse=True, scope="session")
+def cleanup_fixtures_tags():
+    """Clean up any tags created in fixtures directory during tests."""
+    yield
+    # Clean up after all tests
+    tags_dir = FIXTURES_PATH / "lake" / "tags"
+    if tags_dir.exists():
+        shutil.rmtree(tags_dir)
 
 
 # https://pawamoy.github.io/posts/local-http-server-fake-files-testing-purposes/
