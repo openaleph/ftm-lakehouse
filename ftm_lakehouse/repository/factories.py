@@ -48,7 +48,7 @@ def get_jobs(dataset: str, model: type[J], uri: Uri | None = None) -> JobReposit
 
 @cache
 def get_versions(dataset: str, uri: Uri | None = None) -> VersionStore:
-    settings = Settings
+    settings = Settings()
     uri = uri or f"{settings.uri}/{dataset}"
     return VersionStore(uri)
 
