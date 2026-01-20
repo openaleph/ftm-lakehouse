@@ -60,7 +60,7 @@ def cleanup_fixtures_tags():
     """Clean up any tags created in fixtures directory during tests."""
     yield
     # Clean up after all tests
-    tags_dir = FIXTURES_PATH / "lake" / "tags"
+    tags_dir = FIXTURES_PATH / "lake" / "tmp_dataset" / "tags"
     if tags_dir.exists():
         shutil.rmtree(tags_dir)
 

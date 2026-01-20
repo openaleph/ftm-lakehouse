@@ -207,18 +207,18 @@ class JournalStore:
         uri: str | None = None,
     ) -> None:
         self.dataset = dataset
-        db_uri = uri or settings.journal_uri
+        self.uri = uri or settings.journal_uri
 
         # For in-memory SQLite, use StaticPool to share the same connection
-        if db_uri == "sqlite:///:memory:":
+        if self.uri == "sqlite:///:memory:":
             log.warn("Using in-memory journal!")
             self.engine: Engine = create_engine(
-                db_uri,
+                self.uri,
                 connect_args={"check_same_thread": False},
                 poolclass=StaticPool,
             )
         else:
-            self.engine = create_engine(db_uri)
+            self.engine = create_engine(self.uri)
 
         self.metadata = MetaData()
         self.table = make_journal_table(self.metadata, f"journal_{dataset}")
