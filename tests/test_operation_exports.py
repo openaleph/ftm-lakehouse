@@ -31,11 +31,12 @@ def setup_entities(repo: EntityRepository) -> None:
 
 def test_operation_export_statements(tmp_path):
     """Test ExportStatementsOperation: parquet to statements.csv with tags."""
-    repo = EntityRepository(dataset=DATASET, uri=tmp_path)
+    dataset_uri = tmp_path / DATASET
+    repo = EntityRepository(dataset=DATASET, uri=dataset_uri)
     setup_entities(repo)
 
     # No target tag before run
-    target_path = "tags/lakehouse/exports/statements.csv"
+    target_path = f"{DATASET}/tags/lakehouse/exports/statements.csv"
     assert not (tmp_path / target_path).exists()
 
     # Create operation and verify target/dependencies
@@ -58,16 +59,17 @@ def test_operation_export_statements(tmp_path):
     assert (tmp_path / target_path).exists()
 
     # Verify output file exists at hardcoded path
-    assert (tmp_path / "exports/statements.csv").exists()
+    assert (dataset_uri / "exports/statements.csv").exists()
 
 
 def test_operation_export_entities(tmp_path):
     """Test ExportEntitiesOperation: parquet to entities.ftm.json with tags."""
-    repo = EntityRepository(dataset=DATASET, uri=tmp_path)
+    dataset_uri = tmp_path / DATASET
+    repo = EntityRepository(dataset=DATASET, uri=dataset_uri)
     setup_entities(repo)
 
     # No target tag before run
-    target_path = "tags/lakehouse/entities.ftm.json"
+    target_path = f"{DATASET}/tags/lakehouse/entities.ftm.json"
     assert not (tmp_path / target_path).exists()
 
     # Create operation and verify target/dependencies
@@ -90,16 +92,17 @@ def test_operation_export_entities(tmp_path):
     assert (tmp_path / target_path).exists()
 
     # Verify output file exists at hardcoded path
-    assert (tmp_path / "entities.ftm.json").exists()
+    assert (dataset_uri / "entities.ftm.json").exists()
 
 
 def test_operation_export_statistics(tmp_path):
     """Test ExportStatisticsOperation: parquet to statistics.json with tags."""
-    repo = EntityRepository(dataset=DATASET, uri=tmp_path)
+    dataset_uri = tmp_path / DATASET
+    repo = EntityRepository(dataset=DATASET, uri=dataset_uri)
     setup_entities(repo)
 
     # No target tag before run
-    target_path = "tags/lakehouse/statistics.json"
+    target_path = f"{DATASET}/tags/lakehouse/statistics.json"
     assert not (tmp_path / target_path).exists()
 
     # Create operation and verify target/dependencies
@@ -122,13 +125,14 @@ def test_operation_export_statistics(tmp_path):
     assert (tmp_path / target_path).exists()
 
     # Verify output file exists (versioned, so check versions dir)
-    versions = list((tmp_path / "versions").rglob("statistics.json"))
+    versions = list((dataset_uri / "versions").rglob("statistics.json"))
     assert len(versions) >= 1
 
 
 def test_operation_export_index(tmp_path):
     """Test ExportIndexOperation: generate index.json with tags."""
-    repo = EntityRepository(dataset=DATASET, uri=tmp_path)
+    dataset_uri = tmp_path / DATASET
+    repo = EntityRepository(dataset=DATASET, uri=dataset_uri)
     setup_entities(repo)
 
     # Run prerequisites first (statistics and entities exports)
@@ -139,7 +143,7 @@ def test_operation_export_index(tmp_path):
     ExportEntitiesOperation(job=entities_job, lake_uri=tmp_path).run()
 
     # No target tag before run
-    target_path = "tags/lakehouse/index.json"
+    target_path = f"{DATASET}/tags/lakehouse/index.json"
     assert not (tmp_path / target_path).exists()
 
     # Create operation and verify target/dependencies
@@ -165,5 +169,5 @@ def test_operation_export_index(tmp_path):
     assert (tmp_path / target_path).exists()
 
     # Verify output file exists (versioned, so check versions dir)
-    versions = list((tmp_path / "versions").rglob("index.json"))
+    versions = list((dataset_uri / "versions").rglob("index.json"))
     assert len(versions) >= 1

@@ -16,7 +16,8 @@ def count_parquet_files(repo: EntityRepository) -> int:
 
 def test_operation_optimize(tmp_path):
     """Test OptimizeOperation: compaction and vacuum with tag verification."""
-    repo = EntityRepository(dataset=DATASET, uri=tmp_path)
+    dataset_uri = tmp_path / DATASET
+    repo = EntityRepository(dataset=DATASET, uri=dataset_uri)
 
     # Add entities in multiple batches to create multiple parquet files
     for i in range(3):
@@ -38,7 +39,7 @@ def test_operation_optimize(tmp_path):
 
     # No target tag before run
     target_path = "tags/lakehouse/statements/store_optimized"
-    assert not (tmp_path / target_path).exists()
+    assert not (dataset_uri / target_path).exists()
 
     # Create operation and verify target/dependencies
     job = OptimizeJob.make(dataset=DATASET)
@@ -57,7 +58,7 @@ def test_operation_optimize(tmp_path):
     assert result.stopped is not None
 
     # Tag should exist at hardcoded path after run
-    assert (tmp_path / target_path).exists()
+    assert (dataset_uri / target_path).exists()
 
     # After optimization, files should be compacted (reduced or same)
     optimized_file_count = count_parquet_files(repo)
@@ -66,7 +67,8 @@ def test_operation_optimize(tmp_path):
 
 def test_operation_optimize_vacuum(tmp_path):
     """Test OptimizeOperation with vacuum=True removes old files."""
-    repo = EntityRepository(dataset=DATASET, uri=tmp_path)
+    dataset_uri = tmp_path / DATASET
+    repo = EntityRepository(dataset=DATASET, uri=dataset_uri)
 
     # Add entities in multiple batches
     for i in range(3):

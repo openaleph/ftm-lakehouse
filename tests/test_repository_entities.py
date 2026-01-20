@@ -11,10 +11,10 @@ JOHN = {"id": "john", "schema": "Person", "properties": {"name": ["John Doe"]}}
 def test_repository_entities_local(tmp_path):
     repo = EntityRepository("test", tmp_path)
 
-    # Initially empty
-    assert list(repo.query()) == []
+    # Initially empty (check tags before query which may trigger flush)
     assert not repo._tags.exists(tag.JOURNAL_UPDATED)
     assert not repo._tags.exists(tag.STATEMENTS_UPDATED)
+    assert list(repo.query(flush_first=False)) == []
 
     jane = make_entity(JANE)
     john = make_entity(JOHN)

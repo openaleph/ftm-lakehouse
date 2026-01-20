@@ -81,10 +81,10 @@ def test_entities(tmp_dataset):
     entities = tmp_dataset.entities
     tags = entities._tags
 
-    # Initially empty
-    assert len([e for e in entities.query()]) == 0
+    # Initially empty (check tags before query which may trigger flush)
     assert not tags.exists(tag.STATEMENTS_UPDATED)
     assert not tags.exists(path.EXPORTS_STATEMENTS)
+    assert len([e for e in entities.query(flush_first=False)]) == 0
 
     jane = make_entity(JANE)
     jane_fragment = make_entity(JANE_FIRSTNAME)
