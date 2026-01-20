@@ -13,6 +13,7 @@ from ftmq.store.lake import (
     LakeStore,
     LakeWriter,
     query_duckdb,
+    setup_duckdb_storage,
 )
 from ftmq.types import StatementEntities
 
@@ -43,6 +44,7 @@ class ParquetStore:
             dataset=dataset,
             partition_by=PARTITIONS,
         )
+        setup_duckdb_storage()
 
     def writer(self, origin: str | None = None) -> LakeWriter:
         """Get a writer for adding statements."""
