@@ -24,6 +24,7 @@ mappings = lake.get_mappings("my_data")
 
 from typing import Any, TypeVar
 
+from anystore.functools import weakref_cache as cache
 from anystore.logging import get_logger
 from anystore.types import Uri
 from anystore.util import ensure_uri
@@ -43,6 +44,7 @@ log = get_logger(__name__)
 DM = TypeVar("DM", bound=DatasetModel)
 
 
+@cache
 def get_lakehouse(
     uri: Uri | None = None,
     model_class: type[DM] = DatasetModel,
