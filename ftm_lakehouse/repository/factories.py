@@ -18,6 +18,16 @@ from ftm_lakehouse.storage.versions import VersionStore
 
 @cache
 def get_archive(dataset: str, uri: Uri | None = None) -> ArchiveRepository:
+    """
+    Get the archive repository for a dataset.
+
+    Args:
+        dataset: Dataset name
+        uri: Dataset URI override (default: {LAKEHOUSE_URI}/{dataset})
+
+    Returns:
+        ArchiveRepository instance (cached)
+    """
     settings = Settings()
     uri = uri or f"{settings.uri}/{dataset}"
     return ArchiveRepository(dataset, uri)
@@ -27,6 +37,17 @@ def get_archive(dataset: str, uri: Uri | None = None) -> ArchiveRepository:
 def get_entities(
     dataset: str, uri: Uri | None = None, journal_uri: str | None = None
 ) -> EntityRepository:
+    """
+    Get the entity repository for a dataset.
+
+    Args:
+        dataset: Dataset name
+        uri: Dataset URI override (default: {LAKEHOUSE_URI}/{dataset})
+        journal_uri: Journal database URI override
+
+    Returns:
+        EntityRepository instance (cached)
+    """
     settings = Settings()
     uri = uri or f"{settings.uri}/{dataset}"
     return EntityRepository(dataset, uri, journal_uri)
@@ -34,6 +55,16 @@ def get_entities(
 
 @cache
 def get_mappings(dataset: str, uri: Uri | None = None) -> MappingRepository:
+    """
+    Get the mappings repository for a dataset.
+
+    Args:
+        dataset: Dataset name
+        uri: Dataset URI override (default: {LAKEHOUSE_URI}/{dataset})
+
+    Returns:
+        MappingRepository instance (cached)
+    """
     settings = Settings()
     uri = uri or f"{settings.uri}/{dataset}"
     return MappingRepository(dataset, uri)
@@ -41,6 +72,17 @@ def get_mappings(dataset: str, uri: Uri | None = None) -> MappingRepository:
 
 @cache
 def get_jobs(dataset: str, model: type[J], uri: Uri | None = None) -> JobRepository[J]:
+    """
+    Get the job repository for a dataset.
+
+    Args:
+        dataset: Dataset name
+        model: Job model class
+        uri: Dataset URI override (default: {LAKEHOUSE_URI}/{dataset})
+
+    Returns:
+        JobRepository instance (cached)
+    """
     settings = Settings()
     uri = uri or f"{settings.uri}/{dataset}"
     return JobRepository(dataset, uri, model)
@@ -48,6 +90,16 @@ def get_jobs(dataset: str, model: type[J], uri: Uri | None = None) -> JobReposit
 
 @cache
 def get_versions(dataset: str, uri: Uri | None = None) -> VersionStore:
+    """
+    Get the version store for a dataset.
+
+    Args:
+        dataset: Dataset name
+        uri: Dataset URI override (default: {LAKEHOUSE_URI}/{dataset})
+
+    Returns:
+        VersionStore instance (cached)
+    """
     settings = Settings()
     uri = uri or f"{settings.uri}/{dataset}"
     return VersionStore(uri)
@@ -57,6 +109,17 @@ def get_versions(dataset: str, uri: Uri | None = None) -> VersionStore:
 def get_tags(
     dataset: str, uri: Uri | None = None, tenant: str | None = None
 ) -> TagStore:
+    """
+    Get the tag store for a dataset.
+
+    Args:
+        dataset: Dataset name
+        uri: Dataset URI override (default: {LAKEHOUSE_URI}/{dataset})
+        tenant: Tag tenant/namespace
+
+    Returns:
+        TagStore instance (cached)
+    """
     settings = Settings()
     uri = uri or f"{settings.uri}/{dataset}"
     return TagStore(uri, tenant)

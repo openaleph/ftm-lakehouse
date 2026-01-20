@@ -33,10 +33,10 @@ from ftm_lakehouse.catalog import Catalog
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.dataset import Dataset
 from ftm_lakehouse.model import DatasetModel
-from ftm_lakehouse.repository import (
-    ArchiveRepository,
-    EntityRepository,
-    MappingRepository,
+from ftm_lakehouse.repository.factories import (
+    get_archive,
+    get_entities,
+    get_mappings,
 )
 
 log = get_logger(__name__)
@@ -108,45 +108,11 @@ def ensure_dataset(
     return dataset
 
 
-# -------------------------------------------------------------------------
-# Repository shortcuts
-# -------------------------------------------------------------------------
-
-
-def get_entities(name: str) -> EntityRepository:
-    """
-    Get the entities repository for a dataset.
-
-    Args:
-        name: Dataset name
-
-    Returns:
-        EntityRepository instance
-    """
-    return get_dataset(name).entities
-
-
-def get_archive(name: str) -> ArchiveRepository:
-    """
-    Get the archive repository for a dataset.
-
-    Args:
-        name: Dataset name
-
-    Returns:
-        ArchiveRepository instance
-    """
-    return get_dataset(name).archive
-
-
-def get_mappings(name: str) -> MappingRepository:
-    """
-    Get the mappings repository for a dataset.
-
-    Args:
-        name: Dataset name
-
-    Returns:
-        MappingRepository instance
-    """
-    return get_dataset(name).mappings
+__all__ = [
+    "get_archive",
+    "get_entities",
+    "get_mappings",
+    "get_lakehouse",
+    "get_dataset",
+    "ensure_dataset",
+]

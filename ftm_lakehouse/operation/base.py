@@ -2,7 +2,7 @@ from typing import Generic
 
 from anystore.types import Uri
 
-from ftm_lakehouse.core.settings import Settings
+from ftm_lakehouse.helpers.dataset import make_dataset_uri
 from ftm_lakehouse.model.job import DJ
 from ftm_lakehouse.repository.archive import ArchiveRepository
 from ftm_lakehouse.repository.entities import EntityRepository
@@ -41,9 +41,8 @@ class DatasetJobOperation(Generic[DJ]):
         versions: VersionStore | None = None,
         lake_uri: Uri | None = None,
     ) -> None:
-        settings = Settings()
-        self.uri = lake_uri or settings.uri
         self.dataset = job.dataset
+        self.uri = make_dataset_uri(self.dataset, lake_uri)
         self.job = job
         self.log = job.log
         self.archive = archive or get_archive(job.dataset, self.uri)
