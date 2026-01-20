@@ -47,7 +47,9 @@ class TagStore(AnyTags):
         last_updated = self.get(key)
         if last_updated is None:
             return False
-        updated_dependencies = (i for i in map(self.get, dependencies) if i)
+        updated_dependencies = [i for i in map(self.get, dependencies) if i]
+        if not updated_dependencies:
+            return False
         return all(last_updated > i for i in updated_dependencies)
 
     def set(self, key: str, timestamp: datetime | None = None) -> datetime:
