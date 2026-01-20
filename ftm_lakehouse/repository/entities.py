@@ -105,6 +105,15 @@ class EntityRepository(BaseRepository):
         Returns:
             Number of statements flushed
         """
+        if self._journal.count() == 0:
+            self.log.debug("Journal is empty")
+            # set tags for the initial run
+            if not self._tags.exists(tag.JOURNAL_FLUSHED):
+                self._tags.set(tag.JOURNAL_FLUSHED)
+            if not self._tags.exists(tag.STATEMENTS_UPDATED):
+                self._tags.set(tag.STATEMENTS_UPDATED)
+            return 0
+
         with self._tags.touch(tag.JOURNAL_FLUSHED), Took() as t:
             total_count = 0
             current_bucket: str | None = None
@@ -129,13 +138,12 @@ class EntityRepository(BaseRepository):
             if bulk is not None:
                 bulk.flush()
 
-            if total_count > 0:
-                self._tags.set(tag.STATEMENTS_UPDATED)
-                self.log.info(
-                    "Flushed statements from journal to lake",
-                    count=total_count,
-                    took=t.took,
-                )
+            self._tags.set(tag.STATEMENTS_UPDATED)
+            self.log.info(
+                "Flushed statements from journal to lake",
+                count=total_count,
+                took=t.took,
+            )
 
             return total_count
 
