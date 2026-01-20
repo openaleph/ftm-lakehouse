@@ -170,6 +170,9 @@ class ArchiveRepository(BaseRepository):
                     out.write(fh.read())
 
         # Set metadata
+        for key in list(extra.keys()):
+            if key in file.__class__.model_fields:
+                setattr(file, key, extra.pop(key))
         file.extra = clean_dict(extra)
         file.store = str(self.uri)
         file.dataset = self.dataset
