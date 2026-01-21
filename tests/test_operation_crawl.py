@@ -26,10 +26,10 @@ def test_operation_crawl(fixtures_path, tmp_path):
     assert (dataset_uri / "tags/lakehouse/operations/crawl/last_run").exists()
 
     # Verify archived files
-    files = [f for f in op.archive.iterate()]
+    files = [f for f in op.archive.iterate_files()]
     assert len(files) == 5
 
-    file = op.archive.get("2aae6c35c94fcfb415dbe95f408b9ce91ee846ed")
+    file = op.archive.get_file("2aae6c35c94fcfb415dbe95f408b9ce91ee846ed")
     assert file.key == "testdir/test.txt"
     assert file.name == "test.txt"
 

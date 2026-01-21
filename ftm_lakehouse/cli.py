@@ -311,8 +311,8 @@ def cli_archive_get(
     Retrieve a file from dataset archive and write to out uri (default: stdout)
     """
     with DatasetContext() as dataset:
-        file = dataset.archive.get(content_hash)
-        with dataset.archive.open(file) as i, smart_open(out_uri, "wb") as o:
+        file = dataset.archive.get_file(content_hash)
+        with dataset.archive.open(file.checksum) as i, smart_open(out_uri, "wb") as o:
             o.write(i.read())
 
 
@@ -321,11 +321,11 @@ def cli_archive_head(
     content_hash: str, out_uri: Annotated[str, typer.Option("-o")] = "-"
 ):
     """
-    Retrieve a file info from dataset archive and write to out uri (default: stdout)
+    Retrieve all file metadata objects from dataset archive and write to out uri
+    (default: stdout)
     """
     with DatasetContext() as dataset:
-        file = dataset.archive.get(content_hash)
-        smart_write(out_uri, dump_json_model(file, newline=True))
+        smart_write_models(out_uri, dataset.archive.get_all_files(content_hash))
 
 
 @archive.command("ls")
@@ -338,7 +338,7 @@ def cli_archive_ls(
     List all files in dataset archive
     """
     with DatasetContext() as dataset:
-        iterator = dataset.archive.iterate()
+        iterator = dataset.archive.iterate_files()
         if keys:
             files = (f.key.encode() + b"\n" for f in iterator)
         elif checksums:

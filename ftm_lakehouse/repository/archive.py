@@ -2,19 +2,21 @@
 metadata) and optional TextStore for extracted fulltext."""
 
 from pathlib import Path
-from typing import IO, Any, ContextManager, Generator
+from typing import IO, Any, ContextManager
 
 from anystore.store import get_store_for_uri
 from anystore.store.base import BaseStore
 from anystore.store.virtual import open_virtual
 from anystore.types import BytesGenerator, Uri
-from anystore.util import DEFAULT_HASH_ALGORITHM
+from anystore.util import DEFAULT_HASH_ALGORITHM, join_relpaths
 from banal import clean_dict
 
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.model import File
+from ftm_lakehouse.model.file import Files
 from ftm_lakehouse.repository.base import BaseRepository
 from ftm_lakehouse.storage import BlobStore, FileStore, TextStore
+from ftm_lakehouse.storage.base import ByteStorage
 
 
 class ArchiveRepository(BaseRepository):
@@ -28,7 +30,8 @@ class ArchiveRepository(BaseRepository):
     creates its own metadata file (keyed by File.id).
 
     Optionally, extracted text (by different origins) can be stored and
-    retrieved.
+    retrieved. As well, other programs can write arbitrary additional data to
+    the archive (such as pdf page thumbnails).
 
     Example:
         ```python
@@ -38,10 +41,10 @@ class ArchiveRepository(BaseRepository):
         file = archive.store("path/to/file.pdf")
 
         # Retrieve file info
-        file = archive.get(checksum)
+        file = archive.get_file(checksum)
 
-        # Stream file contents
-        for chunk in archive.stream(file):
+        # Stream file contents by checksum
+        for chunk in archive.stream(file.checksum):
             process(chunk)
         ```
     """
@@ -51,12 +54,13 @@ class ArchiveRepository(BaseRepository):
         self._blobs = BlobStore(uri)
         self._files = FileStore(uri)
         self._txts = TextStore(uri)
+        self._data = ByteStorage(uri)
 
     def exists(self, checksum: str) -> bool:
         """Check if blob exists for the given checksum."""
         return self._blobs.exists(checksum)
 
-    def get(self, checksum: str, file_id: str | None = None) -> File:
+    def get_file(self, checksum: str, file_id: str | None = None) -> File:
         """
         Get file metadata for the given checksum.
 
@@ -72,11 +76,11 @@ class ArchiveRepository(BaseRepository):
             return self._files.get(key)
 
         # Return first found metadata
-        for file in self.get_all(checksum):
+        for file in self.get_all_files(checksum):
             return file
         raise FileNotFoundError(checksum)
 
-    def get_all(self, checksum: str) -> Generator[File, None, None]:
+    def get_all_files(self, checksum: str) -> Files:
         """
         Iterate all metadata files for the given checksum.
 
@@ -86,33 +90,33 @@ class ArchiveRepository(BaseRepository):
         prefix = path.archive_prefix(checksum)
         yield from self._files.iterate(prefix, glob="*.json")
 
-    def iterate(self) -> Generator[File, None, None]:
+    def iterate_files(self) -> Files:
         """Iterate all file metadata in the archive."""
         yield from self._files.iterate(path.ARCHIVE, glob="**/*.json")
 
-    def stream(self, file: File) -> BytesGenerator:
-        """Stream file contents as bytes."""
-        yield from self._blobs.stream(file.checksum)
-
-    def put(self, file: File) -> File:
+    def put_file(self, file: File) -> File:
         """Store file metadata object."""
         file.store = str(self.uri)
         file.dataset = self.dataset
         self._files.put(file)
         return file
 
-    def open(self, file: File) -> ContextManager[IO[bytes]]:
-        """Get a file handle for reading."""
-        return self._blobs.open(file.checksum)
+    def stream(self, checksum: str) -> BytesGenerator:
+        """Stream blob contents as bytes."""
+        yield from self._blobs.stream(checksum)
 
-    def local_path(self, file: File) -> ContextManager[Path]:
+    def open(self, checksum: str) -> ContextManager[IO[bytes]]:
+        """Get a file-like handle for reading."""
+        return self._blobs.open(checksum)
+
+    def local_path(self, checksum: str) -> ContextManager[Path]:
         """
-        Get the local path to the file.
+        Get the local path to the blob.
 
         If storage is local, returns actual path. Otherwise, creates
-        a temporary copy that is cleaned up after context exit.
+        a temporary local copy that is cleaned up after context exit.
         """
-        return self._blobs.local_path(file.checksum)
+        return self._blobs.local_path(checksum)
 
     def store(
         self,
@@ -120,7 +124,7 @@ class ArchiveRepository(BaseRepository):
         remote_store: BaseStore | None = None,
         file: File | None = None,
         checksum: str | None = None,
-        **extra: Any,
+        **metadata: Any,
     ) -> File:
         """
         Archive a file from a local or remote URI.
@@ -133,7 +137,7 @@ class ArchiveRepository(BaseRepository):
             remote_store: Fetch the URI as key from this store
             file: Optional metadata file object to patch
             checksum: Content hash (skip computation if provided)
-            **extra: Additional data to store in file's extra field, including
+            **metadata: Additional data to store in file's extra field, including
                 FollowTheMoney properties for the `Document` schema
 
         Returns:
@@ -142,38 +146,20 @@ class ArchiveRepository(BaseRepository):
         if remote_store is None:
             remote_store, uri = get_store_for_uri(uri)
 
-        store_blob = True
-        with open_virtual(
-            uri,
-            remote_store,
-            checksum=DEFAULT_HASH_ALGORITHM if checksum is None else None,
-        ) as fh:
-            fh.checksum = checksum or fh.checksum
-            if fh.checksum is None:
-                raise RuntimeError(f"No checksum for `{uri}`")
+        # store bytes blob
+        checksum = self.store_blob(uri, remote_store, checksum)
 
-            if self.exists(fh.checksum):
-                self.log.debug(
-                    "Blob already exists, storing metadata only",
-                    checksum=fh.checksum,
-                )
-                store_blob = False
+        # file metadata
+        if file is None:
+            info = remote_store.info(uri)
+            file = File.from_info(info, checksum)
 
-            if file is None:
-                info = remote_store.info(uri)
-                file = File.from_info(info, fh.checksum)
+        file.checksum = checksum
 
-            file.checksum = fh.checksum
-
-            if store_blob:
-                with self._blobs.open(fh.checksum, "wb") as out:
-                    out.write(fh.read())
-
-        # Set metadata
-        for key in list(extra.keys()):
+        for key in list(metadata.keys()):
             if key in file.__class__.model_fields:
-                setattr(file, key, extra.pop(key))
-        file.extra = clean_dict(extra)
+                setattr(file, key, metadata.pop(key))
+        file.extra = clean_dict(metadata)
         file.store = str(self.uri)
         file.dataset = self.dataset
 
@@ -185,10 +171,56 @@ class ArchiveRepository(BaseRepository):
         self.log.info(
             f"Archived `{file.key} ({file.checksum})`",
             checksum=file.checksum,
-            stored_blob=store_blob,
         )
 
         return file
+
+    def store_blob(
+        self,
+        uri: Uri,
+        remote_store: BaseStore | None = None,
+        checksum: str | None = None,
+    ) -> str:
+        """
+        Store bytes blob from given uri if it doesn't exist yet.
+
+        Args:
+            uri: Local or remote URI to the file
+            remote_store: Fetch the URI as key from this store
+            checksum: Content hash (skip computation if provided)
+
+        Returns:
+            checksum
+        """
+        if checksum and self.exists(checksum):
+            self.log.debug("Blob already exists, skipping", checksum=checksum)
+            return checksum
+
+        if remote_store is None:
+            remote_store, uri = get_store_for_uri(uri)
+
+        with open_virtual(
+            uri,
+            remote_store,
+            checksum=DEFAULT_HASH_ALGORITHM if checksum is None else None,
+        ) as fh:
+            fh.checksum = checksum or fh.checksum
+            if fh.checksum is None:
+                raise RuntimeError(f"No checksum for `{uri}`")
+
+            if self.exists(fh.checksum):
+                self.log.debug(
+                    "Blob already exists, skipping",
+                    checksum=fh.checksum,
+                )
+                return fh.checksum
+
+            # actually store the blob
+            self.log.info(f"Storing blob `{fh.checksum}` ...", checksum=fh.checksum)
+            with self._blobs.open(fh.checksum, "wb") as out:
+                out.write(fh.read())
+
+            return fh.checksum
 
     def delete(self, file: File) -> None:
         """
@@ -211,3 +243,13 @@ class ArchiveRepository(BaseRepository):
         """Get extracted text for a file. If `origin`, get by this specific
         extraction, otherwise get the first txt value (no guaranteed order)"""
         return self._txts.get(checksum, origin)
+
+    def put_data(self, checksum: str, path: str, data: bytes) -> None:
+        """Store raw data at the given path"""
+        key = join_relpaths(checksum, path)
+        self._data._store.put(key, data)
+
+    def get_data(self, checksum: str, path: str) -> bytes:
+        """Get raw data at the given path"""
+        key = join_relpaths(checksum, path)
+        return self._data._store.get(key)

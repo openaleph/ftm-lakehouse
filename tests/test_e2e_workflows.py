@@ -658,7 +658,7 @@ class TestArchiveOperations:
         file = tmp_dataset.archive.store(fixtures_path / "src" / "example.pdf")
 
         # Lookup by checksum
-        found = tmp_dataset.archive.get(file.checksum)
+        found = tmp_dataset.archive.get_file(file.checksum)
         assert found.checksum == file.checksum
 
     def test_archive_file_exists(self, tmp_dataset, fixtures_path):
@@ -673,7 +673,7 @@ class TestArchiveOperations:
         """Test opening an archived file."""
         file = tmp_dataset.archive.store(fixtures_path / "src" / "utf.txt")
 
-        with tmp_dataset.archive.open(file) as fh:
+        with tmp_dataset.archive.open(file.checksum) as fh:
             content = fh.read()
             assert len(content) > 0
 
@@ -683,5 +683,5 @@ class TestArchiveOperations:
         tmp_dataset.archive.store(fixtures_path / "src" / "example.pdf")
         tmp_dataset.archive.store(fixtures_path / "src" / "utf.txt")
 
-        files = list(tmp_dataset.archive.iterate())
+        files = list(tmp_dataset.archive.iterate_files())
         assert len(files) == 2

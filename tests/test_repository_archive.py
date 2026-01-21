@@ -24,19 +24,19 @@ def _test_repository_archive(
     if base_path:
         assert (base_path / "tags/lakehouse/archive/last_updated").exists()
 
-    files = [f for f in archive.iterate()]
+    files = [f for f in archive.iterate_files()]
     assert len(files) == 5
 
     content_hash = "5a6acf229ba576d9a40b09292595658bbb74ef56"
     assert archive.exists(content_hash)
-    file = archive.get(content_hash)
+    file = archive.get_file(content_hash)
     assert file.key == "utf.txt"
     assert file.checksum == content_hash
     assert file.mimetype == PLAIN
-    with archive.open(file) as fh:
+    with archive.open(file.checksum) as fh:
         assert fh.read() == "Îș unî©ođ€.\n".encode()
 
-    assert b"\n".join(archive.stream(file)) == "Îș unî©ođ€.\n".encode()
+    assert b"\n".join(archive.stream(file.checksum)) == "Îș unî©ođ€.\n".encode()
 
     # Storing another file updates the tag
     archive.store("utf.txt", crawl)
@@ -126,7 +126,7 @@ def test_repository_archive_lookup_files(tmp_path):
     checksum = results[0].checksum
 
     # get_files should return all 3 metadata entries
-    all_files = list(archive.get_all(checksum))
+    all_files = list(archive.get_all_files(checksum))
     assert len(all_files) == 3
 
     # All should have the same checksum
@@ -154,15 +154,15 @@ def test_repository_archive_get_file_by_id(tmp_path):
     result2 = archive.store(file2)
 
     # get_file without file_id returns any (first found)
-    found = archive.get(result1.checksum)
+    found = archive.get_file(result1.checksum)
     assert found.checksum == result1.checksum
 
     # get_file with specific file_id returns that specific file
-    found1 = archive.get(result1.checksum, file_id=result1.id)
+    found1 = archive.get_file(result1.checksum, file_id=result1.id)
     assert found1.id == result1.id
     assert found1.key == result1.key
 
-    found2 = archive.get(result1.checksum, file_id=result2.id)
+    found2 = archive.get_file(result1.checksum, file_id=result2.id)
     assert found2.id == result2.id
     assert found2.key == result2.key
 
@@ -191,7 +191,7 @@ def test_repository_archive_iter_files_multi_metadata(tmp_path):
         archive.store(p)
 
     # iter_files should return all 4 metadata entries
-    all_files = list(archive.iterate())
+    all_files = list(archive.iterate_files())
     assert len(all_files) == 4
 
 

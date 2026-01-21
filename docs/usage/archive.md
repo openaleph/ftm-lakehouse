@@ -1,6 +1,6 @@
 # Working with Files
 
-The archive repository manages source documents and files in `ftm-lakehouse`. It provides content-addressable storage with automatic deduplication.
+The archive repository manages source documents and files metadata in `ftm-lakehouse`. It provides content-addressable storage with automatic deduplication.
 
 ## Overview
 
@@ -11,6 +11,13 @@ The archive stores files using their SHA1 checksum as the key. This design enabl
 - **Metadata**: Track file properties (name, size, MIME type, etc.)
 - **Provenance**: Link files to [FollowTheMoney](https://followthemoney.tech/explorer/schemata/Document/) entities
 
+
+!!! info "Blob vs. File object"
+    When referring to a _Blob_, this is the actual bytes content of a given source file, identified by it's SHA1 checksum.
+
+    When referring to a _File_, this is the metadata [File][ftm_lakehouse.model.File] model. Multiple metadata files can exist for a single bytes blob.
+
+
 ## Quick Start
 
 ```python
@@ -18,29 +25,29 @@ from ftm_lakehouse import ensure_dataset
 
 dataset = ensure_dataset("my_dataset")
 
-# Archive a file
-file = dataset.archive.put("/path/to/document.pdf")
+# Archive a source file, returns File metadata:
+file = dataset.archive.store("/path/to/document.pdf")
 print(f"Archived: {file.name} ({file.checksum})")
 
 # Archive from HTTP URL
-file = dataset.archive.put("https://example.com/report.pdf")
+file = dataset.archive.store("https://example.com/report.pdf")
 print(f"Archived: {file.name} ({file.checksum})")
 
 # Retrieve file content
-with dataset.archive.open(file) as fh:
+with dataset.archive.open(file.checksum) as fh:
     content = fh.read()
 
 # Stream bytes (memory efficient for large files)
-for chunk in dataset.archive.stream(file):
+for chunk in dataset.archive.stream(file.checksum):
     process_chunk(chunk)
 
-# Get file metadata
-file = dataset.archive.get("da39a3ee5e6b4b0d3255bfef95601890afd80709")
+# Get file metadata for checksum
+file = dataset.archive.get_file("<checksum>")
 print(f"Size: {file.size}, Type: {file.mimetype}")
 
-# Check if file exists
-if dataset.archive.exists("da39a3ee5e6b4b0d3255bfef95601890afd80709"):
-    print("File exists")
+# Check if a blob exists
+if dataset.archive.exists("<checksum>"):
+    print("Blob exists")
 ```
 
 Alternatively, use the shortcut to get the repository directly:
@@ -49,10 +56,10 @@ Alternatively, use the shortcut to get the repository directly:
 from ftm_lakehouse import lake
 
 archive = lake.get_archive("my_dataset")
-file = archive.put("/path/to/document.pdf")
+file = archive.store("/path/to/document.pdf")
 ```
 
-## Archiving Files
+## Archiving Blobs
 
 ### From Local Path
 
@@ -61,7 +68,7 @@ from ftm_lakehouse import ensure_dataset
 
 dataset = ensure_dataset("my_dataset")
 
-file = dataset.archive.put("/path/to/document.pdf")
+file = dataset.archive.store("/path/to/document.pdf")
 print(f"Checksum: {file.checksum}")
 print(f"Size: {file.size}")
 print(f"MIME type: {file.mimetype}")
@@ -70,30 +77,19 @@ print(f"MIME type: {file.mimetype}")
 ### From URL
 
 ```python
-file = dataset.archive.put("https://example.com/report.pdf")
+file = dataset.archive.store("https://example.com/report.pdf")
 ```
 
-### From Bytes
-
-```python
-file = dataset.archive.put_bytes(
-    data=pdf_bytes,
-    name="report.pdf",
-    mimetype="application/pdf",
-)
-```
 
 ## Reading Files
 
-### Open as File Handle
+### Open as File-like Handle
 
 ```python
 from ftm_lakehouse import get_dataset
 
 dataset = get_dataset("my_dataset")
-file = dataset.archive.get(checksum)
-
-with dataset.archive.open(file) as fh:
+with dataset.archive.open("<checksum>") as fh:
     content = fh.read()
 ```
 
@@ -102,16 +98,16 @@ with dataset.archive.open(file) as fh:
 For large files, streaming is more memory efficient:
 
 ```python
-for chunk in dataset.archive.stream(file):
+for chunk in dataset.archive.stream("<checksum>"):
     process_chunk(chunk)
 ```
 
 ### Get Local Path
 
-For tools that require a local file path:
+For tools that require a local file path, this downloads the blob into a temporary directory which is cleaned up when leaving the context (except if the archive is local, see warning below).
 
 ```python
-with dataset.archive.local_path(file) as path:
+with dataset.archive.local_path("<checksum>") as path:
     # path is a pathlib.Path object
     subprocess.run(["pdftotext", str(path), "output.txt"])
 ```
@@ -129,7 +125,7 @@ from ftm_lakehouse import get_dataset
 
 dataset = get_dataset("my_dataset")
 
-file = dataset.archive.get(checksum)
+file = dataset.archive.get_file(checksum)
 if file:
     print(f"Name: {file.name}")
     print(f"Key: {file.key}")
@@ -145,7 +141,7 @@ from ftm_lakehouse import get_dataset
 
 dataset = get_dataset("my_dataset")
 
-for file in dataset.archive.iterate():
+for file in dataset.archive.iterate_files():
     print(f"{file.key}: {file.checksum}")
 ```
 
@@ -159,7 +155,7 @@ from ftm_lakehouse import ensure_dataset
 dataset = ensure_dataset("my_dataset")
 
 # Archive a file
-file = dataset.archive.put("/path/to/document.pdf")
+file = dataset.archive.store("/path/to/document.pdf")
 
 # Convert to FtM entity
 entity = file.to_entity()
@@ -184,7 +180,7 @@ ftm-lakehouse -d my_dataset archive ls --checksums
 # List only keys (paths)
 ftm-lakehouse -d my_dataset archive ls --keys
 
-# Get file metadata
+# Get file metadata (one json line per File)
 ftm-lakehouse -d my_dataset archive head <checksum>
 
 # Retrieve file content
@@ -201,9 +197,10 @@ my_dataset/
     00/
       de/
         ad/
-          00deadbeef123456789012345678901234567890               # file blob
-          00deadbeef123456789012345678901234567890.json          # metadata
-          00deadbeef123456789012345678901234567890.<origin>.txt  # (optional) extracted text
+          00deadbeef123456789012345678901234567890/
+            blob                    # file blob (raw bytes)
+            {file_id}.json          # metadata (one per source path)
+            {origin}.txt            # (optional) extracted text
 ```
 
 The checksum is split into directory segments for better filesystem performance.
@@ -234,7 +231,7 @@ def main():
 
     # List all archived files
     print("\nAll files:")
-    for file in dataset.archive.iterate():
+    for file in dataset.archive.iterate_files():
         print(f"  - {file.name}: {file.size} bytes")
 
 

@@ -61,7 +61,7 @@ class Errors:
 def get_file_info(dataset: str, content_hash: str) -> File:
     try:
         archive = lake.get_archive(dataset)
-        return archive.get(content_hash)
+        return archive.get_file(content_hash)
     except FileNotFoundError:
         raise DEFAULT_ERROR
 
@@ -77,10 +77,10 @@ def ensure_path_context(dataset: str, content_hash: str) -> Context:
 
 def stream_file(ctx: Context) -> StreamingResponse:
     archive = lake.get_archive(ctx.dataset)
-    file = archive.get(ctx.content_hash)
+    file = archive.get_file(ctx.content_hash)
     if file is None:
         raise DEFAULT_ERROR
-    stream = archive.stream(file)
+    stream = archive.stream(file.checksum)
     return StreamingResponse(
         stream,
         headers=ctx.headers,
