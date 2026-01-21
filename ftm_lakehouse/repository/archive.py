@@ -2,13 +2,13 @@
 metadata) and optional TextStore for extracted fulltext."""
 
 from pathlib import Path
-from typing import IO, Any, ContextManager
+from typing import IO, Any, BinaryIO, ContextManager
 
 from anystore.store import get_store_for_uri
 from anystore.store.base import BaseStore
 from anystore.store.virtual import open_virtual
 from anystore.types import BytesGenerator, Uri
-from anystore.util import DEFAULT_HASH_ALGORITHM, join_relpaths
+from anystore.util import DEFAULT_HASH_ALGORITHM, join_relpaths, make_checksum
 from banal import clean_dict
 
 from ftm_lakehouse.core.conventions import path, tag
@@ -17,6 +17,7 @@ from ftm_lakehouse.model.file import Files
 from ftm_lakehouse.repository.base import BaseRepository
 from ftm_lakehouse.storage import BlobStore, FileStore, TextStore
 from ftm_lakehouse.storage.base import ByteStorage
+from ftm_lakehouse.util import make_checksum_key
 
 
 class ArchiveRepository(BaseRepository):
@@ -209,18 +210,25 @@ class ArchiveRepository(BaseRepository):
                 raise RuntimeError(f"No checksum for `{uri}`")
 
             if self.exists(fh.checksum):
-                self.log.debug(
-                    "Blob already exists, skipping",
-                    checksum=fh.checksum,
-                )
+                self.log.debug("Blob already exists, skipping", checksum=fh.checksum)
                 return fh.checksum
 
             # actually store the blob
             self.log.info(f"Storing blob `{fh.checksum}` ...", checksum=fh.checksum)
-            with self._blobs.open(fh.checksum, "wb") as out:
-                out.write(fh.read())
+            self.write_blob(fh, checksum)
 
             return fh.checksum
+
+    def write_blob(self, fh: BinaryIO, checksum: str | None = None) -> str:
+        """Write a blob from the given open file-handler"""
+        if checksum and self.exists(checksum):
+            self.log.debug("Blob already exists, skipping", checksum=checksum)
+            return checksum
+        if not checksum:
+            checksum = make_checksum(fh)
+        with self._blobs.open(checksum, "wb") as out:
+            out.write(fh.read())
+        return checksum
 
     def delete(self, file: File) -> None:
         """
@@ -246,10 +254,10 @@ class ArchiveRepository(BaseRepository):
 
     def put_data(self, checksum: str, path: str, data: bytes) -> None:
         """Store raw data at the given path"""
-        key = join_relpaths(checksum, path)
+        key = join_relpaths(make_checksum_key(checksum), path)
         self._data._store.put(key, data)
 
     def get_data(self, checksum: str, path: str) -> bytes:
         """Get raw data at the given path"""
-        key = join_relpaths(checksum, path)
+        key = join_relpaths(make_checksum_key(checksum), path)
         return self._data._store.get(key)

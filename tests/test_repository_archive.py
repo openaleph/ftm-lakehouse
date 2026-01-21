@@ -5,6 +5,7 @@ from rigour.mime.types import PLAIN
 
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.repository.archive import ArchiveRepository
+from ftm_lakehouse.util import make_checksum_key
 
 
 def _test_repository_archive(
@@ -219,3 +220,30 @@ def test_repository_archive_put_text_multi_origin(tmp_path, fixtures_path):
     assert text_tesseract.read_text() == "Text from tesseract"
     assert text_azure.read_text() == "Text from azure"
     assert text_default.read_text() == "Default extraction"
+
+
+def test_repository_archive_store_and_retrieve(tmp_path, fixtures_path):
+    """Test arbitrary data and blog r/w"""
+
+    archive = ArchiveRepository("test", tmp_path)
+
+    checksum = "5a6acf229ba576d9a40b09292595658bbb74ef56"
+
+    # arbitrary data
+    archive.put_data(checksum, "data.txt", b"hello")
+    assert archive.get_data(checksum, "data.txt") == b"hello"
+    assert (tmp_path / make_checksum_key(checksum) / "data.txt").exists()
+
+    # write via file handler
+    fixture = str(fixtures_path / "src/utf.txt")
+    with open(fixture, "rb") as fh:
+        assert archive.write_blob(fh, checksum) == checksum
+    with archive.open(checksum) as fh:
+        assert fh.read() == "Îș unî©ođ€.\n".encode()
+
+    # implicit generate checksum
+    fixture = str(fixtures_path / "src/utf.txt")
+    with open(fixture, "rb") as fh:
+        assert archive.write_blob(fh) == checksum
+    with archive.open(checksum) as fh:
+        assert fh.read() == "Îș unî©ođ€.\n".encode()
