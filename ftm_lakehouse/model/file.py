@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Any, Generator, Self, TypeAlias
 
-from anystore.store.base import Stats
+from anystore.model import Stats
 from followthemoney import StatementEntity
 from followthemoney.dataset import DefaultDataset
 from ftmq.types import StatementEntities
@@ -63,6 +63,10 @@ class File(Stats):
         parent = Path(self.key).parent
         if parent.name:
             yield from make_folders(parent, dataset=self.dataset)
+
+    def make_entities(self) -> StatementEntities:
+        yield from self.make_parents()
+        yield self.to_entity()
 
     @computed_field
     @property
