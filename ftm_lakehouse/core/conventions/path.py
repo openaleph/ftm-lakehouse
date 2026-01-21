@@ -33,7 +33,7 @@ Dataset Layout
 
             archive/                        # content-addressed file storage
                 ab/cd/ef/{checksum}/        # SHA1 split into segments
-                    data                    # file blob (stored once)
+                    blob                    # file blob (stored once)
                     {file_id}.json          # metadata (one per source path)
                     {origin}.txt            # extracted text (one per engine)
 
@@ -128,7 +128,7 @@ def tag(*parts: str, tenant: str | None = TENANT) -> str:
 ARCHIVE = "archive"
 """Base path for archive"""
 
-ARCHIVE_BLOB = "data"
+ARCHIVE_BLOB = "blob"
 """blob filename within checksum directory"""
 
 
@@ -148,7 +148,7 @@ def archive_blob(checksum: str) -> str:
     """
     Get the blob path for a file in the archive.
 
-    Layout: archive/5a/6a/cf/5a6acf229ba576d9a40b09292595658bbb74ef56/data
+    Layout: archive/5a/6a/cf/5a6acf229ba576d9a40b09292595658bbb74ef56/blob
 
     Args:
         checksum: SHA1 checksum of file

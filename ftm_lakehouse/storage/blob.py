@@ -21,7 +21,7 @@ class BlobStore(ByteStorage[Literal[True]]):
 
     Hashes are stored in a 3-part prefixed way.
 
-    Path to a blob: archive/ab/cd/ef/abcdef1234.../data
+    Path to a blob: archive/ab/cd/ef/abcdef1234.../blob
     """
 
     serialization_mode = "raw"

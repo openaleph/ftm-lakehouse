@@ -49,9 +49,9 @@ lakehouse/
         archive/                    # content-addressed file storage
             # SHA1 checksum split into directory segments:
             ab/cd/ef/{checksum}/
-                data                # file blob (stored once per checksum)
-                {file_id}.json      # metadata (one per source path, keyed by File.id)
-                {origin}.txt        # extracted text (one per OCR engine/origin)
+                blob                # file blob (stored once per checksum)
+                {file_id}.json      # [optional] metadata (one per source path, keyed by File.id)
+                {origin}.txt        # [optional] extracted text (one per OCR engine/origin)
 
         mappings/
             {content_hash}/
