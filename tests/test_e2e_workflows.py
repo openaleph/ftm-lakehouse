@@ -17,17 +17,13 @@ from ftmq.model.stats import DatasetStats
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.dataset import Dataset
 from ftm_lakehouse.model.mapping import DatasetMapping
-from ftm_lakehouse.operation.crawl import crawl
-from ftm_lakehouse.operation.export import (
-    ExportEntitiesJob,
-    ExportEntitiesOperation,
-    ExportIndexJob,
-    ExportIndexOperation,
-    ExportStatementsJob,
-    ExportStatementsOperation,
-    ExportStatisticsJob,
-    ExportStatisticsOperation,
+from ftm_lakehouse.operation import (
+    export_index,
+    export_statements,
+    export_statistics,
+    make,
 )
+from ftm_lakehouse.operation.crawl import crawl
 from ftm_lakehouse.operation.mapping import MappingJob, MappingOperation
 
 
@@ -45,72 +41,6 @@ def count_versions(dataset: Dataset, filename: str) -> int:
 def get_tag_timestamp(dataset: Dataset, tag_key: str):
     """Get the timestamp for a tag, or None if not set."""
     return dataset.entities._tags.get(tag_key)
-
-
-def export_statements(dataset: Dataset):
-    """Helper to run export statements operation."""
-    job = ExportStatementsJob.make(dataset=dataset.name)
-    op = ExportStatementsOperation(
-        job=job,
-        entities=dataset.entities,
-        jobs=dataset.jobs,
-        tags=dataset.entities._tags,
-        versions=dataset.entities._versions,
-    )
-    op.run()
-
-
-def export_entities(dataset: Dataset):
-    """Helper to run export entities operation."""
-    job = ExportEntitiesJob.make(dataset=dataset.name)
-    op = ExportEntitiesOperation(
-        job=job,
-        entities=dataset.entities,
-        jobs=dataset.jobs,
-        tags=dataset.entities._tags,
-        versions=dataset.entities._versions,
-    )
-    op.run()
-
-
-def export_statistics(dataset: Dataset):
-    """Helper to run export statistics operation."""
-    job = ExportStatisticsJob.make(dataset=dataset.name)
-    op = ExportStatisticsOperation(
-        job=job,
-        entities=dataset.entities,
-        jobs=dataset.jobs,
-        tags=dataset.entities._tags,
-        versions=dataset.entities._versions,
-    )
-    op.run()
-
-
-def export_index(dataset: Dataset, include_all: bool = False):
-    """Helper to run export index operation."""
-    job = ExportIndexJob.make(
-        dataset=dataset.name,
-        include_statements_csv=include_all,
-        include_entities_json=include_all,
-        include_statistics=include_all,
-    )
-    op = ExportIndexOperation(
-        job=job,
-        entities=dataset.entities,
-        jobs=dataset.jobs,
-        tags=dataset.entities._tags,
-        versions=dataset.entities._versions,
-    )
-    op.run(dataset=dataset.model)
-
-
-def make(dataset: Dataset):
-    """Helper to run full make workflow (flush + exports)."""
-    dataset.entities.flush()
-    export_statements(dataset)
-    export_entities(dataset)
-    export_statistics(dataset)
-    export_index(dataset, include_all=True)
 
 
 class TestIncrementalProcessing:

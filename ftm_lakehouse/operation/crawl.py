@@ -115,9 +115,7 @@ class CrawlOperation(DatasetJobOperation[CrawlJob]):
         self.log.info(f"Crawling `{uri}` ...", source=self.source.uri)
         file = self.archive.store(uri, self.source, origin=CRAWL_ORIGIN)
         if self.job.make_entities:
-            self.entities.add_many(
-                [file.to_entity(), *file.make_parents()], CRAWL_ORIGIN
-            )
+            self.entities.add_many(file.make_entities(), CRAWL_ORIGIN)
         run.job.done += 1
         return now
 

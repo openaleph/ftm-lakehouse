@@ -14,19 +14,15 @@ from ftm_lakehouse.catalog import Catalog
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.dataset import Dataset
 from ftm_lakehouse.lake import get_dataset, get_lakehouse
-from ftm_lakehouse.operation.crawl import crawl
-from ftm_lakehouse.operation.export import (
-    ExportEntitiesJob,
-    ExportEntitiesOperation,
-    ExportIndexJob,
-    ExportIndexOperation,
-    ExportStatementsJob,
-    ExportStatementsOperation,
-    ExportStatisticsJob,
-    ExportStatisticsOperation,
+from ftm_lakehouse.operation import (
+    crawl,
+    export_entities,
+    export_index,
+    export_statements,
+    make,
+    optimize,
+    run_mapping,
 )
-from ftm_lakehouse.operation.mapping import MappingJob, MappingOperation
-from ftm_lakehouse.operation.optimize import OptimizeJob, OptimizeOperation
 
 settings = Settings()
 cli = typer.Typer(
@@ -147,50 +143,11 @@ def cli_make(
     flushing the journal and generating all exports.
     """
     with DatasetContext() as dataset:
-        # Flush journal first
-        dataset.entities.flush()
-
         if full:
-            # Export statements
-            job = ExportStatementsJob.make(dataset=dataset.name)
-            op = ExportStatementsOperation(
-                job=job,
-                entities=dataset.entities,
-                jobs=dataset.jobs,
-            )
-            op.run()
-
-            # Export entities
-            job = ExportEntitiesJob.make(dataset=dataset.name)
-            op = ExportEntitiesOperation(
-                job=job,
-                entities=dataset.entities,
-                jobs=dataset.jobs,
-            )
-            op.run()
-
-            # Export statistics
-            job = ExportStatisticsJob.make(dataset=dataset.name)
-            op = ExportStatisticsOperation(
-                job=job,
-                entities=dataset.entities,
-                jobs=dataset.jobs,
-            )
-            op.run()
-
-        # Export index
-        job = ExportIndexJob.make(
-            dataset=dataset.name,
-            include_statements_csv=full,
-            include_entities_json=full,
-            include_statistics=full,
-        )
-        op = ExportIndexOperation(
-            job=job,
-            entities=dataset.entities,
-            jobs=dataset.jobs,
-        )
-        op.run(dataset=dataset.model)
+            make(dataset, with_resources=True)
+        else:
+            dataset.entities.flush()
+            export_index(dataset)
         console.print(dataset.model)
 
 
@@ -225,13 +182,7 @@ def cli_export_statements():
     Export statement store to sorted `statements.csv`
     """
     with DatasetContext() as dataset:
-        job = ExportStatementsJob.make(dataset=dataset.name)
-        op = ExportStatementsOperation(
-            job=job,
-            entities=dataset.entities,
-            jobs=dataset.jobs,
-        )
-        op.run()
+        export_statements(dataset)
         console.print("Exported statements.csv")
 
 
@@ -241,23 +192,8 @@ def cli_export_entities():
     Export `statements.csv` to `entities.json`
     """
     with DatasetContext() as dataset:
-        # Export statements first
-        job = ExportStatementsJob.make(dataset=dataset.name)
-        op = ExportStatementsOperation(
-            job=job,
-            entities=dataset.entities,
-            jobs=dataset.jobs,
-        )
-        op.run()
-
-        # Then export entities
-        job = ExportEntitiesJob.make(dataset=dataset.name)
-        op = ExportEntitiesOperation(
-            job=job,
-            entities=dataset.entities,
-            jobs=dataset.jobs,
-        )
-        op.run()
+        export_statements(dataset)
+        export_entities(dataset)
         console.print("Exported entities.ftm.json")
 
 
@@ -271,13 +207,7 @@ def cli_optimize(
     Optimize a datasets statement store
     """
     with DatasetContext() as dataset:
-        job = OptimizeJob.make(dataset=dataset.name, vacuum=vacuum)
-        op = OptimizeOperation(
-            job=job,
-            entities=dataset.entities,
-            jobs=dataset.jobs,
-        )
-        op.run()
+        optimize(dataset, vacuum=bool(vacuum))
         console.print("Optimized statement store")
 
 
@@ -422,27 +352,13 @@ def cli_mappings_process(
     """
     with DatasetContext() as dataset:
         if content_hash:
-            job = MappingJob.make(dataset=dataset.name, content_hash=content_hash)
-            op = MappingOperation(
-                job=job,
-                archive=dataset.archive,
-                entities=dataset.entities,
-                jobs=dataset.jobs,
-            )
-            result = op.run()
+            result = run_mapping(dataset, content_hash)
             console.print(f"Generated {result.done} entities from {content_hash}")
         else:
             total = 0
             count = 0
             for mapping_hash in dataset.mappings.list():
-                job = MappingJob.make(dataset=dataset.name, content_hash=mapping_hash)
-                op = MappingOperation(
-                    job=job,
-                    archive=dataset.archive,
-                    entities=dataset.entities,
-                    jobs=dataset.jobs,
-                )
-                result = op.run()
+                result = run_mapping(dataset, mapping_hash)
                 if result.done > 0:
                     console.print(f"{mapping_hash}: {result.done} entities")
                 total += result.done
