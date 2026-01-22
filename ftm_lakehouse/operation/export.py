@@ -4,6 +4,7 @@ from typing import TypeVar
 
 from anystore.util import join_uri
 from ftmq.io import smart_write_proxies
+from ftmq.model.stats import DatasetStats
 
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.helpers.dataset import (
@@ -122,6 +123,7 @@ class ExportIndexOperation(BaseExportOperation[ExportIndexJob]):
     ) -> None:
         self.ensure_flush()
         force = kwargs.get("force", False)
+        make_resources = dataset.resources_public_url_prefix is not None
 
         if run.job.include_statements_csv:
             if force or not self.tags.is_latest(
@@ -129,10 +131,12 @@ class ExportIndexOperation(BaseExportOperation[ExportIndexJob]):
             ):
                 with self.tags.touch(path.EXPORTS_STATEMENTS):
                     self.export_statements()
-            uri = join_uri(self.entities.uri, path.EXPORTS_STATEMENTS)
-            # Only add resource for HTTP URLs (DataResource requires http/https)
-            if uri.startswith("http"):
-                dataset.resources.append(make_statements_resource(uri))
+            if make_resources:
+                uri = join_uri(dataset.uri, path.EXPORTS_STATEMENTS)
+                public_url = join_uri(
+                    dataset.resources_public_url_prefix, path.EXPORTS_STATEMENTS
+                )
+                dataset.resources.append(make_statements_resource(uri, public_url))
 
         if run.job.include_entities_json:
             if force or not self.tags.is_latest(
@@ -140,10 +144,12 @@ class ExportIndexOperation(BaseExportOperation[ExportIndexJob]):
             ):
                 with self.tags.touch(path.ENTITIES_JSON):
                     self.export_entities()
-            uri = join_uri(self.entities.uri, path.ENTITIES_JSON)
-            # Only add resource for HTTP URLs (DataResource requires http/https)
-            if uri.startswith("http"):
-                dataset.resources.append(make_entities_resource(uri))
+            if make_resources:
+                uri = join_uri(dataset.uri, path.ENTITIES_JSON)
+                public_url = join_uri(
+                    dataset.resources_public_url_prefix, path.ENTITIES_JSON
+                )
+                dataset.resources.append(make_entities_resource(uri, public_url))
 
         if run.job.include_statistics:
             if force or not self.tags.is_latest(
@@ -151,10 +157,17 @@ class ExportIndexOperation(BaseExportOperation[ExportIndexJob]):
             ):
                 with self.tags.touch(path.STATISTICS):
                     self.export_statistics()
-            uri = join_uri(self.entities.uri, path.STATISTICS)
-            # Only add resource for HTTP URLs (DataResource requires http/https)
-            if uri.startswith("http"):
-                dataset.resources.append(make_statistics_resource(uri))
+            if make_resources:
+                uri = join_uri(dataset.uri, path.STATISTICS)
+                public_url = join_uri(
+                    dataset.resources_public_url_prefix, path.STATISTICS
+                )
+                dataset.resources.append(make_statistics_resource(uri, public_url))
+
+        # update dataset with computed stats
+        stats = self.versions.get(path.STATISTICS, model=DatasetStats)
+        if stats:
+            dataset.apply_stats(stats)
 
         self.versions.make(path.INDEX, dataset)
 

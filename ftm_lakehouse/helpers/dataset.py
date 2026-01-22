@@ -12,12 +12,14 @@ from rigour.mime.types import CSV, FTM, JSON
 from ftm_lakehouse.core.settings import Settings
 
 
-def make_resource(uri: str, mime_type: str | None = None) -> DataResource:
+def make_resource(
+    uri: str, mime_type: str | None = None, public_url: str | None = None
+) -> DataResource:
     info = get_info(uri)
     path = Path(uri)
     return DataResource(
         name=path.name,
-        url=uri,
+        url=public_url or uri,
         checksum=get_checksum(uri),
         timestamp=info.created_at,
         mime_type=mime_type or info.mimetype,
@@ -25,16 +27,16 @@ def make_resource(uri: str, mime_type: str | None = None) -> DataResource:
     )
 
 
-def make_entities_resource(uri: str) -> DataResource:
-    return make_resource(uri, FTM)
+def make_entities_resource(uri: str, public_url: str | None = None) -> DataResource:
+    return make_resource(uri, FTM, public_url)
 
 
-def make_statements_resource(uri: str) -> DataResource:
-    return make_resource(uri, CSV)
+def make_statements_resource(uri: str, public_url: str | None = None) -> DataResource:
+    return make_resource(uri, CSV, public_url)
 
 
-def make_statistics_resource(uri: str) -> DataResource:
-    return make_resource(uri, JSON)
+def make_statistics_resource(uri: str, public_url: str | None = None) -> DataResource:
+    return make_resource(uri, JSON, public_url)
 
 
 @cache

@@ -121,7 +121,7 @@ def export_index(
     Returns:
         The completed job result
     """
-    if include_all:
+    if include_all or force:
         include_statements_csv = True
         include_entities_json = True
         include_statistics = True
@@ -213,26 +213,10 @@ def make(dataset: Dataset, with_resources: bool = True, force: bool = False) -> 
     """
     Run the full make workflow: flush journal and generate all exports.
 
-    This is equivalent to running:
-    1. dataset.entities.flush()
-    2. export_statements(dataset)
-    3. export_entities(dataset)
-    4. export_statistics(dataset)
-    5. export_index(dataset, include_all=True)
-
     Args:
         dataset: The dataset to process
-        include_all: Include all exports in index.json resources
+        with_resources: Include all exports in index.json resources
         force: Force all operations even if up-to-date
     """
     dataset.entities.flush()
-    export_statements(dataset, force=force)
-    export_entities(dataset, force=force)
-    export_statistics(dataset, force=force)
-    export_index(
-        dataset,
-        include_statements_csv=with_resources,
-        include_entities_json=with_resources,
-        include_statistics=with_resources,
-        force=force,
-    )
+    export_index(dataset, include_all=with_resources, force=force)

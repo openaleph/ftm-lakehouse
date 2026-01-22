@@ -102,6 +102,13 @@ class Dataset(Generic[DM]):
         """Load and return the dataset model from config.yml."""
         return self._load_model()
 
+    @property
+    def index(self) -> DM:
+        """Load and return the generated index.json (or fall back to config.yml)"""
+        if self._versions.exists(path.INDEX):
+            return self._versions.get(path.INDEX, model=self._model_class)
+        return self.model
+
     def update_model(self, **data: Any) -> DM:
         """
         Update config.yml with new data.

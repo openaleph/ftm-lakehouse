@@ -14,6 +14,7 @@ from ftm_lakehouse.catalog import Catalog
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.dataset import Dataset
 from ftm_lakehouse.lake import get_dataset, get_lakehouse
+from ftm_lakehouse.model.dataset import DatasetModel
 from ftm_lakehouse.operation import (
     crawl,
     export_entities,
@@ -131,11 +132,19 @@ def cli_datasets(
 
 @cli.command("make")
 def cli_make(
+    config: Annotated[
+        Optional[str],
+        typer.Option("-c", help="Configuration yml to store as `config.yml`"),
+    ] = None,
     full: Annotated[
         Optional[bool],
         typer.Option(
             help="Run full update: flush journal, export statements/entities, compute stats"
         ),
+    ] = False,
+    force: Annotated[
+        Optional[bool],
+        typer.Option(help="Re-compute full exports pipeline even if up-to-date."),
     ] = False,
 ):
     """
@@ -143,12 +152,15 @@ def cli_make(
     flushing the journal and generating all exports.
     """
     with DatasetContext() as dataset:
+        if config:
+            dataset_config = DatasetModel.from_yaml_uri(config)
+            dataset.update_model(**dataset_config.model_dump())
         if full:
-            make(dataset, with_resources=True)
+            make(dataset, with_resources=True, force=bool(force))
         else:
             dataset.entities.flush()
-            export_index(dataset)
-        console.print(dataset.model)
+            export_index(dataset, force=bool(force))
+        console.print(dataset.index)
 
 
 @cli.command("write-entities")
