@@ -46,7 +46,7 @@ class ExportStatisticsJob(BaseExportJob):
 
 class ExportIndexJob(BaseExportJob):
     target: str = path.INDEX
-    dependencies: list[str] = [path.STATISTICS, path.ENTITIES_JSON]
+    dependencies: list[str] = [path.CONFIG, path.STATISTICS, path.ENTITIES_JSON]
     include_statements_csv: bool = False
     include_entities_json: bool = False
     include_statistics: bool = False

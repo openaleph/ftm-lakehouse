@@ -95,6 +95,7 @@ class Dataset(Generic[DM]):
     def _load_model(self, **data: Any) -> DM:
         """Load dataset model from config.yml."""
         data["name"] = self.name
+        data.pop("storage", None)
         return self._model_class(**load_config(self._store, **data))
 
     @property
