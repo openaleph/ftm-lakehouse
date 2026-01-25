@@ -227,7 +227,8 @@ class ArchiveRepository(BaseRepository):
         if not checksum:
             checksum = make_checksum(fh)
         with self._blobs.open(checksum, "wb") as out:
-            out.write(fh.read())
+            while chunk := fh.read(8192):
+                out.write(chunk)
         return checksum
 
     def delete(self, file: File) -> None:
