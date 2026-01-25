@@ -2,9 +2,9 @@ from typing import Annotated, Optional, TypedDict
 
 import typer
 from anystore.cli import ErrorHandler
-from anystore.io import smart_open, smart_write, smart_write_models
+from anystore.io import smart_open, smart_read, smart_write, smart_write_models
 from anystore.logging import configure_logging
-from anystore.util import dump_json_model
+from anystore.util import dump_json_model, make_data_checksum
 from ftmq.io import smart_read_proxies, smart_write_proxies
 from pydantic import BaseModel
 from rich.console import Console
@@ -153,8 +153,16 @@ def cli_make(
     """
     with DatasetContext() as dataset:
         if config:
-            dataset_config = DatasetModel.from_yaml_uri(config)
-            dataset.update_model(**dataset_config.model_dump())
+            checksum = make_data_checksum(smart_read(config))
+            tag = f"config.yml-{checksum}"
+            if not dataset._tags.exists(tag):
+                with dataset._tags.touch(tag):
+                    dataset_config = DatasetModel.from_yaml_uri(config)
+                    dataset.update_model(**dataset_config.model_dump())
+            else:
+                dataset._log.info(
+                    "Config already up-to-date", config=config, checksum=checksum
+                )
         if full:
             make(dataset, with_resources=True, force=bool(force))
         else:
