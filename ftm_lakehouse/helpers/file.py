@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Iterable
 
 from anystore.functools import weakref_cache as cache
 from anystore.util import make_data_checksum
@@ -95,3 +96,17 @@ def mime_to_schema(mimetype: str) -> Schema:
             if schema is not None:
                 return schema
     return model["Document"]
+
+
+def pick_mime(mimetypes: Iterable[str], default: str | None = None) -> str:
+    """
+    Pick a mime type from given input. Useful to sort out
+    application/ocet-stream if there is some other available.
+    """
+    for mime in mimetypes:
+        mime = normalize_mimetype(mime)
+        if mime != types.DEFAULT:
+            return mime
+    if default:
+        return normalize_mimetype(default)
+    return types.DEFAULT

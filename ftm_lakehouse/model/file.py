@@ -14,7 +14,12 @@ from ftmq.util import make_entity
 from pydantic import ConfigDict, computed_field, model_validator
 
 from ftm_lakehouse.core.conventions import path
-from ftm_lakehouse.helpers.file import make_file_id, make_folders, mime_to_schema
+from ftm_lakehouse.helpers.file import (
+    make_file_id,
+    make_folders,
+    mime_to_schema,
+    pick_mime,
+)
 
 
 class Document(BaseModel):
@@ -37,7 +42,7 @@ class Document(BaseModel):
             id=e.id,
             checksum=checksum,
             name=e.caption,
-            mimetype=e.first("mimeType") or guess_mimetype(e.caption),
+            mimetype=pick_mime(e.get("mimeType"), guess_mimetype(e.caption)),
             size=e.first("fileSize") or 0,
             updated_at=getattr(e, "last_change", None),
         )
