@@ -1,4 +1,5 @@
-from anystore.io import DoesNotExist, smart_read
+from anystore.exceptions import DoesNotExist
+from anystore.io import smart_read
 from anystore.settings import BaseSettings
 from pydantic import HttpUrl
 from pydantic_settings import SettingsConfigDict
@@ -14,6 +15,7 @@ class Settings(BaseSettings):
     )
 
     uri: str = "data"
+    public_url_prefix: str | None = None
     journal_uri: str = "sqlite:///data/journal.db"
 
 

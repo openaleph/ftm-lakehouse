@@ -143,7 +143,7 @@ class ExportIndexOperation(BaseExportOperation[ExportIndexJob]):
     ) -> None:
         self.ensure_flush()
         force = kwargs.get("force", False)
-        make_resources = dataset.resources_public_url_prefix is not None
+        public_prefix = dataset.get_public_prefix()
 
         if run.job.include_statements_csv:
             if force or not self.tags.is_latest(
@@ -151,11 +151,9 @@ class ExportIndexOperation(BaseExportOperation[ExportIndexJob]):
             ):
                 with self.tags.touch(path.EXPORTS_STATEMENTS):
                     self.export_statements()
-            if make_resources:
+            if public_prefix:
                 uri = join_uri(dataset.uri, path.EXPORTS_STATEMENTS)
-                public_url = join_uri(
-                    dataset.resources_public_url_prefix, path.EXPORTS_STATEMENTS
-                )
+                public_url = join_uri(public_prefix, path.EXPORTS_STATEMENTS)
                 dataset.resources.append(make_statements_resource(uri, public_url))
 
         if run.job.include_entities_json:
@@ -164,11 +162,9 @@ class ExportIndexOperation(BaseExportOperation[ExportIndexJob]):
             ):
                 with self.tags.touch(path.ENTITIES_JSON):
                     self.export_entities()
-            if make_resources:
+            if public_prefix:
                 uri = join_uri(dataset.uri, path.ENTITIES_JSON)
-                public_url = join_uri(
-                    dataset.resources_public_url_prefix, path.ENTITIES_JSON
-                )
+                public_url = join_uri(public_prefix, path.ENTITIES_JSON)
                 dataset.resources.append(make_entities_resource(uri, public_url))
 
         if run.job.include_documents_csv:
@@ -177,11 +173,9 @@ class ExportIndexOperation(BaseExportOperation[ExportIndexJob]):
             ):
                 with self.tags.touch(path.EXPORTS_DOCUMENTS):
                     self.export_documents()
-            if make_resources:
+            if public_prefix:
                 uri = join_uri(dataset.uri, path.EXPORTS_DOCUMENTS)
-                public_url = join_uri(
-                    dataset.resources_public_url_prefix, path.EXPORTS_DOCUMENTS
-                )
+                public_url = join_uri(public_prefix, path.EXPORTS_DOCUMENTS)
                 dataset.resources.append(make_documents_resource(uri, public_url))
 
         if run.job.include_statistics:
@@ -190,11 +184,9 @@ class ExportIndexOperation(BaseExportOperation[ExportIndexJob]):
             ):
                 with self.tags.touch(path.STATISTICS):
                     self.export_statistics()
-            if make_resources:
+            if public_prefix:
                 uri = join_uri(dataset.uri, path.STATISTICS)
-                public_url = join_uri(
-                    dataset.resources_public_url_prefix, path.STATISTICS
-                )
+                public_url = join_uri(public_prefix, path.STATISTICS)
                 dataset.resources.append(make_statistics_resource(uri, public_url))
 
         # update dataset with computed stats

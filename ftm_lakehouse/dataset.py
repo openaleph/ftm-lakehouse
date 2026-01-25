@@ -6,6 +6,7 @@ from typing import Any, Generic, TypeVar
 from anystore.logging import get_logger
 from anystore.store import get_store
 from anystore.types import Uri
+from anystore.util import join_uri
 
 from ftm_lakehouse.core.config import load_config
 from ftm_lakehouse.core.conventions import path
@@ -166,3 +167,13 @@ class Dataset(Generic[DM]):
         if not self.exists():
             self.update_model()
             self._log.info("Created dataset")
+
+    # -------------------------------------------------------------------------
+    # Public Url exposure
+    # -------------------------------------------------------------------------
+
+    def get_blob_url(self, checksum: str) -> str:
+        prefix = self.model.get_public_prefix()
+        if not prefix:
+            prefix = self.uri
+        return join_uri(prefix, path.archive_blob(checksum))
