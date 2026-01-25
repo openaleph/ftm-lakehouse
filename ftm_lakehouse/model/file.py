@@ -1,10 +1,13 @@
 """File metadata model."""
 
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Generator, Self, TypeAlias
 
+from anystore.mixins import BaseModel
 from anystore.model import Stats
-from followthemoney import StatementEntity
+from anystore.util import guess_mimetype
+from followthemoney import EntityProxy, StatementEntity
 from followthemoney.dataset import DefaultDataset
 from ftmq.types import StatementEntities
 from ftmq.util import make_entity
@@ -12,6 +15,32 @@ from pydantic import ConfigDict, computed_field, model_validator
 
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.helpers.file import make_file_id, make_folders, mime_to_schema
+
+
+class Document(BaseModel):
+    """Condensed file metadata for flat csv streaming"""
+
+    id: str
+    checksum: str
+    name: str
+    mimetype: str
+    path: str | None = None
+    size: int | None = None
+    updated_at: datetime | None = None
+
+    @classmethod
+    def from_entity(cls, e: EntityProxy) -> Self:
+        checksum = e.first("contentHash")
+        if checksum is None or not e.id:
+            raise ValueError(f"Missing contentHash for entity id `{e.id}`")
+        return cls(
+            id=e.id,
+            checksum=checksum,
+            name=e.caption,
+            mimetype=e.first("mimeType") or guess_mimetype(e.caption),
+            size=e.first("fileSize") or 0,
+            updated_at=getattr(e, "last_change", None),
+        )
 
 
 class File(Stats):
@@ -33,6 +62,7 @@ class File(Stats):
         if not isinstance(data, dict):
             return data
         known_fields = set(cls.model_fields.keys())
+        known_fields.update(["id", "path", "parent"])  # computed_field
         extra = data.get("extra", {})
         extra_fields = {k: v for k, v in data.items() if k not in known_fields}
         if extra_fields:
@@ -105,6 +135,21 @@ class File(Stats):
         data["checksum"] = checksum
         return cls(**{**info.model_dump(), **data})
 
+    def to_document(self) -> Document:
+        return Document(
+            id=self.id,
+            checksum=self.checksum,
+            name=self.name,
+            path=self.path,
+            size=self.size,
+            mimetype=self.mimetype,
+            updated_at=self.updated_at,
+        )
+
 
 Files: TypeAlias = Generator[File, None, None]
 """Type shorthand for a generator of `File` objects"""
+
+
+Documents: TypeAlias = Generator[Document, None, None]
+"""Type shorthand for a generator of `Document` objects"""

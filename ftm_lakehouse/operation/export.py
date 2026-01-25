@@ -8,6 +8,7 @@ from ftmq.model.stats import DatasetStats
 
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.helpers.dataset import (
+    make_documents_resource,
     make_entities_resource,
     make_statements_resource,
     make_statistics_resource,
@@ -20,7 +21,8 @@ from ftm_lakehouse.repository.job import JobRun
 
 class BaseExportJob(DatasetJobModel):
     target: str
-    dependencies: list[str]
+    # Include JOURNAL_UPDATED so we don't skip when there's unflushed data
+    dependencies: list[str] = [tag.STATEMENTS_UPDATED, tag.JOURNAL_UPDATED]
 
 
 J = TypeVar("J", bound=BaseExportJob)
@@ -28,27 +30,31 @@ J = TypeVar("J", bound=BaseExportJob)
 
 class ExportStatementsJob(BaseExportJob):
     target: str = path.EXPORTS_STATEMENTS
-    # Include JOURNAL_UPDATED so we don't skip when there's unflushed data
-    dependencies: list[str] = [tag.STATEMENTS_UPDATED, tag.JOURNAL_UPDATED]
 
 
 class ExportEntitiesJob(BaseExportJob):
     target: str = path.ENTITIES_JSON
-    # Include JOURNAL_UPDATED so we don't skip when there's unflushed data
-    dependencies: list[str] = [tag.STATEMENTS_UPDATED, tag.JOURNAL_UPDATED]
 
 
 class ExportStatisticsJob(BaseExportJob):
     target: str = path.STATISTICS
-    # Include JOURNAL_UPDATED so we don't skip when there's unflushed data
-    dependencies: list[str] = [tag.STATEMENTS_UPDATED, tag.JOURNAL_UPDATED]
+
+
+class ExportDocumentsJob(BaseExportJob):
+    target: str = path.EXPORTS_DOCUMENTS
 
 
 class ExportIndexJob(BaseExportJob):
     target: str = path.INDEX
-    dependencies: list[str] = [path.CONFIG, path.STATISTICS, path.ENTITIES_JSON]
+    dependencies: list[str] = [
+        path.CONFIG,
+        path.STATISTICS,
+        path.ENTITIES_JSON,
+        path.EXPORTS_DOCUMENTS,
+    ]
     include_statements_csv: bool = False
     include_entities_json: bool = False
+    include_documents_csv: bool = False
     include_statistics: bool = False
 
 
@@ -73,6 +79,10 @@ class BaseExportOperation(DatasetJobOperation[J]):
         self.ensure_flush()
         output_uri = self.entities._store.get_key(path.ENTITIES_JSON)
         smart_write_proxies(output_uri, self.entities.query())
+
+    def export_documents(self) -> None:
+        self.ensure_flush()
+        self.documents.export_csv()
 
     def export_statistics(self) -> None:
         self.ensure_flush()
@@ -107,6 +117,16 @@ class ExportStatisticsOperation(BaseExportOperation[ExportStatisticsJob]):
 
     def handle(self, run: JobRun, *args, **kwargs) -> None:
         self.export_statistics()
+        run.job.done = 1
+
+
+class ExportDocumentsOperation(BaseExportOperation[ExportDocumentsJob]):
+    """Export file metadata to documents.csv. Checks if journal needs to be
+    flushed first. Skips if the last export is newer then last statements
+    update."""
+
+    def handle(self, run: JobRun, *args, **kwargs) -> None:
+        self.export_documents()
         run.job.done = 1
 
 
@@ -150,6 +170,19 @@ class ExportIndexOperation(BaseExportOperation[ExportIndexJob]):
                     dataset.resources_public_url_prefix, path.ENTITIES_JSON
                 )
                 dataset.resources.append(make_entities_resource(uri, public_url))
+
+        if run.job.include_documents_csv:
+            if force or not self.tags.is_latest(
+                path.EXPORTS_DOCUMENTS, [tag.STATEMENTS_UPDATED]
+            ):
+                with self.tags.touch(path.EXPORTS_DOCUMENTS):
+                    self.export_documents()
+            if make_resources:
+                uri = join_uri(dataset.uri, path.EXPORTS_DOCUMENTS)
+                public_url = join_uri(
+                    dataset.resources_public_url_prefix, path.EXPORTS_DOCUMENTS
+                )
+                dataset.resources.append(make_documents_resource(uri, public_url))
 
         if run.job.include_statistics:
             if force or not self.tags.is_latest(

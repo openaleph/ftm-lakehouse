@@ -53,6 +53,7 @@ Dataset Layout
             exports/
                 statistics.json             # entity counts, facets
                 statements.csv              # sorted statements
+                documents.csv               # document metadata
                 graph.cypher                # neo4j export (optional)
 
             jobs/
@@ -236,6 +237,9 @@ EXPORTS_CYPHER = f"{EXPORTS}/graph.cypher"
 
 EXPORTS_STATEMENTS = f"{EXPORTS}/statements.csv"
 """complete sorted statements file path"""
+
+EXPORTS_DOCUMENTS = f"{EXPORTS}/documents.csv"
+"""documents metadata to stream"""
 
 JOBS = "jobs"
 """Job data prefix"""

@@ -35,6 +35,10 @@ def make_statements_resource(uri: str, public_url: str | None = None) -> DataRes
     return make_resource(uri, CSV, public_url)
 
 
+def make_documents_resource(uri: str, public_url: str | None = None) -> DataResource:
+    return make_resource(uri, CSV, public_url)
+
+
 def make_statistics_resource(uri: str, public_url: str | None = None) -> DataResource:
     return make_resource(uri, JSON, public_url)
 

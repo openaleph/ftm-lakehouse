@@ -9,6 +9,7 @@ from anystore.types import Uri
 
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.repository.archive import ArchiveRepository
+from ftm_lakehouse.repository.documents import DocumentRepository
 from ftm_lakehouse.repository.entities import EntityRepository
 from ftm_lakehouse.repository.job import J, JobRepository
 from ftm_lakehouse.repository.mapping import MappingRepository
@@ -51,6 +52,23 @@ def get_entities(
     settings = Settings()
     uri = uri or f"{settings.uri}/{dataset}"
     return EntityRepository(dataset, uri, journal_uri)
+
+
+@cache
+def get_documents(dataset: str, uri: Uri | None = None) -> DocumentRepository:
+    """
+    Get the document repository for a dataset.
+
+    Args:
+        dataset: Dataset name
+        uri: Dataset URI override (default: {LAKEHOUSE_URI}/{dataset})
+
+    Returns:
+        DocumentRepository instance (cached)
+    """
+    settings = Settings()
+    uri = uri or f"{settings.uri}/{dataset}"
+    return DocumentRepository(dataset, uri)
 
 
 @cache

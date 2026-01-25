@@ -5,9 +5,11 @@ from anystore.types import Uri
 from ftm_lakehouse.helpers.dataset import make_dataset_uri
 from ftm_lakehouse.model.job import DJ
 from ftm_lakehouse.repository.archive import ArchiveRepository
+from ftm_lakehouse.repository.documents import DocumentRepository
 from ftm_lakehouse.repository.entities import EntityRepository
 from ftm_lakehouse.repository.factories import (
     get_archive,
+    get_documents,
     get_entities,
     get_jobs,
     get_tags,
@@ -36,6 +38,7 @@ class DatasetJobOperation(Generic[DJ]):
         job: DJ,
         archive: ArchiveRepository | None = None,
         entities: EntityRepository | None = None,
+        documents: DocumentRepository | None = None,
         jobs: JobRepository | None = None,
         tags: TagStore | None = None,
         versions: VersionStore | None = None,
@@ -47,6 +50,7 @@ class DatasetJobOperation(Generic[DJ]):
         self.log = job.log
         self.archive = archive or get_archive(job.dataset, self.uri)
         self.entities = entities or get_entities(job.dataset, self.uri)
+        self.documents = documents or get_documents(job.dataset, self.uri)
         self.jobs = jobs or get_jobs(job.dataset, job.__class__, self.uri)
         self.tags = tags or get_tags(job.dataset, self.uri)
         self.versions = versions or get_versions(job.dataset, self.uri)

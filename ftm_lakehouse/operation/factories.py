@@ -103,6 +103,7 @@ def export_index(
     dataset: Dataset,
     include_statements_csv: bool = False,
     include_entities_json: bool = False,
+    include_documents_csv: bool = False,
     include_statistics: bool = False,
     include_all: bool = False,
     force: bool = False,
@@ -124,12 +125,14 @@ def export_index(
     if include_all or force:
         include_statements_csv = True
         include_entities_json = True
+        include_documents_csv = True
         include_statistics = True
 
     job = ExportIndexJob.make(
         dataset=dataset.name,
         include_statements_csv=include_statements_csv,
         include_entities_json=include_entities_json,
+        include_documents_csv=include_documents_csv,
         include_statistics=include_statistics,
     )
     op = ExportIndexOperation(
