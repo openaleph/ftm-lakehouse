@@ -49,7 +49,7 @@ def export_statements(dataset: Dataset, force: bool = False) -> ExportStatements
         job=job,
         entities=dataset.entities,
         jobs=dataset.jobs,
-        tags=dataset.entities._tags,
+        tags=dataset.archive._tags,
         versions=dataset.entities._versions,
     )
     return op.run(force=force)
@@ -71,7 +71,7 @@ def export_entities(dataset: Dataset, force: bool = False) -> ExportEntitiesJob:
         job=job,
         entities=dataset.entities,
         jobs=dataset.jobs,
-        tags=dataset.entities._tags,
+        tags=dataset.archive._tags,
         versions=dataset.entities._versions,
     )
     return op.run(force=force)
@@ -93,7 +93,7 @@ def export_statistics(dataset: Dataset, force: bool = False) -> ExportStatistics
         job=job,
         entities=dataset.entities,
         jobs=dataset.jobs,
-        tags=dataset.entities._tags,
+        tags=dataset.archive._tags,
         versions=dataset.entities._versions,
     )
     return op.run(force=force)
@@ -139,7 +139,7 @@ def export_index(
         job=job,
         entities=dataset.entities,
         jobs=dataset.jobs,
-        tags=dataset.entities._tags,
+        tags=dataset.archive._tags,
         versions=dataset.entities._versions,
     )
     return op.run(dataset=dataset.model, force=force)
@@ -178,7 +178,7 @@ def optimize(
         job=job,
         entities=dataset.entities,
         jobs=dataset.jobs,
-        tags=dataset.entities._tags,
+        tags=dataset.archive._tags,
         versions=dataset.entities._versions,
     )
     return op.run(force=force)
