@@ -312,3 +312,14 @@ class JournalStore:
             conn.execute(delete(self.table).where(self.table.c.dataset == self.dataset))
             conn.commit()
         return count
+
+    def dispose(self) -> None:
+        """Dispose the engine and close all pooled connections."""
+        self.engine.dispose()
+
+    def __del__(self) -> None:
+        """Clean up engine on garbage collection."""
+        try:
+            self.engine.dispose()
+        except Exception:
+            pass  # Ignore errors during cleanup
