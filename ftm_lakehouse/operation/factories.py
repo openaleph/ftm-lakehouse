@@ -20,6 +20,8 @@ Example:
 
 from ftm_lakehouse.dataset import Dataset
 from ftm_lakehouse.operation.export import (
+    ExportDocumentsJob,
+    ExportDocumentsOperation,
     ExportEntitiesJob,
     ExportEntitiesOperation,
     ExportIndexJob,
@@ -99,42 +101,40 @@ def export_statistics(dataset: Dataset, force: bool = False) -> ExportStatistics
     return op.run(force=force)
 
 
-def export_index(
-    dataset: Dataset,
-    include_statements_csv: bool = False,
-    include_entities_json: bool = False,
-    include_documents_csv: bool = False,
-    include_statistics: bool = False,
-    include_all: bool = False,
-    force: bool = False,
-) -> ExportIndexJob:
+def export_documents(dataset: Dataset, force: bool = False) -> ExportDocumentsJob:
     """
-    Run export index operation (-> index.json).
+    Run export documents operation (parquet -> documents.csv).
 
     Args:
         dataset: The dataset to export from
-        include_statements_csv: Include statements.csv in index resources
-        include_entities_json: Include entities.ftm.json in index resources
-        include_statistics: Include statistics.json in index resources
-        include_all: Shorthand to include all exports in index resources
         force: Force export even if up-to-date
 
     Returns:
         The completed job result
     """
-    if include_all or force:
-        include_statements_csv = True
-        include_entities_json = True
-        include_documents_csv = True
-        include_statistics = True
-
-    job = ExportIndexJob.make(
-        dataset=dataset.name,
-        include_statements_csv=include_statements_csv,
-        include_entities_json=include_entities_json,
-        include_documents_csv=include_documents_csv,
-        include_statistics=include_statistics,
+    job = ExportDocumentsJob.make(dataset=dataset.name)
+    op = ExportDocumentsOperation(
+        job=job,
+        entities=dataset.entities,
+        jobs=dataset.jobs,
+        tags=dataset.archive._tags,
+        versions=dataset.entities._versions,
     )
+    return op.run(force=force)
+
+
+def export_index(dataset: Dataset, force: bool = False) -> ExportIndexJob:
+    """
+    Run export index operation (-> index.json).
+
+    Args:
+        dataset: The dataset to export from
+        force: Force export even if up-to-date
+
+    Returns:
+        The completed job result
+    """
+    job = ExportIndexJob.make(dataset=dataset.name)
     op = ExportIndexOperation(
         job=job,
         entities=dataset.entities,
@@ -142,7 +142,7 @@ def export_index(
         tags=dataset.archive._tags,
         versions=dataset.entities._versions,
     )
-    return op.run(dataset=dataset.model, force=force)
+    return op.run(force=force)
 
 
 def optimize(
@@ -212,14 +212,17 @@ def run_mapping(
     return op.run(force=force)
 
 
-def make(dataset: Dataset, with_resources: bool = True, force: bool = False) -> None:
+def make(dataset: Dataset, force: bool = False) -> None:
     """
     Run the full make workflow: flush journal and generate all exports.
 
     Args:
         dataset: The dataset to process
-        with_resources: Include all exports in index.json resources
         force: Force all operations even if up-to-date
     """
     dataset.entities.flush()
-    export_index(dataset, include_all=with_resources, force=force)
+    export_statements(dataset, force=force)
+    export_entities(dataset, force=force)
+    export_documents(dataset, force=force)
+    export_statistics(dataset, force=force)
+    export_index(dataset, force=force)

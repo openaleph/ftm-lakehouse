@@ -60,9 +60,12 @@ def cleanup_fixtures_tags():
     """Clean up any tags created in fixtures directory during tests."""
     yield
     # Clean up after all tests
-    tags_dir = FIXTURES_PATH / "lake" / "tmp_dataset" / "tags"
-    if tags_dir.exists():
-        shutil.rmtree(tags_dir)
+    for _dir in (
+        FIXTURES_PATH / "lake" / "tmp_dataset" / "tags",
+        FIXTURES_PATH / "lake" / "tmp_dataset" / "exports",
+    ):
+        if _dir.exists():
+            shutil.rmtree(_dir)
 
 
 # https://pawamoy.github.io/posts/local-http-server-fake-files-testing-purposes/

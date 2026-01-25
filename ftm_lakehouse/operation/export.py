@@ -52,10 +52,6 @@ class ExportIndexJob(BaseExportJob):
         path.ENTITIES_JSON,
         path.EXPORTS_DOCUMENTS,
     ]
-    include_statements_csv: bool = False
-    include_entities_json: bool = False
-    include_documents_csv: bool = False
-    include_statistics: bool = False
 
 
 class BaseExportOperation(DatasetJobOperation[J]):
@@ -69,26 +65,6 @@ class BaseExportOperation(DatasetJobOperation[J]):
         if not self.tags.is_latest(tag.JOURNAL_FLUSHED, [tag.JOURNAL_UPDATED]):
             self.entities.flush()
 
-    def export_statements(self) -> None:
-        self.ensure_flush()
-        output_uri = self.entities._store.get_key(path.EXPORTS_STATEMENTS)
-        self.entities._store.ensure_parent(path.EXPORTS_STATEMENTS)
-        self.entities._statements.export_csv(output_uri)
-
-    def export_entities(self) -> None:
-        self.ensure_flush()
-        output_uri = self.entities._store.get_key(path.ENTITIES_JSON)
-        smart_write_proxies(output_uri, self.entities.query())
-
-    def export_documents(self) -> None:
-        self.ensure_flush()
-        self.documents.export_csv(self.dataset.get_public_prefix())
-
-    def export_statistics(self) -> None:
-        self.ensure_flush()
-        stats = self.entities.make_statistics()
-        self.versions.make(path.STATISTICS, stats)
-
 
 class ExportStatementsOperation(BaseExportOperation[ExportStatementsJob]):
     """Export parquet store to statements.csv. Checks if journal needs to be
@@ -96,7 +72,10 @@ class ExportStatementsOperation(BaseExportOperation[ExportStatementsJob]):
     update."""
 
     def handle(self, run: JobRun, *args, **kwargs) -> None:
-        self.export_statements()
+        self.ensure_flush()
+        output_uri = self.entities._store.get_key(path.EXPORTS_STATEMENTS)
+        self.entities._store.ensure_parent(path.EXPORTS_STATEMENTS)
+        self.entities._statements.export_csv(output_uri)
         run.job.done = 1
 
 
@@ -106,7 +85,9 @@ class ExportEntitiesOperation(BaseExportOperation[ExportEntitiesJob]):
     update."""
 
     def handle(self, run: JobRun, *args, **kwargs) -> None:
-        self.export_entities()
+        self.ensure_flush()
+        output_uri = self.entities._store.get_key(path.ENTITIES_JSON)
+        smart_write_proxies(output_uri, self.entities.query())
         run.job.done = 1
 
 
@@ -116,7 +97,9 @@ class ExportStatisticsOperation(BaseExportOperation[ExportStatisticsJob]):
     statements update."""
 
     def handle(self, run: JobRun, *args, **kwargs) -> None:
-        self.export_statistics()
+        self.ensure_flush()
+        stats = self.entities.make_statistics()
+        self.versions.make(path.STATISTICS, stats)
         run.job.done = 1
 
 
@@ -126,13 +109,14 @@ class ExportDocumentsOperation(BaseExportOperation[ExportDocumentsJob]):
     update."""
 
     def handle(self, run: JobRun, *args, **kwargs) -> None:
-        self.export_documents()
+        self.ensure_flush()
+        self.documents.export_csv(self.dataset.get_public_prefix())
         run.job.done = 1
 
 
 class ExportIndexOperation(BaseExportOperation[ExportIndexJob]):
-    """Export index.json, optionally including statistics and url to entities.ftm.json,
-    therefore these targets need to be done as well."""
+    """Export index.json, optionally including resources, therefore these
+    targets need to be existing."""
 
     def handle(
         self,
@@ -141,50 +125,26 @@ class ExportIndexOperation(BaseExportOperation[ExportIndexJob]):
         **kwargs,
     ) -> None:
         self.ensure_flush()
-        force = kwargs.get("force", False)
         public_prefix = self.dataset.get_public_prefix()
         store = get_store(self.dataset.uri)
 
-        if run.job.include_statements_csv:
-            if force or not self.tags.is_latest(
-                path.EXPORTS_STATEMENTS, [tag.STATEMENTS_UPDATED]
-            ):
-                with self.tags.touch(path.EXPORTS_STATEMENTS):
-                    self.export_statements()
-            if public_prefix and store.exists(path.EXPORTS_STATEMENTS):
+        if public_prefix:
+            if store.exists(path.EXPORTS_STATEMENTS):
                 uri = join_uri(self.dataset.uri, path.EXPORTS_STATEMENTS)
                 public_url = join_uri(public_prefix, path.EXPORTS_STATEMENTS)
                 self.dataset.resources.append(make_statements_resource(uri, public_url))
 
-        if run.job.include_entities_json:
-            if force or not self.tags.is_latest(
-                path.ENTITIES_JSON, [tag.STATEMENTS_UPDATED]
-            ):
-                with self.tags.touch(path.ENTITIES_JSON):
-                    self.export_entities()
-            if public_prefix and store.exists(path.ENTITIES_JSON):
+            if store.exists(path.ENTITIES_JSON):
                 uri = join_uri(self.dataset.uri, path.ENTITIES_JSON)
                 public_url = join_uri(public_prefix, path.ENTITIES_JSON)
                 self.dataset.resources.append(make_entities_resource(uri, public_url))
 
-        if run.job.include_documents_csv:
-            if force or not self.tags.is_latest(
-                path.EXPORTS_DOCUMENTS, [tag.STATEMENTS_UPDATED]
-            ):
-                with self.tags.touch(path.EXPORTS_DOCUMENTS):
-                    self.export_documents()
-            if public_prefix and store.exists(path.EXPORTS_DOCUMENTS):
+            if store.exists(path.EXPORTS_DOCUMENTS):
                 uri = join_uri(self.dataset.uri, path.EXPORTS_DOCUMENTS)
                 public_url = join_uri(public_prefix, path.EXPORTS_DOCUMENTS)
                 self.dataset.resources.append(make_documents_resource(uri, public_url))
 
-        if run.job.include_statistics:
-            if force or not self.tags.is_latest(
-                path.STATISTICS, [tag.STATEMENTS_UPDATED]
-            ):
-                with self.tags.touch(path.STATISTICS):
-                    self.export_statistics()
-            if public_prefix and store.exists(path.STATISTICS):
+            if store.exists(path.STATISTICS):
                 uri = join_uri(self.dataset.uri, path.STATISTICS)
                 public_url = join_uri(public_prefix, path.STATISTICS)
                 self.dataset.resources.append(make_statistics_resource(uri, public_url))

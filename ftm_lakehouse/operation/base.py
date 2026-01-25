@@ -1,3 +1,4 @@
+from functools import cached_property
 from typing import Generic
 
 from anystore.types import Uri
@@ -55,14 +56,16 @@ class DatasetJobOperation(Generic[DJ]):
         self.jobs = jobs or get_jobs(job.dataset, job.__class__, self.uri)
         self.tags = tags or get_tags(job.dataset, self.uri)
         self.versions = versions or get_versions(job.dataset, self.uri)
-        # Have DatasetModel available:
-        self.dataset: DatasetModel = self.versions.get(
+
+    @cached_property
+    def dataset(self) -> DatasetModel:
+        """Makes current dataset config.yml available to operations"""
+        dataset = self.versions.get(
             path.CONFIG, raise_on_nonexist=False, model=DatasetModel
         )
-        if self.dataset is None:
-            self.dataset = DatasetModel(
-                name=job.dataset, title=job.dataset, uri=self.uri
-            )
+        if dataset is not None:
+            return dataset
+        return DatasetModel(name=self.job.dataset, title=self.job.dataset, uri=self.uri)
 
     def get_target(self) -> str:
         """Return the target tag. Override for dynamic values."""

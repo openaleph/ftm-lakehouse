@@ -164,7 +164,7 @@ def cli_make(
                     "Config already up-to-date", config=config, checksum=checksum
                 )
         if full:
-            make(dataset, with_resources=True, force=bool(force))
+            make(dataset, force=bool(force))
         else:
             dataset.entities.flush()
             export_index(dataset, force=bool(force))

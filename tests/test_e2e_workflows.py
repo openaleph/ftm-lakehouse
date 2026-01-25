@@ -16,6 +16,7 @@ from ftmq.model.stats import DatasetStats
 
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.dataset import Dataset
+from ftm_lakehouse.model.dataset import DatasetModel
 from ftm_lakehouse.model.mapping import DatasetMapping
 from ftm_lakehouse.operation import (
     export_index,
@@ -324,12 +325,12 @@ class TestIncrementalProcessing:
         export_statements(tmp_dataset)
         export_statistics(tmp_dataset)
 
-        # Make index with stats
-        export_index(tmp_dataset, include_all=True)
+        # Make index
+        export_index(tmp_dataset)
 
-        # Verify the index
-        index = tmp_dataset.entities._store.get(path.INDEX)
-        assert index is not None
+        # Verify the index with statistics included
+        index = tmp_dataset._versions.get(path.INDEX, DatasetModel)
+        assert index.stats.things.total == 5
 
     def test_iterate_vs_query_entities(self, tmp_dataset):
         """Test difference between stream (from JSON) and query (from store)."""
