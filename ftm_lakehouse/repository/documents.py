@@ -3,6 +3,7 @@ clients, including diffs"""
 
 from anystore.io import smart_stream_csv_models, smart_write_models
 from anystore.types import Uri
+from anystore.util import join_uri
 from ftmq.query import Query
 
 from ftm_lakehouse.core.conventions import path
@@ -73,7 +74,7 @@ class DocumentRepository(BaseRepository):
 
         return paths
 
-    def collect(self) -> Documents:
+    def collect(self, public_url_prefix: str | None = None) -> Documents:
         paths = self.make_paths()
         q = (
             Query()
@@ -85,16 +86,21 @@ class DocumentRepository(BaseRepository):
                 continue
             assert entity.id  # FIXME (typing)
             document = Document.from_entity(entity)
-            parents = entity.get("parent")
+            if public_url_prefix:
+                document.public_url = join_uri(
+                    public_url_prefix, path.archive_blob(document.checksum)
+                )
             yielded = False
-            for parent in parents:
-                path = paths.get(parent)
-                if path:
-                    document.path = paths.get(parent)
+            for parent in entity.get("parent"):
+                path_ = paths.get(parent)
+                if path_:
+                    document.path = path_
                     yield document
                     yielded = True
             if not yielded:
                 yield document
 
-    def export_csv(self) -> None:
-        smart_write_models(self.csv_uri, self.collect(), output_format="csv")
+    def export_csv(self, public_url_prefix: str | None = None) -> None:
+        smart_write_models(
+            self.csv_uri, self.collect(public_url_prefix), output_format="csv"
+        )

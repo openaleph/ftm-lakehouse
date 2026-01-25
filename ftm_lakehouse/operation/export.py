@@ -80,9 +80,9 @@ class BaseExportOperation(DatasetJobOperation[J]):
         output_uri = self.entities._store.get_key(path.ENTITIES_JSON)
         smart_write_proxies(output_uri, self.entities.query())
 
-    def export_documents(self) -> None:
+    def export_documents(self, public_prefix: str | None = None) -> None:
         self.ensure_flush()
-        self.documents.export_csv()
+        self.documents.export_csv(public_prefix)
 
     def export_statistics(self) -> None:
         self.ensure_flush()
@@ -172,7 +172,7 @@ class ExportIndexOperation(BaseExportOperation[ExportIndexJob]):
                 path.EXPORTS_DOCUMENTS, [tag.STATEMENTS_UPDATED]
             ):
                 with self.tags.touch(path.EXPORTS_DOCUMENTS):
-                    self.export_documents()
+                    self.export_documents(public_prefix)
             if public_prefix:
                 uri = join_uri(dataset.uri, path.EXPORTS_DOCUMENTS)
                 public_url = join_uri(public_prefix, path.EXPORTS_DOCUMENTS)

@@ -11,7 +11,7 @@ from followthemoney import EntityProxy, StatementEntity
 from followthemoney.dataset import DefaultDataset
 from ftmq.types import StatementEntities
 from ftmq.util import make_entity
-from pydantic import ConfigDict, computed_field, model_validator
+from pydantic import ConfigDict, HttpUrl, computed_field, model_validator
 
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.helpers.file import (
@@ -32,9 +32,10 @@ class Document(BaseModel):
     path: str | None = None
     size: int | None = None
     updated_at: datetime | None = None
+    public_url: HttpUrl | None = None
 
     @classmethod
-    def from_entity(cls, e: EntityProxy) -> Self:
+    def from_entity(cls, e: EntityProxy, public_url: str | None = None) -> Self:
         checksum = e.first("contentHash")
         if checksum is None or not e.id:
             raise ValueError(f"Missing contentHash for entity id `{e.id}`")
@@ -45,6 +46,7 @@ class Document(BaseModel):
             mimetype=pick_mime(e.get("mimeType"), guess_mimetype(e.caption)),
             size=e.first("fileSize") or 0,
             updated_at=getattr(e, "last_change", None),
+            public_url=public_url,
         )
 
 

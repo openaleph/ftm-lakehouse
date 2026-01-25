@@ -163,6 +163,8 @@ class ArchiveRepository(BaseRepository):
         file.extra = clean_dict(metadata)
         file.store = str(self.uri)
         file.dataset = self.dataset
+        # hide local information
+        file.raw = {}
 
         # Store metadata
         self._files.put(file)
