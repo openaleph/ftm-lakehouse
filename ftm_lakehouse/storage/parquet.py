@@ -8,6 +8,7 @@ from anystore.util import join_uri
 from followthemoney import Statement
 from ftmq.model.stats import DatasetStats
 from ftmq.query import Query
+from ftmq.store.lake import TABLE as _TABLE
 from ftmq.store.lake import (
     LakeQueryView,
     LakeStore,
@@ -15,7 +16,8 @@ from ftmq.store.lake import (
     query_duckdb,
     setup_duckdb_storage,
 )
-from ftmq.types import StatementEntities
+from ftmq.types import StatementEntities, Statements
+from sqlalchemy import Select
 
 from ftm_lakehouse.core.conventions import path
 
@@ -35,6 +37,8 @@ class ParquetStore:
 
     Layout: statements/bucket={bucket}/origin={origin}/{auto-identifier}.parquet
     """
+
+    TABLE = _TABLE
 
     def __init__(self, uri: Uri, dataset: str) -> None:
         self.uri = join_uri(uri, path.STATEMENTS)
@@ -56,7 +60,7 @@ class ParquetStore:
 
     def query(self, q: Query | None = None) -> StatementEntities:
         """
-        Query statements from the store.
+        Query Entities from the store.
 
         Args:
             q: Optional Query object with filters
@@ -66,6 +70,21 @@ class ParquetStore:
         """
         view = self.view()
         yield from view.query(q or Query())
+
+    def query_statements(self, q: Select | None = None) -> Statements:
+        """
+        Query ordered Statements from the store.
+
+        Args:
+            q: Optional SQLAlchemy query (default: Query().sql.statements)
+
+        Yields:
+            Statement objects matching the query
+        """
+        view = self.view()
+        yield from view.store._iterate_stmts(
+            q if q is not None else Query().sql.statements
+        )
 
     def stats(self) -> DatasetStats:
         """Compute statistics from the statement store."""
