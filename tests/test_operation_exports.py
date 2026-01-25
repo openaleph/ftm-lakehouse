@@ -1,8 +1,11 @@
 """Tests for export operations - statements, entities, statistics, index."""
 
+from anystore.io import smart_stream_csv_models
 from ftmq.util import make_entity
 
 from ftm_lakehouse.core.conventions import path, tag
+from ftm_lakehouse.model.dataset import DatasetModel
+from ftm_lakehouse.model.file import Document
 from ftm_lakehouse.operation.export import (
     ExportDocumentsJob,
     ExportDocumentsOperation,
@@ -168,8 +171,6 @@ def test_operation_export_index(tmp_path):
     ]
 
     # Run the export operation (requires dataset model)
-    from ftm_lakehouse.model.dataset import DatasetModel
-
     dataset = DatasetModel(name=DATASET, title="Export Test Dataset")
     result = op.run(dataset=dataset)
 
@@ -193,9 +194,9 @@ def test_operation_export_documents(tmp_path, fixtures_path):
 
     # Archive files and write their entities
     for key in ["utf.txt", "companies.csv"]:
-        file = archive.store(fixtures_path / "src" / key)
+        doc = archive.store(fixtures_path / "src" / key)
         with repo.bulk() as writer:
-            for entity in file.make_entities():
+            for entity in doc.make_entities():
                 writer.add_entity(entity)
     repo.flush()
 
@@ -223,3 +224,9 @@ def test_operation_export_documents(tmp_path, fixtures_path):
 
     # Verify output file exists at hardcoded path
     assert (dataset_uri / "exports/documents.csv").exists()
+
+    # Check result
+    docs = list(smart_stream_csv_models(dataset_uri / path.EXPORTS_DOCUMENTS, Document))
+    assert len(docs) == 2
+    for doc in docs:
+        assert doc.public_url.startswith(f"https://data.example.org/{DATASET}/archive/")

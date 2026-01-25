@@ -6,12 +6,13 @@ from typing import Any, Generator, Self, TypeAlias
 
 from anystore.mixins import BaseModel
 from anystore.model import Stats
+from anystore.types import HttpUrlStr
 from anystore.util import guess_mimetype
 from followthemoney import EntityProxy, StatementEntity
 from followthemoney.dataset import DefaultDataset
 from ftmq.types import StatementEntities
 from ftmq.util import make_entity
-from pydantic import ConfigDict, HttpUrl, computed_field, model_validator
+from pydantic import ConfigDict, computed_field, model_validator
 
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.helpers.file import (
@@ -32,7 +33,7 @@ class Document(BaseModel):
     path: str | None = None
     size: int | None = None
     updated_at: datetime | None = None
-    public_url: HttpUrl | None = None
+    public_url: HttpUrlStr | None = None
 
     @classmethod
     def from_entity(cls, e: EntityProxy, public_url: str | None = None) -> Self:

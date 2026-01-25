@@ -125,7 +125,7 @@ class Dataset(Generic[DM]):
         """
         model = self._load_model(**data)
         self._versions.make(path.CONFIG, model)
-        self._log.info("Updated dataset config", **data)
+        self._log.info("Updated dataset config")
         return model
 
     # -------------------------------------------------------------------------

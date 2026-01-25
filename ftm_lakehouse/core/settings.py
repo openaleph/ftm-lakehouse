@@ -1,7 +1,7 @@
 from anystore.exceptions import DoesNotExist
 from anystore.io import smart_read
 from anystore.settings import BaseSettings
-from pydantic import HttpUrl
+from anystore.types import HttpUrlStr
 from pydantic_settings import SettingsConfigDict
 
 
@@ -48,4 +48,4 @@ class ApiSettings(BaseSettings):
     description: str = get_api_doc()
     contact: ApiContactSettings | None = None
 
-    allowed_origins: list[HttpUrl] = [HttpUrl("http://localhost:3000")]
+    allowed_origins: list[HttpUrlStr] = ["http://localhost:3000"]

@@ -3,8 +3,8 @@
 from typing import TypeVar
 
 from anystore.model import StoreModel
+from anystore.types import HttpUrlStr
 from ftmq.model import Catalog, Dataset
-from pydantic import HttpUrl
 
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.util import render
@@ -20,9 +20,9 @@ class CatalogModel(Catalog):
 class DatasetModel(Dataset):
     storage: StoreModel | None = None
     """Set storage for external lakehouse"""
-    public_url_prefix: HttpUrl | None = None
+    public_url_prefix: HttpUrlStr | None = None
     """Public url prefix for resources"""
-    archive_public_url_prefix: HttpUrl | None = None
+    archive_public_url_prefix: HttpUrlStr | None = None
     """Compute public urls to source files (e.g. when using a CDN)"""
 
     def get_public_prefix(self) -> str | None:

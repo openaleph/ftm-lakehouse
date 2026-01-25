@@ -2,6 +2,7 @@
 
 from typing import TypeVar
 
+from anystore import get_store
 from anystore.util import join_uri
 from ftmq.io import smart_write_proxies
 from ftmq.model.stats import DatasetStats
@@ -13,7 +14,6 @@ from ftm_lakehouse.helpers.dataset import (
     make_statements_resource,
     make_statistics_resource,
 )
-from ftm_lakehouse.model.dataset import DatasetModel
 from ftm_lakehouse.model.job import DatasetJobModel
 from ftm_lakehouse.operation.base import DatasetJobOperation
 from ftm_lakehouse.repository.job import JobRun
@@ -80,9 +80,9 @@ class BaseExportOperation(DatasetJobOperation[J]):
         output_uri = self.entities._store.get_key(path.ENTITIES_JSON)
         smart_write_proxies(output_uri, self.entities.query())
 
-    def export_documents(self, public_prefix: str | None = None) -> None:
+    def export_documents(self) -> None:
         self.ensure_flush()
-        self.documents.export_csv(public_prefix)
+        self.documents.export_csv(self.dataset.get_public_prefix())
 
     def export_statistics(self) -> None:
         self.ensure_flush()
@@ -137,13 +137,13 @@ class ExportIndexOperation(BaseExportOperation[ExportIndexJob]):
     def handle(
         self,
         run: JobRun[ExportIndexJob],
-        dataset: DatasetModel,
         *args,
         **kwargs,
     ) -> None:
         self.ensure_flush()
         force = kwargs.get("force", False)
-        public_prefix = dataset.get_public_prefix()
+        public_prefix = self.dataset.get_public_prefix()
+        store = get_store(self.dataset.uri)
 
         if run.job.include_statements_csv:
             if force or not self.tags.is_latest(
@@ -151,10 +151,10 @@ class ExportIndexOperation(BaseExportOperation[ExportIndexJob]):
             ):
                 with self.tags.touch(path.EXPORTS_STATEMENTS):
                     self.export_statements()
-            if public_prefix:
-                uri = join_uri(dataset.uri, path.EXPORTS_STATEMENTS)
+            if public_prefix and store.exists(path.EXPORTS_STATEMENTS):
+                uri = join_uri(self.dataset.uri, path.EXPORTS_STATEMENTS)
                 public_url = join_uri(public_prefix, path.EXPORTS_STATEMENTS)
-                dataset.resources.append(make_statements_resource(uri, public_url))
+                self.dataset.resources.append(make_statements_resource(uri, public_url))
 
         if run.job.include_entities_json:
             if force or not self.tags.is_latest(
@@ -162,21 +162,21 @@ class ExportIndexOperation(BaseExportOperation[ExportIndexJob]):
             ):
                 with self.tags.touch(path.ENTITIES_JSON):
                     self.export_entities()
-            if public_prefix:
-                uri = join_uri(dataset.uri, path.ENTITIES_JSON)
+            if public_prefix and store.exists(path.ENTITIES_JSON):
+                uri = join_uri(self.dataset.uri, path.ENTITIES_JSON)
                 public_url = join_uri(public_prefix, path.ENTITIES_JSON)
-                dataset.resources.append(make_entities_resource(uri, public_url))
+                self.dataset.resources.append(make_entities_resource(uri, public_url))
 
         if run.job.include_documents_csv:
             if force or not self.tags.is_latest(
                 path.EXPORTS_DOCUMENTS, [tag.STATEMENTS_UPDATED]
             ):
                 with self.tags.touch(path.EXPORTS_DOCUMENTS):
-                    self.export_documents(public_prefix)
-            if public_prefix:
-                uri = join_uri(dataset.uri, path.EXPORTS_DOCUMENTS)
+                    self.export_documents()
+            if public_prefix and store.exists(path.EXPORTS_DOCUMENTS):
+                uri = join_uri(self.dataset.uri, path.EXPORTS_DOCUMENTS)
                 public_url = join_uri(public_prefix, path.EXPORTS_DOCUMENTS)
-                dataset.resources.append(make_documents_resource(uri, public_url))
+                self.dataset.resources.append(make_documents_resource(uri, public_url))
 
         if run.job.include_statistics:
             if force or not self.tags.is_latest(
@@ -184,16 +184,16 @@ class ExportIndexOperation(BaseExportOperation[ExportIndexJob]):
             ):
                 with self.tags.touch(path.STATISTICS):
                     self.export_statistics()
-            if public_prefix:
-                uri = join_uri(dataset.uri, path.STATISTICS)
+            if public_prefix and store.exists(path.STATISTICS):
+                uri = join_uri(self.dataset.uri, path.STATISTICS)
                 public_url = join_uri(public_prefix, path.STATISTICS)
-                dataset.resources.append(make_statistics_resource(uri, public_url))
+                self.dataset.resources.append(make_statistics_resource(uri, public_url))
 
         # update dataset with computed stats
         stats = self.versions.get(path.STATISTICS, model=DatasetStats)
         if stats:
-            dataset.apply_stats(stats)
+            self.dataset.apply_stats(stats)
 
-        self.versions.make(path.INDEX, dataset)
+        self.versions.make(path.INDEX, self.dataset)
 
         run.job.done = 1

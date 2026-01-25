@@ -2,7 +2,9 @@ from typing import Generic
 
 from anystore.types import Uri
 
+from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.helpers.dataset import make_dataset_uri
+from ftm_lakehouse.model.dataset import DatasetModel
 from ftm_lakehouse.model.job import DJ
 from ftm_lakehouse.repository.archive import ArchiveRepository
 from ftm_lakehouse.repository.documents import DocumentRepository
@@ -44,8 +46,7 @@ class DatasetJobOperation(Generic[DJ]):
         versions: VersionStore | None = None,
         lake_uri: Uri | None = None,
     ) -> None:
-        self.dataset = job.dataset
-        self.uri = make_dataset_uri(self.dataset, lake_uri)
+        self.uri = make_dataset_uri(job.dataset, lake_uri)
         self.job = job
         self.log = job.log
         self.archive = archive or get_archive(job.dataset, self.uri)
@@ -54,6 +55,14 @@ class DatasetJobOperation(Generic[DJ]):
         self.jobs = jobs or get_jobs(job.dataset, job.__class__, self.uri)
         self.tags = tags or get_tags(job.dataset, self.uri)
         self.versions = versions or get_versions(job.dataset, self.uri)
+        # Have DatasetModel available:
+        self.dataset: DatasetModel = self.versions.get(
+            path.CONFIG, raise_on_nonexist=False, model=DatasetModel
+        )
+        if self.dataset is None:
+            self.dataset = DatasetModel(
+                name=job.dataset, title=job.dataset, uri=self.uri
+            )
 
     def get_target(self) -> str:
         """Return the target tag. Override for dynamic values."""
@@ -106,4 +115,4 @@ class DatasetJobOperation(Generic[DJ]):
         raise RuntimeError("Result is `None`")
 
     def __repr__(self) -> str:
-        return f"<{self.__class__.__name__}({self.dataset})>"
+        return f"<{self.__class__.__name__}({self.dataset.name})>"

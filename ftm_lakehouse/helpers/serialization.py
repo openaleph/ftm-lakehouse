@@ -1,4 +1,4 @@
-from anystore.model import BaseModel
+from anystore.mixins import BaseModel
 from anystore.types import M, Uri
 from anystore.util import dump_json_model, dump_yaml_model, get_extension
 

@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import Generic
 
+from anystore.exceptions import DoesNotExist
 from anystore.mixins import BaseModel
 from anystore.types import M, Uri
 from anystore.util import join_relpaths
@@ -82,10 +83,21 @@ class VersionStore(ByteStorage):
         super().__init__(uri)
         self.versions: dict[str, VersionedModelStore] = {}
         self.exists = self._store.exists
-        self.get = self._store.get
 
     def make(self, key: str, obj: BaseModel) -> str:
         clz = obj.__class__.__name__
         if clz not in self.versions:
             self.versions[clz] = VersionedModelStore(self.uri, obj.__class__)
         return self.versions[clz].make(key, obj)
+
+    def get(
+        self, key: str, model: type[M], raise_on_nonexist: bool | None = True
+    ) -> M | None:
+        clz = model.__name__
+        if clz not in self.versions:
+            self.versions[clz] = VersionedModelStore(self.uri, model)
+        try:
+            return self.versions[clz].get(key)
+        except DoesNotExist as e:
+            if raise_on_nonexist:
+                raise e
