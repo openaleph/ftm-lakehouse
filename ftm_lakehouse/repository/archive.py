@@ -226,6 +226,10 @@ class ArchiveRepository(BaseRepository):
             return checksum
         if not checksum:
             checksum = make_checksum(fh)
+            if self.exists(checksum):
+                self.log.debug("Blob already exists, skipping", checksum=checksum)
+                return checksum
+            fh.seek(0)
         with self._blobs.open(checksum, "wb") as out:
             while chunk := fh.read(8192):
                 out.write(chunk)
