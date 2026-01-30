@@ -20,9 +20,6 @@ from ftm_lakehouse.operation.base import DatasetJobOperation
 from ftm_lakehouse.repository import ArchiveRepository, EntityRepository, JobRepository
 from ftm_lakehouse.repository.job import JobRun
 
-CRAWL_ORIGIN = "crawl"
-"""Default origin identifier for crawled files."""
-
 
 class CrawlJob(DatasetJobModel):
     """
@@ -113,9 +110,9 @@ class CrawlOperation(DatasetJobOperation[CrawlJob]):
         now = datetime.now()
 
         self.log.info(f"Crawling `{uri}` ...", source=self.source.uri)
-        file = self.archive.store(uri, self.source, origin=CRAWL_ORIGIN)
+        file = self.archive.store(uri, self.source, origin=tag.CRAWL_ORIGIN)
         if self.job.make_entities:
-            self.entities.add_many(file.make_entities(), CRAWL_ORIGIN)
+            self.entities.add_many(file.make_entities(), tag.CRAWL_ORIGIN)
         run.job.done += 1
         return now
 

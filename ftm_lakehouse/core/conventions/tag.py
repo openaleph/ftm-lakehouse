@@ -45,3 +45,7 @@ def key(key: str) -> str:
 def mapping_tag(content_hash: str) -> str:
     """Get the tag key for a mapping execution."""
     return f"mappings/{content_hash}/last_processed"
+
+
+CRAWL_ORIGIN = "crawl"
+"""Default origin identifier for crawled files."""
