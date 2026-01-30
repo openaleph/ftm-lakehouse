@@ -1,6 +1,7 @@
 from functools import cached_property
 from typing import Generic
 
+from anystore.store import get_store
 from anystore.types import Uri
 
 from ftm_lakehouse.core.conventions import path
@@ -56,6 +57,7 @@ class DatasetJobOperation(Generic[DJ]):
         self.jobs = jobs or get_jobs(job.dataset, job.__class__, self.uri)
         self.tags = tags or get_tags(job.dataset, self.uri)
         self.versions = versions or get_versions(job.dataset, self.uri)
+        self.store = get_store(self.uri)
 
     @cached_property
     def dataset(self) -> DatasetModel:

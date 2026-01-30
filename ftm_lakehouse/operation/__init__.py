@@ -15,12 +15,14 @@ Factory functions provide convenient ways to run operations from a Dataset:
 
 from ftm_lakehouse.operation.crawl import CrawlOperation, crawl
 from ftm_lakehouse.operation.export import (
+    ExportDocumentsOperation,
     ExportEntitiesOperation,
     ExportIndexOperation,
     ExportStatementsOperation,
     ExportStatisticsOperation,
 )
 from ftm_lakehouse.operation.factories import (
+    export_documents,
     export_entities,
     export_index,
     export_statements,
@@ -35,6 +37,7 @@ from ftm_lakehouse.operation.optimize import OptimizeOperation
 __all__ = [
     # Operations
     "CrawlOperation",
+    "ExportDocumentsOperation",
     "ExportEntitiesOperation",
     "ExportIndexOperation",
     "ExportStatementsOperation",
@@ -43,6 +46,7 @@ __all__ = [
     "OptimizeOperation",
     # Factory functions
     "crawl",
+    "export_documents",
     "export_entities",
     "export_index",
     "export_statements",
