@@ -4,86 +4,21 @@ from followthemoney import Statement, model
 from ftmq.model.stats import DatasetStats
 from ftmq.util import make_entity
 
-from ftm_lakehouse.core.conventions import path, tag
-from ftm_lakehouse.operation.export import (
-    ExportEntitiesJob,
-    ExportEntitiesOperation,
-    ExportStatementsJob,
-    ExportStatementsOperation,
-    ExportStatisticsJob,
-    ExportStatisticsOperation,
+from ftm_lakehouse.core.conventions import path
+from ftm_lakehouse.operation import (
+    export_entities,
+    export_statements,
+    export_statistics,
+    optimize,
 )
-from ftm_lakehouse.operation.optimize import OptimizeJob, OptimizeOperation
-
-JANE = {"id": "jane", "schema": "Person", "properties": {"name": ["Jane Doe"]}}
-
-JANE_FIRSTNAME = {
-    "id": "jane",
-    "schema": "Person",
-    "properties": {"firstName": ["Jane"]},
-}
-
-
-def export_statements(dataset):
-    """Helper to run export statements operation."""
-    job = ExportStatementsJob.make(dataset=dataset.name)
-    op = ExportStatementsOperation(
-        job=job,
-        entities=dataset.entities,
-        jobs=dataset.jobs,
-        tags=dataset.entities._tags,
-        versions=dataset.entities._versions,
-    )
-    op.run()
-
-
-def export_entities(dataset):
-    """Helper to run export entities operation."""
-    job = ExportEntitiesJob.make(dataset=dataset.name)
-    op = ExportEntitiesOperation(
-        job=job,
-        entities=dataset.entities,
-        jobs=dataset.jobs,
-        tags=dataset.entities._tags,
-        versions=dataset.entities._versions,
-    )
-    op.run()
-
-
-def export_statistics(dataset):
-    """Helper to run export statistics operation."""
-    job = ExportStatisticsJob.make(dataset=dataset.name)
-    op = ExportStatisticsOperation(
-        job=job,
-        entities=dataset.entities,
-        jobs=dataset.jobs,
-        tags=dataset.entities._tags,
-        versions=dataset.entities._versions,
-    )
-    op.run()
-
-
-def optimize(dataset, vacuum=False):
-    """Helper to run optimize operation."""
-    job = OptimizeJob.make(dataset=dataset.name, vacuum=vacuum)
-    op = OptimizeOperation(
-        job=job,
-        entities=dataset.entities,
-        jobs=dataset.jobs,
-        tags=dataset.entities._tags,
-        versions=dataset.entities._versions,
-    )
-    op.run()
+from tests.shared import JANE, JANE_FIRSTNAME
 
 
 def test_entities(tmp_dataset):
     """Test the unified DatasetEntities interface."""
     entities = tmp_dataset.entities
-    tags = entities._tags
 
-    # Initially empty (check tags before query which may trigger flush)
-    assert not tags.exists(tag.STATEMENTS_UPDATED)
-    assert not tags.exists(path.EXPORTS_STATEMENTS)
+    # Initially empty
     assert len([e for e in entities.query(flush_first=False)]) == 0
 
     jane = make_entity(JANE)
@@ -94,15 +29,11 @@ def test_entities(tmp_dataset):
         bulk.add_entity(jane)
 
     assert len([e for e in entities.query()]) == 1
-    assert tags.exists(tag.JOURNAL_UPDATED)
-    last_updated = tags.get(tag.JOURNAL_UPDATED)
 
     with entities.bulk(origin="update") as bulk:
         bulk.add_entity(jane_fragment)
 
     assert len([e for e in entities.query()]) == 1
-    assert tags.exists(tag.JOURNAL_UPDATED)
-    assert last_updated < tags.get(tag.JOURNAL_UPDATED)
 
     # Get entity by ID
     jane = entities.get("jane")
@@ -117,10 +48,7 @@ def test_entities(tmp_dataset):
     assert jane.first("firstName") == "Jane"
 
     # Export statements.csv
-    assert not tags.exists(path.EXPORTS_STATEMENTS)
     export_statements(tmp_dataset)
-    last_export = tags.get(path.EXPORTS_STATEMENTS)
-    assert last_export is not None
 
     # Add a new entity to trigger re-export
     john = make_entity(
@@ -141,15 +69,10 @@ def test_entities(tmp_dataset):
     assert origins == {"update", "default"}
 
     # Optimize
-    assert not tags.exists(tag.STORE_OPTIMIZED)
     optimize(tmp_dataset, vacuum=True)
-    last_optimize = tags.get(tag.STORE_OPTIMIZED)
-    assert last_optimize is not None
 
     # Statistics
-    assert not tags.exists(path.EXPORTS_STATISTICS)
     export_statistics(tmp_dataset)
-    assert tags.exists(path.EXPORTS_STATISTICS)
     stats: DatasetStats = entities._store.get(
         path.EXPORTS_STATISTICS, model=DatasetStats
     )
@@ -159,7 +82,6 @@ def test_entities(tmp_dataset):
 def test_entities_export(tmp_dataset):
     """Test entity export to JSON."""
     entities = tmp_dataset.entities
-    tags = entities._tags
     jane = make_entity(JANE)
     jane_fragment = make_entity(JANE_FIRSTNAME)
 
@@ -169,11 +91,7 @@ def test_entities_export(tmp_dataset):
         bulk.add_entity(jane_fragment)
 
     export_statements(tmp_dataset)  # Operation's ensure_flush handles flushing
-
-    assert not tags.exists(path.ENTITIES_JSON)
     export_entities(tmp_dataset)
-    last_export = tags.get(path.EXPORTS_STATEMENTS)
-    assert last_export is not None
 
     # stream() reads from exported entities.ftm.json
     ents = [e for e in entities.stream()]

@@ -5,10 +5,7 @@ from ftmq.util import make_entity
 
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.repository import EntityRepository
-
-JANE = {"id": "jane", "schema": "Person", "properties": {"name": ["Jane Doe"]}}
-JOHN = {"id": "john", "schema": "Person", "properties": {"name": ["John Doe"]}}
-BOB = {"id": "bob", "schema": "Person", "properties": {"name": ["Bob"]}}
+from tests.shared import BOB, JANE, JOHN
 
 
 def test_repository_entities_local(tmp_path):

@@ -19,11 +19,9 @@ from ftm_lakehouse.operation.export import (
     ExportStatisticsOperation,
 )
 from ftm_lakehouse.repository import ArchiveRepository, EntityRepository
+from tests.shared import JANE, JOHN
 
 DATASET = "export_test"
-
-JANE = {"id": "jane", "schema": "Person", "properties": {"name": ["Jane Doe"]}}
-JOHN = {"id": "john", "schema": "Person", "properties": {"name": ["John Doe"]}}
 
 
 def setup_entities(repo: EntityRepository) -> None:
