@@ -87,7 +87,7 @@ Single-purpose storage interfaces. Each store does ONE thing.
 
 ```
 storage/
-  base.py        # BaseStore - common store interface
+  base.py        # Store - common store interface
   blob.py        # BlobStore - raw file bytes (content-addressed)
   file.py        # FileStore - JSON metadata files (File model)
   text.py        # TextStore - extracted text content
@@ -237,7 +237,7 @@ ftm_lakehouse/
 │
 ├── storage/
 │   ├── __init__.py          # Exports all stores
-│   ├── base.py              # BaseStore
+│   ├── base.py              # Store
 │   ├── blob.py              # BlobStore
 │   ├── file.py              # FileStore
 │   ├── text.py              # TextStore

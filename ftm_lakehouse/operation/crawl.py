@@ -110,7 +110,9 @@ class CrawlOperation(DatasetJobOperation[CrawlJob]):
         now = datetime.now()
 
         self.log.info(f"Crawling `{uri}` ...", source=self.source.uri)
-        file = self.archive.store(uri, self.source, origin=tag.CRAWL_ORIGIN)
+        file = self.archive.store(
+            self.source.to_uri(uri), key=uri, origin=tag.CRAWL_ORIGIN
+        )
         if self.job.make_entities:
             self.entities.add_many(file.make_entities(), tag.CRAWL_ORIGIN)
         run.job.done += 1
@@ -142,7 +144,7 @@ def crawl(
     archive: ArchiveRepository | None = None,
     entities: EntityRepository | None = None,
     jobs: JobRepository | None = None,
-    lake_uri: Uri | None = None,
+    dataset_uri: Uri | None = None,
     make_entities: bool | None = False,
 ) -> CrawlJob:
     """
@@ -189,6 +191,6 @@ def crawl(
         archive=archive,
         entities=entities,
         jobs=jobs,
-        lake_uri=lake_uri,
+        uri=dataset_uri,
     )
     return op.run()

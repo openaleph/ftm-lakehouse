@@ -56,6 +56,13 @@ Dataset Layout
                 documents.csv               # document metadata
                 graph.cypher                # neo4j export (optional)
 
+            diffs/
+                entities.ftm.json/
+                    v10_20240116T103000Z.delta.json  # entities delta
+                exports/
+                    documents.csv/
+                        v10_20240116T103000Z.documents.diff.csv  # documents delta
+
             jobs/
                 runs/
                     {job_type}/
@@ -80,6 +87,9 @@ CONFIG = "config.yml"
 STATISTICS = "statistics.json"
 """computed statistics filename"""
 
+TS_FORMAT = "%Y%m%dT%H%M%S%fZ"
+"""Global format for timestamps in files"""
+
 VERSIONS = "versions"
 """Base path for versions"""
 
@@ -88,20 +98,20 @@ def version(name: str, ts: str | None = None) -> str:
     """
     Get a versioned snapshot path for a file, e.g. for index.json or config.yml
 
-    Layout: versions/YYYY/MM/YYYY-MM-DDTHH:MM:SS/<name>
+    Layout: versions/YYYY/MM/{TS_FORMAT}/<name>
 
     Args:
         name: The file name to version (e.g. "config.yml", "index.json")
         ts: ISO timestamp, omit to use current time
 
     Returns:
-        Path like "versions/2025/01/2025-01-15T10:30:00/config.yml"
+        Path like "versions/2025/01/20250115T103000/config.yml"
     """
     if ts is None:
-        ts = datetime.now(timezone.utc).isoformat()
+        ts = datetime.now(timezone.utc).strftime(TS_FORMAT)
 
     year = ts[:4]
-    month = ts[5:7]
+    month = ts[4:6]
     return f"{VERSIONS}/{year}/{month}/{ts}/{name}"
 
 
@@ -240,6 +250,59 @@ EXPORTS_STATEMENTS = f"{EXPORTS}/statements.csv"
 
 EXPORTS_DOCUMENTS = f"{EXPORTS}/documents.csv"
 """documents metadata to stream"""
+
+DIFFS = "diffs"
+"""Base path for diff exports"""
+
+DIFFS_DOCUMENTS = f"{DIFFS}/{EXPORTS_DOCUMENTS}"
+"""Base path for document.csv diffs"""
+
+DIFFS_ENTITIES = f"{DIFFS}/{ENTITIES_JSON}"
+"""Base path for entities.ftm.json diffs"""
+
+
+def documents_diff(version: int, ts: datetime | None = None) -> str:
+    """
+    Get path for a documents diff export file.
+
+    Layout: diffs/exports/documents.csv/v{version}_{ts}.diff.csv
+
+    Args:
+        version: Delta table version number
+        ts: Compact timestamp (YYYYMMDDTHHMMSSZ), defaults to current time
+
+    Returns:
+        Path to diff file
+    """
+    if ts is None:
+        ts = datetime.now(timezone.utc)
+    ts_iso = ts.strftime(TS_FORMAT)
+    return f"{DIFFS_DOCUMENTS}/v{version}_{ts_iso}.diff.csv"
+
+
+def entities_diff(version: int, ts: datetime | None = None) -> str:
+    """
+    Get path for an entities diff export file.
+
+    Layout: diffs/entities.ftm.json/v{version}_{ts}.delta.json
+
+    The delta file contains line-based JSON with operation envelopes:
+        {"op": "ADD", "entity": {"id": "...", "schema": "...", "properties": {...}}}
+        {"op": "MOD", "entity": {"id": "...", "schema": "...", "properties": {...}}}
+        {"op": "DEL", "entity": {"id": "..."}}
+
+    Args:
+        version: Delta table version number
+        ts: Compact timestamp (YYYYMMDDTHHMMSSZ), defaults to current time
+
+    Returns:
+        Path to delta file
+    """
+    if ts is None:
+        ts = datetime.now(timezone.utc)
+    ts_iso = ts.strftime(TS_FORMAT)
+    return f"{DIFFS_ENTITIES}/v{version}_{ts_iso}.delta.json"
+
 
 JOBS = "jobs"
 """Job data prefix"""

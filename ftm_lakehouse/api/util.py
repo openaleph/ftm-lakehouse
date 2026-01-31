@@ -1,5 +1,5 @@
+from anystore.exceptions import DoesNotExist
 from anystore.logging import get_logger
-from anystore.store.fs import DoesNotExist
 from anystore.util import clean_dict
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse

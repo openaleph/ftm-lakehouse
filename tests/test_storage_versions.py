@@ -35,9 +35,7 @@ def test_storage_versions_make(tmp_path):
     assert (tmp_path / versioned_path).exists()
 
     # Verify path structure: versions/YYYY/MM/YYYY-MM-DDTHH:MM:SS.../config.json
-    pattern = (
-        r"^versions/\d{4}/\d{2}/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.*?/config\.json$"
-    )
+    pattern = r"^versions/\d{4}/\d{2}/\d{8}T\d{12}Z/config\.json$"
     assert re.match(pattern, versioned_path)
 
     # Tag should be created at hardcoded path
@@ -139,14 +137,14 @@ def test_storage_versions_nested_path(tmp_path):
     # Main file should exist in nested path
     assert (tmp_path / "exports" / "statistics.json").exists()
 
-    # Versioned path structure: {parent}/versions/YYYY/MM/timestamp/{filename}
+    # Versioned path structure: versions/YYYY/MM/timestamp/{path}
     parts = versioned_path.split("/")
-    assert parts[0] == "exports"
-    assert parts[1] == "versions"
-    assert len(parts[2]) == 4  # YYYY
-    assert len(parts[3]) == 2  # MM
-    assert "T" in parts[4]  # timestamp
-    assert parts[5] == "statistics.json"  # filename only, not exports/statistics.json
+    assert parts[0] == "versions"
+    assert len(parts[1]) == 4  # YYYY
+    assert len(parts[2]) == 2  # MM
+    assert "T" in parts[3]  # timestamp
+    assert parts[4] == "exports"
+    assert parts[5] == "statistics.json"
     assert len(parts) == 6
 
     # Verify file exists

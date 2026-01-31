@@ -5,6 +5,7 @@ from typing import Generator
 
 from anystore.types import Uri
 from anystore.util import join_uri
+from deltalake.exceptions import TableNotFoundError
 from followthemoney import Statement
 from ftmq.model.stats import DatasetStats
 from ftmq.query import Query
@@ -97,6 +98,7 @@ class ParquetStore:
         Args:
             output_uri: Destination URI for the CSV file
         """
+        self._store._backend.ensure_parent(output_uri)
         db = query_duckdb(Query().sql.statements, self._store.deltatable)
         db.write_csv(output_uri)
 
@@ -109,22 +111,26 @@ class ParquetStore:
         Get statement changes for a version range using change data capture.
 
         Args:
-            start_version: Starting version number (default: 1)
+            start_version: Starting version number (default: 0)
             end_version: Ending version number (default: latest)
 
         Yields:
             Tuples of (commit_timestamp, change_type, statement)
         """
-        while batch := self._store.deltatable.load_cdf(
-            starting_version=start_version or 1,
+        reader = self._store.deltatable.load_cdf(
+            starting_version=start_version or 0,
             ending_version=end_version,
-        ).read_next_batch():
-            for row in batch.to_struct_array().to_pylist():
-                yield (
-                    row["_commit_timestamp"],
-                    row["_change_type"],
-                    Statement.from_dict(row),
-                )
+        )
+        try:
+            while batch := reader.read_next_batch():
+                for row in batch.to_struct_array().to_pylist():
+                    yield (
+                        row["_commit_timestamp"],
+                        row["_change_type"],
+                        Statement.from_dict(row),
+                    )
+        except StopIteration:
+            return
 
     def optimize(
         self,
@@ -146,6 +152,15 @@ class ParquetStore:
         writer.optimize(vacuum, vacuum_keep_hours, bucket=bucket, origin=origin)
 
     @property
-    def version(self) -> int:
+    def version(self) -> int | None:
         """Current version of the Delta table."""
-        return self._store.deltatable.version()
+        try:
+            return self._store.deltatable.version()
+        except TableNotFoundError:
+            # deltatable doesn't exist
+            return
+
+    @property
+    def exists(self) -> bool:
+        """Check existence of deltatable"""
+        return self.version is not None

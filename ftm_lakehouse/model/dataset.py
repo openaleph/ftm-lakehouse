@@ -1,7 +1,5 @@
 """Catalog and dataset metadata models."""
 
-from typing import TypeVar
-
 from anystore.model import StoreModel
 from anystore.types import HttpUrlStr
 from ftmq.model import Catalog, Dataset
@@ -27,9 +25,6 @@ class DatasetModel(Dataset):
 
     def get_public_prefix(self) -> str | None:
         if self.public_url_prefix:
-            return str(self.public_url_prefix)
+            return self.public_url_prefix
         if settings.public_url_prefix:
             return render(settings.public_url_prefix, {"dataset": self.name})
-
-
-D = TypeVar("D", bound=DatasetModel)

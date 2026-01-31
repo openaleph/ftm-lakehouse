@@ -1,12 +1,13 @@
 """Dataset class for single-dataset management."""
 
 from functools import cached_property
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic
 
 from anystore.logging import get_logger
 from anystore.store import get_store
 from anystore.types import Uri
 from anystore.util import join_uri
+from ftmq.model.dataset import D
 
 from ftm_lakehouse.core.config import load_config
 from ftm_lakehouse.core.conventions import path
@@ -23,10 +24,8 @@ from ftm_lakehouse.storage.versions import VersionStore
 
 log = get_logger(__name__)
 
-DM = TypeVar("DM", bound=DatasetModel)
 
-
-class Dataset(Generic[DM]):
+class Dataset(Generic[D]):
     """
     A single dataset within the lakehouse.
 
@@ -59,7 +58,7 @@ class Dataset(Generic[DM]):
         self,
         name: str,
         uri: Uri,
-        model_class: type[DM] = DatasetModel,
+        model_class: type[D] = DatasetModel,
     ) -> None:
         self.name = name
         self.uri = uri
@@ -93,25 +92,25 @@ class Dataset(Generic[DM]):
     # Model access (config.yml via VersionStore)
     # -------------------------------------------------------------------------
 
-    def _load_model(self, **data: Any) -> DM:
+    def _load_model(self, **data: Any) -> D:
         """Load dataset model from config.yml."""
         data["name"] = self.name
         data.pop("storage", None)
         return self._model_class(**load_config(self._store, **data))
 
     @property
-    def model(self) -> DM:
+    def model(self) -> D:
         """Load and return the dataset model from config.yml."""
         return self._load_model()
 
     @property
-    def index(self) -> DM:
+    def index(self) -> D:
         """Load and return the generated index.json (or fall back to config.yml)"""
         if self._versions.exists(path.INDEX):
             return self._versions.get(path.INDEX, model=self._model_class)
         return self.model
 
-    def update_model(self, **data: Any) -> DM:
+    def update_model(self, **data: Any) -> D:
         """
         Update config.yml with new data.
 

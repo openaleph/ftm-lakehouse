@@ -22,12 +22,13 @@ mappings = lake.get_mappings("my_data")
 ```
 """
 
-from typing import Any, TypeVar
+from typing import Any
 
 from anystore.functools import weakref_cache as cache
 from anystore.logging import get_logger
 from anystore.types import Uri
 from anystore.util import ensure_uri
+from ftmq.model.dataset import D
 
 from ftm_lakehouse.catalog import Catalog
 from ftm_lakehouse.core.settings import Settings
@@ -41,14 +42,12 @@ from ftm_lakehouse.repository.factories import (
 
 log = get_logger(__name__)
 
-DM = TypeVar("DM", bound=DatasetModel)
-
 
 @cache
 def get_lakehouse(
     uri: Uri | None = None,
-    model_class: type[DM] = DatasetModel,
-) -> Catalog[DM]:
+    model_class: type[D] = DatasetModel,
+) -> Catalog[D]:
     """
     Get a lakehouse catalog.
 
@@ -67,9 +66,9 @@ def get_lakehouse(
 
 def get_dataset(
     name: str,
-    model_class: type[DM] = DatasetModel,
+    model_class: type[D] = DatasetModel,
     **data: Any,
-) -> Dataset[DM]:
+) -> Dataset[D]:
     """
     Get a dataset by name.
 
@@ -87,9 +86,9 @@ def get_dataset(
 
 def ensure_dataset(
     name: str,
-    model_class: type[DM] = DatasetModel,
+    model_class: type[D] = DatasetModel,
     **data: Any,
-) -> Dataset[DM]:
+) -> Dataset[D]:
     """
     Get a dataset and ensure it exists.
 

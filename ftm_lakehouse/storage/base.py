@@ -1,9 +1,9 @@
-from typing import Generic
+from typing import IO, ContextManager, Generic
 
-from anystore.io import ensure_uri
-from anystore.serialize import Mode
-from anystore.store import BaseStore, get_store
+from anystore.logic.serialize import Mode
+from anystore.store import Store, get_store
 from anystore.types import M, Raise, Uri, V
+from anystore.util import ensure_uri
 
 from ftm_lakehouse.exceptions import ImproperlyConfigured
 
@@ -16,28 +16,37 @@ class BaseStorage(Generic[V, Raise]):
 
     serialization_mode: Mode | None = None
     raise_on_nonexist: bool | None = True
-    _store: BaseStore[V, Raise]
+    _store: Store[V, Raise]
 
     def __init__(self, uri: Uri) -> None:
-        self.uri = uri
-        self._store = get_store(
+        self.uri = ensure_uri(uri)
+        self._store: Store[V, Raise] = get_store(
             uri=uri,
             serialization_mode=self.serialization_mode,
             raise_on_nonexist=self.raise_on_nonexist,
         )
 
+    def to_uri(self, key: Uri) -> str:
+        return self._store.to_uri(key)
+
+    def exists(self, key: Uri) -> bool:
+        return self._store.exists(key)
+
+    def open(self, key: Uri, *args, **kwargs) -> ContextManager[IO]:
+        return self._store.open(key, *args, **kwargs)
+
     def __repr__(self) -> str:
-        return f"<{self.__class__.__name__}({ensure_uri(self.uri)})>"
+        return f"<{self.__class__.__name__}({self.uri})>"
 
 
 class ByteStorage(BaseStorage[bytes, Raise]):
     serialization_mode = "raw"
-    _store: BaseStore[bytes, Raise]
+    _store: Store[bytes, Raise]
 
 
 class StrStorage(BaseStorage[str, Raise]):
     serialization_mode = "auto"
-    _store: BaseStore[str, Raise]
+    _store: Store[str, Raise]
 
 
 class ModelStorage(BaseStorage[M, Raise]):
@@ -46,7 +55,7 @@ class ModelStorage(BaseStorage[M, Raise]):
     """
 
     model: type[M]
-    _store: BaseStore[M, Raise]
+    _store: Store[M, Raise]
 
     def __init__(
         self,

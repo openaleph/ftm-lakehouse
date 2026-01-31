@@ -2,12 +2,13 @@
 
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Generator, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generator, Generic
 
 from anystore.logging import get_logger
 from anystore.store import get_store
 from anystore.types import Uri
 from anystore.util import join_uri
+from ftmq.model.dataset import D
 
 from ftm_lakehouse.core.config import load_config
 from ftm_lakehouse.core.conventions import path
@@ -20,10 +21,8 @@ if TYPE_CHECKING:
 
 log = get_logger(__name__)
 
-DM = TypeVar("DM", bound=DatasetModel)
 
-
-class Catalog(Generic[DM]):
+class Catalog(Generic[D]):
     """
     Multi-dataset lakehouse catalog.
 
@@ -47,7 +46,7 @@ class Catalog(Generic[DM]):
     def __init__(
         self,
         uri: Uri,
-        model_class: type[DM] = DatasetModel,
+        model_class: type[D] = DatasetModel,
     ) -> None:
         self.uri = uri
         self._model_class = model_class
@@ -106,7 +105,7 @@ class Catalog(Generic[DM]):
     # Dataset management
     # -------------------------------------------------------------------------
 
-    def get_dataset(self, name: str, **data: Any) -> "Dataset[DM]":
+    def get_dataset(self, name: str, **data: Any) -> "Dataset[D]":
         """
         Get a Dataset instance by name.
 
@@ -132,7 +131,7 @@ class Catalog(Generic[DM]):
 
         return dataset
 
-    def list_datasets(self) -> Generator["Dataset[DM]", None, None]:
+    def list_datasets(self) -> Generator["Dataset[D]", None, None]:
         """
         Iterate through all datasets in the catalog.
 
@@ -144,7 +143,7 @@ class Catalog(Generic[DM]):
             if self._store.exists(f"{dataset_name}/{path.CONFIG}"):
                 yield self.get_dataset(dataset_name)
 
-    def create_dataset(self, name: str, **data: Any) -> "Dataset[DM]":
+    def create_dataset(self, name: str, **data: Any) -> "Dataset[D]":
         """
         Create a new dataset.
 

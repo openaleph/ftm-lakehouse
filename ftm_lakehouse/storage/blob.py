@@ -3,8 +3,7 @@
 from pathlib import Path
 from typing import IO, ContextManager, Literal
 
-from anystore.io import DEFAULT_MODE
-from anystore.store.virtual import get_virtual_path
+from anystore.logic.constants import DEFAULT_MODE
 from anystore.types import BytesGenerator
 
 from ftm_lakehouse.core.conventions import path
@@ -64,7 +63,8 @@ class BlobStore(ByteStorage[Literal[True]]):
             If the blob storage is local, this returns the actual file path. Do
             not modify or delete the file at this path.
         """
-        return get_virtual_path(self._blob_path(checksum), self._store)
+        key = self._blob_path(checksum)
+        return self._store.local_path(key)
 
     def delete(self, checksum: str) -> None:
         """Delete the blob for the given checksum."""

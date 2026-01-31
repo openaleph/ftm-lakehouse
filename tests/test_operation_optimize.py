@@ -16,8 +16,7 @@ def count_parquet_files(repo: EntityRepository) -> int:
 
 def test_operation_optimize(tmp_path):
     """Test OptimizeOperation: compaction and vacuum with tag verification."""
-    dataset_uri = tmp_path / DATASET
-    repo = EntityRepository(dataset=DATASET, uri=dataset_uri)
+    repo = EntityRepository(dataset=DATASET, uri=tmp_path)
 
     # Add entities in multiple batches to create multiple parquet files
     for i in range(3):
@@ -39,11 +38,11 @@ def test_operation_optimize(tmp_path):
 
     # No target tag before run
     target_path = "tags/lakehouse/statements/store_optimized"
-    assert not (dataset_uri / target_path).exists()
+    assert not (tmp_path / target_path).exists()
 
     # Create operation and verify target/dependencies
     job = OptimizeJob.make(dataset=DATASET)
-    op = OptimizeOperation(job=job, lake_uri=tmp_path)
+    op = OptimizeOperation(job=job, uri=tmp_path)
 
     assert op.get_target() == tag.STORE_OPTIMIZED
     assert op.get_target() == "statements/store_optimized"
@@ -58,7 +57,7 @@ def test_operation_optimize(tmp_path):
     assert result.stopped is not None
 
     # Tag should exist at hardcoded path after run
-    assert (dataset_uri / target_path).exists()
+    assert (tmp_path / target_path).exists()
 
     # After optimization, files should be compacted (reduced or same)
     optimized_file_count = count_parquet_files(repo)
@@ -67,8 +66,8 @@ def test_operation_optimize(tmp_path):
 
 def test_operation_optimize_vacuum(tmp_path):
     """Test OptimizeOperation with vacuum=True removes old files."""
-    dataset_uri = tmp_path / DATASET
-    repo = EntityRepository(dataset=DATASET, uri=dataset_uri)
+    tmp_path = tmp_path / DATASET
+    repo = EntityRepository(dataset=DATASET, uri=tmp_path)
 
     # Add entities in multiple batches
     for i in range(3):
@@ -88,14 +87,14 @@ def test_operation_optimize_vacuum(tmp_path):
 
     # First optimize without vacuum (creates compacted files but keeps old ones)
     job = OptimizeJob.make(dataset=DATASET, vacuum=False)
-    op = OptimizeOperation(job=job, lake_uri=tmp_path)
+    op = OptimizeOperation(job=job, uri=tmp_path)
     op.run()
 
     after_optimize_count = count_parquet_files(repo)
 
     # Now run with vacuum=True to purge old files
     job_vacuum = OptimizeJob.make(dataset=DATASET, vacuum=True, vacuum_keep_hours=0)
-    op_vacuum = OptimizeOperation(job=job_vacuum, lake_uri=tmp_path)
+    op_vacuum = OptimizeOperation(job=job_vacuum, uri=tmp_path)
     op_vacuum.run()
 
     after_vacuum_count = count_parquet_files(repo)

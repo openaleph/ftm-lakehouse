@@ -54,7 +54,7 @@ class TestIncrementalProcessing:
         # Initial state - nothing exists
         assert not store.exists(path.CONFIG)
         assert not store.exists(path.INDEX)
-        assert not store.exists(path.STATISTICS)
+        assert not store.exists(path.EXPORTS_STATISTICS)
         assert not store.exists(path.EXPORTS_STATEMENTS)
         assert not store.exists(path.ENTITIES_JSON)
 
@@ -76,18 +76,18 @@ class TestIncrementalProcessing:
 
         # All exports should now exist
         assert store.exists(path.INDEX)
-        assert store.exists(path.STATISTICS)
+        assert store.exists(path.EXPORTS_STATISTICS)
         assert store.exists(path.EXPORTS_STATEMENTS)
         assert store.exists(path.ENTITIES_JSON)
 
         # Verify statistics
-        stats: DatasetStats = store.get(path.STATISTICS, model=DatasetStats)
+        stats: DatasetStats = store.get(path.EXPORTS_STATISTICS, model=DatasetStats)
         assert stats.entity_count == 6  # 5 files + 1 folder
         assert len(stats.things.schemata) == 5  # Document types from crawled files
 
         # Verify versions were created for versioned files
         assert count_versions(tmp_dataset, "index.json") >= 1
-        assert count_versions(tmp_dataset, "statistics.json") >= 1
+        assert count_versions(tmp_dataset, "exports/statistics.json") >= 1
 
     def test_make_skips_when_up_to_date(self, tmp_dataset, fixtures_path):
         """Test that make() skips processing when nothing has changed.
@@ -115,7 +115,7 @@ class TestIncrementalProcessing:
 
         # Record versions after second make
         initial_index_versions = count_versions(tmp_dataset, "index.json")
-        initial_stats_versions = count_versions(tmp_dataset, "statistics.json")
+        initial_stats_versions = count_versions(tmp_dataset, "exports/statistics.json")
 
         # Small delay to ensure timestamps differ
         time.sleep(0.1)
@@ -125,7 +125,10 @@ class TestIncrementalProcessing:
 
         # No new versions should be created
         assert count_versions(tmp_dataset, "index.json") == initial_index_versions
-        assert count_versions(tmp_dataset, "statistics.json") == initial_stats_versions
+        assert (
+            count_versions(tmp_dataset, "exports/statistics.json")
+            == initial_stats_versions
+        )
 
     def test_incremental_entity_addition(self, tmp_dataset):
         """Test adding entities incrementally triggers appropriate updates."""
@@ -139,7 +142,7 @@ class TestIncrementalProcessing:
 
         make(tmp_dataset)
 
-        initial_stats_versions = count_versions(tmp_dataset, "statistics.json")
+        initial_stats_versions = count_versions(tmp_dataset, "exports/statistics.json")
 
         # Verify initial state via query
         initial_entities = list(tmp_dataset.entities.query())
@@ -167,7 +170,10 @@ class TestIncrementalProcessing:
         make(tmp_dataset)
 
         # New version of statistics should exist
-        assert count_versions(tmp_dataset, "statistics.json") > initial_stats_versions
+        assert (
+            count_versions(tmp_dataset, "exports/statistics.json")
+            > initial_stats_versions
+        )
 
     def test_bulk_entity_writing(self, tmp_dataset):
         """Test bulk entity writing with the context manager."""
@@ -184,7 +190,7 @@ class TestIncrementalProcessing:
 
         # Verify all entities were written
         stats: DatasetStats = tmp_dataset.entities._store.get(
-            path.STATISTICS, model=DatasetStats
+            path.EXPORTS_STATISTICS, model=DatasetStats
         )
         assert stats.entity_count == 10
 
@@ -220,7 +226,7 @@ class TestIncrementalProcessing:
 
         # Total count
         stats: DatasetStats = tmp_dataset.entities._store.get(
-            path.STATISTICS, model=DatasetStats
+            path.EXPORTS_STATISTICS, model=DatasetStats
         )
         assert stats.entity_count == 8
 
@@ -241,7 +247,7 @@ class TestIncrementalProcessing:
         # Verify exports exist
         assert store.exists(path.EXPORTS_STATEMENTS)
         assert store.exists(path.ENTITIES_JSON)
-        assert store.exists(path.STATISTICS)
+        assert store.exists(path.EXPORTS_STATISTICS)
 
         # Record initial file size
         initial_csv_content = store.get(path.EXPORTS_STATEMENTS)
@@ -451,7 +457,7 @@ class TestIncrementalProcessing:
 
         # Verify versioning
         assert count_versions(tmp_dataset, "config.yml") >= 1
-        assert count_versions(tmp_dataset, "statistics.json") >= 2
+        assert count_versions(tmp_dataset, "exports/statistics.json") >= 2
 
 
 class TestTagDependencies:
@@ -504,7 +510,7 @@ class TestTagDependencies:
         export_statistics(tmp_dataset)
 
         # Statistics should now be latest relative to STATEMENTS_UPDATED
-        assert tags.is_latest(path.STATISTICS, [tag.STATEMENTS_UPDATED])
+        assert tags.is_latest(path.EXPORTS_STATISTICS, [tag.STATEMENTS_UPDATED])
 
         # Add more data - breaks the "latest" status
         entity2 = model.make_entity("Company")
@@ -514,7 +520,7 @@ class TestTagDependencies:
         tmp_dataset.entities.flush()
 
         # Statistics is no longer latest
-        assert not tags.is_latest(path.STATISTICS, [tag.STATEMENTS_UPDATED])
+        assert not tags.is_latest(path.EXPORTS_STATISTICS, [tag.STATEMENTS_UPDATED])
 
 
 class TestMappingWorkflow:

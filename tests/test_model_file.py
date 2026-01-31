@@ -1,6 +1,6 @@
 from anystore import get_store
 from followthemoney import StatementEntity
-from followthemoney.dataset import DefaultDataset
+from ftmq.util import DEFAULT_DATASET
 from rigour.mime.types import PLAIN
 
 from ftm_lakehouse.model.file import File
@@ -16,7 +16,7 @@ def test_model_file(fixtures_path):
     assert file.key == "src/utf.txt"
     assert file.name == "utf.txt"
     assert file.mimetype == PLAIN
-    assert file.dataset == DefaultDataset.name
+    assert file.dataset == DEFAULT_DATASET == "default"
     assert file.id == file_id
     assert file.size == 19
     file_dict = file.to_dict()

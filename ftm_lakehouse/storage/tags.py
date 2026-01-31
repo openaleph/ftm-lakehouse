@@ -3,8 +3,8 @@
 from datetime import datetime
 from typing import Iterable, Literal
 
-from anystore.store import BaseStore, get_store
-from anystore.tags import Tags as AnyTags
+from anystore.interface.tags import Tags as AnyTags
+from anystore.store import Store, get_store
 from anystore.types import Uri
 from anystore.util import join_uri
 
@@ -25,12 +25,11 @@ class TagStore(AnyTags):
     relative paths from there.
     """
 
-    store = BaseStore[datetime, Literal[False]]
+    store = Store[datetime, Literal[False]]
 
     def __init__(self, uri: Uri, tenant: str | None = None) -> None:
-        store = get_store(
-            uri=uri, raise_on_nonexist=False, key_prefix=path.tag(tenant=tenant)
-        )
+        uri = join_uri(uri, path.tag(tenant=tenant))
+        store = get_store(uri, raise_on_nonexist=False)
         super().__init__(store)
 
     def is_latest(self, key: str, dependencies: Iterable[str]) -> bool:
@@ -59,5 +58,4 @@ class TagStore(AnyTags):
         return ts
 
     def __repr__(self) -> str:
-        prefix = self.store.key_prefix or ""
-        return f"<{self.__class__.__name__}({join_uri(self.store.uri, prefix)})>"
+        return f"<{self.__class__.__name__}({self.store.uri})>"

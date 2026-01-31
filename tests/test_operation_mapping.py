@@ -16,15 +16,14 @@ DATASET = "mapping_test"
 
 def test_operation_mapping(fixtures_path, tmp_path):
     """Test MappingOperation: CSV to entities workflow with tags and origin."""
-    dataset_uri = tmp_path / DATASET
 
     # Archive the CSV file first
-    archive = ArchiveRepository(dataset=DATASET, uri=dataset_uri)
+    archive = ArchiveRepository(dataset=DATASET, uri=tmp_path)
     csv_file = archive.store(fixtures_path / "src/companies.csv", origin="test")
     content_hash = csv_file.checksum
 
     # Create mapping configuration
-    mappings = MappingRepository(dataset=DATASET, uri=dataset_uri)
+    mappings = MappingRepository(dataset=DATASET, uri=tmp_path)
     mapping_config = DatasetMapping(
         dataset=DATASET,
         content_hash=content_hash,
@@ -47,11 +46,11 @@ def test_operation_mapping(fixtures_path, tmp_path):
 
     # No target tag before run
     target_path = f"tags/lakehouse/mappings/{content_hash}/last_processed"
-    assert not (dataset_uri / target_path).exists()
+    assert not (tmp_path / target_path).exists()
 
     # Create operation and verify target/dependencies
     job = MappingJob.make(dataset=DATASET, content_hash=content_hash)
-    op = MappingOperation(job=job, lake_uri=tmp_path)
+    op = MappingOperation(job=job, uri=tmp_path)
 
     assert op.get_target() == tag.mapping_tag(content_hash)
     assert op.get_target() == f"mappings/{content_hash}/last_processed"
@@ -66,8 +65,8 @@ def test_operation_mapping(fixtures_path, tmp_path):
     assert result.stopped is not None
 
     # Verify tag exists at hardcoded path after run
-    assert (dataset_uri / target_path).exists()
-    assert (dataset_uri / f"mappings/{content_hash}/mapping.yml").exists()
+    assert (tmp_path / target_path).exists()
+    assert (tmp_path / f"mappings/{content_hash}/mapping.yml").exists()
 
     # Verify entities were created with correct origin
     origin = mapping_origin(content_hash)

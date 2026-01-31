@@ -29,6 +29,7 @@ from ftm_lakehouse.operation.factories import (
     export_statistics,
     make,
     optimize,
+    recreate,
     run_mapping,
 )
 from ftm_lakehouse.operation.mapping import MappingOperation
@@ -53,5 +54,6 @@ __all__ = [
     "export_statistics",
     "make",
     "optimize",
+    "recreate",
     "run_mapping",
 ]

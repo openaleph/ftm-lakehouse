@@ -2,9 +2,10 @@
 
 from typing import Type
 
-from anystore.queue import Queue
+from anystore.interface.queue import Queue
 from anystore.store import get_store
 from anystore.types import M, Uri
+from anystore.util import join_uri
 
 from ftm_lakehouse.core.conventions import path
 
@@ -23,5 +24,6 @@ class QueueStore(Queue):
     """
 
     def __init__(self, uri: Uri, model: Type[M], tenant: str | None = None) -> None:
-        store = get_store(uri, key_prefix=path.queue(tenant))
+        uri = join_uri(uri, path.queue(tenant))
+        store = get_store(uri)
         super().__init__(store, model)

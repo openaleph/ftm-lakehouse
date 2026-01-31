@@ -1,11 +1,14 @@
+import json
+
 from followthemoney import model
 from ftmq.util import make_entity
 
-from ftm_lakehouse.core.conventions import tag
+from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.repository import EntityRepository
 
 JANE = {"id": "jane", "schema": "Person", "properties": {"name": ["Jane Doe"]}}
 JOHN = {"id": "john", "schema": "Person", "properties": {"name": ["John Doe"]}}
+BOB = {"id": "bob", "schema": "Person", "properties": {"name": ["Bob"]}}
 
 
 def test_repository_entities_local(tmp_path):
@@ -102,3 +105,98 @@ def test_repository_entities_multi_origin(tmp_path):
     assert source_a_only is not None
     assert "John Smith" in source_a_only.get("name")
     assert source_a_only.first("birthDate") is None
+
+
+def test_repository_entities_export_diff(tmp_path):
+    """Test incremental diff export using Delta CDC.
+
+    Initial diff copies entities.ftm.json regardless of Delta table version.
+    Subsequent diffs capture incremental changes via CDC.
+    """
+    from ftmq.io import smart_write_proxies
+
+    repo = EntityRepository("test", tmp_path)
+
+    # Create multiple flushes to simulate real usage where table is at v > 0
+    # before first diff export
+    with repo.bulk() as writer:
+        writer.add_entity(make_entity(JANE))
+    repo.flush()
+    assert repo._statements.version == 0
+
+    with repo.bulk() as writer:
+        writer.add_entity(make_entity(JOHN))
+    repo.flush()
+    assert repo._statements.version == 1
+
+    # Export entities.ftm.json (required for initial diff)
+    entities_json_path = tmp_path / path.ENTITIES_JSON
+    smart_write_proxies(str(entities_json_path), repo.query(flush_first=False))
+
+    # Initial diff - copies entities.ftm.json even though table is at v1
+    diff_name_1 = repo.export_diff()
+    assert diff_name_1.startswith("v1_")
+    diff_files = list((tmp_path / path.DIFFS_ENTITIES).glob("*.delta.json"))
+    assert len(diff_files) == 1  # Initial diff file created
+
+    # Verify initial diff contains both JANE and JOHN (full export)
+    with open(diff_files[0]) as f:
+        lines = f.readlines()
+    assert len(lines) == 2
+    entities = {json.loads(line)["entity"]["id"] for line in lines}
+    assert entities == {"jane", "john"}
+
+    # Add more data: creates Delta table v2
+    with repo.bulk() as writer:
+        writer.add_entity(make_entity(BOB))
+    repo.flush()
+
+    # Incremental diff - captures changes from v1 to v2
+    diff_name_2 = repo.export_diff()
+    assert diff_name_2.startswith("v2_")
+    assert diff_name_2 != diff_name_1
+
+    diff_files = list((tmp_path / path.DIFFS_ENTITIES).glob("*.delta.json"))
+    assert len(diff_files) == 2
+
+    # Find and verify the incremental diff (v2) contains only BOB
+    diff_files_sorted = sorted(diff_files, key=lambda p: p.name)
+    with open(diff_files_sorted[1]) as f:
+        lines = f.readlines()
+    assert len(lines) == 1
+    delta = json.loads(lines[0])
+    assert delta["op"] == "ADD"
+    assert delta["entity"]["id"] == "bob"
+
+
+def test_repository_entities_export_diff_no_changes(tmp_path):
+    """Test diff export when there are no new changes after initial setup."""
+    from ftmq.io import smart_write_proxies
+
+    repo = EntityRepository("test", tmp_path)
+
+    # Create data and flush
+    with repo.bulk() as writer:
+        writer.add_entity(make_entity(JANE))
+    repo.flush()
+    assert repo._statements.version == 0
+
+    with repo.bulk() as writer:
+        writer.add_entity(make_entity(JOHN))
+    repo.flush()
+    assert repo._statements.version == 1
+
+    # Export entities.ftm.json for initial diff
+    entities_json_path = tmp_path / path.ENTITIES_JSON
+    smart_write_proxies(str(entities_json_path), repo.query(flush_first=False))
+
+    # Initial diff (v1) - copies entities.ftm.json
+    diff_name_1 = repo.export_diff()
+    assert diff_name_1.startswith("v1_")
+
+    # Second diff without any new data - no new diff file
+    assert repo.export_diff() is None
+
+    # Only one diff file should exist (initial)
+    diff_files = list((tmp_path / path.DIFFS_ENTITIES).glob("*.delta.json"))
+    assert len(diff_files) == 1

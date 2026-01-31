@@ -16,7 +16,7 @@ def _test_repository_archive(
 
     crawl = get_store(crawl_uri)
     for key in crawl.iterate_keys():
-        archive.store(key, crawl)
+        archive.store(crawl.to_uri(key))
 
     # Tag should be set after store operations
     assert archive._tags.exists(tag.ARCHIVE_UPDATED)
@@ -29,6 +29,8 @@ def _test_repository_archive(
     assert len(files) == 5
 
     content_hash = "5a6acf229ba576d9a40b09292595658bbb74ef56"
+    if base_path:
+        assert (base_path / "archive" / "5a/6a/cf" / content_hash / "blob").exists()
     assert archive.exists(content_hash)
     file = archive.get_file(content_hash)
     assert file.key == "utf.txt"
@@ -40,7 +42,7 @@ def _test_repository_archive(
     assert b"\n".join(archive.stream(file.checksum)) == "Îș unî©ođ€.\n".encode()
 
     # Storing another file updates the tag
-    archive.store("utf.txt", crawl)
+    archive.store(crawl.to_uri("utf.txt"))
     assert archive._tags.get(tag.ARCHIVE_UPDATED) > archive_updated
 
     return True

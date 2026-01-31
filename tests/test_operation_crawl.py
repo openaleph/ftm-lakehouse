@@ -6,13 +6,12 @@ DATASET = "carpet_crawlers"
 
 def test_operation_crawl(fixtures_path, tmp_path):
     """Test CrawlOperation: source files to archive and entities with tags."""
-    dataset_uri = tmp_path / DATASET
 
     # No tag before run
-    assert not (dataset_uri / "tags/lakehouse/operations/crawl/last_run").exists()
+    assert not (tmp_path / "tags/lakehouse/operations/crawl/last_run").exists()
 
     job = CrawlJob.make(dataset=DATASET, uri=fixtures_path / "src", make_entities=True)
-    op = CrawlOperation(job=job, lake_uri=tmp_path)
+    op = CrawlOperation(job=job, uri=tmp_path)
 
     # Verify target and dependencies
     assert op.get_target() == tag.OP_CRAWL
@@ -23,7 +22,7 @@ def test_operation_crawl(fixtures_path, tmp_path):
     assert res.done == 5
 
     # Tag should exist at hardcoded path after run
-    assert (dataset_uri / "tags/lakehouse/operations/crawl/last_run").exists()
+    assert (tmp_path / "tags/lakehouse/operations/crawl/last_run").exists()
 
     # Verify archived files
     files = [f for f in op.archive.iterate_files()]
@@ -53,7 +52,7 @@ def test_operation_crawl_globs(fixtures_path, tmp_path):
         exclude_glob="*.pdf",
         make_entities=True,
     )
-    op = CrawlOperation(job=job, lake_uri=tmp_path)
+    op = CrawlOperation(job=job, uri=tmp_path)
     res = op.run()
     assert res.done == 4
     entities = list(op.entities.query(origin=tag.CRAWL_ORIGIN))
@@ -62,7 +61,7 @@ def test_operation_crawl_globs(fixtures_path, tmp_path):
     job = CrawlJob.make(
         dataset=DATASET, uri=fixtures_path / "src", glob="*.pdf", make_entities=True
     )
-    op = CrawlOperation(job=job, lake_uri=tmp_path)
+    op = CrawlOperation(job=job, uri=tmp_path)
     res = op.run()
     assert res.done == 1
     entities = list(op.entities.query(origin=tag.CRAWL_ORIGIN))

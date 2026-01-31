@@ -1,12 +1,10 @@
 """VersionStore - timestamped snapshot storage."""
 
-from pathlib import Path
 from typing import Generic
 
 from anystore.exceptions import DoesNotExist
-from anystore.mixins import BaseModel
+from anystore.model.base import BaseModel
 from anystore.types import M, Uri
-from anystore.util import join_relpaths
 
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.helpers.serialization import dump_model, load_model
@@ -50,10 +48,7 @@ class VersionedModelStore(ByteStorage, Generic[M]):
             Path to the versioned copy
         """
         with self._tags.touch(key):
-            key_path = Path(key)
-            versioned_path = join_relpaths(
-                key_path.parent.name, path.version(key_path.name)
-            )
+            versioned_path = path.version(str(key))
             raw = dump_model(key, data)
             self._store.put(versioned_path, raw)
             self._store.put(key, raw)

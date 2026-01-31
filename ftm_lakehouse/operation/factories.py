@@ -33,6 +33,11 @@ from ftm_lakehouse.operation.export import (
 )
 from ftm_lakehouse.operation.mapping import MappingJob, MappingOperation
 from ftm_lakehouse.operation.optimize import OptimizeJob, OptimizeOperation
+from ftm_lakehouse.operation.recreate import (
+    RecreateJob,
+    RecreateOperation,
+    RecreateSource,
+)
 
 
 def export_statements(dataset: Dataset, force: bool = False) -> ExportStatementsJob:
@@ -57,18 +62,21 @@ def export_statements(dataset: Dataset, force: bool = False) -> ExportStatements
     return op.run(force=force)
 
 
-def export_entities(dataset: Dataset, force: bool = False) -> ExportEntitiesJob:
+def export_entities(
+    dataset: Dataset, force: bool = False, make_diff: bool = True
+) -> ExportEntitiesJob:
     """
     Run export entities operation (parquet -> entities.ftm.json).
 
     Args:
         dataset: The dataset to export from
         force: Force export even if up-to-date
+        make_diff: Also export delta diff file (default True)
 
     Returns:
         The completed job result
     """
-    job = ExportEntitiesJob.make(dataset=dataset.name)
+    job = ExportEntitiesJob.make(dataset=dataset.name, make_diff=make_diff)
     op = ExportEntitiesOperation(
         job=job,
         entities=dataset.entities,
@@ -101,7 +109,9 @@ def export_statistics(dataset: Dataset, force: bool = False) -> ExportStatistics
     return op.run(force=force)
 
 
-def export_documents(dataset: Dataset, force: bool = False) -> ExportDocumentsJob:
+def export_documents(
+    dataset: Dataset, force: bool = False, make_diff: bool = True
+) -> ExportDocumentsJob:
     """
     Run export documents operation (parquet -> documents.csv).
 
@@ -112,7 +122,7 @@ def export_documents(dataset: Dataset, force: bool = False) -> ExportDocumentsJo
     Returns:
         The completed job result
     """
-    job = ExportDocumentsJob.make(dataset=dataset.name)
+    job = ExportDocumentsJob.make(dataset=dataset.name, make_diff=make_diff)
     op = ExportDocumentsOperation(
         job=job,
         entities=dataset.entities,
@@ -210,6 +220,38 @@ def run_mapping(
         versions=dataset._versions,
     )
     return op.run(force=force)
+
+
+def recreate(
+    dataset: Dataset, source: RecreateSource = RecreateSource.AUTO
+) -> RecreateJob:
+    """
+    Recreate a corrupted dataset by rebuilding the parquet store from exports.
+
+    This operation repairs corrupted lakehouse datasets by clearing the
+    statement store (parquet), then re-importing from the most
+    recent export file (entities.ftm.json or statements.csv).
+
+    Warning: This operation is destructive - it will delete all existing
+    statement data before re-importing from exports.
+
+    Args:
+        dataset: The dataset to recreate
+        source: Source for recreation (AUTO selects based on timestamps)
+        force: Force recreation (always runs since no freshness check)
+
+    Returns:
+        The completed job result
+    """
+    job = RecreateJob.make(dataset=dataset.name, source=source)
+    op = RecreateOperation(
+        job=job,
+        entities=dataset.entities,
+        jobs=dataset.jobs,
+        tags=dataset.archive._tags,
+        versions=dataset.entities._versions,
+    )
+    return op.run()
 
 
 def make(dataset: Dataset, force: bool = False) -> None:

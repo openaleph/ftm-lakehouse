@@ -1,26 +1,19 @@
 """Dataset model helpers"""
 
-from functools import cache
-from pathlib import Path
-
-from anystore.io import get_checksum, get_info
-from anystore.types import Uri
-from anystore.util import join_uri
+from anystore.store.resource import UriResource
 from followthemoney.dataset.resource import DataResource
 from rigour.mime.types import CSV, FTM, JSON
-
-from ftm_lakehouse.core.settings import Settings
 
 
 def make_resource(
     uri: str, mime_type: str | None = None, public_url: str | None = None
 ) -> DataResource:
-    info = get_info(uri)
-    path = Path(uri)
+    res = UriResource(uri)
+    info = res.info()
     return DataResource(
-        name=path.name,
+        name=res.name,
         url=public_url or uri,
-        checksum=get_checksum(uri),
+        checksum=res.checksum(),
         timestamp=info.created_at,
         mime_type=mime_type or info.mimetype,
         size=info.size,
@@ -41,11 +34,3 @@ def make_documents_resource(uri: str, public_url: str | None = None) -> DataReso
 
 def make_statistics_resource(uri: str, public_url: str | None = None) -> DataResource:
     return make_resource(uri, JSON, public_url)
-
-
-@cache
-def make_dataset_uri(name: str, base_uri: Uri | None = None) -> str:
-    if base_uri is None:
-        settings = Settings()
-        base_uri = settings.uri
-    return join_uri(base_uri, name)

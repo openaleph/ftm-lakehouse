@@ -4,11 +4,12 @@ metadata) and optional TextStore for extracted fulltext."""
 from pathlib import Path
 from typing import IO, Any, BinaryIO, ContextManager
 
-from anystore.store import get_store_for_uri
-from anystore.store.base import BaseStore
-from anystore.store.virtual import open_virtual
+from anystore.io.read import open_virtual
+from anystore.logic.constants import CHUNK_SIZE_LARGE
+from anystore.logic.io import stream
+from anystore.store.resource import UriResource
 from anystore.types import BytesGenerator, Uri
-from anystore.util import DEFAULT_HASH_ALGORITHM, join_relpaths, make_checksum
+from anystore.util import join_relpaths, make_checksum
 from banal import clean_dict
 
 from ftm_lakehouse.core.conventions import path, tag
@@ -122,7 +123,6 @@ class ArchiveRepository(BaseRepository):
     def store(
         self,
         uri: Uri,
-        remote_store: BaseStore | None = None,
         file: File | None = None,
         checksum: str | None = None,
         **metadata: Any,
@@ -135,7 +135,6 @@ class ArchiveRepository(BaseRepository):
 
         Args:
             uri: Local or remote URI to the file
-            remote_store: Fetch the URI as key from this store
             file: Optional metadata file object to patch
             checksum: Content hash (skip computation if provided)
             **metadata: Additional data to store in file's extra field, including
@@ -144,15 +143,14 @@ class ArchiveRepository(BaseRepository):
         Returns:
             File metadata object
         """
-        if remote_store is None:
-            remote_store, uri = get_store_for_uri(uri)
+        resource = UriResource(uri)
 
-        # store bytes blob
-        checksum = self.store_blob(uri, remote_store, checksum)
+        # store bytes blob (skipped if already exists)
+        checksum = self.store_blob(uri, checksum)
 
         # file metadata
         if file is None:
-            info = remote_store.info(uri)
+            info = resource.info()
             file = File.from_info(info, checksum)
 
         file.checksum = checksum
@@ -163,8 +161,6 @@ class ArchiveRepository(BaseRepository):
         file.extra = clean_dict(metadata)
         file.store = str(self.uri)
         file.dataset = self.dataset
-        # hide local information
-        file.raw = {}
 
         # Store metadata
         self._files.put(file)
@@ -178,18 +174,12 @@ class ArchiveRepository(BaseRepository):
 
         return file
 
-    def store_blob(
-        self,
-        uri: Uri,
-        remote_store: BaseStore | None = None,
-        checksum: str | None = None,
-    ) -> str:
+    def store_blob(self, uri: Uri, checksum: str | None = None) -> str:
         """
         Store bytes blob from given uri if it doesn't exist yet.
 
         Args:
             uri: Local or remote URI to the file
-            remote_store: Fetch the URI as key from this store
             checksum: Content hash (skip computation if provided)
 
         Returns:
@@ -199,18 +189,7 @@ class ArchiveRepository(BaseRepository):
             self.log.debug("Blob already exists, skipping", checksum=checksum)
             return checksum
 
-        if remote_store is None:
-            remote_store, uri = get_store_for_uri(uri)
-
-        with open_virtual(
-            uri,
-            remote_store,
-            checksum=DEFAULT_HASH_ALGORITHM if checksum is None else None,
-        ) as fh:
-            fh.checksum = checksum or fh.checksum
-            if fh.checksum is None:
-                raise RuntimeError(f"No checksum for `{uri}`")
-
+        with open_virtual(uri) as fh:
             if self.exists(fh.checksum):
                 self.log.debug("Blob already exists, skipping", checksum=fh.checksum)
                 return fh.checksum
@@ -233,8 +212,7 @@ class ArchiveRepository(BaseRepository):
                 return checksum
             fh.seek(0)
         with self._blobs.open(checksum, "wb") as out:
-            while chunk := fh.read(8192):
-                out.write(chunk)
+            stream(fh, out, CHUNK_SIZE_LARGE)
         return checksum
 
     def delete(self, file: File) -> None:

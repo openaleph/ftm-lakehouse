@@ -1,4 +1,4 @@
-from anystore import serialize
+from anystore.logic import serialize
 
 from ftm_lakehouse.model.crud import Crud, CrudAction, CrudResource
 

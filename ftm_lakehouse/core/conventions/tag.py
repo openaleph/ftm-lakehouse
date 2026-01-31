@@ -37,6 +37,9 @@ STATISTICS = "exports/statistics"
 OP_CRAWL = "operations/crawl/last_run"
 """Last crawl (import files) execution"""
 
+OP_RECREATE = "operations/recreate/last_run"
+"""Last recreate (repair dataset) execution"""
+
 
 def key(key: str) -> str:
     return join_relpaths(TAGS, key)

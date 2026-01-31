@@ -4,8 +4,10 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Generator, Iterable
 
+import orjson
+from anystore.io import smart_write_json
 from anystore.store import get_store
-from anystore.types import Uri
+from anystore.types import SDict, Uri
 from anystore.util import Took
 from followthemoney import EntityProxy, Statement, StatementEntity
 from ftmq.io import smart_read_proxies
@@ -17,13 +19,14 @@ from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.helpers.statements import unpack_statement
 from ftm_lakehouse.repository.base import BaseRepository
+from ftm_lakehouse.repository.diff import ParquetDiffMixin
 from ftm_lakehouse.storage import JournalStore, ParquetStore
 from ftm_lakehouse.storage.journal import JournalWriter
 
 settings = Settings()
 
 
-class EntityRepository(BaseRepository):
+class EntityRepository(ParquetDiffMixin, BaseRepository):
     """
     Repository for entity/statement operations.
 
@@ -59,7 +62,7 @@ class EntityRepository(BaseRepository):
         super().__init__(dataset, uri)
         self._journal = JournalStore(dataset, journal_uri or settings.journal_uri)
         self._statements = ParquetStore(uri, dataset)
-        self._store = get_store(self.uri)
+        self._store = get_store(uri)
 
     @contextmanager
     def bulk(self, origin: str | None = None) -> Generator[JournalWriter, None, None]:
@@ -195,17 +198,47 @@ class EntityRepository(BaseRepository):
         This reads from the pre-exported entities.ftm.json file,
         not directly from the parquet store.
         """
-        uri = self._store.get_key(path.ENTITIES_JSON)
+        uri = self._store.to_uri(path.ENTITIES_JSON)
         yield from smart_read_proxies(uri)
 
     def make_statistics(self) -> DatasetStats:
         """Compute statistics from the parquet store."""
         return self._statements.stats()
 
-    def get_changes(
+    # DiffMixin implementation
+
+    _diff_base_path = path.DIFFS_ENTITIES
+
+    def _filter_changes(
         self,
-        start_version: int | None = None,
-        end_version: int | None = None,
-    ) -> Generator[tuple[datetime, str, Statement], None, None]:
-        """Get statement changes for a version range."""
-        yield from self._statements.get_changes(start_version, end_version)
+        changes: Generator[tuple[datetime, str, Statement], None, None],
+    ) -> set[str]:
+        """Track all entity IDs that have any statement change."""
+        changed_entity_ids: set[str] = set()
+        for _, change_type, stmt in changes:
+            if change_type in ("insert", "update_postimage"):
+                changed_entity_ids.add(stmt.entity_id)
+        return changed_entity_ids
+
+    def _write_diff(self, entity_ids: set[str], v: int, ts: datetime, **kwargs) -> str:
+        """Write entities as line-based JSON with operation envelopes."""
+        key = path.entities_diff(v, ts)
+        with self._store.open(key, "wb") as o:
+            smart_write_json(o, self._get_delta_entities(entity_ids))
+        return self._store.to_uri(key)
+
+    def _get_delta_entities(self, entity_ids: set[str]) -> Generator[SDict, None, None]:
+        for entity in self.query(entity_ids=entity_ids, flush_first=False):
+            yield self._make_envelope(entity.to_dict())
+
+    def _make_envelope(self, data: SDict, op: str = "ADD") -> SDict:
+        return {"op": op, "entity": data}
+
+    def _write_initial_diff(self, version: int, ts: datetime, **kwargs) -> None:
+        """Copy over exported entities.ftm.json to initial diff version"""
+        with self._store.open(path.entities_diff(version, ts), "wb") as o:
+            for data in self._store.stream(path.ENTITIES_JSON):
+                line = orjson.dumps(
+                    self._make_envelope(data), option=orjson.OPT_APPEND_NEWLINE
+                )
+                o.write(line)

@@ -4,10 +4,11 @@ from datetime import datetime, timedelta
 from functools import cached_property
 from typing import Self, TypeVar
 
-from anystore.logging import BoundLogger, get_logger
+from anystore.logging import get_logger
 from anystore.model import BaseModel
 from anystore.util import ensure_uuid
 from pydantic import computed_field, field_validator
+from structlog.stdlib import BoundLogger
 
 DEFAULT_USER = "__system__"
 

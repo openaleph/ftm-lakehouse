@@ -1,4 +1,7 @@
+from anystore.io import smart_stream_csv_models
+
 from ftm_lakehouse.core.conventions import path
+from ftm_lakehouse.model.file import Document
 from ftm_lakehouse.repository import (
     ArchiveRepository,
     DocumentRepository,
@@ -124,3 +127,89 @@ def test_repository_document_multi_metadata(tmp_path):
     assert len(ids) == 2
     assert "doc.txt" in names
     assert "same.txt" in names
+
+
+def test_repository_document_export_diff(tmp_path, fixtures_path):
+    """Test incremental diff export using Delta CDC.
+
+    Initial diff copies documents.csv regardless of Delta table version.
+    Subsequent diffs capture incremental changes via CDC.
+    """
+    archive = ArchiveRepository("test", tmp_path)
+    entities = EntityRepository("test", tmp_path)
+    repo = DocumentRepository("test", tmp_path)
+
+    assert entities._statements.version is None
+
+    # Create multiple flushes to simulate real usage where table is at v > 0
+    # before first diff export
+    _archive_with_entities(archive, entities, fixtures_path / "src" / "utf.txt")
+    entities.flush()
+    assert entities._statements.version == 0
+
+    _archive_with_entities(archive, entities, fixtures_path / "src" / "companies.csv")
+    entities.flush()
+    assert entities._statements.version == 1
+
+    # Create initial diff
+    diff_name_1 = repo.export_diff()
+    assert diff_name_1.startswith("v1_")
+
+    diff_files = list((tmp_path / path.DIFFS_DOCUMENTS).glob("*.diff.csv"))
+    assert len(diff_files) == 1  # Initial diff file created
+
+    # Verify initial diff contains both files (full export)
+    initial_diff_docs = list(smart_stream_csv_models(diff_files[0], model=Document))
+    assert len(initial_diff_docs) == 2
+    names = {doc.name for doc in initial_diff_docs}
+    assert names == {"utf.txt", "companies.csv"}
+
+    # Add more data: creates Delta table v3
+    file3 = tmp_path / "new_file.txt"
+    file3.write_text("new content")
+    _archive_with_entities(archive, entities, file3)
+    entities.flush()
+
+    # Incremental diff - captures changes from v2 to v3
+    diff_name_2 = repo.export_diff()
+    assert diff_name_2.startswith("v2_")
+    assert diff_name_2 != diff_name_1
+
+    diff_files = list((tmp_path / path.DIFFS_DOCUMENTS).glob("*.diff.csv"))
+    assert len(diff_files) == 2
+
+    # Find and verify the incremental diff (v2) contains only new_file.txt
+    diff_files_sorted = sorted(diff_files, key=lambda p: p.name)
+    incremental_docs = list(
+        smart_stream_csv_models(diff_files_sorted[1], model=Document)
+    )
+    assert len(incremental_docs) == 1
+    assert incremental_docs[0].name == "new_file.txt"
+
+
+def test_repository_document_export_diff_no_changes(tmp_path, fixtures_path):
+    """Test diff export when there are no new changes after initial setup."""
+    archive = ArchiveRepository("test", tmp_path)
+    entities = EntityRepository("test", tmp_path)
+    repo = DocumentRepository("test", tmp_path)
+
+    # Create data and flush
+    _archive_with_entities(archive, entities, fixtures_path / "src" / "utf.txt")
+    entities.flush()  # v0
+
+    _archive_with_entities(archive, entities, fixtures_path / "src" / "companies.csv")
+    entities.flush()  # v1
+
+    # Export documents.csv for initial diff
+    repo.export_csv()
+
+    # Initial diff (v1) - copies documents.csv
+    diff_name_1 = repo.export_diff()
+    assert diff_name_1.startswith("v1_")
+
+    # Second diff without any new data - no new diff file
+    assert repo.export_diff() is None
+
+    # Only one diff file should exist (initial)
+    diff_files = list((tmp_path / path.DIFFS_DOCUMENTS).glob("*.diff.csv"))
+    assert len(diff_files) == 1

@@ -147,10 +147,12 @@ def test_entities(tmp_dataset):
     assert last_optimize is not None
 
     # Statistics
-    assert not tags.exists(path.STATISTICS)
+    assert not tags.exists(path.EXPORTS_STATISTICS)
     export_statistics(tmp_dataset)
-    assert tags.exists(path.STATISTICS)
-    stats: DatasetStats = entities._store.get(path.STATISTICS, model=DatasetStats)
+    assert tags.exists(path.EXPORTS_STATISTICS)
+    stats: DatasetStats = entities._store.get(
+        path.EXPORTS_STATISTICS, model=DatasetStats
+    )
     assert stats.entity_count == 2  # jane and john
 
 

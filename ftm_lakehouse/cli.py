@@ -10,20 +10,12 @@ from pydantic import BaseModel
 from rich.console import Console
 
 from ftm_lakehouse import __version__
+from ftm_lakehouse import operation as op
 from ftm_lakehouse.catalog import Catalog
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.dataset import Dataset
 from ftm_lakehouse.lake import get_dataset, get_lakehouse
 from ftm_lakehouse.model.dataset import DatasetModel
-from ftm_lakehouse.operation import (
-    crawl,
-    export_entities,
-    export_index,
-    export_statements,
-    make,
-    optimize,
-    run_mapping,
-)
 
 settings = Settings()
 cli = typer.Typer(
@@ -146,6 +138,13 @@ def cli_make(
         Optional[bool],
         typer.Option(help="Re-compute full exports pipeline even if up-to-date."),
     ] = False,
+    recreate: Annotated[
+        Optional[bool],
+        typer.Option(
+            "--recreate",
+            help="Recreate statement store from exports (repair corrupted datasets)",
+        ),
+    ] = False,
 ):
     """
     Make or update a dataset. Use --full for a full update including
@@ -163,11 +162,13 @@ def cli_make(
                 dataset._log.info(
                     "Config already up-to-date", config=config, checksum=checksum
                 )
+        if recreate:
+            op.recreate(dataset)
         if full:
-            make(dataset, force=bool(force))
+            op.make(dataset, force=bool(force))
         else:
             dataset.entities.flush()
-            export_index(dataset, force=bool(force))
+            op.export_index(dataset, force=bool(force))
         console.print(dataset.index)
 
 
@@ -202,19 +203,38 @@ def cli_export_statements():
     Export statement store to sorted `statements.csv`
     """
     with DatasetContext() as dataset:
-        export_statements(dataset)
+        op.export_statements(dataset)
         console.print("Exported statements.csv")
 
 
 @cli.command("export-entities")
 def cli_export_entities():
     """
-    Export `statements.csv` to `entities.json`
+    Export statement store to `entities.json`
     """
     with DatasetContext() as dataset:
-        export_statements(dataset)
-        export_entities(dataset)
+        op.export_entities(dataset)
         console.print("Exported entities.ftm.json")
+
+
+@cli.command("export-statistics")
+def cli_export_statistics():
+    """
+    Export statement store statistics to `statistics.json`
+    """
+    with DatasetContext() as dataset:
+        op.export_statistics(dataset)
+        console.print("Exported statistics.json")
+
+
+@cli.command("export-documents")
+def cli_export_documents():
+    """
+    Export document metadata to `documents.csv`
+    """
+    with DatasetContext() as dataset:
+        op.export_documents(dataset)
+        console.print("Exported documents.csv")
 
 
 @cli.command("optimize")
@@ -227,30 +247,8 @@ def cli_optimize(
     Optimize a datasets statement store
     """
     with DatasetContext() as dataset:
-        optimize(dataset, vacuum=bool(vacuum))
+        op.optimize(dataset, vacuum=bool(vacuum))
         console.print("Optimized statement store")
-
-
-# @cli.command("versions")
-# def cli_versions():
-#     """Show versions of dataset"""
-#     with Dataset() as dataset:
-#         for version in dataset.documents.get_versions():
-#             console.print(version)
-
-
-# @cli.command("diff")
-# def cli_diff(
-#     version: Annotated[str, typer.Option("-v", help="Version")],
-#     out_uri: Annotated[str, typer.Option("-o")] = "-",
-# ):
-#     """
-#     Show documents diff for given version
-#     """
-#     with Dataset() as dataset:
-#         ver = dataset.documents.get_version(version)
-#         with smart_open(out_uri, DEFAULT_WRITE_MODE) as out:
-#             out.write(ver)
 
 
 @archive.command("get")
@@ -319,7 +317,7 @@ def cli_crawl(
     Crawl documents from local or remote sources
     """
     with DatasetContext() as dataset:
-        result = crawl(
+        result = op.crawl(
             dataset.name,
             uri,
             archive=dataset.archive,
@@ -372,13 +370,13 @@ def cli_mappings_process(
     """
     with DatasetContext() as dataset:
         if content_hash:
-            result = run_mapping(dataset, content_hash)
+            result = op.run_mapping(dataset, content_hash)
             console.print(f"Generated {result.done} entities from {content_hash}")
         else:
             total = 0
             count = 0
             for mapping_hash in dataset.mappings.list():
-                result = run_mapping(dataset, mapping_hash)
+                result = op.run_mapping(dataset, mapping_hash)
                 if result.done > 0:
                     console.print(f"{mapping_hash}: {result.done} entities")
                 total += result.done

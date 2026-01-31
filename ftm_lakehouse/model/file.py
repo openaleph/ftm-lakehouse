@@ -4,14 +4,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Generator, Self, TypeAlias
 
-from anystore.mixins import BaseModel
 from anystore.model import Stats
+from anystore.model.base import BaseModel
 from anystore.types import HttpUrlStr
 from anystore.util import guess_mimetype
 from followthemoney import EntityProxy, StatementEntity
-from followthemoney.dataset import DefaultDataset
 from ftmq.types import StatementEntities
-from ftmq.util import make_entity
+from ftmq.util import DEFAULT_DATASET, make_entity
 from pydantic import ConfigDict, computed_field, model_validator
 
 from ftm_lakehouse.core.conventions import path
@@ -63,6 +62,8 @@ class File(Stats):
     """SHA1 checksum (often referred to as `content_hash`)"""
     extra: dict[str, Any] = {}
     """Arbitrary extra data"""
+    origin: str | None = None
+    """Origin stage of this file"""
 
     @model_validator(mode="before")
     @classmethod
@@ -139,7 +140,7 @@ class File(Stats):
 
     @classmethod
     def from_info(cls, info: Stats, checksum: str, **data) -> Self:
-        data["dataset"] = data.get("dataset", DefaultDataset.name)
+        data["dataset"] = data.get("dataset", DEFAULT_DATASET)
         data["checksum"] = checksum
         return cls(**{**info.model_dump(), **data})
 

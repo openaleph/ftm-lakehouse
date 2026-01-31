@@ -1,19 +1,26 @@
 """DocumentRepository - compiled metadata (csv) about files to consume for
 clients, including diffs"""
 
+from datetime import datetime
+from typing import Generator
+
 from anystore.io import smart_stream_csv_models, smart_write_models
+from anystore.logic.constants import CHUNK_SIZE_LARGE
+from anystore.logic.io import stream
 from anystore.types import Uri
 from anystore.util import join_uri
+from followthemoney import Statement, model
 from ftmq.query import Query
 
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.model.file import Document, Documents
 from ftm_lakehouse.repository.base import BaseRepository
+from ftm_lakehouse.repository.diff import ParquetDiffMixin
 from ftm_lakehouse.storage.base import ByteStorage
 from ftm_lakehouse.storage.parquet import ParquetStore
 
 
-class DocumentRepository(BaseRepository):
+class DocumentRepository(ParquetDiffMixin, BaseRepository):
     """
     Repository for documents to consume for clients.
 
@@ -34,11 +41,11 @@ class DocumentRepository(BaseRepository):
     def __init__(self, dataset: str, uri: Uri) -> None:
         super().__init__(dataset, uri)
         self._statements = ParquetStore(uri, dataset)
-        self._store = ByteStorage(uri)
+        self._storage = ByteStorage(uri)
 
     @property
     def csv_uri(self) -> Uri:
-        return self._store._store.get_key(path.EXPORTS_DOCUMENTS)
+        return self._storage.to_uri(path.EXPORTS_DOCUMENTS)
 
     def stream(self) -> Documents:
         yield from smart_stream_csv_models(self.csv_uri, model=Document)
@@ -74,11 +81,11 @@ class DocumentRepository(BaseRepository):
 
         return paths
 
-    def collect(self, public_url_prefix: str | None = None) -> Documents:
+    def collect(self, public_url_prefix: str | None = None, **filters) -> Documents:
         paths = self.make_paths()
         q = (
             Query()
-            .where(schema="Document", schema_include_descendants=True)
+            .where(schema="Document", schema_include_descendants=True, **filters)
             .order_by("contentHash")
         )
         for entity in self._statements.query(q):
@@ -104,3 +111,40 @@ class DocumentRepository(BaseRepository):
         smart_write_models(
             self.csv_uri, self.collect(public_url_prefix), output_format="csv"
         )
+
+    # DiffMixin implementation
+
+    _diff_base_path = path.DIFFS_DOCUMENTS
+
+    def _filter_changes(
+        self,
+        changes: Generator[tuple[datetime, str, Statement], None, None],
+    ) -> set[str]:
+        """Filter for Document entities with contentHash changes."""
+        changed_entity_ids: set[str] = set()
+        for _, change_type, stmt in changes:
+            if change_type in ("insert", "update_postimage"):
+                schema = model.get(stmt.schema)
+                if schema and schema.is_a("Document") and not schema.name == "Folder":
+                    if stmt.prop == "contentHash":
+                        changed_entity_ids.add(stmt.entity_id)
+        return changed_entity_ids
+
+    def _write_diff(self, entity_ids: set[str], v: int, ts: datetime, **kwargs) -> str:
+        """Write documents as CSV."""
+        docs = self.collect(kwargs.get("public_url_prefix"), entity_id__in=entity_ids)
+        key = path.documents_diff(v, ts)
+        with self._storage.open(key, "w") as o:
+            smart_write_models(o, docs, output_format="csv")
+        return self._storage.to_uri(key)
+
+    def _write_initial_diff(self, version: int, ts: datetime, **kwargs) -> None:
+        """Copy over exported documents.csv to initial diff version"""
+        if not self._storage.exists(path.EXPORTS_DOCUMENTS):
+            self.log.info(
+                f"Exporting `{path.EXPORTS_DOCUMENTS}` first to create initial diff."
+            )
+            self.export_csv()
+        with self._storage.open(path.EXPORTS_DOCUMENTS, "rb") as i:
+            with self._storage.open(path.documents_diff(version, ts), "wb") as o:
+                stream(i, o, CHUNK_SIZE_LARGE)
