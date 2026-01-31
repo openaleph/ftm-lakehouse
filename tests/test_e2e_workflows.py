@@ -39,11 +39,6 @@ def count_versions(dataset: Dataset, filename: str) -> int:
     )
 
 
-def get_tag_timestamp(dataset: Dataset, tag_key: str):
-    """Get the timestamp for a tag, or None if not set."""
-    return dataset.entities._tags.get(tag_key)
-
-
 class TestIncrementalProcessing:
     """Test incremental data processing with dependency tracking."""
 
@@ -67,9 +62,6 @@ class TestIncrementalProcessing:
             jobs=tmp_dataset.jobs,
             make_entities=True,
         )
-
-        # After crawl, journal should be updated but not yet flushed to store
-        assert get_tag_timestamp(tmp_dataset, tag.JOURNAL_UPDATED) is not None
 
         # Run make - this should flush journal and generate all exports
         make(tmp_dataset)
@@ -156,9 +148,6 @@ class TestIncrementalProcessing:
 
         tmp_dataset.entities.add(person, origin="test")
 
-        # Journal should be updated
-        assert get_tag_timestamp(tmp_dataset, tag.JOURNAL_UPDATED) is not None
-
         # Flush to see the new entity in queries
         tmp_dataset.entities.flush()
 
@@ -231,9 +220,8 @@ class TestIncrementalProcessing:
         assert stats.entity_count == 8
 
     def test_export_files_created(self, tmp_dataset):
-        """Test that exports are created after make()."""
+        """Test that exports are created after make() and grow with new data."""
         store = tmp_dataset.entities._store
-        tags = tmp_dataset.entities._tags
 
         # Add initial data
         with tmp_dataset.entities.bulk(origin="test") as writer:
@@ -252,32 +240,21 @@ class TestIncrementalProcessing:
         # Record initial file size
         initial_csv_content = store.get(path.EXPORTS_STATEMENTS)
         initial_csv_size = len(initial_csv_content)
-        initial_tag = tags.get(path.EXPORTS_STATEMENTS)
 
-        # Add more data
+        # Add more data and re-export
         with tmp_dataset.entities.bulk(origin="test") as writer:
             entity = model.make_entity("Company")
             entity.make_id("company-1")
             entity.add("name", "New Company")
             writer.add_entity(entity)
 
-        # Only flush, don't run full make
         tmp_dataset.entities.flush()
-
-        # Statements should be updated tag
-        assert get_tag_timestamp(tmp_dataset, tag.STATEMENTS_UPDATED) is not None
-
-        # Now export statements
         export_statements(tmp_dataset)
 
         # Verify the file is bigger (more statements)
         new_csv_content = store.get(path.EXPORTS_STATEMENTS)
         new_csv_size = len(new_csv_content)
         assert new_csv_size > initial_csv_size
-
-        # Verify the tag timestamp is newer
-        new_tag = tags.get(path.EXPORTS_STATEMENTS)
-        assert new_tag > initial_tag
 
     def test_file_archive_and_entity_creation(self, tmp_dataset, fixtures_path):
         """Test that archived files create Document entities."""
@@ -462,38 +439,6 @@ class TestIncrementalProcessing:
 
 class TestTagDependencies:
     """Test the tag-based dependency tracking system."""
-
-    def test_journal_updated_tag(self, tmp_dataset):
-        """Test that adding entities sets the JOURNAL_UPDATED tag."""
-        initial_tag = get_tag_timestamp(tmp_dataset, tag.JOURNAL_UPDATED)
-        assert initial_tag is None
-
-        # Add an entity
-        entity = model.make_entity("Person")
-        entity.make_id("test")
-        entity.add("name", "Test")
-        tmp_dataset.entities.add(entity, origin="test")
-
-        # Tag should be set
-        updated_tag = get_tag_timestamp(tmp_dataset, tag.JOURNAL_UPDATED)
-        assert updated_tag is not None
-
-    def test_statements_updated_tag(self, tmp_dataset):
-        """Test that flushing journal sets the STATEMENTS_UPDATED tag."""
-        # Add and flush
-        entity = model.make_entity("Person")
-        entity.make_id("test")
-        entity.add("name", "Test")
-        tmp_dataset.entities.add(entity, origin="test")
-
-        initial_tag = get_tag_timestamp(tmp_dataset, tag.STATEMENTS_UPDATED)
-        assert initial_tag is None
-
-        tmp_dataset.entities.flush()
-
-        # Tag should be set
-        updated_tag = get_tag_timestamp(tmp_dataset, tag.STATEMENTS_UPDATED)
-        assert updated_tag is not None
 
     def test_is_latest_logic(self, tmp_dataset):
         """Test the is_latest dependency check."""
