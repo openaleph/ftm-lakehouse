@@ -2,24 +2,6 @@
 
 Single-purpose storage interfaces. Each store does one thing.
 
-## BlobStore
-
-Content-addressed blob storage.
-
-::: ftm_lakehouse.storage.BlobStore
-    options:
-        heading_level: 3
-        show_root_heading: true
-
-## FileStore
-
-JSON metadata file storage.
-
-::: ftm_lakehouse.storage.FileStore
-    options:
-        heading_level: 3
-        show_root_heading: true
-
 ## JournalStore
 
 SQL statement buffer for write-ahead logging.

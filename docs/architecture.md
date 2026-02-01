@@ -87,16 +87,16 @@ Single-purpose storage interfaces. Each store does ONE thing.
 
 ```
 storage/
-  base.py        # Store - common store interface
-  blob.py        # BlobStore - raw file bytes (content-addressed)
-  file.py        # FileStore - JSON metadata files (File model)
-  text.py        # TextStore - extracted text content
   parquet.py     # ParquetStore - Delta Lake statement parquet files
   journal.py     # JournalStore - SQL statement buffer (write-ahead log)
   tags.py        # TagStore - key-value freshness tracking
   queue.py       # QueueStore - CRUD action queue
   versions.py    # VersionStore - timestamped snapshots
 ```
+
+Blob, file metadata, and text storage are handled directly by repositories
+using `anystore.Store` instances via `get_store()`, eliminating a layer of
+indirection.
 
 **Principles:**
 
@@ -114,16 +114,18 @@ Domain-specific combinations of multiple stores. Each repository owns ONE domain
 ```
 repository/
   base.py        # BaseRepository - common repository interface
-  archive.py     # ArchiveRepository - uses BlobStore + FileStore + TextStore
+  archive.py     # ArchiveRepository - blobs, file metadata, text (via get_store)
   entities.py    # EntityRepository - uses JournalStore + ParquetStore
+  documents.py   # DocumentRepository - compiled document metadata CSV + diffs
   mapping.py     # MappingRepository - uses VersionStore
-  job.py         # JobRepository - uses VersionStore
+  job.py         # JobRepository - job tracking (via get_store)
   factories.py   # Cached factory functions (get_archive, get_entities, etc.)
 ```
 
 **Principles:**
 
 - Combines stores for a single domain concept
+- May use `get_store()` directly for simple storage needs (blobs, metadata JSON)
 - No cross-domain awareness (ArchiveRepository doesn't know about statements)
 - Provides domain-specific operations
 - Uses TagStore for freshness tracking
@@ -237,10 +239,6 @@ ftm_lakehouse/
 │
 ├── storage/
 │   ├── __init__.py          # Exports all stores
-│   ├── base.py              # Store
-│   ├── blob.py              # BlobStore
-│   ├── file.py              # FileStore
-│   ├── text.py              # TextStore
 │   ├── parquet.py           # ParquetStore
 │   ├── journal.py           # JournalStore, JournalWriter
 │   ├── tags.py              # TagStore

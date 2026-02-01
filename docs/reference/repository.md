@@ -4,7 +4,7 @@ Domain-specific combinations of multiple stores. Each repository owns one domain
 
 ## ArchiveRepository
 
-File archive operations combining BlobStore and FileStore.
+Content-addressed file archive with metadata and extracted text storage.
 
 ```python
 dataset.archive.put(uri)
