@@ -1,16 +1,16 @@
-"""JobRepository - job run storage using FileStore."""
+"""JobRepository - job run storage."""
 
 import contextlib
 from datetime import datetime
 from typing import Generator, Generic
 
 from anystore.logging import get_logger
+from anystore.store import get_store
 from anystore.types import Uri
 
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.model.job import J, JobModel
 from ftm_lakehouse.repository.base import BaseRepository
-from ftm_lakehouse.storage.base import ModelStorage
 
 log = get_logger(__name__)
 
@@ -44,7 +44,7 @@ class JobRepository(BaseRepository, Generic[J]):
     """
     Repository for job run storage.
 
-    Uses ModelStorage to persist job run data as JSON files,
+    Persists job run data as JSON files,
     organized by job type and run ID.
 
     Example:
@@ -68,7 +68,7 @@ class JobRepository(BaseRepository, Generic[J]):
     def __init__(self, dataset: str, uri: Uri, model: type[J]) -> None:
         super().__init__(dataset, uri)
         self.job_type = model.__name__
-        self._store = ModelStorage(uri, model)._store
+        self._store = get_store(uri, model=model)
 
     def put(self, job: JobModel) -> None:
         """Store a job run."""

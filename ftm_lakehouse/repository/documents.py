@@ -7,6 +7,7 @@ from typing import Generator
 from anystore.io import smart_stream_csv_models, smart_write_models
 from anystore.logic.constants import CHUNK_SIZE_LARGE
 from anystore.logic.io import stream
+from anystore.store import get_store
 from anystore.types import Uri
 from anystore.util import join_uri
 from followthemoney import Statement, model
@@ -16,7 +17,6 @@ from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.model.file import Document, Documents
 from ftm_lakehouse.repository.base import BaseRepository
 from ftm_lakehouse.repository.diff import ParquetDiffMixin
-from ftm_lakehouse.storage.base import ByteStorage
 from ftm_lakehouse.storage.parquet import ParquetStore
 
 
@@ -41,7 +41,7 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
     def __init__(self, dataset: str, uri: Uri) -> None:
         super().__init__(dataset, uri)
         self._statements = ParquetStore(uri, dataset)
-        self._storage = ByteStorage(uri)
+        self._storage = get_store(uri, serialization_mode="raw")
 
     @property
     def csv_uri(self) -> Uri:

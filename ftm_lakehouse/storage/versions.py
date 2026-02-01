@@ -1,18 +1,18 @@
 """VersionStore - timestamped snapshot storage."""
 
-from typing import Generic
+from typing import Any, Generator, Generic
 
 from anystore.exceptions import DoesNotExist
 from anystore.model.base import BaseModel
+from anystore.store import get_store
 from anystore.types import M, Uri
 
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.helpers.serialization import dump_model, load_model
-from ftm_lakehouse.storage.base import ByteStorage
 from ftm_lakehouse.storage.tags import TagStore
 
 
-class VersionedModelStore(ByteStorage, Generic[M]):
+class VersionedModelStore(Generic[M]):
     """
     Timestamped snapshot storage for a given model type.
 
@@ -29,12 +29,10 @@ class VersionedModelStore(ByteStorage, Generic[M]):
     model: type[M]
 
     def __init__(self, uri: Uri, model: type[M]) -> None:
-        super().__init__(uri)
+        self.uri = uri
+        self._store = get_store(uri, serialization_mode="raw")
         self._tags = TagStore(uri)
         self.model = model
-        self.delete = self._store.delete
-        self.exists = self._store.exists
-        self.iterate_keys = self._store.iterate_keys
 
     def make(self, key: Uri, data: M) -> str:
         """
@@ -58,6 +56,15 @@ class VersionedModelStore(ByteStorage, Generic[M]):
         """Get the current version of a file."""
         return load_model(key, self._store.get(key), model=self.model)
 
+    def exists(self, key: str) -> bool:
+        return self._store.exists(key)
+
+    def delete(self, key: str) -> None:
+        self._store.delete(key)
+
+    def iterate_keys(self, **kwargs: Any) -> Generator[str, None, None]:
+        yield from self._store.iterate_keys(**kwargs)
+
     def list_versions(self, key: str) -> list[str]:
         """
         List all versioned copies of a file.
@@ -73,11 +80,14 @@ class VersionedModelStore(ByteStorage, Generic[M]):
         return sorted(versions)
 
 
-class VersionStore(ByteStorage):
+class VersionStore:
     def __init__(self, uri: Uri) -> None:
-        super().__init__(uri)
+        self.uri = uri
+        self._store = get_store(uri, serialization_mode="raw")
         self.versions: dict[str, VersionedModelStore] = {}
-        self.exists = self._store.exists
+
+    def exists(self, key: str) -> bool:
+        return self._store.exists(key)
 
     def make(self, key: str, obj: BaseModel) -> str:
         clz = obj.__class__.__name__

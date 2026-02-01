@@ -52,3 +52,6 @@ def mapping_tag(content_hash: str) -> str:
 
 CRAWL_ORIGIN = "crawl"
 """Default origin identifier for crawled files."""
+
+DEFAULT_ORIGIN = "default"
+"""Default origin identifier for extracted text."""
