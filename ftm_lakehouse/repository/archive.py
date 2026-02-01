@@ -110,6 +110,9 @@ class ArchiveRepository(BaseRepository):
         """Get a file-like handle for reading."""
         return self._store.open(path.archive_blob(checksum), mode=DEFAULT_MODE)
 
+    def to_uri(self, checksum: str) -> str:
+        return self._store.to_uri(path.archive_blob(checksum))
+
     def local_path(self, checksum: str) -> ContextManager[Path]:
         """
         Get the local path to the blob.
