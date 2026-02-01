@@ -36,12 +36,14 @@ from typing import Self
 
 import jwt
 from anystore.logging import get_logger
-from fastapi import Depends, Request
+from fastapi import Depends, HTTPException, Request
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 
-from ftm_lakehouse.api.util import DEFAULT_ERROR
 from ftm_lakehouse.core.settings import ApiSettings
+
+UNAUTHORIZED = HTTPException(401, headers={"WWW-Authenticate": "Bearer"})
+FORBIDDEN = HTTPException(403)
 
 settings = ApiSettings()
 log = get_logger(__name__)
@@ -106,7 +108,7 @@ def ensure_token_context(token: str, request: Request) -> TokenData:
     """Decode token and verify it allows the request method and path."""
     if not token:
         log.error("Auth: no token")
-        raise DEFAULT_ERROR
+        raise UNAUTHORIZED
     try:
         payload = jwt.decode(
             token,
@@ -114,22 +116,31 @@ def ensure_token_context(token: str, request: Request) -> TokenData:
             algorithms=[settings.access_token_algorithm],
             verify=True,
         )
-        data = TokenData.from_payload(payload)
-        if not data.allows(request.method, request.url.path):
-            log.error(
-                "Auth: method/path not allowed",
-                method=request.method,
-                path=request.url.path,
-            )
-            raise DEFAULT_ERROR
-        return data
-    except DEFAULT_ERROR.__class__:
-        raise
     except Exception as e:
         log.error(f"Invalid token: `{e}`", token=token)
-        raise DEFAULT_ERROR
+        raise UNAUTHORIZED
+    data = TokenData.from_payload(payload)
+    if not data.allows(request.method, request.url.path):
+        log.error(
+            "Auth: method/path not allowed",
+            method=request.method,
+            path=request.url.path,
+        )
+        raise FORBIDDEN
+    return data
+
+
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 
 def ensure_auth(request: Request, token: str = Depends(oauth2_scheme)) -> TokenData:
-    """Get token data from Authorization header and verify access."""
+    """Get token data from Authorization header and verify access.
+
+    If auth is not required, allow read-only (GET, HEAD, OPTIONS) requests
+    without a token. Write requests are always rejected in public mode.
+    """
+    if not settings.auth_required:
+        if request.method.upper() in SAFE_METHODS:
+            return TokenData(methods=list(SAFE_METHODS), prefixes=["/"])
+        raise FORBIDDEN
     return ensure_token_context(token, request)

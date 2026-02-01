@@ -43,6 +43,7 @@ class ApiSettings(BaseSettings):
     secret_key: str = "change-for-production"
     access_token_expire: int = 5  # minutes
     access_token_algorithm: str = "HS256"
+    auth_required: bool = True
 
     title: str = "FollowTheMoney Data Lakehouse Api"
     description: str = get_api_doc()
