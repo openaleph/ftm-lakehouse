@@ -55,8 +55,7 @@ def export_statements(dataset: Dataset, force: bool = False) -> ExportStatements
     op = ExportStatementsOperation(
         job=job,
         entities=dataset.entities,
-        jobs=dataset.jobs,
-        tags=dataset.archive._tags,
+        tags=dataset._tags,
         versions=dataset.entities._versions,
     )
     return op.run(force=force)
@@ -80,8 +79,7 @@ def export_entities(
     op = ExportEntitiesOperation(
         job=job,
         entities=dataset.entities,
-        jobs=dataset.jobs,
-        tags=dataset.archive._tags,
+        tags=dataset._tags,
         versions=dataset.entities._versions,
     )
     return op.run(force=force)
@@ -102,8 +100,7 @@ def export_statistics(dataset: Dataset, force: bool = False) -> ExportStatistics
     op = ExportStatisticsOperation(
         job=job,
         entities=dataset.entities,
-        jobs=dataset.jobs,
-        tags=dataset.archive._tags,
+        tags=dataset._tags,
         versions=dataset.entities._versions,
     )
     return op.run(force=force)
@@ -126,8 +123,7 @@ def export_documents(
     op = ExportDocumentsOperation(
         job=job,
         entities=dataset.entities,
-        jobs=dataset.jobs,
-        tags=dataset.archive._tags,
+        tags=dataset._tags,
         versions=dataset.entities._versions,
     )
     return op.run(force=force)
@@ -148,11 +144,10 @@ def export_index(dataset: Dataset, force: bool = False) -> ExportIndexJob:
     op = ExportIndexOperation(
         job=job,
         entities=dataset.entities,
-        jobs=dataset.jobs,
-        tags=dataset.archive._tags,
+        tags=dataset._tags,
         versions=dataset.entities._versions,
     )
-    return op.run(force=force)
+    return op.run(force=force, dataset=dataset.model)
 
 
 def optimize(
@@ -187,8 +182,7 @@ def optimize(
     op = OptimizeOperation(
         job=job,
         entities=dataset.entities,
-        jobs=dataset.jobs,
-        tags=dataset.archive._tags,
+        tags=dataset._tags,
         versions=dataset.entities._versions,
     )
     return op.run(force=force)
@@ -215,7 +209,6 @@ def run_mapping(
         job=job,
         archive=dataset.archive,
         entities=dataset.entities,
-        jobs=dataset.jobs,
         tags=dataset._tags,
         versions=dataset._versions,
     )
@@ -247,8 +240,7 @@ def recreate(
     op = RecreateOperation(
         job=job,
         entities=dataset.entities,
-        jobs=dataset.jobs,
-        tags=dataset.archive._tags,
+        tags=dataset._tags,
         versions=dataset.entities._versions,
     )
     return op.run()
