@@ -29,7 +29,6 @@ class CrawlJob(DatasetJobModel):
 
     Attributes:
         uri: Source location URI to crawl
-        skip_existing: Skip files that have already been crawled
         prefix: Include only keys with this prefix
         exclude_prefix: Exclude keys with this prefix
         glob: Include only keys matching this glob pattern
@@ -110,8 +109,11 @@ class CrawlOperation(DatasetJobOperation[CrawlJob]):
         now = datetime.now()
 
         self.log.info(f"Crawling `{uri}` ...", source=self.source.uri)
+        checksum = None
+        if self.source.is_local:
+            checksum = self.source.checksum(uri)
         file = self.archive.store(
-            self.source.to_uri(uri), key=uri, origin=tag.CRAWL_ORIGIN
+            self.source.to_uri(uri), checksum=checksum, key=uri, origin=tag.CRAWL_ORIGIN
         )
         if self.job.make_entities:
             self.entities.add_many(file.make_entities(), tag.CRAWL_ORIGIN)
@@ -157,7 +159,6 @@ def crawl(
         files: ArchiveRepository for archiving
         statements: EntityRepository for entities
         jobs: JobRepository for job tracking
-        skip_existing: Don't re-crawl files that already exist in the archive
         prefix: Include only keys with this prefix
         exclude_prefix: Exclude keys with this prefix
         glob: Glob pattern for keys to include
