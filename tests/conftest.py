@@ -63,6 +63,7 @@ def cleanup_fixtures_tags():
     for _dir in (
         FIXTURES_PATH / "lake" / "tmp_dataset" / "tags",
         FIXTURES_PATH / "lake" / "tmp_dataset" / "exports",
+        FIXTURES_PATH / "lake" / "tmp_dataset" / "jobs",
     ):
         if _dir.exists():
             shutil.rmtree(_dir)
