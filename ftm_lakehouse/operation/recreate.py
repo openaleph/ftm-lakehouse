@@ -3,9 +3,7 @@
 from enum import Enum
 
 from anystore.io import smart_open
-from anystore.store import get_store
 from followthemoney.statement.serialize import read_csv_statements
-from ftmq.io import smart_read_proxies
 
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.model.job import DatasetJobModel
@@ -58,8 +56,8 @@ class RecreateOperation(DatasetJobOperation[RecreateJob]):
         entities_ts = self.tags.get(tag.ENTITIES_JSON)
         statements_ts = self.tags.get(tag.EXPORTS_STATEMENTS)
 
-        entities_exists = self.store.exists(path.ENTITIES_JSON)
-        statements_exists = self.store.exists(path.EXPORTS_STATEMENTS)
+        entities_exists = self.entities._store.exists(path.ENTITIES_JSON)
+        statements_exists = self.entities._store.exists(path.EXPORTS_STATEMENTS)
 
         if not entities_exists and not statements_exists:
             raise RuntimeError(
@@ -88,22 +86,14 @@ class RecreateOperation(DatasetJobOperation[RecreateJob]):
             else RecreateSource.STATEMENTS
         )
 
-    def _clear_store(self) -> None:
-        """Clear the parquet statement store by deleting its delta log files."""
-        store = get_store(self.entities._statements.uri)
-        for key in store.iterate_keys("_delta_log"):
-            self.store.delete(key)
-
-        self.log.info("Cleared statement store", uri=store.uri)
-
     def _import_from_entities(self, run: JobRun[RecreateJob]) -> None:
         """Import entities from entities.ftm.json."""
-        uri = self.store.to_uri(path.ENTITIES_JSON)
+        uri = self.entities._store.to_uri(path.ENTITIES_JSON)
 
         self.log.info(f"Importing from `{path.ENTITIES_JSON}` ...", uri=uri)
 
         with self.entities.bulk() as writer:
-            for entity in smart_read_proxies(uri):
+            for entity in self.entities.stream():
                 writer.add_entity(entity)
                 run.job.entities_imported += 1
 
@@ -123,7 +113,7 @@ class RecreateOperation(DatasetJobOperation[RecreateJob]):
 
     def _import_from_statements(self, run: JobRun[RecreateJob]) -> None:
         """Import statements from statements.csv."""
-        uri = self.store.to_uri(path.EXPORTS_STATEMENTS)
+        uri = self.entities._store.to_uri(path.EXPORTS_STATEMENTS)
 
         self.log.info(f"Importing from `{path.EXPORTS_STATEMENTS}` ...", uri=uri)
 
@@ -177,7 +167,7 @@ class RecreateOperation(DatasetJobOperation[RecreateJob]):
         self.log.info("Recreating dataset", source=source.value)
 
         # Step 1: Clear the parquet statement store
-        self._clear_store()
+        self.entities._statements.destroy()
 
         # Step 2: Re-import from export
         if source == RecreateSource.STATEMENTS:

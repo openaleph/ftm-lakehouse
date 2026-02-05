@@ -3,8 +3,9 @@
 from datetime import datetime
 from typing import Generator
 
+from anystore.logging import get_logger
 from anystore.types import Uri
-from anystore.util import join_uri
+from anystore.util import Took, join_uri
 from deltalake.exceptions import TableNotFoundError
 from followthemoney import Statement
 from ftmq.model.stats import DatasetStats
@@ -49,7 +50,26 @@ class ParquetStore:
             dataset=dataset,
             partition_by=PARTITIONS,
         )
+        self.log = get_logger(
+            f"{self.dataset}.{self.__class__.__name__}",
+            dataset=self.dataset,
+            uri=self.uri,
+        )
         setup_duckdb_storage()
+
+    @property
+    def version(self) -> int | None:
+        """Current version of the Delta table."""
+        try:
+            return self._store.deltatable.version()
+        except TableNotFoundError:
+            # deltatable doesn't exist
+            return
+
+    @property
+    def exists(self) -> bool:
+        """Check existence of deltatable"""
+        return self.version is not None
 
     def writer(self, origin: str | None = None) -> LakeWriter:
         """Get a writer for adding statements."""
@@ -151,16 +171,14 @@ class ParquetStore:
         writer = self._store.writer()
         writer.optimize(vacuum, vacuum_keep_hours, bucket=bucket, origin=origin)
 
-    @property
-    def version(self) -> int | None:
-        """Current version of the Delta table."""
-        try:
-            return self._store.deltatable.version()
-        except TableNotFoundError:
-            # deltatable doesn't exist
-            return
-
-    @property
-    def exists(self) -> bool:
-        """Check existence of deltatable"""
-        return self.version is not None
+    def destroy(self) -> None:
+        """
+        Destroy the deltalake by removing the transaction log in "_delta_log"
+        directory. This is soft deleting, as the parquet files remain (but will
+        be cleaned up on optimize --vacuum)
+        """
+        with Took() as t:
+            self.log.warn("🔥 Destroying deltalake store ...")
+            for key in self._store._backend.iterate_keys("_delta_log"):
+                self._store._backend.delete(key)
+        self.log.info("Deleted statement store.", took=t.took)
