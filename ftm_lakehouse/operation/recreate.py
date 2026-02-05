@@ -99,7 +99,7 @@ class RecreateOperation(DatasetJobOperation[RecreateJob]):
 
                 if run.job.entities_imported % 10_000 == 0:
                     self.log.info(
-                        f"Importing from `{path.ENTITIES_JSON}` ...",
+                        f"Importing Entity {run.job.entities_imported} ...",
                         entities=run.job.entities_imported,
                         uri=uri,
                     )
@@ -125,7 +125,7 @@ class RecreateOperation(DatasetJobOperation[RecreateJob]):
 
                     if run.job.statements_imported % 100_000 == 0:
                         self.log.info(
-                            f"Importing from `{path.EXPORTS_STATEMENTS}` ...",
+                            f"Importing Statement {run.job.statements_imported} ...",
                             statements=run.job.statements_imported,
                             uri=uri,
                         )
@@ -150,7 +150,7 @@ class RecreateOperation(DatasetJobOperation[RecreateJob]):
 
                 if run.job.files_imported % 1_000 == 0:
                     self.log.info(
-                        "Importing from archive ...",
+                        f"Importing File {run.job.files_imported} ...",
                         files=run.job.files_imported,
                         uri=self.archive.uri,
                     )
@@ -164,7 +164,7 @@ class RecreateOperation(DatasetJobOperation[RecreateJob]):
 
     def handle(self, run: JobRun[RecreateJob], *args, **kwargs) -> None:
         source = self._get_source()
-        self.log.info("Recreating dataset", source=source.value)
+        self.log.info("Recreating dataset ...", source=source.value)
 
         # Step 1: Clear the parquet statement store
         self.entities._statements.destroy()

@@ -18,7 +18,13 @@ Example:
     ```
 """
 
+from anystore.types import Uri
+
 from ftm_lakehouse.dataset import Dataset
+from ftm_lakehouse.operation.download import (
+    DownloadArchiveJob,
+    DownloadArchiveOperation,
+)
 from ftm_lakehouse.operation.export import (
     ExportDocumentsJob,
     ExportDocumentsOperation,
@@ -260,3 +266,17 @@ def make(dataset: Dataset, force: bool = False) -> None:
     export_documents(dataset, force=force)
     export_statistics(dataset, force=force)
     export_index(dataset, force=force)
+
+
+def download_archive(dataset: Dataset, target: Uri) -> DownloadArchiveJob:
+    """
+    Download (export) the archive files to a target, rewriting to original
+    relative paths.
+
+    Args:
+        dataset: The dataset to process
+        target: The uri to the target (local or remote)
+    """
+    job = DownloadArchiveJob.make(dataset=dataset.name, target=target)
+    op = DownloadArchiveOperation(job=job, archive=dataset.archive)
+    return op.run()

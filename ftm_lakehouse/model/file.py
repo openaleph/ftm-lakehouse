@@ -49,6 +49,12 @@ class Document(BaseModel):
             public_url=public_url,
         )
 
+    @property
+    def relative_path(self) -> str:
+        if self.path is None:
+            return self.name
+        return f"{self.path}/{self.name}"
+
 
 class File(Stats):
     """File metadata model. Arbitrary data can be stored in `extra`, including

@@ -247,8 +247,8 @@ def cli_optimize(
     Optimize a datasets statement store
     """
     with DatasetContext() as dataset:
-        op.optimize(dataset, vacuum=bool(vacuum))
-        console.print("Optimized statement store")
+        res = op.optimize(dataset, vacuum=bool(vacuum))
+        console.print(res)
 
 
 @archive.command("get")
@@ -295,6 +295,16 @@ def cli_archive_ls(
             files = (dump_json_model(f, newline=True) for f in iterator)
         with smart_open(out_uri, "wb") as o:
             o.writelines(files)
+
+
+@archive.command("download")
+def cli_archive_download(target: Annotated[str, typer.Option("-o")]):
+    """
+    List all files in dataset archive
+    """
+    with DatasetContext() as dataset:
+        res = op.download_archive(dataset, target)
+        console.print(res)
 
 
 @cli.command("crawl")

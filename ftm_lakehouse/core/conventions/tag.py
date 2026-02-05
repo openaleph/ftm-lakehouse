@@ -40,6 +40,9 @@ OP_CRAWL = "operations/crawl/last_run"
 OP_RECREATE = "operations/recreate/last_run"
 """Last recreate (repair dataset) execution"""
 
+OP_DOWNLOAD_ARCHIVE = "operations/download_archive/last_run"
+"""Last download archive execution"""
+
 
 def key(key: str) -> str:
     return join_relpaths(TAGS, key)
