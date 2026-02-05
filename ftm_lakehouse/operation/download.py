@@ -13,6 +13,7 @@ from ftm_lakehouse.repository.job import JobRun
 
 class DownloadArchiveJob(DatasetJobModel):
     target: Uri
+    skipped: int = 0
 
 
 class DownloadArchiveOperation(DatasetJobOperation[DownloadArchiveJob]):
@@ -32,8 +33,19 @@ class DownloadArchiveOperation(DatasetJobOperation[DownloadArchiveJob]):
             documents=self.documents.csv_uri,
         )
         for document in self.documents.stream():
+            if target.exists(document.relative_path):
+                self.log.debug(
+                    f"Skipping `{document.relative_path}`, already exists.",
+                    checksum=document.checksum,
+                    source=self.archive.uri,
+                    target=target.uri,
+                )
+                run.job.skipped += 1
+                continue
+
             self.log.info(
                 f"Downloading `{document.relative_path}` ...",
+                checksum=document.checksum,
                 source=self.archive.uri,
                 target=target.uri,
             )
