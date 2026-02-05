@@ -16,6 +16,7 @@ from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.dataset import Dataset
 from ftm_lakehouse.lake import get_dataset, get_lakehouse
 from ftm_lakehouse.model.dataset import DatasetModel
+from ftm_lakehouse.operation.crawl import HandleExistingMode
 
 settings = Settings()
 cli = typer.Typer(
@@ -322,6 +323,9 @@ def cli_crawl(
     make_entities: Annotated[
         Optional[bool], typer.Option(help="Create entities from crawled files")
     ] = True,
+    existing: Annotated[
+        Optional[HandleExistingMode], typer.Option(help="How to handle existing files")
+    ] = HandleExistingMode.overwrite,
 ):
     """
     Crawl documents from local or remote sources
@@ -336,6 +340,7 @@ def cli_crawl(
             glob=include,
             exclude_glob=exclude,
             make_entities=make_entities,
+            existing=existing,
         )
         write_obj(result, out_uri)
 

@@ -6,6 +6,7 @@ documents but no processing. Use `ingest-file` or any other client for that.
 """
 
 from datetime import datetime
+from enum import Enum
 from fnmatch import fnmatch
 from typing import Generator
 
@@ -19,6 +20,12 @@ from ftm_lakehouse.model.job import DatasetJobModel
 from ftm_lakehouse.operation.base import DatasetJobOperation
 from ftm_lakehouse.repository import ArchiveRepository, EntityRepository, JobRepository
 from ftm_lakehouse.repository.job import JobRun
+
+
+class HandleExistingMode(str, Enum):
+    overwrite = "overwrite"
+    skip_path = "skip_path"
+    skip_checksum = "skip_checksum"
 
 
 class CrawlJob(DatasetJobModel):
@@ -41,6 +48,7 @@ class CrawlJob(DatasetJobModel):
     glob: str | None = None
     exclude_glob: str | None = None
     make_entities: bool = False
+    existing: HandleExistingMode | None = HandleExistingMode.skip_path
 
 
 class CrawlOperation(DatasetJobOperation[CrawlJob]):
@@ -93,7 +101,7 @@ class CrawlOperation(DatasetJobOperation[CrawlJob]):
             self.job.touch()
             yield key
 
-    def handle_crawl(self, uri: str, run: JobRun) -> datetime:
+    def handle_crawl(self, uri: str, run: JobRun[CrawlJob]) -> datetime:
         """
         Handle a single crawl task.
 
@@ -112,12 +120,16 @@ class CrawlOperation(DatasetJobOperation[CrawlJob]):
         checksum = None
         if self.source.is_local:
             checksum = self.source.checksum(uri)
-        file = self.archive.store(
-            self.source.to_uri(uri), checksum=checksum, key=uri, origin=tag.CRAWL_ORIGIN
-        )
-        if self.job.make_entities:
-            self.entities.add_many(file.make_entities(), tag.CRAWL_ORIGIN)
-        run.job.done += 1
+        if not self._should_skip(uri, checksum):
+            file = self.archive.store(
+                self.source.to_uri(uri),
+                checksum=checksum,
+                key=uri,
+                origin=tag.CRAWL_ORIGIN,
+            )
+            if self.job.make_entities:
+                self.entities.add_many(file.make_entities(), tag.CRAWL_ORIGIN)
+            run.job.done += 1
         return now
 
     def handle(self, run: JobRun, *args, **kwargs) -> None:
@@ -135,6 +147,22 @@ class CrawlOperation(DatasetJobOperation[CrawlJob]):
         if self.job.make_entities:
             self.entities.flush()
 
+    def _should_skip(self, uri: Uri, checksum: str | None) -> bool:
+        if self.job.existing is None:
+            return False
+        if self.job.existing == HandleExistingMode.overwrite:
+            return False
+        if checksum is None:
+            return False
+        if self.job.existing == HandleExistingMode.skip_checksum:
+            return self.archive.exists(checksum)
+        if self.job.existing == HandleExistingMode.skip_path:
+            if self.archive.exists(checksum):
+                for file in self.archive.get_all_files(checksum):
+                    if file.key == str(uri):
+                        return True
+        return False
+
 
 def crawl(
     dataset: str,
@@ -143,11 +171,11 @@ def crawl(
     exclude_prefix: str | None = None,
     glob: str | None = None,
     exclude_glob: str | None = None,
+    make_entities: bool | None = False,
+    existing: HandleExistingMode | None = HandleExistingMode.skip_path,
     archive: ArchiveRepository | None = None,
     entities: EntityRepository | None = None,
     jobs: JobRepository | None = None,
-    dataset_uri: Uri | None = None,
-    make_entities: bool | None = False,
 ) -> CrawlJob:
     """
     Crawl a local or remote location of documents.
@@ -156,14 +184,15 @@ def crawl(
 
     Args:
         uri: Source location URI (local path, s3://, http://, etc.)
-        files: ArchiveRepository for archiving
-        statements: EntityRepository for entities
-        jobs: JobRepository for job tracking
         prefix: Include only keys with this prefix
         exclude_prefix: Exclude keys with this prefix
         glob: Glob pattern for keys to include
         exclude_glob: Glob pattern for keys to exclude
         make_entities: Create file entities from crawled files
+        existing: Ignore already existing (by relative path, checksum) or overwrite
+        archive: ArchiveRepository for blobs
+        entities: EntityRepository for entities
+        jobs: JobRepository for job tracking
 
     Returns:
         CrawlJob with completion statistics
@@ -185,6 +214,7 @@ def crawl(
         glob=glob,
         exclude_glob=exclude_glob,
         make_entities=make_entities,
+        existing=existing,
     )
 
     op = CrawlOperation(
@@ -192,6 +222,5 @@ def crawl(
         archive=archive,
         entities=entities,
         jobs=jobs,
-        uri=dataset_uri,
     )
     return op.run()
