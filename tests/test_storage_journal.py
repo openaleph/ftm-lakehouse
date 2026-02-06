@@ -1,9 +1,17 @@
-"""Tests for JournalStore - SQL statement buffer for write-ahead logging."""
+"""Tests for JournalStore implementations (SQL and API)."""
 
+from typing import Generator
+
+import httpx
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from followthemoney.statement import Statement
 
+from ftm_lakehouse.api.routes.journal import _get_journal, router
 from ftm_lakehouse.helpers.statements import unpack_statement
-from ftm_lakehouse.storage.journal import JournalRows, JournalStore
+from ftm_lakehouse.storage.journal import ApiJournalStore, JournalRows, SqlJournalStore
+from ftm_lakehouse.storage.journal.base import BaseJournalStore
 
 DATASET = "test"
 
@@ -27,20 +35,54 @@ def make_statement(
 
 def collect_statements(items: JournalRows) -> list[Statement]:
     """Collect all statements from flush items."""
-    return [unpack_statement(data) for _, _, _, _, data, _ in items]
+    return [unpack_statement(stmt) for _, _, _, _, stmt, _ in items]
 
 
-def test_storage_journal_initialize():
+def _make_sql_journal() -> SqlJournalStore:
+    return SqlJournalStore(dataset=DATASET, uri="sqlite:///:memory:")
+
+
+def _make_api_journal() -> ApiJournalStore:
+    app = FastAPI()
+    app.state.journal_uri = "sqlite:///:memory:"
+    app.include_router(router)
+
+    test_client = TestClient(app)
+    transport = httpx.MockTransport(
+        lambda request: test_client.send(
+            test_client.build_request(
+                method=request.method,
+                url=str(request.url),
+                headers=dict(request.headers),
+                content=request.read(),
+            )
+        )
+    )
+    client = httpx.Client(transport=transport, base_url="http://testserver")
+
+    store = ApiJournalStore(dataset=DATASET, uri="http://testserver/")
+    store.client = client
+    return store
+
+
+@pytest.fixture(params=["sql", "api"])
+def journal(request) -> Generator[BaseJournalStore, None, None]:
+    if request.param == "sql":
+        yield _make_sql_journal()
+    else:
+        store = _make_api_journal()
+        yield store
+        store.client.close()
+    _get_journal.cache_clear()
+
+
+def test_storage_journal_initialize(journal):
     """Test journal can be initialized and starts empty."""
-    journal = JournalStore(dataset=DATASET, uri="sqlite:///:memory:")
     assert collect_statements(journal.flush()) == []
 
 
-def test_storage_journal_put_and_flush():
+def test_storage_journal_put_and_flush(journal):
     """Test basic put and flush operations."""
-    journal = JournalStore(dataset=DATASET, uri="sqlite:///:memory:")
-
-    # Add statements via writer
     with journal.writer() as w:
         w.add_statement(make_statement("jane", "name", "Jane Doe"))
         w.add_statement(make_statement("jane", "firstName", "Jane"))
@@ -48,7 +90,6 @@ def test_storage_journal_put_and_flush():
         w.add_statement(make_statement("john", "name", "John Smith"))
         w.add_statement(make_statement("john", "firstName", "John"))
 
-    # Flush and verify entities exist
     flushed = collect_statements(journal.flush())
     entity_ids = {s.entity_id for s in flushed}
     assert "jane" in entity_ids
@@ -59,11 +100,8 @@ def test_storage_journal_put_and_flush():
     assert collect_statements(journal.flush()) == []
 
 
-def test_storage_journal_writer_context_manager():
+def test_storage_journal_writer_context_manager(journal):
     """Test bulk writer with context manager."""
-    journal = JournalStore(dataset=DATASET, uri="sqlite:///:memory:")
-
-    # Use writer directly
     with journal.writer() as w:
         for i in range(100):
             w.add_statement(make_statement(f"e{i}", "name", f"Name {i}"))
@@ -72,17 +110,13 @@ def test_storage_journal_writer_context_manager():
     assert len(flushed) == 100
 
 
-def test_storage_journal_flush_empties():
+def test_storage_journal_flush_empties(journal):
     """Test that flush empties the journal."""
-    journal = JournalStore(dataset=DATASET, uri="sqlite:///:memory:")
-
-    # Add statements for multiple entities
     with journal.writer() as w:
         for i in range(5):
             entity_id = f"entity_{i:02d}"
             w.add_statement(make_statement(entity_id, "name", f"Name {i}"))
 
-    # Flush all
     flushed = collect_statements(journal.flush())
     assert len(flushed) == 5
 
@@ -90,11 +124,8 @@ def test_storage_journal_flush_empties():
     assert collect_statements(journal.flush()) == []
 
 
-def test_storage_journal_statement_fields():
+def test_storage_journal_statement_fields(journal):
     """Test that key statement fields are preserved."""
-    journal = JournalStore(dataset=DATASET, uri="sqlite:///:memory:")
-
-    # Create statement with core fields
     stmt = Statement(
         entity_id="jane",
         prop="name",
@@ -107,7 +138,6 @@ def test_storage_journal_statement_fields():
     with journal.writer() as w:
         w.add_statement(stmt)
 
-    # Flush and verify core fields
     flushed = collect_statements(journal.flush())
     name_stmts = [s for s in flushed if s.prop == "name"]
     assert len(name_stmts) == 1
@@ -121,15 +151,11 @@ def test_storage_journal_statement_fields():
     assert retrieved.origin == "import"
     assert retrieved.id is not None
 
-    # Should be empty after flush
     assert collect_statements(journal.flush()) == []
 
 
-def test_storage_journal_flush_yields_bucket_origin():
-    """Test that flush yields (id, bucket, origin, canonical_id, data, deleted_at) tuples."""
-    journal = JournalStore(dataset=DATASET, uri="sqlite:///:memory:")
-
-    # Add statements with different origins
+def test_storage_journal_flush_yields_bucket_origin(journal):
+    """Test that flush yields (id, bucket, origin, canonical_id, data) tuples."""
     with journal.writer() as w:
         w.add_statement(
             Statement(
@@ -162,11 +188,9 @@ def test_storage_journal_flush_yields_bucket_origin():
             )
         )
 
-    # Flush and verify tuples
     items = list(journal.flush())
     assert len(items) == 3
 
-    # Each item is (id, bucket, origin, canonical_id, data, deleted_at)
     for row_id, bucket, origin, canonical_id, data, deleted_at in items:
         assert bucket == "thing"  # Person is a Thing
         assert origin in ("source_a", "source_b")
@@ -174,11 +198,8 @@ def test_storage_journal_flush_yields_bucket_origin():
         assert stmt.origin == origin
 
 
-def test_storage_journal_flush_sorted_order():
+def test_storage_journal_flush_sorted_order(journal):
     """Test that flush yields statements in sorted order (bucket, origin, canonical_id)."""
-    journal = JournalStore(dataset=DATASET, uri="sqlite:///:memory:")
-
-    # Add statements with different origins (not in sorted order)
     with journal.writer() as w:
         for origin in ["z_origin", "a_origin", "m_origin"]:
             for i in range(3):
@@ -192,19 +213,15 @@ def test_storage_journal_flush_sorted_order():
                 )
                 w.add_statement(stmt)
 
-    # Flush and verify order
     items = list(journal.flush())
     origins = [origin for _, _, origin, _, _, _ in items]
-
-    # Should be sorted by origin
     assert origins == sorted(origins)
 
 
-def test_storage_journal_rollback_on_consumer_error():
+def test_storage_journal_rollback_on_consumer_error(request, journal):
     """Test that statements are preserved if consumer raises an error."""
-    journal = JournalStore(dataset=DATASET, uri="sqlite:///:memory:")
-
-    # Add statements
+    if request.node.callspec.params["journal"] == "api":
+        pytest.skip("API transport buffers full response; rollback is server-side only")
     with journal.writer() as w:
         for i in range(5):
             w.add_statement(make_statement(f"e{i}", "name", f"Name {i}"))
@@ -217,17 +234,13 @@ def test_storage_journal_rollback_on_consumer_error():
         pass
 
     # Statements should still be in journal due to rollback
-    # Now flush successfully
     flushed = collect_statements(journal.flush())
     assert len(flushed) == 5
     assert collect_statements(journal.flush()) == []
 
 
-def test_storage_journal_upsert_duplicate_statements():
+def test_storage_journal_upsert_duplicate_statements(journal):
     """Test that duplicate statements are upserted (updated, not duplicated)."""
-    journal = JournalStore(dataset=DATASET, uri="sqlite:///:memory:")
-
-    # Add a statement
     stmt = Statement(
         entity_id="jane",
         prop="name",
@@ -249,16 +262,13 @@ def test_storage_journal_upsert_duplicate_statements():
     with journal.writer() as w:
         w.add_statement(stmt)
 
-    # Flush and verify - should only have 1 statement due to upsert
     flushed = collect_statements(journal.flush())
     assert len(flushed) == 1
     assert flushed[0].origin == "updated"
 
 
-def test_storage_journal_count():
+def test_storage_journal_count(journal):
     """Test counting rows in journal."""
-    journal = JournalStore(dataset=DATASET, uri="sqlite:///:memory:")
-
     assert journal.count() == 0
 
     with journal.writer() as w:
@@ -272,17 +282,14 @@ def test_storage_journal_count():
     assert journal.count() == 0
 
 
-def test_storage_journal_clear():
+def test_storage_journal_clear(journal):
     """Test clearing all rows from journal."""
-    journal = JournalStore(dataset=DATASET, uri="sqlite:///:memory:")
-
     with journal.writer() as w:
         for i in range(10):
             w.add_statement(make_statement(f"e{i}", "name", f"Name {i}"))
 
     assert journal.count() == 10
 
-    # Clear returns count of deleted rows
     deleted = journal.clear()
     assert deleted == 10
     assert journal.count() == 0

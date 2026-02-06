@@ -294,10 +294,8 @@ class EntityRepository(ParquetDiffMixin, BaseRepository):
             pass
 
         # Read from journal (may override parquet entries)
-
         q = (
             select(self._journal.table)
-            .where(self._journal.table.c.dataset == self._journal.dataset)
             .where(self._journal.table.c.canonical_id == entity_id)
             .where(self._journal.table.c.deleted_at.is_(None))
         )
