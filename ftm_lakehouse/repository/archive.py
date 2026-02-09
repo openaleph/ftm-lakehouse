@@ -14,7 +14,7 @@ from anystore.util import join_relpaths, make_checksum
 from banal import clean_dict
 
 from ftm_lakehouse.core.conventions import path, tag
-from ftm_lakehouse.core.conventions.tag import DEFAULT_ORIGIN
+from ftm_lakehouse.core.conventions.tag import ARCHIVE_ORIGIN, DEFAULT_ORIGIN
 from ftm_lakehouse.model import File
 from ftm_lakehouse.model.file import Files
 from ftm_lakehouse.repository.base import BaseRepository
@@ -163,6 +163,7 @@ class ArchiveRepository(BaseRepository):
         file.extra = clean_dict(metadata)
         file.store = str(self.uri)
         file.dataset = self.dataset
+        file.origin = file.origin or ARCHIVE_ORIGIN
 
         # Store metadata
         self._files.put(file.meta_path, file)

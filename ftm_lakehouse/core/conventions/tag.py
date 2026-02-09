@@ -53,8 +53,12 @@ def mapping_tag(content_hash: str) -> str:
     return f"mappings/{content_hash}/last_processed"
 
 
+DEFAULT_ORIGIN = "default"
+"""Default origin identifier"""
+
+
 CRAWL_ORIGIN = "crawl"
 """Default origin identifier for crawled files."""
 
-DEFAULT_ORIGIN = "default"
-"""Default origin identifier for extracted text."""
+ARCHIVE_ORIGIN = "archive"
+"""Default origin identifier for archived files (if not crawled)"""
