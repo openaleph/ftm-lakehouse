@@ -166,6 +166,51 @@ def test_repository_entities_export_diff(tmp_path):
     assert delta["entity"]["id"] == "bob"
 
 
+def test_repository_entities_export_diff_delete(tmp_path):
+    """Test that deleting an entity produces a DEL op in the incremental diff."""
+    from ftmq.io import smart_write_proxies
+
+    repo = EntityRepository("test", tmp_path)
+
+    # Add two entities and flush
+    with repo.bulk() as writer:
+        writer.add_entity(make_entity(JANE))
+        writer.add_entity(make_entity(JOHN))
+    repo.flush()
+
+    # Export entities.ftm.json (required for initial diff)
+    entities_json_path = tmp_path / path.ENTITIES_JSON
+    smart_write_proxies(str(entities_json_path), repo.query(flush_first=False))
+
+    # Initial diff
+    diff_name_1 = repo.export_diff()
+    assert diff_name_1 is not None
+
+    # Delete jane, flush tombstones to parquet
+    repo.delete_entity("jane")
+    repo.flush()
+
+    # Incremental diff should contain a DEL for jane
+    diff_name_2 = repo.export_diff()
+    assert diff_name_2 is not None
+    assert diff_name_2 != diff_name_1
+
+    diff_files = sorted(
+        (tmp_path / path.DIFFS_ENTITIES).glob("*.delta.json"),
+        key=lambda p: p.name,
+    )
+    assert len(diff_files) == 2
+
+    # Read the incremental diff (second file)
+    with open(diff_files[1]) as f:
+        lines = f.readlines()
+
+    ops = [json.loads(line) for line in lines]
+    del_ops = [o for o in ops if o["op"] == "DEL"]
+    assert len(del_ops) == 1
+    assert del_ops[0]["entity"]["id"] == "jane"
+
+
 def test_repository_entities_export_diff_no_changes(tmp_path):
     """Test diff export when there are no new changes after initial setup."""
     from ftmq.io import smart_write_proxies

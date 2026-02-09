@@ -27,7 +27,7 @@ def make_statement(
 
 def collect_statements(items: JournalRows) -> list[Statement]:
     """Collect all statements from flush items."""
-    return [unpack_statement(stmt) for _, _, _, _, stmt in items]
+    return [unpack_statement(data) for _, _, _, _, data, _ in items]
 
 
 def test_storage_journal_initialize():
@@ -126,7 +126,7 @@ def test_storage_journal_statement_fields():
 
 
 def test_storage_journal_flush_yields_bucket_origin():
-    """Test that flush yields (id, bucket, origin, canonical_id, data) tuples."""
+    """Test that flush yields (id, bucket, origin, canonical_id, data, deleted_at) tuples."""
     journal = JournalStore(dataset=DATASET, uri="sqlite:///:memory:")
 
     # Add statements with different origins
@@ -166,8 +166,8 @@ def test_storage_journal_flush_yields_bucket_origin():
     items = list(journal.flush())
     assert len(items) == 3
 
-    # Each item is (id, bucket, origin, canonical_id, data)
-    for row_id, bucket, origin, canonical_id, data in items:
+    # Each item is (id, bucket, origin, canonical_id, data, deleted_at)
+    for row_id, bucket, origin, canonical_id, data, deleted_at in items:
         assert bucket == "thing"  # Person is a Thing
         assert origin in ("source_a", "source_b")
         stmt = unpack_statement(data)
@@ -194,7 +194,7 @@ def test_storage_journal_flush_sorted_order():
 
     # Flush and verify order
     items = list(journal.flush())
-    origins = [origin for _, _, origin, _, _ in items]
+    origins = [origin for _, _, origin, _, _, _ in items]
 
     # Should be sorted by origin
     assert origins == sorted(origins)
@@ -211,7 +211,7 @@ def test_storage_journal_rollback_on_consumer_error():
 
     # Try to consume but raise error
     try:
-        for _id, _bucket, _origin, _canonical_id, _data in journal.flush():
+        for _id, _bucket, _origin, _canonical_id, _data, _deleted_at in journal.flush():
             raise ValueError("Simulated error")
     except ValueError:
         pass

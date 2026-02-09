@@ -10,7 +10,7 @@ from anystore.logic.io import stream
 from anystore.store import get_store
 from anystore.types import Uri
 from anystore.util import join_uri
-from followthemoney import Statement, model
+from followthemoney import model
 from ftmq.query import Query
 
 from ftm_lakehouse.core.conventions import path
@@ -118,16 +118,16 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
 
     def _filter_changes(
         self,
-        changes: Generator[tuple[datetime, str, Statement], None, None],
+        changes: Generator[tuple[datetime, str, dict], None, None],
     ) -> set[str]:
         """Filter for Document entities with contentHash changes."""
         changed_entity_ids: set[str] = set()
-        for _, change_type, stmt in changes:
+        for _, change_type, row in changes:
             if change_type in ("insert", "update_postimage"):
-                schema = model.get(stmt.schema)
+                schema = model.get(row.get("schema"))
                 if schema and schema.is_a("Document") and not schema.name == "Folder":
-                    if stmt.prop == "contentHash":
-                        changed_entity_ids.add(stmt.entity_id)
+                    if row.get("prop") == "contentHash":
+                        changed_entity_ids.add(row["entity_id"])
         return changed_entity_ids
 
     def _write_diff(self, entity_ids: set[str], v: int, ts: datetime, **kwargs) -> str:

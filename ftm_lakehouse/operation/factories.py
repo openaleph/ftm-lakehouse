@@ -163,6 +163,7 @@ def optimize(
     bucket: str | None = None,
     origin: str | None = None,
     force: bool = False,
+    compact: bool = False,
 ) -> OptimizeJob:
     """
     Run optimize operation on the parquet statement store.
@@ -174,6 +175,7 @@ def optimize(
         bucket: Scope optimization to a specific bucket
         origin: Scope optimization to a specific origin
         force: Force optimization even if up-to-date
+        compact: Dedupe statements and clear out delete tombstones
 
     Returns:
         The completed job result
@@ -184,6 +186,7 @@ def optimize(
         vacuum_keep_hours=vacuum_keep_hours,
         bucket=bucket,
         origin=origin,
+        compact=compact,
     )
     op = OptimizeOperation(
         job=job,

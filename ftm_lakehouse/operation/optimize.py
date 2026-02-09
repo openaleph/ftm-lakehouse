@@ -11,6 +11,7 @@ class OptimizeJob(DatasetJobModel):
     origin: str | None = None
     vacuum: bool = False
     vacuum_keep_hours: int = 0
+    compact: bool = False
 
 
 class OptimizeOperation(DatasetJobOperation[OptimizeJob]):
@@ -20,6 +21,10 @@ class OptimizeOperation(DatasetJobOperation[OptimizeJob]):
     instance, after a crawl operation, only optimizing origin=crawl is
     feasible.
 
+    When compact=True, performs full compaction: dedup, remove tombstones,
+    rewrite the table, Z_ORDER optimize, and vacuum. This is a heavier
+    operation than standard optimize but produces a clean table.
+
     Depending on the size of the dataset, this can be a very long running
     operation that may require some local memory and tmp disk storage.
     """
@@ -28,6 +33,8 @@ class OptimizeOperation(DatasetJobOperation[OptimizeJob]):
     dependencies = [tag.STATEMENTS_UPDATED]
 
     def handle(self, run: JobRun[OptimizeJob], *args, **kwargs) -> None:
+        if run.job.compact:
+            self.entities._statements.compact()
         self.entities._statements.optimize(
             vacuum=run.job.vacuum,
             vacuum_keep_hours=run.job.vacuum_keep_hours,

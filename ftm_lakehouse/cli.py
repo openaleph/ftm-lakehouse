@@ -243,12 +243,16 @@ def cli_optimize(
     vacuum: Annotated[
         Optional[bool], typer.Option(help="Delete staled files after optimization")
     ] = False,
+    compact: Annotated[
+        Optional[bool],
+        typer.Option(help="Dedupe statements and clear out deletion tombstones"),
+    ] = False,
 ):
     """
     Optimize a datasets statement store
     """
     with DatasetContext() as dataset:
-        res = op.optimize(dataset, vacuum=bool(vacuum))
+        res = op.optimize(dataset, vacuum=bool(vacuum), compact=bool(compact))
         console.print(res)
 
 

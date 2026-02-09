@@ -4,7 +4,6 @@ from abc import abstractmethod
 from datetime import datetime, timezone
 from typing import Generator
 
-from followthemoney import Statement
 from pyarrow import timestamp
 from structlog.stdlib import BoundLogger
 
@@ -43,7 +42,7 @@ class ParquetDiffMixin:
     @abstractmethod
     def _filter_changes(
         self,
-        changes: Generator[tuple[datetime, str, Statement], None, None],
+        changes: Generator[tuple[datetime, str, dict], None, None],
     ) -> set[str]:
         """Filter CDC changes and return set of changed entity IDs."""
         ...

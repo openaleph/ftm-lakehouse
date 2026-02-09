@@ -1,27 +1,41 @@
 """EntityRepository - entity/statement operations using JournalStore + ParquetStore."""
 
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Generator, Iterable
 
+import duckdb
 import orjson
+import pyarrow as pa
 from anystore.io import smart_write_json
 from anystore.store import get_store
 from anystore.types import SDict, Uri
 from anystore.util import Took
+from deltalake import write_deltalake
+from deltalake.exceptions import TableNotFoundError
 from followthemoney import EntityProxy, Statement, StatementEntity
 from ftmq.io import smart_read_proxies
 from ftmq.model.stats import DatasetStats
 from ftmq.query import Query
+from ftmq.store.lake import (
+    TARGET_SIZE,
+    WRITER,
+)
+from ftmq.store.lake import pack_statement as lake_pack_statement
+from ftmq.store.lake import (
+    storage_options,
+)
 from ftmq.types import StatementEntities, ValueEntities
+from sqlalchemy import select
 
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.core.settings import Settings
-from ftm_lakehouse.helpers.statements import unpack_statement
+from ftm_lakehouse.helpers.statements import unpack_statement, unpack_tombstone_row
 from ftm_lakehouse.repository.base import BaseRepository
 from ftm_lakehouse.repository.diff import ParquetDiffMixin
 from ftm_lakehouse.storage import JournalStore, ParquetStore
 from ftm_lakehouse.storage.journal import JournalWriter
+from ftm_lakehouse.storage.parquet import PARTITIONS, STATEMENT_SCHEMA
 
 settings = Settings()
 
@@ -103,7 +117,8 @@ class EntityRepository(ParquetDiffMixin, BaseRepository):
         Flush statements from journal to parquet store.
 
         Statements are streamed ordered by (bucket, origin, canonical_id).
-        The parquet writer is flushed whenever bucket or origin changes.
+        Batches are written directly via write_deltalake, with schema_mode="merge"
+        to handle tombstone rows that include a deleted_at column.
 
         Returns:
             Number of statements flushed
@@ -123,25 +138,30 @@ class EntityRepository(ParquetDiffMixin, BaseRepository):
             total_count = 0
             current_bucket: str | None = None
             current_origin: str | None = None
-            bulk = None
+            current_batch: list[dict] = []
 
-            for _, bucket, origin, _, data in self._journal.flush():
-                # Flush and get new writer when partition changes
+            for _, bucket, origin, _, data, deleted_at in self._journal.flush():
+                # Write batch when partition changes
                 if bucket != current_bucket or origin != current_origin:
-                    if bulk is not None:
-                        bulk.flush()
+                    if current_batch:
+                        self._write_flush_batch(current_batch)
+                    current_batch = []
                     current_bucket = bucket
                     current_origin = origin
-                    bulk = self._statements.writer(origin)
 
-                assert bulk is not None
-                stmt = unpack_statement(data)
-                bulk.add_statement(stmt)
+                if deleted_at is not None:
+                    row = unpack_tombstone_row(data)
+                    row["deleted_at"] = deleted_at
+                else:
+                    stmt = unpack_statement(data)
+                    row = lake_pack_statement(stmt)
+                    row["deleted_at"] = None
+                current_batch.append(row)
                 total_count += 1
 
-            # Flush final batch
-            if bulk is not None:
-                bulk.flush()
+            # Write final batch
+            if current_batch:
+                self._write_flush_batch(current_batch)
 
             self._tags.set(tag.STATEMENTS_UPDATED)
             self.log.info(
@@ -152,6 +172,21 @@ class EntityRepository(ParquetDiffMixin, BaseRepository):
             )
 
             return total_count
+
+    def _write_flush_batch(self, batch: list[dict]) -> None:
+        """Write a partition batch directly via write_deltalake."""
+        table = pa.Table.from_pylist(batch, schema=STATEMENT_SCHEMA)
+        write_deltalake(
+            str(self._statements.uri),
+            table,
+            partition_by=PARTITIONS,
+            mode="append",
+            schema_mode="merge",
+            writer_properties=WRITER,
+            target_file_size=TARGET_SIZE,
+            storage_options=storage_options(),
+            configuration={"delta.enableChangeDataFeed": "true"},
+        )
 
     def query(
         self,
@@ -201,6 +236,79 @@ class EntityRepository(ParquetDiffMixin, BaseRepository):
         uri = self._store.to_uri(path.ENTITIES_JSON)
         yield from smart_read_proxies(uri)
 
+    def delete_entity(self, entity_id: str) -> int:
+        """Delete all statements for an entity via journal tombstones.
+
+        Reads statements from both parquet and journal, then UPSERTs
+        tombstone rows (with deleted_at set) into the journal.
+
+        Args:
+            entity_id: The entity ID to delete
+
+        Returns:
+            Number of tombstone statements written
+        """
+        now = datetime.now(timezone.utc)
+        stmts = self._collect_entity_statements(entity_id)
+        if not stmts:
+            return 0
+        with self._journal.writer() as w:
+            for stmt in stmts:
+                w.add_statement(stmt, deleted_at=now)
+        self._tags.set(tag.JOURNAL_UPDATED)
+        return len(stmts)
+
+    def delete_statement(self, stmt: Statement) -> None:
+        """Delete a single statement via journal tombstone.
+
+        Args:
+            stmt: The Statement to delete
+        """
+        now = datetime.now(timezone.utc)
+        with self._journal.writer() as w:
+            w.add_statement(stmt, deleted_at=now)
+        self._tags.set(tag.JOURNAL_UPDATED)
+
+    def _collect_entity_statements(self, entity_id: str) -> list[Statement]:
+        """Read all statements for an entity from parquet + journal."""
+        stmts_by_id: dict[str, Statement] = {}
+
+        # Read from parquet
+        try:
+            dt = self._statements._store.deltatable
+            rel = duckdb.arrow(dt.to_pyarrow_dataset())
+            cols = {f.name for f in dt.schema().to_arrow()}
+            where = f"entity_id = '{entity_id}'"
+            if "deleted_at" in cols:
+                where += " AND deleted_at IS NULL"
+            result = rel.query(
+                "arrow",
+                f"SELECT * FROM arrow WHERE {where}",
+            )
+            for row in result.fetchall():
+                row_dict = dict(zip(result.columns, row))
+                stmt = Statement.from_dict(row_dict)
+                if stmt.id:
+                    stmts_by_id[stmt.id] = stmt
+        except TableNotFoundError:
+            pass
+
+        # Read from journal (may override parquet entries)
+
+        q = (
+            select(self._journal.table)
+            .where(self._journal.table.c.dataset == self._journal.dataset)
+            .where(self._journal.table.c.canonical_id == entity_id)
+            .where(self._journal.table.c.deleted_at.is_(None))
+        )
+        with self._journal.engine.connect() as conn:
+            for row in conn.execute(q):
+                stmt = unpack_statement(row.data)
+                if stmt.id:
+                    stmts_by_id[stmt.id] = stmt
+
+        return list(stmts_by_id.values())
+
     def make_statistics(self) -> DatasetStats:
         """Compute statistics from the parquet store."""
         return self._statements.stats()
@@ -211,13 +319,13 @@ class EntityRepository(ParquetDiffMixin, BaseRepository):
 
     def _filter_changes(
         self,
-        changes: Generator[tuple[datetime, str, Statement], None, None],
+        changes: Generator[tuple[datetime, str, dict], None, None],
     ) -> set[str]:
         """Track all entity IDs that have any statement change."""
         changed_entity_ids: set[str] = set()
-        for _, change_type, stmt in changes:
+        for _, change_type, row in changes:
             if change_type in ("insert", "update_postimage"):
-                changed_entity_ids.add(stmt.entity_id)
+                changed_entity_ids.add(row["entity_id"])
         return changed_entity_ids
 
     def _write_diff(self, entity_ids: set[str], v: int, ts: datetime, **kwargs) -> str:
@@ -228,8 +336,13 @@ class EntityRepository(ParquetDiffMixin, BaseRepository):
         return self._store.to_uri(key)
 
     def _get_delta_entities(self, entity_ids: set[str]) -> Generator[SDict, None, None]:
+        seen_ids: set[str] = set()
         for entity in self.query(entity_ids=entity_ids, flush_first=False):
+            seen_ids.add(entity.id)
             yield self._make_envelope(entity.to_dict())
+        # Entities in changed set but not in deduped output were deleted
+        for entity_id in entity_ids - seen_ids:
+            yield self._make_envelope({"id": entity_id}, op="DEL")
 
     def _make_envelope(self, data: SDict, op: str = "ADD") -> SDict:
         return {"op": op, "entity": data}

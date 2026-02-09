@@ -1,26 +1,40 @@
 """JournalStore - SQL statement buffer for write-ahead logging."""
 
+from datetime import datetime
 from typing import Generator, Self, TypeAlias
 
 from anystore.logging import get_logger
 from followthemoney import EntityProxy, Statement, StatementEntity
-from ftmq.store.lake import DEFAULT_ORIGIN, get_schema_bucket
+from ftmq.store.base import DEFAULT_ORIGIN
+from ftmq.store.lake import get_schema_bucket
 from ftmq.util import ensure_entity
-from sqlalchemy import Column, Index, MetaData, String, Table, Text, delete, select
+from sqlalchemy import (
+    Column,
+    DateTime,
+    Index,
+    MetaData,
+    String,
+    Table,
+    Text,
+    delete,
+    select,
+)
 from sqlalchemy.dialects.postgresql import insert as psql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection, Engine, Transaction, create_engine
 from sqlalchemy.pool import StaticPool
 
 from ftm_lakehouse.core.settings import Settings
-from ftm_lakehouse.helpers.statements import pack_statement
+from ftm_lakehouse.helpers.statements import pack_statement, pack_tombstone
 
 settings = Settings()
 log = get_logger(__name__)
 
 WRITE_BATCH_SIZE = 10_000
 
-JournalRow = tuple[str, str, str, str, str]  # (id, bucket, origin, canonical_id, data)
+JournalRow = tuple[
+    str, str, str, str, str, datetime | None
+]  # (id, bucket, origin, canonical_id, data, deleted_at)
 JournalRows: TypeAlias = Generator[JournalRow, None, None]
 
 
@@ -35,6 +49,7 @@ def make_journal_table(metadata: MetaData, name: str = "journal") -> Table:
         Column("origin", String(255), nullable=False),
         Column("canonical_id", String(255), nullable=False),
         Column("data", Text, nullable=False),
+        Column("deleted_at", DateTime(timezone=True), nullable=True),
         Index(f"ix_{name}_sort", "dataset", "bucket", "origin", "canonical_id"),
     )
 
@@ -73,6 +88,7 @@ class JournalWriter:
                     "origin": sqlite_istmt.excluded.origin,
                     "canonical_id": sqlite_istmt.excluded.canonical_id,
                     "data": sqlite_istmt.excluded.data,
+                    "deleted_at": sqlite_istmt.excluded.deleted_at,
                 },
             )
             self.conn.execute(sqlite_stmt)
@@ -86,6 +102,7 @@ class JournalWriter:
                     "origin": psql_istmt.excluded.origin,
                     "canonical_id": psql_istmt.excluded.canonical_id,
                     "data": psql_istmt.excluded.data,
+                    "deleted_at": psql_istmt.excluded.deleted_at,
                 },
             )
             self.conn.execute(psql_stmt)
@@ -102,6 +119,7 @@ class JournalWriter:
         origin: str,
         canonical_id: str,
         data: str,
+        deleted_at: datetime | None = None,
     ) -> None:
         """Add a raw row to the journal batch."""
         self.batch.append(
@@ -112,14 +130,21 @@ class JournalWriter:
                 "origin": origin,
                 "canonical_id": canonical_id,
                 "data": data,
+                "deleted_at": deleted_at,
             }
         )
 
         if len(self.batch) >= WRITE_BATCH_SIZE:
             self._upsert_batch()
 
-    def add_statement(self, stmt: Statement) -> None:
-        """Add a statement to the journal."""
+    def add_statement(
+        self, stmt: Statement, deleted_at: datetime | None = None
+    ) -> None:
+        """Add a statement to the journal.
+
+        When deleted_at is set, the statement is packed as a tombstone
+        (only routing fields, payload stripped).
+        """
         if stmt.entity_id is None or stmt.id is None:
             return
 
@@ -143,13 +168,16 @@ class JournalWriter:
             origin=origin,
         )
 
+        data = pack_tombstone(stmt) if deleted_at is not None else pack_statement(stmt)
+
         self.add(
             row_id=stmt.id,
             dataset=self.dataset,
             bucket=get_schema_bucket(stmt.schema),
             origin=origin,
             canonical_id=canonical_id,
-            data=pack_statement(stmt),
+            data=data,
+            deleted_at=deleted_at,
         )
 
     def add_entity(self, entity: EntityProxy) -> None:
@@ -236,7 +264,7 @@ class JournalStore:
         partitioned writes to downstream storage.
 
         Yields:
-            Tuples of (id, bucket, origin, canonical_id, data)
+            Tuples of (id, bucket, origin, canonical_id, data, deleted_at)
         """
         q = (
             select(self.table)
@@ -252,7 +280,14 @@ class JournalStore:
             cursor = conn.execution_options(stream_results=True).execute(q)
             while rows := cursor.fetchmany(10_000):
                 for row in rows:
-                    yield row.id, row.bucket, row.origin, row.canonical_id, row.data
+                    yield (
+                        row.id,
+                        row.bucket,
+                        row.origin,
+                        row.canonical_id,
+                        row.data,
+                        row.deleted_at,
+                    )
 
     def flush(self) -> JournalRows:
         """
@@ -262,7 +297,7 @@ class JournalStore:
         If the consumer raises an exception, the transaction is rolled back.
 
         Yields:
-            Tuples of (id, bucket, origin, canonical_id, data)
+            Tuples of (id, bucket, origin, canonical_id, data, deleted_at)
         """
         q = (
             select(self.table)
@@ -281,7 +316,14 @@ class JournalStore:
 
                 while rows := cursor.fetchmany(10_000):
                     for row in rows:
-                        yield row.id, row.bucket, row.origin, row.canonical_id, row.data
+                        yield (
+                            row.id,
+                            row.bucket,
+                            row.origin,
+                            row.canonical_id,
+                            row.data,
+                            row.deleted_at,
+                        )
 
                 # Delete all rows for this dataset
                 conn.execute(
