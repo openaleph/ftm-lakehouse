@@ -1,6 +1,8 @@
-"""Tests for ParquetStore - Delta Lake statement parquet storage."""
+"""Tests for ParquetStore - Delta Lake statement parquet storage. Most of it is
+tested in upstream ftmq.store.lake, so this only ensures api compatibility."""
 
 from followthemoney import Statement
+from ftmq.store.lake import TABLE
 from sqlalchemy import select
 
 from ftm_lakehouse.storage.parquet import ParquetStore
@@ -73,8 +75,7 @@ def test_storage_parquet_query_statements_with_filter(tmp_path):
         w.add_statement(make_statement("john", "firstName", "John"))
 
     # Build custom query filtering by prop using TABLE
-    T = ParquetStore.TABLE
-    q = select(T).where(T.c.prop == "name")
+    q = select(TABLE).where(TABLE.c.prop == "name")
 
     statements = list(store.query_statements(q))
     assert len(statements) == 2
@@ -87,7 +88,7 @@ def test_storage_parquet_query_statements_with_filter(tmp_path):
     assert values == {"Jane Doe", "John Smith"}
 
     # Filter by entity_id
-    q = select(T).where(T.c.entity_id == "jane")
+    q = select(TABLE).where(TABLE.c.entity_id == "jane")
     statements = list(store.query_statements(q))
     assert len(statements) == 3
     assert all(s.entity_id == "jane" for s in statements)

@@ -24,8 +24,8 @@ from ftm_lakehouse.repository.job import JobRun
 
 class HandleExistingMode(str, Enum):
     overwrite = "overwrite"
-    skip_path = "skip_path"
-    skip_checksum = "skip_checksum"
+    skip_path = "skip-path"
+    skip_checksum = "skip-checksum"
 
 
 class CrawlJob(DatasetJobModel):
