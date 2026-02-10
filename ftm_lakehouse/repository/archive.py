@@ -10,15 +10,16 @@ from anystore.logic.io import stream
 from anystore.store import get_store
 from anystore.store.resource import UriResource
 from anystore.types import BytesGenerator, Uri
-from anystore.util import join_relpaths, make_checksum
+from anystore.util import join_relpaths
 from banal import clean_dict
 
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.core.conventions.tag import ARCHIVE_ORIGIN, DEFAULT_ORIGIN
+from ftm_lakehouse.core.settings import CHECKSUM_ALGORITHM
 from ftm_lakehouse.model import File
 from ftm_lakehouse.model.file import Files
 from ftm_lakehouse.repository.base import BaseRepository
-from ftm_lakehouse.util import make_checksum_key
+from ftm_lakehouse.util import make_checksum, make_checksum_key, validate_checksum
 
 
 class ArchiveRepository(BaseRepository):
@@ -66,7 +67,7 @@ class ArchiveRepository(BaseRepository):
         Get file metadata for the given checksum.
 
         Args:
-            checksum: SHA1 checksum of file
+            checksum: SHA256 checksum of file
             file_id: Optional File.id to get specific metadata
 
         Raises:
@@ -188,19 +189,19 @@ class ArchiveRepository(BaseRepository):
         Returns:
             checksum
         """
+        if checksum:
+            validate_checksum(checksum)
         if checksum and self.exists(checksum):
             self.log.debug("Blob already exists, skipping", checksum=checksum)
             return checksum
 
-        with open_virtual(uri) as fh:
+        with open_virtual(uri, algorithm=CHECKSUM_ALGORITHM) as fh:
             if self.exists(fh.checksum):
                 self.log.debug("Blob already exists, skipping", checksum=fh.checksum)
                 return fh.checksum
 
-            # actually store the blob
             self.log.info(f"Storing blob `{fh.checksum}` ...", checksum=fh.checksum)
-            self.write_blob(fh, checksum)
-
+            self.write_blob(fh, fh.checksum)
             return fh.checksum
 
     def write_blob(self, fh: BinaryIO, checksum: str | None = None) -> str:

@@ -50,7 +50,10 @@ def test_repository_document_collect(tmp_path, fixtures_path):
     utf_docs = [d for d in documents if d.name == "utf.txt"]
     assert len(utf_docs) == 1
     utf_doc = utf_docs[0]
-    assert utf_doc.checksum == "5a6acf229ba576d9a40b09292595658bbb74ef56"
+    assert (
+        utf_doc.checksum
+        == "bbb1f047ff1f0c333560e09cff0c4a052eb87a2998d6d16775a276645877c5b7"
+    )
     assert utf_doc.mimetype == "text/plain"
 
 

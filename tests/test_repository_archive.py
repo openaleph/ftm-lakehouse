@@ -28,9 +28,9 @@ def _test_repository_archive(
     files = [f for f in archive.iterate_files()]
     assert len(files) == 5
 
-    content_hash = "5a6acf229ba576d9a40b09292595658bbb74ef56"
+    content_hash = "bbb1f047ff1f0c333560e09cff0c4a052eb87a2998d6d16775a276645877c5b7"
     if base_path:
-        assert (base_path / "archive" / "5a/6a/cf" / content_hash / "blob").exists()
+        assert (base_path / "archive" / "bb/b1/f0" / content_hash / "blob").exists()
     assert archive.exists(content_hash)
     file = archive.get_file(content_hash)
     assert file.key == "utf.txt"
@@ -229,7 +229,7 @@ def test_repository_archive_store_and_retrieve(tmp_path, fixtures_path):
 
     archive = ArchiveRepository("test", tmp_path)
 
-    checksum = "5a6acf229ba576d9a40b09292595658bbb74ef56"
+    checksum = "bbb1f047ff1f0c333560e09cff0c4a052eb87a2998d6d16775a276645877c5b7"
 
     # arbitrary data
     archive.put_data(checksum, "data.txt", b"hello")

@@ -5,10 +5,12 @@ from rigour.mime.types import PLAIN
 
 from ftm_lakehouse.model.file import File
 
+FAKE_CHECKSUM = "5b93539659eb03f4c5dfa64f342a667db6946913ce4d3243f4846bbe37f391d9"
+
 
 def test_model_file(fixtures_path):
-    checksum = "2928064cd9a743af30b720634dcffacdd84de23d"
-    file_id = "file-4ab9a436dae7c583dbc437dbc7f014d8d084c081"
+    checksum = FAKE_CHECKSUM
+    file_id = "file-df082aa01243e36fed47a2b1de2bd563ad6dae11449431d9a1ef3795c63e0427"
     store = get_store(fixtures_path)
 
     file = File.from_info(store.info("src/utf.txt"), checksum=checksum)
@@ -26,14 +28,14 @@ def test_model_file(fixtures_path):
     assert file_dict["size"] == 19
     assert file_dict["key"] == "src/utf.txt"
     assert file_dict["dataset"] == "default"
-    assert file_dict["checksum"] == "2928064cd9a743af30b720634dcffacdd84de23d"
+    assert file_dict["checksum"] == checksum
 
 
 def test_model_file_extra_fields():
     """Test that unknown fields are collected into the extra dict."""
     file = File(
         dataset="test",
-        checksum="abc123",
+        checksum=FAKE_CHECKSUM,
         key="test.txt",
         name="test.txt",
         store="s3://bucket",
@@ -46,7 +48,7 @@ def test_model_file_extra_fields():
     # Test merging with existing extra dict
     file2 = File(
         dataset="test",
-        checksum="abc123",
+        checksum=FAKE_CHECKSUM,
         key="test.txt",
         name="test.txt",
         store="s3://bucket",
@@ -59,7 +61,7 @@ def test_model_file_extra_fields():
     # Test normal creation without extra fields
     file3 = File(
         dataset="test",
-        checksum="abc123",
+        checksum=FAKE_CHECKSUM,
         key="test.txt",
         name="test.txt",
         store="s3://bucket",
@@ -72,7 +74,7 @@ def test_model_file_entity():
     """Test generation of entities from file"""
     file = File(
         dataset="test",
-        checksum="abc123",
+        checksum=FAKE_CHECKSUM,
         key="test.txt",
         name="test.txt",
         store="s3://bucket",
@@ -84,12 +86,15 @@ def test_model_file_entity():
     assert file.extra["foo"] == "bar"
     entity = file.to_entity()
     assert isinstance(entity, StatementEntity)
-    assert entity.id == "file-abe3bdf54822f196577946c4c3e2f987d3fba7e9"
+    assert (
+        entity.id
+        == "file-725fa66861ba50448ace5adbb6474165ed07540a08f0d07f2fd723e80b172461"
+    )
     assert entity.dataset.name == "test"
     assert entity.datasets == {"test"}
     assert entity.schema.name == "PlainText"
     assert entity.first("fileName") == "test.txt"
-    assert entity.first("contentHash") == "abc123"
+    assert entity.first("contentHash") == FAKE_CHECKSUM
     assert entity.first("mimeType") == PLAIN
     assert entity.first("title") == "Document title"
     assert entity.first("fileSize") == "100"
@@ -100,7 +105,7 @@ def test_model_file_parents():
     """Test parent folder graph for file entities"""
     file = File(
         dataset="test",
-        checksum="abc123",
+        checksum=FAKE_CHECKSUM,
         key="foo/bar/test.txt",
         name="test.txt",
         store="s3://bucket",
@@ -108,11 +113,17 @@ def test_model_file_parents():
     )
     folders = list(file.make_parents())
     assert len(folders) == 2
-    assert folders[0].id == "folder-0beec7b5ea3f0fdbc95d0dd47f3c5bc275da8a33"
+    assert (
+        folders[0].id
+        == "folder-2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"
+    )
     assert folders[0].schema.name == "Folder"
     assert folders[0].dataset.name == "test"
     assert folders[0].first("fileName") == "foo"
-    assert folders[1].id == "folder-8f8fe7be5773bb7f931647ee8ccf43a386569afa"
+    assert (
+        folders[1].id
+        == "folder-dbbc59510ed49771423ffcd2ddbaaa7846666628fee87ee5e61656a93273b3f5"
+    )
     assert folders[1].first("fileName") == "bar"
     assert folders[1].first("parent") == folders[0].id
     assert file.parent == folders[1].id
@@ -122,7 +133,7 @@ def test_model_file_parents():
     # no parents
     file = File(
         dataset="test",
-        checksum="abc123",
+        checksum=FAKE_CHECKSUM,
         key="test.txt",
         name="test.txt",
         store="s3://bucket",
@@ -133,7 +144,7 @@ def test_model_file_parents():
     # test weird (trailing WS) but valid folder path
     file = File(
         dataset="test",
-        checksum="abc123",
+        checksum=FAKE_CHECKSUM,
         key="Foo / è e/test.txt",
         name="test.txt",
         store="s3://bucket",

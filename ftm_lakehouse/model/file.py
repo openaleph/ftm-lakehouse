@@ -11,7 +11,7 @@ from anystore.util import guess_mimetype
 from followthemoney import EntityProxy, StatementEntity
 from ftmq.types import StatementEntities
 from ftmq.util import DEFAULT_DATASET, make_entity
-from pydantic import ConfigDict, computed_field, model_validator
+from pydantic import ConfigDict, computed_field, field_validator, model_validator
 
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.helpers.file import (
@@ -20,6 +20,7 @@ from ftm_lakehouse.helpers.file import (
     mime_to_schema,
     pick_mime,
 )
+from ftm_lakehouse.util import validate_checksum
 
 
 class Document(BaseModel):
@@ -33,6 +34,11 @@ class Document(BaseModel):
     size: int | None = None
     updated_at: datetime | None = None
     public_url: HttpUrlStr | None = None
+
+    @field_validator("checksum")
+    @classmethod
+    def check_checksum(cls, v: str) -> str:
+        return validate_checksum(v)
 
     @classmethod
     def from_entity(cls, e: EntityProxy, public_url: str | None = None) -> Self:
@@ -65,11 +71,16 @@ class File(Stats):
     dataset: str
     """Dataset name"""
     checksum: str
-    """SHA1 checksum (often referred to as `content_hash`)"""
+    """SHA256 checksum (often referred to as `content_hash`)"""
     extra: dict[str, Any] = {}
     """Arbitrary extra data"""
     origin: str | None = None
     """Origin stage of this file"""
+
+    @field_validator("checksum")
+    @classmethod
+    def check_checksum(cls, v: str) -> str:
+        return validate_checksum(v)
 
     @model_validator(mode="before")
     @classmethod

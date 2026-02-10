@@ -24,7 +24,7 @@ dependencies = [
     "ftmq[lake] (>=4.5.3,<5.0.0)",
     "jinja2 (>=3.1.5,<4.0.0)",
     "followthemoney (>=4.5.2,<5.0.0)",
-    "anystore (>=1.0.1,<2.0.0)",
+    "anystore @ git+https://github.com/dataresearchcenter/anystore.git",
 ]
 
 [project.optional-dependencies]

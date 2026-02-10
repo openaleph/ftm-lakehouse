@@ -4,7 +4,7 @@ import typer
 from anystore.cli import ErrorHandler
 from anystore.io import smart_open, smart_read, smart_write, smart_write_models
 from anystore.logging import configure_logging
-from anystore.util import dump_json_model, make_data_checksum
+from anystore.util import dump_json_model
 from ftmq.io import smart_read_proxies, smart_write_proxies
 from pydantic import BaseModel
 from rich.console import Console
@@ -17,6 +17,7 @@ from ftm_lakehouse.dataset import Dataset
 from ftm_lakehouse.lake import get_dataset, get_lakehouse
 from ftm_lakehouse.model.dataset import DatasetModel
 from ftm_lakehouse.operation.crawl import HandleExistingMode
+from ftm_lakehouse.util import make_data_checksum
 
 settings = Settings()
 cli = typer.Typer(

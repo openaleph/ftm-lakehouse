@@ -548,8 +548,8 @@ class TestArchiveOperations:
         file = tmp_dataset.archive.store(fixtures_path / "src" / "example.pdf")
 
         assert tmp_dataset.archive.exists(file.checksum)
-        # Use a valid but non-existent checksum format (40 hex chars for SHA1)
-        assert not tmp_dataset.archive.exists("0" * 40)
+        # Use a valid but non-existent checksum format (64 hex chars for SHA256)
+        assert not tmp_dataset.archive.exists("0" * 64)
 
     def test_archive_open_file(self, tmp_dataset, fixtures_path):
         """Test opening an archived file."""

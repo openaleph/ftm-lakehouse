@@ -1,30 +1,54 @@
-from typing import Any
+from typing import Any, BinaryIO
 
 from anystore.types import SDict
+from anystore.util import make_checksum as _make_checksum
+from anystore.util import make_data_checksum as _make_data_checksum
 from followthemoney import StatementEntity
 from ftmq.util import make_entity as _make_entity
 from jinja2 import Template
 
+from ftm_lakehouse.core.settings import CHECKSUM_ALGORITHM
+
+
+def make_checksum(io: BinaryIO) -> str:
+    """Compute checksum using SHA256."""
+    return _make_checksum(io, algorithm=CHECKSUM_ALGORITHM)
+
+
+def make_data_checksum(data: Any) -> str:
+    """Compute data checksum using SHA256."""
+    return _make_data_checksum(data, algorithm=CHECKSUM_ALGORITHM)
+
+
+def validate_checksum(ch: str) -> str:
+    """Validate that a checksum is a valid SHA256 hex digest (64 chars).
+
+    Raises:
+        ValueError: If the checksum is not a valid SHA256 hex digest
+    """
+    if len(ch) != 64:
+        raise ValueError(f"Invalid checksum: `{ch}`")
+    return ch
+
 
 def make_checksum_key(ch: str) -> str:
     """
-    Generate a path key for the given SHA1 checksum
+    Generate a path key for the given SHA256 checksum.
 
     Examples:
-        >>> make_checksum_key("5a6acf229ba576d9a40b09292595658bbb74ef56")
-        "5a/6a/cf/5a6acf229ba576d9a40b09292595658bbb74ef56"
+        >>> make_checksum_key("a7fdc3...")
+        "a7/fd/c3/a7fdc3..."
 
     Args:
-        ch: SHA1 checksum (often referred to as `content_hash`)
+        ch: SHA256 Hex checksum (content_hash)
 
     Raises:
-        ValueError: If the checksum is not 40 chars long (SHA1)
+        ValueError: If the checksum is not a valid SHA256 hex digest
 
     Returns:
-        The prefixed SHA1 path
+        The prefixed path
     """
-    if len(ch) != 40:  # sha1
-        raise ValueError(f"Invalid checksum: `{ch}`")
+    validate_checksum(ch)
     return "/".join((ch[:2], ch[2:4], ch[4:6], ch))
 
 

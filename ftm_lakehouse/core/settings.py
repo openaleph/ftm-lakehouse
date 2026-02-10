@@ -4,6 +4,8 @@ from anystore.settings import BaseSettings
 from anystore.types import HttpUrlStr
 from pydantic_settings import SettingsConfigDict
 
+CHECKSUM_ALGORITHM = "sha256"  # never change this! ;)
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(

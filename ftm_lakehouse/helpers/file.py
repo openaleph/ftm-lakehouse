@@ -3,11 +3,12 @@ from pathlib import Path
 from typing import Iterable
 
 from anystore.functools import weakref_cache as cache
-from anystore.util import make_data_checksum
 from followthemoney import Schema, StatementEntity, model
 from ftmq.types import StatementEntities
 from ftmq.util import make_entity
 from rigour.mime import normalize_mimetype, types
+
+from ftm_lakehouse.util import make_data_checksum
 
 MAX_LRU = 10_000
 

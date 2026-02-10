@@ -16,6 +16,7 @@ from anystore.types import Uri
 from banal import ensure_dict
 
 from ftm_lakehouse.core.conventions import tag
+from ftm_lakehouse.core.settings import CHECKSUM_ALGORITHM
 from ftm_lakehouse.model.job import DatasetJobModel
 from ftm_lakehouse.operation.base import DatasetJobOperation
 from ftm_lakehouse.repository import ArchiveRepository, EntityRepository, JobRepository
@@ -119,7 +120,7 @@ class CrawlOperation(DatasetJobOperation[CrawlJob]):
         self.log.info(f"Crawling `{uri}` ...", source=self.source.uri)
         checksum = None
         if self.source.is_local:
-            checksum = self.source.checksum(uri)
+            checksum = self.source.checksum(uri, algorithm=CHECKSUM_ALGORITHM)
         if not self._should_skip(uri, checksum):
             file = self.archive.store(
                 self.source.to_uri(uri),

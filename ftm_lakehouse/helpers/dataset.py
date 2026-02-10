@@ -4,6 +4,8 @@ from anystore.store.resource import UriResource
 from followthemoney.dataset.resource import DataResource
 from rigour.mime.types import CSV, FTM, JSON
 
+from ftm_lakehouse.core.settings import CHECKSUM_ALGORITHM
+
 
 def make_resource(
     uri: str, mime_type: str | None = None, public_url: str | None = None
@@ -13,7 +15,7 @@ def make_resource(
     return DataResource(
         name=res.name,
         url=public_url or uri,
-        checksum=res.checksum(),
+        checksum=res.checksum(algorithm=CHECKSUM_ALGORITHM),
         timestamp=info.created_at,
         mime_type=mime_type or info.mimetype,
         size=info.size,

@@ -4,8 +4,8 @@ from ftm_lakehouse import util
 
 
 def test_util():
-    ch = "5a6acf229ba576d9a40b09292595658bbb74ef56"
-    assert util.make_checksum_key(ch) == f"5a/6a/cf/{ch}"
+    ch = "bbb1f047ff1f0c333560e09cff0c4a052eb87a2998d6d16775a276645877c5b7"
+    assert util.make_checksum_key(ch) == f"bb/b1/f0/{ch}"
     with pytest.raises(ValueError):
         util.make_checksum_key("abcde")
 
