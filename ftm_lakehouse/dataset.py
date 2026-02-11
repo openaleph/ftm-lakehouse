@@ -7,12 +7,12 @@ from anystore.logging import get_logger
 from anystore.store import get_store
 from anystore.types import Uri
 from anystore.util import join_uri
-from ftmq.model.dataset import D
 
 from ftm_lakehouse.core.config import load_config
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.core.settings import Settings
-from ftm_lakehouse.model import DatasetModel
+from ftm_lakehouse.core.zfs import ensure_zfs_dataset
+from ftm_lakehouse.model import DM, DatasetJobModel, DatasetModel
 from ftm_lakehouse.repository import (
     ArchiveRepository,
     EntityRepository,
@@ -25,7 +25,7 @@ from ftm_lakehouse.storage.versions import VersionStore
 log = get_logger(__name__)
 
 
-class Dataset(Generic[D]):
+class Dataset(Generic[DM]):
     """
     A single dataset within the lakehouse.
 
@@ -58,7 +58,7 @@ class Dataset(Generic[D]):
         self,
         name: str,
         uri: Uri,
-        model_class: type[D] = DatasetModel,
+        model_class: type[DM] = DatasetModel,
     ) -> None:
         self.name = name
         self.uri = uri
@@ -92,25 +92,26 @@ class Dataset(Generic[D]):
     # Model access (config.yml via VersionStore)
     # -------------------------------------------------------------------------
 
-    def _load_model(self, **data: Any) -> D:
+    def _load_model(self, **data: Any) -> DM:
         """Load dataset model from config.yml."""
         data["name"] = self.name
         data.pop("storage", None)
         return self._model_class(**load_config(self._store, **data))
 
     @property
-    def model(self) -> D:
+    def model(self) -> DM:
         """Load and return the dataset model from config.yml."""
         return self._load_model()
 
     @property
-    def index(self) -> D:
+    def index(self) -> DM:
         """Load and return the generated index.json (or fall back to config.yml)"""
-        if self._versions.exists(path.INDEX):
-            return self._versions.get(path.INDEX, model=self._model_class)
+        index = self._versions.get(path.INDEX, model=self._model_class)
+        if index:
+            return index
         return self.model
 
-    def update_model(self, **data: Any) -> D:
+    def update_model(self, **data: Any) -> DM:
         """
         Update config.yml with new data.
 
@@ -149,8 +150,6 @@ class Dataset(Generic[D]):
     @cached_property
     def jobs(self) -> JobRepository:
         """Job tracking."""
-        from ftm_lakehouse.model import DatasetJobModel
-
         return JobRepository(self.name, self.uri, DatasetJobModel)
 
     # -------------------------------------------------------------------------
@@ -164,6 +163,8 @@ class Dataset(Generic[D]):
     def ensure(self) -> None:
         """Ensure dataset exists, create config.yml if needed."""
         if not self.exists():
+            if self._store.is_local and self._settings.on_zfs:
+                ensure_zfs_dataset(self.name)
             self.update_model()
             self._log.info("Created dataset")
 

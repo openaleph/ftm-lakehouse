@@ -17,8 +17,10 @@ class Settings(BaseSettings):
     )
 
     uri: str = "data"
-    public_url_prefix: str | None = None
     journal_uri: str = "sqlite:///data/journal.db"
+    on_zfs: bool = False
+
+    public_url_prefix: str | None = None
 
 
 class ApiContactSettings(BaseSettings):

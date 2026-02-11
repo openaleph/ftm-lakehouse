@@ -1,5 +1,7 @@
 """Catalog and dataset metadata models."""
 
+from typing import TypeVar
+
 from anystore.model import StoreModel
 from anystore.types import HttpUrlStr
 from ftmq.model import Catalog, Dataset
@@ -8,6 +10,8 @@ from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.util import render
 
 settings = Settings()
+
+DM = TypeVar("DM", bound="DatasetModel")
 
 
 class CatalogModel(Catalog):
