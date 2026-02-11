@@ -21,6 +21,8 @@ def test_model_file(fixtures_path):
     assert file.dataset == DEFAULT_DATASET == "default"
     assert file.id == file_id
     assert file.size == 19
+    assert file.store == "lakehouse://"
+    assert file.uri == "lakehouse:///src/utf.txt"
     file_dict = file.to_dict()
     assert "created_at" in file_dict
     assert "updated_at" in file_dict

@@ -82,6 +82,12 @@ class File(Stats):
     def check_checksum(cls, v: str) -> str:
         return validate_checksum(v)
 
+    @field_validator("store")
+    @classmethod
+    def hide_store(cls, v: str) -> str:
+        # always don't include original store uri
+        return "lakehouse://"
+
     @model_validator(mode="before")
     @classmethod
     def collect_extra_fields(cls, data: Any) -> Any:

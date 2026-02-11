@@ -162,7 +162,6 @@ class ArchiveRepository(BaseRepository):
             if key in file.__class__.model_fields:
                 setattr(file, key, metadata.pop(key))
         file.extra = clean_dict(metadata)
-        file.store = str(self.uri)
         file.dataset = self.dataset
         file.origin = file.origin or ARCHIVE_ORIGIN
 
