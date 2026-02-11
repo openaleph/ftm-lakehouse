@@ -55,11 +55,8 @@ class TestIncrementalProcessing:
 
         # Crawl documents
         crawl(
-            tmp_dataset.name,
+            tmp_dataset,
             fixtures_path / "src",
-            archive=tmp_dataset.archive,
-            entities=tmp_dataset.entities,
-            jobs=tmp_dataset.jobs,
             make_entities=True,
         )
 
@@ -92,11 +89,8 @@ class TestIncrementalProcessing:
         """
         # Initial crawl and make
         crawl(
-            tmp_dataset.name,
+            tmp_dataset,
             fixtures_path / "src",
-            archive=tmp_dataset.archive,
-            entities=tmp_dataset.entities,
-            jobs=tmp_dataset.jobs,
             make_entities=True,
         )
         make(tmp_dataset)
@@ -365,11 +359,8 @@ class TestIncrementalProcessing:
         """Test that crawl skips already existing files."""
         # First crawl
         result1 = crawl(
-            tmp_dataset.name,
+            tmp_dataset,
             fixtures_path / "src",
-            archive=tmp_dataset.archive,
-            entities=tmp_dataset.entities,
-            jobs=tmp_dataset.jobs,
             make_entities=True,
         )
         make(tmp_dataset)
@@ -378,11 +369,8 @@ class TestIncrementalProcessing:
 
         # Second crawl should skip existing files (archive handles deduplication)
         result2 = crawl(
-            tmp_dataset.name,
+            tmp_dataset,
             fixtures_path / "src",
-            archive=tmp_dataset.archive,
-            entities=tmp_dataset.entities,
-            jobs=tmp_dataset.jobs,
             make_entities=True,
         )
 

@@ -21,11 +21,8 @@ def test_api(fixtures_path, tmp_catalog):
     dataset = tmp_catalog.get_dataset(DATASET)
     dataset.ensure()
     crawl(
-        dataset.name,
+        dataset,
         fixtures_path / "src",
-        archive=dataset.archive,
-        entities=dataset.entities,
-        jobs=dataset.jobs,
         make_entities=True,
     )
 
@@ -82,11 +79,8 @@ def test_api_public_mode(fixtures_path, tmp_catalog):
     dataset = tmp_catalog.get_dataset(DATASET)
     dataset.ensure()
     crawl(
-        dataset.name,
+        dataset,
         fixtures_path / "src",
-        archive=dataset.archive,
-        entities=dataset.entities,
-        jobs=dataset.jobs,
         make_entities=True,
     )
 

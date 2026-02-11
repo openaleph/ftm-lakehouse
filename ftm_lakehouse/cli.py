@@ -337,11 +337,8 @@ def cli_crawl(
     """
     with DatasetContext() as dataset:
         result = op.crawl(
-            dataset.name,
+            dataset,
             uri,
-            archive=dataset.archive,
-            entities=dataset.entities,
-            jobs=dataset.jobs,
             glob=include,
             exclude_glob=exclude,
             make_entities=make_entities,

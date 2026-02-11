@@ -37,6 +37,7 @@ from ftm_lakehouse.operation.export import (
     ExportStatisticsJob,
     ExportStatisticsOperation,
 )
+from ftm_lakehouse.operation.make import MakeJob, MakeOperation
 from ftm_lakehouse.operation.mapping import MappingJob, MappingOperation
 from ftm_lakehouse.operation.optimize import OptimizeJob, OptimizeOperation
 from ftm_lakehouse.operation.recreate import (
@@ -58,13 +59,7 @@ def export_statements(dataset: Dataset, force: bool = False) -> ExportStatements
         The completed job result
     """
     job = ExportStatementsJob.make(dataset=dataset.name)
-    op = ExportStatementsOperation(
-        job=job,
-        entities=dataset.entities,
-        tags=dataset._tags,
-        versions=dataset._versions,
-    )
-    return op.run(force=force)
+    return ExportStatementsOperation.from_job(job, dataset).run(force=force)
 
 
 def export_entities(
@@ -82,13 +77,7 @@ def export_entities(
         The completed job result
     """
     job = ExportEntitiesJob.make(dataset=dataset.name, make_diff=make_diff)
-    op = ExportEntitiesOperation(
-        job=job,
-        entities=dataset.entities,
-        tags=dataset._tags,
-        versions=dataset._versions,
-    )
-    return op.run(force=force)
+    return ExportEntitiesOperation.from_job(job, dataset).run(force=force)
 
 
 def export_statistics(dataset: Dataset, force: bool = False) -> ExportStatisticsJob:
@@ -103,13 +92,7 @@ def export_statistics(dataset: Dataset, force: bool = False) -> ExportStatistics
         The completed job result
     """
     job = ExportStatisticsJob.make(dataset=dataset.name)
-    op = ExportStatisticsOperation(
-        job=job,
-        entities=dataset.entities,
-        tags=dataset._tags,
-        versions=dataset._versions,
-    )
-    return op.run(force=force)
+    return ExportStatisticsOperation.from_job(job, dataset).run(force=force)
 
 
 def export_documents(
@@ -126,13 +109,7 @@ def export_documents(
         The completed job result
     """
     job = ExportDocumentsJob.make(dataset=dataset.name, make_diff=make_diff)
-    op = ExportDocumentsOperation(
-        job=job,
-        entities=dataset.entities,
-        tags=dataset._tags,
-        versions=dataset._versions,
-    )
-    return op.run(force=force)
+    return ExportDocumentsOperation.from_job(job, dataset).run(force=force)
 
 
 def export_index(dataset: Dataset, force: bool = False) -> ExportIndexJob:
@@ -147,13 +124,9 @@ def export_index(dataset: Dataset, force: bool = False) -> ExportIndexJob:
         The completed job result
     """
     job = ExportIndexJob.make(dataset=dataset.name)
-    op = ExportIndexOperation(
-        job=job,
-        entities=dataset.entities,
-        tags=dataset._tags,
-        versions=dataset._versions,
+    return ExportIndexOperation.from_job(job, dataset).run(
+        force=force, dataset=dataset.model
     )
-    return op.run(force=force, dataset=dataset.model)
 
 
 def optimize(
@@ -188,13 +161,7 @@ def optimize(
         origin=origin,
         compact=compact,
     )
-    op = OptimizeOperation(
-        job=job,
-        entities=dataset.entities,
-        tags=dataset._tags,
-        versions=dataset._versions,
-    )
-    return op.run(force=force)
+    return OptimizeOperation.from_job(job, dataset).run(force=force)
 
 
 def run_mapping(
@@ -207,21 +174,14 @@ def run_mapping(
 
     Args:
         dataset: The dataset containing the mapping
-        content_hash: SHA1 checksum of the CSV file to process
+        content_hash: SHA256 checksum of the CSV file to process
         force: Force processing even if up-to-date
 
     Returns:
         The completed job result
     """
     job = MappingJob.make(dataset=dataset.name, content_hash=content_hash)
-    op = MappingOperation(
-        job=job,
-        archive=dataset.archive,
-        entities=dataset.entities,
-        tags=dataset._tags,
-        versions=dataset._versions,
-    )
-    return op.run(force=force)
+    return MappingOperation.from_job(job, dataset).run(force=force)
 
 
 def recreate(
@@ -240,35 +200,27 @@ def recreate(
     Args:
         dataset: The dataset to recreate
         source: Source for recreation (AUTO selects based on timestamps)
-        force: Force recreation (always runs since no freshness check)
 
     Returns:
         The completed job result
     """
     job = RecreateJob.make(dataset=dataset.name, source=source)
-    op = RecreateOperation(
-        job=job,
-        entities=dataset.entities,
-        tags=dataset._tags,
-        versions=dataset._versions,
-    )
-    return op.run()
+    return RecreateOperation.from_job(job, dataset).run()
 
 
-def make(dataset: Dataset, force: bool = False) -> None:
+def make(dataset: Dataset, force: bool = False) -> MakeJob:
     """
     Run the full make workflow: flush journal and generate all exports.
 
     Args:
         dataset: The dataset to process
         force: Force all operations even if up-to-date
+
+    Returns:
+        The completed job result
     """
-    dataset.entities.flush()
-    export_statements(dataset, force=force)
-    export_entities(dataset, force=force)
-    export_documents(dataset, force=force)
-    export_statistics(dataset, force=force)
-    export_index(dataset, force=force)
+    job = MakeJob.make(dataset=dataset.name)
+    return MakeOperation.from_job(job, dataset).run(force=force)
 
 
 def download_archive(dataset: Dataset, target: Uri) -> DownloadArchiveJob:
@@ -281,5 +233,4 @@ def download_archive(dataset: Dataset, target: Uri) -> DownloadArchiveJob:
         target: The uri to the target (local or remote)
     """
     job = DownloadArchiveJob.make(dataset=dataset.name, target=target)
-    op = DownloadArchiveOperation(job=job, archive=dataset.archive)
-    return op.run()
+    return DownloadArchiveOperation.from_job(job, dataset).run()

@@ -43,6 +43,9 @@ OP_RECREATE = "operations/recreate/last_run"
 OP_DOWNLOAD_ARCHIVE = "operations/download_archive/last_run"
 """Last download archive execution"""
 
+OP_MAKE = "operations/make/last_run"
+"""Last make (full workflow) execution"""
+
 
 def key(key: str) -> str:
     return join_relpaths(TAGS, key)

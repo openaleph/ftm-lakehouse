@@ -34,6 +34,7 @@ from ftm_lakehouse.operation.factories import (
     recreate,
     run_mapping,
 )
+from ftm_lakehouse.operation.make import MakeJob, MakeOperation
 from ftm_lakehouse.operation.mapping import MappingOperation
 from ftm_lakehouse.operation.optimize import OptimizeOperation
 
@@ -46,6 +47,8 @@ __all__ = [
     "ExportIndexOperation",
     "ExportStatementsOperation",
     "ExportStatisticsOperation",
+    "MakeJob",
+    "MakeOperation",
     "MappingOperation",
     "OptimizeOperation",
     # Factory functions

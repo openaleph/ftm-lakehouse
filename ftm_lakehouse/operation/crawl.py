@@ -19,7 +19,6 @@ from ftm_lakehouse.core.conventions import tag
 from ftm_lakehouse.core.settings import CHECKSUM_ALGORITHM
 from ftm_lakehouse.model.job import DatasetJobModel
 from ftm_lakehouse.operation.base import DatasetJobOperation
-from ftm_lakehouse.repository import ArchiveRepository, EntityRepository, JobRepository
 from ftm_lakehouse.repository.job import JobRun
 
 
@@ -80,6 +79,13 @@ class CrawlOperation(DatasetJobOperation[CrawlJob]):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.source = get_store(self.job.uri)
+        if self.source.is_http:
+            backend_config = ensure_dict(self.source.backend_config)
+            backend_config["client_kwargs"] = {
+                **ensure_dict(backend_config.get("client_kwargs")),
+                "timeout": aiohttp.ClientTimeout(total=3600 * 24),
+            }
+            self.source.backend_config = backend_config
 
     def get_uris(self) -> Generator[str, None, None]:
         """
@@ -166,7 +172,7 @@ class CrawlOperation(DatasetJobOperation[CrawlJob]):
 
 
 def crawl(
-    dataset: str,
+    dataset,
     uri: Uri,
     prefix: str | None = None,
     exclude_prefix: str | None = None,
@@ -174,9 +180,6 @@ def crawl(
     exclude_glob: str | None = None,
     make_entities: bool | None = False,
     existing: HandleExistingMode | None = HandleExistingMode.skip_path,
-    archive: ArchiveRepository | None = None,
-    entities: EntityRepository | None = None,
-    jobs: JobRepository | None = None,
 ) -> CrawlJob:
     """
     Crawl a local or remote location of documents.
@@ -184,6 +187,7 @@ def crawl(
     This is the main entry point for crawling documents.
 
     Args:
+        dataset: The Dataset to crawl into
         uri: Source location URI (local path, s3://, http://, etc.)
         prefix: Include only keys with this prefix
         exclude_prefix: Exclude keys with this prefix
@@ -191,25 +195,13 @@ def crawl(
         exclude_glob: Glob pattern for keys to exclude
         make_entities: Create file entities from crawled files
         existing: Ignore already existing (by relative path, checksum) or overwrite
-        archive: ArchiveRepository for blobs
-        entities: EntityRepository for entities
-        jobs: JobRepository for job tracking
 
     Returns:
         CrawlJob with completion statistics
     """
-    store = get_store(uri=uri)
-    if store.is_http:
-        backend_config: dict = ensure_dict(store.backend_config)
-        backend_config["client_kwargs"] = {
-            **ensure_dict(backend_config.get("client_kwargs")),
-            "timeout": aiohttp.ClientTimeout(total=3600 * 24),
-        }
-        store.backend_config = backend_config
-
     job = CrawlJob.make(
-        uri=store.uri,
-        dataset=dataset,
+        uri=uri,
+        dataset=dataset.name,
         prefix=prefix,
         exclude_prefix=exclude_prefix,
         glob=glob,
@@ -217,11 +209,4 @@ def crawl(
         make_entities=make_entities,
         existing=existing,
     )
-
-    op = CrawlOperation(
-        job=job,
-        archive=archive,
-        entities=entities,
-        jobs=jobs,
-    )
-    return op.run()
+    return CrawlOperation.from_job(job, dataset).run()
