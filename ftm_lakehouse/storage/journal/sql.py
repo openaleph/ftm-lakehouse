@@ -157,7 +157,11 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
                     )
 
     def flush(self) -> JournalRows:
-        """Iterate and delete all rows atomically."""
+        """Iterate and delete yielded rows.
+
+        Only deletes rows that were actually yielded, so rows written by
+        concurrent writers during the flush are preserved.
+        """
         q = select(self.table).order_by(
             self.table.c.bucket,
             self.table.c.origin,
@@ -170,11 +174,20 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
                 cursor = conn.execution_options(stream_results=True).execute(q)
 
                 while rows := cursor.fetchmany(10_000):
+                    flushed: list[str] = []
                     for row in rows:
-                        yield row.id, row.bucket, row.origin, row.canonical_id, row.data, row.deleted_at
+                        flushed.append(row.id)
+                        yield (
+                            row.id,
+                            row.bucket,
+                            row.origin,
+                            row.canonical_id,
+                            row.data,
+                            row.deleted_at,
+                        )
+                    # Delete the rows we yielded
+                    conn.execute(delete(self.table).where(self.table.c.id.in_(flushed)))
 
-                # Delete all rows for this dataset
-                conn.execute(delete(self.table))
                 tx.commit()
             except BaseException:
                 tx.rollback()

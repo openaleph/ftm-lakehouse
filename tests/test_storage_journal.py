@@ -293,3 +293,51 @@ def test_storage_journal_clear(journal):
     deleted = journal.clear()
     assert deleted == 10
     assert journal.count() == 0
+
+
+def test_storage_journal_flush_concurrent_write(tmp_path):
+    """Test that rows written during flush are not deleted.
+
+    Simulates a concurrent writer inserting rows while flush() is yielding.
+    The new rows must survive the flush DELETE since they were never yielded.
+    Uses file-based SQLite so writer and flush use separate connections.
+    """
+    uri = f"sqlite:///{tmp_path / 'journal.db'}"
+    journal = SqlJournalStore(dataset=DATASET, uri=uri)
+
+    # Write initial rows
+    with journal.writer() as w:
+        for i in range(5):
+            w.add_statement(make_statement(f"initial_{i}", "name", f"Initial {i}"))
+
+    assert journal.count() == 5
+
+    # Start flush, inject new rows mid-iteration, then finish
+    flushed_ids = []
+    injected = False
+    for row_id, bucket, origin, canonical_id, data, deleted_at in journal.flush():
+        flushed_ids.append(row_id)
+
+        # After first row, inject new rows via a separate writer
+        if not injected:
+            with journal.writer() as w:
+                for i in range(3):
+                    w.add_statement(
+                        make_statement(f"concurrent_{i}", "name", f"Concurrent {i}")
+                    )
+            injected = True
+
+    # All 5 initial rows were yielded
+    assert len(flushed_ids) == 5
+
+    # The 3 rows written during flush must still be in the journal
+    assert journal.count() == 3
+
+    # Flush the remaining rows — should get exactly the concurrent ones
+    remaining = collect_statements(journal.flush())
+    assert len(remaining) == 3
+    remaining_ids = {s.entity_id for s in remaining}
+    assert remaining_ids == {"concurrent_0", "concurrent_1", "concurrent_2"}
+
+    # Journal is now empty
+    assert journal.count() == 0
