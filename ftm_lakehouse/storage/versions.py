@@ -3,6 +3,7 @@
 from typing import Any, Generator, Generic
 
 from anystore.exceptions import DoesNotExist
+from anystore.logging import get_logger
 from anystore.model.base import BaseModel
 from anystore.store import get_store
 from anystore.types import M, Uri
@@ -10,6 +11,9 @@ from anystore.types import M, Uri
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.helpers.serialization import dump_model, load_model
 from ftm_lakehouse.storage.tags import TagStore
+from ftm_lakehouse.util import make_data_checksum
+
+log = get_logger(__name__)
 
 
 class VersionedModelStore(Generic[M]):
@@ -38,16 +42,25 @@ class VersionedModelStore(Generic[M]):
         """
         Write obj to key and create a versioned snapshot.
 
+        Skips the write if the serialized content is unchanged from the
+        current version (compared by checksum), returning the most recent
+        existing version path instead.
+
         Args:
             key: Main storage key
             data: Pydantic model to store
 
         Returns:
-            Path to the versioned copy
+            Path to the versioned copy (new or most recent existing)
         """
-        with self._tags.touch(key):
+        raw = dump_model(key, data)
+        checksum = make_data_checksum(raw)
+        checksum_tag = f"{key}-{checksum}"
+        if self._tags.exists(checksum_tag):
+            log.debug("Already up-to-date", key=key, checksum=checksum)
+            return self.list_versions(str(key))[-1]
+        with self._tags.touch(key), self._tags.touch(checksum_tag):
             versioned_path = path.version(str(key))
-            raw = dump_model(key, data)
             self._store.put(versioned_path, raw)
             self._store.put(key, raw)
             return versioned_path
