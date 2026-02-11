@@ -6,7 +6,7 @@ import pyarrow as pa
 from deltalake import DeltaTable, write_deltalake
 from ftmq.store.lake import ARROW_SCHEMA
 
-from ftm_lakehouse.logic.parquet import compact, query_deduped
+from ftm_lakehouse.logic.parquet import compact_deletes, query_deduped
 from ftm_lakehouse.storage.parquet import PARTITIONS
 
 TOMBSTONE_SCHEMA = ARROW_SCHEMA.append(pa.field("deleted_at", pa.timestamp("us")))
@@ -168,7 +168,7 @@ def test_compact_removes_tombstones(tmp_path):
     _write_tombstones(uri, [_make_row("jane", "name", "Jane Doe")], ts)
 
     dt = DeltaTable(uri)
-    compact(dt, PARTITIONS)
+    compact_deletes(dt, PARTITIONS)
 
     # Re-load after compact
     dt = DeltaTable(uri)
@@ -195,7 +195,7 @@ def test_compact_preserves_deleted_at_column(tmp_path):
     dt = DeltaTable(uri)
     assert "deleted_at" in {f.name for f in dt.schema().to_arrow()}
 
-    compact(dt, PARTITIONS)
+    compact_deletes(dt, PARTITIONS)
 
     # After compact, deleted_at column is preserved (all NULLs)
     dt = DeltaTable(uri)
@@ -223,7 +223,7 @@ def test_compact_only_rewrites_affected_partitions(tmp_path):
     dt = DeltaTable(uri)
     version_before = dt.version()
 
-    compact(dt, PARTITIONS)
+    compact_deletes(dt, PARTITIONS)
 
     dt = DeltaTable(uri)
     result = dt.to_pyarrow_table()
@@ -251,7 +251,7 @@ def test_compact_preserves_live_data(tmp_path):
     ]
     dt = _write_rows(uri, rows)
 
-    compact(dt, PARTITIONS)
+    compact_deletes(dt, PARTITIONS)
 
     # After compact, verify the table is readable and intact
     dt = DeltaTable(uri)
