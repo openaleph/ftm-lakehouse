@@ -7,7 +7,7 @@ The entities repository is the primary way to work with [FollowTheMoney](https:/
 Entities in `ftm-lakehouse` are stored as **statements** - granular property-level records. This design enables:
 
 - **Versioning**: Track changes over time
-- **Provenance**: Know where each piece of data came from (via `origin` and the [Statement model](https://followthemoney.tech/docs/statements/))
+- **Provenance**: Know where each piece of data came from (via `origin`, `last_seen`, `original_value` and other metadata from the [Statement model](https://followthemoney.tech/docs/statements/))
 - **Incremental updates**: Add new data without reprocessing everything
 - **Deduplication**: Merge entities from multiple sources
 
@@ -166,6 +166,67 @@ for entity in dataset.entities.query(origin="source_a"):
     print(entity.id)
 ```
 
+## Deleting Entities
+
+Entities can be soft-deleted. Deletes go through the journal like writes, and take effect on the next flush.
+
+### Delete an Entity
+
+```python
+from ftm_lakehouse import get_dataset
+
+dataset = get_dataset("my_dataset")
+
+# Delete all statements for an entity
+count = dataset.entities.delete_entity("jane-doe")
+print(f"Wrote {count} tombstones")
+
+# Flush to apply the deletion
+dataset.entities.flush()
+```
+
+After flush, the entity is immediately excluded from all queries, statistics, and exports — no compaction required.
+
+### Delete a Single Statement
+
+```python
+# Get the statement to delete
+stmts = list(dataset.entities._statements.query_statements())
+target = stmts[0]
+
+dataset.entities.delete_statement(target)
+dataset.entities.flush()
+```
+
+### Re-adding After Delete
+
+A deleted entity can be re-added. The new data takes precedence:
+
+```python
+dataset.entities.delete_entity("jane-doe")
+dataset.entities.flush()
+
+# Re-add with new data
+dataset.entities.add(updated_jane, origin="correction")
+dataset.entities.flush()
+
+# jane-doe is alive again with the new data
+```
+
+## Deduplication
+
+When flushing, `ftm-lakehouse` automatically deduplicates statements. If the same statement (same `id`) is written again, only the sidecar metadata (`last_seen` timestamp) is updated — no duplicate rows are added to the main table.
+
+```python
+dataset.entities.add(entity)
+dataset.entities.flush()  # writes to main table + sidecar
+
+dataset.entities.add(entity)  # same entity again
+dataset.entities.flush()  # returns 0 — only updates sidecar last_seen
+```
+
+This means repeated imports of the same data are cheap: the main parquet table doesn't grow, and only the lightweight sidecar is updated.
+
 ## Maintenance
 
 ### Flush the Journal
@@ -177,8 +238,29 @@ from ftm_lakehouse import get_dataset
 
 dataset = get_dataset("my_dataset")
 count = dataset.entities.flush()
-print(f"Flushed {count} statements")
+print(f"Flushed {count} new statements")
 ```
+
+### Compact
+
+Compaction applies the sidecar to the main table: deleted rows are removed and timestamps are updated. After compaction, the main table is self-contained.
+
+```python
+from ftm_lakehouse import get_dataset
+
+dataset = get_dataset("my_dataset")
+
+# Apply sidecar to main table
+dataset.entities.compact()
+
+# Follow up with optimize to compact parquet files
+dataset.entities.optimize()
+```
+
+!!! note
+    Compaction is optional. Queries always join with the sidecar, so deleted
+    entities are filtered automatically even without compaction. Compact when
+    you want to reclaim space or produce a clean, standalone main table.
 
 ### Optimize Storage
 

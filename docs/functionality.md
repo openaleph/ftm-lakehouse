@@ -92,8 +92,32 @@ Same as add entity - statements are written to the journal.
 
 - Sets `journal/last_updated` tag (once, on exit)
 
-!!! note "Entity deletion"
-    Entity and statement deletion from the parquet store is not yet implemented. Statements can be cleared from the journal before flushing.
+### Delete entity
+
+**Input:** entity_id
+
+**Process:**
+
+1. Collect all statements for the entity from parquet + journal
+2. Write tombstone rows to the journal (with `deleted_at` timestamp)
+
+**Side effects:**
+
+- Sets `journal/last_updated` tag
+
+On flush, tombstones are routed to the sidecar table, marking the statements as deleted. All subsequent queries exclude these statements automatically.
+
+### Delete statement
+
+**Input:** Statement object
+
+**Process:**
+
+1. Write a single tombstone row to the journal
+
+**Side effects:**
+
+- Sets `journal/last_updated` tag
 
 ---
 
@@ -221,20 +245,41 @@ Queue items are ordered by UUID7 (time-based). Consumers pop items and execute c
 
 These are triggered by the lakehouse, not directly by tenants.
 
-### Flush (journal → parquet)
+### Flush (journal → parquet + sidecar)
 
 **Trigger:** Explicit call or automatic before query/export via `ensure_flush()`
 
 **Process:**
 
 1. Read statements from journal ordered by (bucket, origin, canonical_id)
-2. Write to Delta Lake parquet partitioned by origin
-3. Clear flushed entries from journal
+2. Build a temp table of existing statement IDs from the main parquet table
+3. For each batch, split into three categories:
+    - **New statements** (not in main table): append to main parquet + insert into sidecar
+    - **Duplicate statements** (already in main table): update sidecar `last_seen` only
+    - **Tombstones** (deleted_at set): update sidecar `deleted_at` only
+4. Clear flushed entries from journal
+
+**Returns:** Number of new statements written to the main table (duplicates and tombstones return 0)
 
 **Side effects:**
 
 - Always sets `journal/last_flushed` tag
 - Sets `statements/last_updated` tag (only if data was flushed)
+
+### Compact (apply sidecar to main table)
+
+**Trigger:** Explicit call
+
+**Process:**
+
+1. Join main table with sidecar, keeping only live rows (`deleted_at IS NULL`)
+2. Overwrite main table with the result (accurate `first_seen`/`last_seen` from sidecar, deleted rows removed)
+3. Remove deleted entries from sidecar
+
+After compact, the main table is self-contained. This is a destructive operation — it rewrites the main table.
+
+!!! note
+    Compaction is optional. The sidecar join handles filtering automatically during queries. Compact when you want to reclaim space or produce a standalone table.
 
 ### Optimize (compact parquet files)
 
@@ -350,6 +395,8 @@ flowchart TD
     AR --> |"create Document"| B
 
     B --> |"flush()"| C[(Parquet Store)]
+    B --> |"flush()"| SC[(Sidecar)]
+    SC --> |"timestamps + deletes"| C
     C --> |"export_statements()"| D[statements.csv]
     C --> |"export_entities()"| E[entities.ftm.json]
     C --> |"export_statistics()"| F[statistics.json]
@@ -365,7 +412,7 @@ flowchart TD
     classDef tag fill:#f9f,stroke:#333,stroke-width:1px
     classDef storage fill:#69b,stroke:#333,stroke-width:2px,color:#fff
     class T0,T1,T1b,T2,T3,T4,T5 tag
-    class B,C,AR storage
+    class B,C,SC,AR storage
 ```
 
 Each export operation:
@@ -398,9 +445,11 @@ lakehouse/
     │       └── {origin}.txt      # Extracted text (one per engine)
     │
     ├── entities/
-    │   └── statements/           # Delta Lake parquet store
-    │       └── origin={origin}/
-    │           └── *.parquet
+    │   ├── statements/           # Delta Lake parquet store (immutable FtM data)
+    │   │   └── origin={origin}/
+    │   │       └── *.parquet
+    │   └── sidecar/              # Sidecar metadata table (mutable)
+    │       └── *.parquet         # Tracks first_seen, last_seen, deleted_at per statement
     │
     ├── entities.ftm.json         # Aggregated entities export
     │

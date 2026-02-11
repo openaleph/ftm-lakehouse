@@ -44,6 +44,40 @@ for entity in map_entities(mapping, csv_path):
         heading_level: 3
         show_root_heading: true
 
+## Sidecar-Aware Parquet Operations
+
+Pure DuckDB/PyArrow functions that operate on the main statement table and sidecar metadata table. Used internally by `ParquetStore`, `SidecarStore`, and `SidecarAwareLakeStore`.
+
+::: ftm_lakehouse.logic.parquet.sidecar_aware_sql
+    options:
+        heading_level: 3
+        show_root_heading: true
+
+::: ftm_lakehouse.logic.parquet.stream_duckdb_sidecar
+    options:
+        heading_level: 3
+        show_root_heading: true
+
+::: ftm_lakehouse.logic.parquet.query_duckdb_sidecar
+    options:
+        heading_level: 3
+        show_root_heading: true
+
+::: ftm_lakehouse.logic.parquet.compact_with_sidecar
+    options:
+        heading_level: 3
+        show_root_heading: true
+
+::: ftm_lakehouse.logic.parquet.get_deleted_entity_ids
+    options:
+        heading_level: 3
+        show_root_heading: true
+
+::: ftm_lakehouse.logic.parquet.filter_live_sidecar
+    options:
+        heading_level: 3
+        show_root_heading: true
+
 ## Statement Serialization
 
 Pack and unpack statements for efficient storage:

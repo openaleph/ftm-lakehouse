@@ -87,7 +87,7 @@ Single-purpose storage interfaces. Each store does ONE thing.
 
 ```
 storage/
-  parquet.py     # ParquetStore - Delta Lake statement parquet files
+  parquet.py     # ParquetStore, SidecarStore - Delta Lake statement + metadata
   journal.py     # JournalStore - SQL statement buffer (write-ahead log)
   tags.py        # TagStore - key-value freshness tracking
   queue.py       # QueueStore - CRUD action queue
@@ -97,6 +97,25 @@ storage/
 Blob, file metadata, and text storage are handled directly by repositories
 using `anystore.Store` instances via `get_store()`, eliminating a layer of
 indirection.
+
+### Sidecar pattern
+
+The main parquet table stores immutable FtM statements using the upstream `ARROW_SCHEMA` (no `deleted_at` column). A lightweight **sidecar Delta table** tracks mutable per-statement metadata:
+
+| Column | Type | Purpose |
+|--------|------|---------|
+| `id` | string | Statement ID (primary key) |
+| `first_seen` | timestamp[us] | When the statement was first written |
+| `last_seen` | timestamp[us] | When the statement was last seen (updated on re-add) |
+| `deleted_at` | timestamp[us] | Soft-delete marker (NULL = live) |
+
+All queries join main + sidecar, filtering `deleted_at IS NULL` and using sidecar timestamps. This separates immutable data (statements) from mutable metadata (timestamps, deletes) and avoids writing tombstone rows into the main table.
+
+During flush, the journal is split three ways:
+
+- **New statements** → append to main table + insert into sidecar
+- **Duplicate statements** → update sidecar `last_seen` only (main table untouched)
+- **Tombstones** → update sidecar `deleted_at` only (main table untouched)
 
 **Principles:**
 
@@ -239,7 +258,7 @@ ftm_lakehouse/
 │
 ├── storage/
 │   ├── __init__.py          # Exports all stores
-│   ├── parquet.py           # ParquetStore
+│   ├── parquet.py           # ParquetStore, SidecarStore
 │   ├── journal.py           # JournalStore, JournalWriter
 │   ├── tags.py              # TagStore
 │   ├── queue.py             # QueueStore
@@ -271,6 +290,7 @@ ftm_lakehouse/
 ├── logic/
 │   ├── __init__.py
 │   ├── entities.py          # Entity logic
+│   ├── parquet.py           # Sidecar-aware DuckDB query helpers
 │   └── mappings.py          # Mapping logic
 │
 ├── api/

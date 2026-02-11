@@ -8,6 +8,7 @@ nav:
   - RFC: rfc.md
   - functionality.md
   - architecture.md
+  - api.md
   - Detailed Usage:
     - Working with Entities: usage/entities.md
     - Working with Files: usage/archive.md

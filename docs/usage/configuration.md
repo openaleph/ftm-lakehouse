@@ -10,6 +10,7 @@
 |----------|-------------|---------|
 | `LAKEHOUSE_URI` | Base path to lakehouse storage | `./data` |
 | `LAKEHOUSE_JOURNAL_URI` | SQLAlchemy URI for statement journal | `sqlite:///:memory:` |
+| `LAKEHOUSE_ON_ZFS` | Enable ZFS dataset creation for local storage | `false` |
 | `LOG_LEVEL` | Logging level (DEBUG, INFO, WARNING, ERROR) | `INFO` |
 | `DEBUG` | Enable debug mode | `false` |
 
@@ -41,7 +42,7 @@ description: >
 updated_at: 2024-09-25
 category: leak  # or: sanctions, pep, etc.
 publisher:
-  name: Data Research Center
+  name: Data and Research Center – DARC
   url: https://dataresearchcenter.org
 ```
 
