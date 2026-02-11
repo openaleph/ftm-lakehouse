@@ -83,7 +83,7 @@ class BaseExportOperation(DatasetJobOperation[J]):
         if not self.entities._statements.exists:
             self.log.info(
                 "Statement store empty, skipping ...",
-                uri=mask_uri(str(self.entities._statements.uri)),
+                uri=mask_uri(self.entities._statements.uri),
             )
             return False
         return True

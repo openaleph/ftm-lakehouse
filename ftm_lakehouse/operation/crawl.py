@@ -97,7 +97,7 @@ class CrawlOperation(DatasetJobOperation[CrawlJob]):
         Yields:
             File uris to be crawled
         """
-        self.log.info(f"Crawling `{mask_uri(str(self.job.uri))}` ...")
+        self.log.info(f"Crawling `{mask_uri(self.job.uri)}` ...")
         for key in self.source.iterate_keys(
             prefix=self.job.prefix,
             exclude_prefix=self.job.exclude_prefix,
@@ -124,7 +124,7 @@ class CrawlOperation(DatasetJobOperation[CrawlJob]):
         """
         now = datetime.now()
 
-        self.log.info(f"Crawling `{uri}` ...", source=mask_uri(str(self.source.uri)))
+        self.log.info(f"Crawling `{uri}` ...", source=mask_uri(self.source.uri))
         checksum = None
         if self.source.is_local:
             checksum = self.source.checksum(uri, algorithm=CHECKSUM_ALGORITHM)

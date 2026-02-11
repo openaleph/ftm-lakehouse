@@ -191,7 +191,7 @@ class ParquetStore:
         self.log = get_logger(
             f"{self.dataset}.{self.__class__.__name__}",
             dataset=self.dataset,
-            uri=mask_uri(str(self.uri)),
+            uri=mask_uri(self.uri),
         )
         setup_duckdb_storage()
 

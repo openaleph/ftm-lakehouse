@@ -91,9 +91,7 @@ class RecreateOperation(DatasetJobOperation[RecreateJob]):
         """Import entities from entities.ftm.json."""
         uri = self.entities._store.to_uri(path.ENTITIES_JSON)
 
-        self.log.info(
-            f"Importing from `{path.ENTITIES_JSON}` ...", uri=mask_uri(str(uri))
-        )
+        self.log.info(f"Importing from `{path.ENTITIES_JSON}` ...", uri=mask_uri(uri))
 
         with self.entities.bulk() as writer:
             for entity in self.entities.stream():
@@ -104,13 +102,13 @@ class RecreateOperation(DatasetJobOperation[RecreateJob]):
                     self.log.info(
                         f"Importing Entity {run.job.entities_imported} ...",
                         entities=run.job.entities_imported,
-                        uri=mask_uri(str(uri)),
+                        uri=mask_uri(uri),
                     )
                     run.save()
         self.log.info(
             f"Importing from `{path.ENTITIES_JSON}` done.",
             entities=run.job.entities_imported,
-            uri=mask_uri(str(uri)),
+            uri=mask_uri(uri),
         )
         run.save()
 
@@ -119,7 +117,7 @@ class RecreateOperation(DatasetJobOperation[RecreateJob]):
         uri = self.entities._store.to_uri(path.EXPORTS_STATEMENTS)
 
         self.log.info(
-            f"Importing from `{path.EXPORTS_STATEMENTS}` ...", uri=mask_uri(str(uri))
+            f"Importing from `{path.EXPORTS_STATEMENTS}` ...", uri=mask_uri(uri)
         )
 
         with self.entities.bulk() as writer:
@@ -132,19 +130,19 @@ class RecreateOperation(DatasetJobOperation[RecreateJob]):
                         self.log.info(
                             f"Importing Statement {run.job.statements_imported} ...",
                             statements=run.job.statements_imported,
-                            uri=mask_uri(str(uri)),
+                            uri=mask_uri(uri),
                         )
                         run.save()
         self.log.info(
             f"Importing from `{path.EXPORTS_STATEMENTS}` done.",
             statements=run.job.statements_imported,
-            uri=mask_uri(str(uri)),
+            uri=mask_uri(uri),
         )
         run.save()
 
     def _import_from_archive(self, run: JobRun[RecreateJob]) -> None:
         """Collect files metadata to add document entities"""
-        self.log.info("Importing from archive ...", uri=mask_uri(str(self.archive.uri)))
+        self.log.info("Importing from archive ...", uri=mask_uri(self.archive.uri))
 
         with self.entities.bulk(origin=tag.CRAWL_ORIGIN) as writer:
             for file in self.archive.iterate_files():
@@ -157,13 +155,13 @@ class RecreateOperation(DatasetJobOperation[RecreateJob]):
                     self.log.info(
                         f"Importing File {run.job.files_imported} ...",
                         files=run.job.files_imported,
-                        uri=mask_uri(str(self.archive.uri)),
+                        uri=mask_uri(self.archive.uri),
                     )
                     run.save()
         self.log.info(
             "Importing from archive done.",
             files=run.job.files_imported,
-            uri=mask_uri(str(self.archive.uri)),
+            uri=mask_uri(self.archive.uri),
         )
         run.save()
 

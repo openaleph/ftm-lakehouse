@@ -157,7 +157,7 @@ class ParquetDiffMixin:
             self.log.info(
                 f"Exported {self._diff_base_path} diff.",
                 version=diff_name,
-                diff_uri=mask_uri(str(diff_uri)),
+                diff_uri=mask_uri(diff_uri),
                 added_entities=len(changed_entity_ids),
             )
             return diff_name

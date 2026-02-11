@@ -64,7 +64,7 @@ class Dataset(Generic[DM]):
         self.uri = uri
         self._model_class = model_class
         self._settings = Settings()
-        self._log = log.bind(dataset=name, uri=mask_uri(str(uri)))
+        self._log = log.bind(dataset=name, uri=mask_uri(uri))
 
     def __repr__(self) -> str:
         return f"Dataset({self.name!r})"

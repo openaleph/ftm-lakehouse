@@ -50,7 +50,7 @@ class Catalog(Generic[D]):
     ) -> None:
         self.uri = uri
         self._model_class = model_class
-        self._log = log.bind(catalog=mask_uri(str(uri)))
+        self._log = log.bind(catalog=mask_uri(uri))
 
     def __repr__(self) -> str:
         return f"Catalog({self.uri!r})"
