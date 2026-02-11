@@ -5,6 +5,7 @@ from typing import Generator, Self, TypeAlias, cast
 
 from anystore.logging import get_logger
 from followthemoney import EntityProxy, Statement, StatementEntity
+from followthemoney.namespace import Namespace
 from ftmq.store.base import DEFAULT_ORIGIN
 from ftmq.store.lake import get_schema_bucket
 from ftmq.util import ensure_entity
@@ -35,6 +36,7 @@ class BaseJournalWriter[S: "BaseJournalStore"]:
         self.dataset = store.dataset
         self.origin = origin or DEFAULT_ORIGIN
         self.batch: list[dict] = []
+        self.namespace = Namespace()
 
     def _upsert_batch(self) -> None:
         raise NotImplementedError
@@ -107,6 +109,7 @@ class BaseJournalWriter[S: "BaseJournalStore"]:
 
     def add_entity(self, entity: EntityProxy) -> None:
         """Add all statements from an entity to the journal."""
+        entity = self.namespace.apply(entity)
         entity = ensure_entity(entity, StatementEntity, self.dataset)
         for stmt in entity.statements:
             self.add_statement(stmt)
