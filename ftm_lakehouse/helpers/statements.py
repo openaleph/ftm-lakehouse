@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from followthemoney import Statement
 from ftmq.store.base import DEFAULT_ORIGIN
 
-NULL_BYTE = "\x00"
+UNIT_SEP = "\x1f"
 
 
 def _to_iso(value: datetime | str | None) -> str:
@@ -23,7 +23,7 @@ def _to_iso(value: datetime | str | None) -> str:
 
 def pack_statement(stmt: Statement) -> str:
     """
-    Pack a Statement into a null-byte joined string.
+    Pack a Statement into a unit-separator delimited string.
 
     Format: id, entity_id, canonical_id, prop, schema, value, dataset,
             lang, original_value, external, first_seen, last_seen, origin, prop_type
@@ -45,7 +45,7 @@ def pack_statement(stmt: Statement) -> str:
         row.get("origin") or DEFAULT_ORIGIN,
         row.get("prop_type") or "",
     ]
-    return NULL_BYTE.join(parts)
+    return UNIT_SEP.join(parts)
 
 
 def pack_tombstone(stmt: Statement) -> str:
@@ -66,14 +66,14 @@ def pack_tombstone(stmt: Statement) -> str:
         stmt.origin or DEFAULT_ORIGIN,
         "",  # prop_type
     ]
-    return NULL_BYTE.join(parts)
+    return UNIT_SEP.join(parts)
 
 
 def unpack_statement(data: str) -> Statement:
     """
-    Unpack a null-byte joined string back into a Statement.
+    Unpack a unit-separator delimited string back into a Statement.
     """
-    parts = data.split(NULL_BYTE)
+    parts = data.split(UNIT_SEP)
     return Statement(
         id=parts[0] or None,
         entity_id=parts[1],  # required
@@ -100,7 +100,7 @@ def unpack_tombstone_row(data: str) -> dict:
     """
     from ftmq.store.lake import get_schema_bucket
 
-    parts = data.split(NULL_BYTE)
+    parts = data.split(UNIT_SEP)
     return {
         "id": parts[0],
         "entity_id": parts[1],
