@@ -6,7 +6,7 @@ from typing import Any, Generator
 import pyarrow as pa
 from anystore.logging import get_logger
 from anystore.types import Uri
-from anystore.util import Took, join_uri
+from anystore.util import Took, join_uri, mask_uri
 from deltalake import DeltaTable, write_deltalake
 from deltalake.exceptions import TableNotFoundError
 from ftmq.model.stats import DatasetStats
@@ -191,7 +191,7 @@ class ParquetStore:
         self.log = get_logger(
             f"{self.dataset}.{self.__class__.__name__}",
             dataset=self.dataset,
-            uri=self.uri,
+            uri=mask_uri(str(self.uri)),
         )
         setup_duckdb_storage()
 

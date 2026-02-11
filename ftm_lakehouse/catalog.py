@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Generator, Generic
 from anystore.logging import get_logger
 from anystore.store import get_store
 from anystore.types import Uri
-from anystore.util import join_uri
+from anystore.util import join_uri, mask_uri
 from ftmq.model.dataset import D
 
 from ftm_lakehouse.core.config import load_config
@@ -50,7 +50,7 @@ class Catalog(Generic[D]):
     ) -> None:
         self.uri = uri
         self._model_class = model_class
-        self._log = log.bind(catalog=uri)
+        self._log = log.bind(catalog=mask_uri(str(uri)))
 
     def __repr__(self) -> str:
         return f"Catalog({self.uri!r})"

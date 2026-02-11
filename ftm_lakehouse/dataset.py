@@ -6,7 +6,7 @@ from typing import Any, Generic
 from anystore.logging import get_logger
 from anystore.store import get_store
 from anystore.types import Uri
-from anystore.util import join_uri
+from anystore.util import join_uri, mask_uri
 
 from ftm_lakehouse.core.config import load_config
 from ftm_lakehouse.core.conventions import path
@@ -64,7 +64,7 @@ class Dataset(Generic[DM]):
         self.uri = uri
         self._model_class = model_class
         self._settings = Settings()
-        self._log = log.bind(dataset=name, uri=uri)
+        self._log = log.bind(dataset=name, uri=mask_uri(str(uri)))
 
     def __repr__(self) -> str:
         return f"Dataset({self.name!r})"

@@ -3,6 +3,7 @@
 from enum import Enum
 
 from anystore.io import smart_open
+from anystore.util import mask_uri
 from followthemoney.statement.serialize import read_csv_statements
 
 from ftm_lakehouse.core.conventions import path, tag
@@ -90,7 +91,9 @@ class RecreateOperation(DatasetJobOperation[RecreateJob]):
         """Import entities from entities.ftm.json."""
         uri = self.entities._store.to_uri(path.ENTITIES_JSON)
 
-        self.log.info(f"Importing from `{path.ENTITIES_JSON}` ...", uri=uri)
+        self.log.info(
+            f"Importing from `{path.ENTITIES_JSON}` ...", uri=mask_uri(str(uri))
+        )
 
         with self.entities.bulk() as writer:
             for entity in self.entities.stream():
@@ -101,13 +104,13 @@ class RecreateOperation(DatasetJobOperation[RecreateJob]):
                     self.log.info(
                         f"Importing Entity {run.job.entities_imported} ...",
                         entities=run.job.entities_imported,
-                        uri=uri,
+                        uri=mask_uri(str(uri)),
                     )
                     run.save()
         self.log.info(
             f"Importing from `{path.ENTITIES_JSON}` done.",
             entities=run.job.entities_imported,
-            uri=uri,
+            uri=mask_uri(str(uri)),
         )
         run.save()
 
@@ -115,7 +118,9 @@ class RecreateOperation(DatasetJobOperation[RecreateJob]):
         """Import statements from statements.csv."""
         uri = self.entities._store.to_uri(path.EXPORTS_STATEMENTS)
 
-        self.log.info(f"Importing from `{path.EXPORTS_STATEMENTS}` ...", uri=uri)
+        self.log.info(
+            f"Importing from `{path.EXPORTS_STATEMENTS}` ...", uri=mask_uri(str(uri))
+        )
 
         with self.entities.bulk() as writer:
             with smart_open(uri, "rb") as fh:
@@ -127,19 +132,19 @@ class RecreateOperation(DatasetJobOperation[RecreateJob]):
                         self.log.info(
                             f"Importing Statement {run.job.statements_imported} ...",
                             statements=run.job.statements_imported,
-                            uri=uri,
+                            uri=mask_uri(str(uri)),
                         )
                         run.save()
         self.log.info(
             f"Importing from `{path.EXPORTS_STATEMENTS}` done.",
             statements=run.job.statements_imported,
-            uri=uri,
+            uri=mask_uri(str(uri)),
         )
         run.save()
 
     def _import_from_archive(self, run: JobRun[RecreateJob]) -> None:
         """Collect files metadata to add document entities"""
-        self.log.info("Importing from archive ...", uri=self.archive.uri)
+        self.log.info("Importing from archive ...", uri=mask_uri(str(self.archive.uri)))
 
         with self.entities.bulk(origin=tag.CRAWL_ORIGIN) as writer:
             for file in self.archive.iterate_files():
@@ -152,13 +157,13 @@ class RecreateOperation(DatasetJobOperation[RecreateJob]):
                     self.log.info(
                         f"Importing File {run.job.files_imported} ...",
                         files=run.job.files_imported,
-                        uri=self.archive.uri,
+                        uri=mask_uri(str(self.archive.uri)),
                     )
                     run.save()
         self.log.info(
             "Importing from archive done.",
             files=run.job.files_imported,
-            uri=self.archive.uri,
+            uri=mask_uri(str(self.archive.uri)),
         )
         run.save()
 

@@ -4,7 +4,7 @@ from typing import TypeVar
 
 from anystore import get_store
 from anystore.types import HttpUrlStr
-from anystore.util import join_uri
+from anystore.util import join_uri, mask_uri
 from ftmq.io import smart_write_proxies
 from ftmq.model.dataset import make_dataset
 from ftmq.model.stats import DatasetStats
@@ -82,7 +82,8 @@ class BaseExportOperation(DatasetJobOperation[J]):
             self.entities.flush()
         if not self.entities._statements.exists:
             self.log.info(
-                "Statement store empty, skipping ...", uri=self.entities._statements.uri
+                "Statement store empty, skipping ...",
+                uri=mask_uri(str(self.entities._statements.uri)),
             )
             return False
         return True

@@ -10,7 +10,7 @@ import pyarrow as pa
 from anystore.io import smart_write_json
 from anystore.store import get_store
 from anystore.types import SDict, Uri
-from anystore.util import Took
+from anystore.util import Took, mask_uri
 from deltalake import write_deltalake
 from deltalake.exceptions import TableNotFoundError
 from followthemoney import EntityProxy, Statement, StatementEntity
@@ -140,7 +140,7 @@ class EntityRepository(ParquetDiffMixin, BaseRepository):
             Number of new statements flushed to the main table
         """
         if self._journal.count() == 0:
-            self.log.debug("Journal is empty", journal=self._journal.uri)
+            self.log.debug("Journal is empty", journal=mask_uri(str(self._journal.uri)))
             # set tags for the initial run
             if not self._tags.exists(tag.JOURNAL_FLUSHED):
                 self._tags.set(tag.JOURNAL_FLUSHED)
@@ -149,7 +149,9 @@ class EntityRepository(ParquetDiffMixin, BaseRepository):
             return 0
 
         with self._tags.touch(tag.JOURNAL_FLUSHED), Took() as t:
-            self.log.info("Flushing journal ...", journal=self._journal.uri)
+            self.log.info(
+                "Flushing journal ...", journal=mask_uri(str(self._journal.uri))
+            )
 
             con = self._make_dedup_connection()
 
@@ -184,7 +186,7 @@ class EntityRepository(ParquetDiffMixin, BaseRepository):
                 "Flushed statements from journal to lake",
                 count=total_new,
                 took=t.took,
-                journal=self._journal.uri,
+                journal=mask_uri(str(self._journal.uri)),
             )
 
             return total_new

@@ -4,6 +4,7 @@ from abc import abstractmethod
 from datetime import datetime, timezone
 from typing import Generator
 
+from anystore.util import mask_uri
 from pyarrow import timestamp
 from structlog.stdlib import BoundLogger
 
@@ -156,7 +157,7 @@ class ParquetDiffMixin:
             self.log.info(
                 f"Exported {self._diff_base_path} diff.",
                 version=diff_name,
-                diff_uri=diff_uri,
+                diff_uri=mask_uri(str(diff_uri)),
                 added_entities=len(changed_entity_ids),
             )
             return diff_name

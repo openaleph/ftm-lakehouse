@@ -4,6 +4,7 @@ from anystore.logic.constants import CHUNK_SIZE_LARGE
 from anystore.logic.io import stream
 from anystore.store import get_store
 from anystore.types import Uri
+from anystore.util import mask_uri
 
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.model.job import DatasetJobModel
@@ -29,16 +30,16 @@ class DownloadArchiveOperation(DatasetJobOperation[DownloadArchiveJob]):
         target = get_store(run.job.target)
         self.log.info(
             "Downloading archive ...",
-            target=target.uri,
-            documents=self.documents.csv_uri,
+            target=mask_uri(str(target.uri)),
+            documents=mask_uri(str(self.documents.csv_uri)),
         )
         for document in self.documents.stream():
             if target.exists(document.relative_path):
                 self.log.debug(
                     f"Skipping `{document.relative_path}`, already exists.",
                     checksum=document.checksum,
-                    source=self.archive.uri,
-                    target=target.uri,
+                    source=mask_uri(str(self.archive.uri)),
+                    target=mask_uri(str(target.uri)),
                 )
                 run.job.skipped += 1
                 continue
@@ -46,8 +47,8 @@ class DownloadArchiveOperation(DatasetJobOperation[DownloadArchiveJob]):
             self.log.info(
                 f"Downloading `{document.relative_path}` ...",
                 checksum=document.checksum,
-                source=self.archive.uri,
-                target=target.uri,
+                source=mask_uri(str(self.archive.uri)),
+                target=mask_uri(str(target.uri)),
             )
             with target.open(document.relative_path, "wb") as o:
                 with self.archive.open(document.checksum) as i:
