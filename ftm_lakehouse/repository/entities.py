@@ -18,6 +18,7 @@ from ftmq.io import smart_read_proxies
 from ftmq.model.stats import DatasetStats
 from ftmq.query import Query
 from ftmq.store.lake import (
+    ARROW_SCHEMA,
     TARGET_SIZE,
     WRITER,
 )
@@ -35,7 +36,7 @@ from ftm_lakehouse.repository.base import BaseRepository
 from ftm_lakehouse.repository.diff import ParquetDiffMixin
 from ftm_lakehouse.storage import JournalStore, ParquetStore
 from ftm_lakehouse.storage.journal import JournalWriter
-from ftm_lakehouse.storage.parquet import PARTITIONS, STATEMENT_SCHEMA
+from ftm_lakehouse.storage.parquet import PARTITIONS, SIDECAR_SCHEMA
 
 settings = Settings()
 
@@ -112,16 +113,31 @@ class EntityRepository(ParquetDiffMixin, BaseRepository):
             for entity in entities:
                 writer.add_entity(entity)
 
+    def _make_dedup_connection(self) -> duckdb.DuckDBPyConnection | None:
+        """Create a DuckDB connection with a temp table of existing statement IDs.
+
+        Returns None if the main parquet table doesn't exist yet (first flush).
+        """
+        try:
+            dt = self._statements._store.deltatable
+        except TableNotFoundError:
+            return None
+        con = duckdb.connect()
+        con.register("arrow", dt.to_pyarrow_dataset())
+        con.execute("CREATE TEMP TABLE existing_ids AS SELECT DISTINCT id FROM arrow")
+        return con
+
     def flush(self) -> int:
         """
         Flush statements from journal to parquet store.
 
-        Statements are streamed ordered by (bucket, origin, canonical_id).
-        Batches are written directly via write_deltalake, with schema_mode="merge"
-        to handle tombstone rows that include a deleted_at column.
+        Uses dedup logic:
+        - New statements (not in main table): append to main + insert into sidecar
+        - Duplicate statements (already in main): update sidecar last_seen only
+        - Tombstones (deleted_at set): update sidecar deleted_at only
 
         Returns:
-            Number of statements flushed
+            Number of new statements flushed to the main table
         """
         if self._journal.count() == 0:
             self.log.debug("Journal is empty", journal=self._journal.uri)
@@ -135,7 +151,9 @@ class EntityRepository(ParquetDiffMixin, BaseRepository):
         with self._tags.touch(tag.JOURNAL_FLUSHED), Took() as t:
             self.log.info("Flushing journal ...", journal=self._journal.uri)
 
-            total_count = 0
+            con = self._make_dedup_connection()
+
+            total_new = 0
             current_bucket: str | None = None
             current_origin: str | None = None
             current_batch: list[dict] = []
@@ -144,49 +162,126 @@ class EntityRepository(ParquetDiffMixin, BaseRepository):
                 # Write batch when partition changes
                 if bucket != current_bucket or origin != current_origin:
                     if current_batch:
-                        self._write_flush_batch(current_batch)
+                        total_new += self._write_flush_batch(current_batch, con)
                     current_batch = []
                     current_bucket = bucket
                     current_origin = origin
 
                 if deleted_at is not None:
                     row = unpack_tombstone_row(data)
-                    row["deleted_at"] = deleted_at
+                    row["_deleted_at"] = deleted_at
                 else:
                     stmt = unpack_statement(data)
                     row = lake_pack_statement(stmt)
-                    row["deleted_at"] = None
                 current_batch.append(row)
-                total_count += 1
 
             # Write final batch
             if current_batch:
-                self._write_flush_batch(current_batch)
+                total_new += self._write_flush_batch(current_batch, con)
 
             self._tags.set(tag.STATEMENTS_UPDATED)
             self.log.info(
                 "Flushed statements from journal to lake",
-                count=total_count,
+                count=total_new,
                 took=t.took,
                 journal=self._journal.uri,
             )
 
-            return total_count
+            return total_new
 
-    def _write_flush_batch(self, batch: list[dict]) -> None:
-        """Write a partition batch directly via write_deltalake."""
-        table = pa.Table.from_pylist(batch, schema=STATEMENT_SCHEMA)
-        write_deltalake(
-            str(self._statements.uri),
-            table,
-            partition_by=PARTITIONS,
-            mode="append",
-            schema_mode="merge",
-            writer_properties=WRITER,
-            target_file_size=TARGET_SIZE,
-            storage_options=storage_options(),
-            configuration={"delta.enableChangeDataFeed": "true"},
+    def _write_flush_batch(
+        self, batch: list[dict], con: duckdb.DuckDBPyConnection | None
+    ) -> int:
+        """Write a partition batch with three-way split.
+
+        1. Tombstones → sidecar mark_deleted only
+        2. New rows (anti-join with existing IDs) → write main table + sidecar upsert
+        3. Duplicate rows (semi-join) → sidecar upsert only (updates last_seen)
+
+        Returns:
+            Number of new rows written to main table
+        """
+        now = datetime.now(timezone.utc)
+
+        # Split tombstones from live rows
+        tombstones = [r for r in batch if r.get("_deleted_at") is not None]
+        live = [r for r in batch if r.get("_deleted_at") is None]
+
+        # Handle tombstones → sidecar only
+        if tombstones:
+            tomb_ids = [r["id"] for r in tombstones]
+            tomb_deleted_at = [r["_deleted_at"] for r in tombstones]
+            tomb_table = pa.table(
+                {
+                    "id": pa.array(tomb_ids, type=pa.string()),
+                    "deleted_at": pa.array(tomb_deleted_at, type=pa.timestamp("us")),
+                }
+            )
+            self._statements._sidecar.mark_deleted(tomb_table)
+
+        if not live:
+            return 0
+
+        # Build sidecar rows for all live statements
+        live_ids = [r["id"] for r in live]
+        live_first_seen = [r.get("first_seen") or now for r in live]
+        live_last_seen = [r.get("last_seen") or now for r in live]
+
+        if con is not None:
+            # Determine which are new vs duplicates
+            batch_ids_table = pa.table({"id": pa.array(live_ids, type=pa.string())})
+            con.register("batch_ids", batch_ids_table)
+
+            new_ids_result = con.execute(
+                "SELECT b.id FROM batch_ids b "
+                "LEFT JOIN existing_ids e ON b.id = e.id "
+                "WHERE e.id IS NULL"
+            ).fetchall()
+            new_id_set = {r[0] for r in new_ids_result}
+            con.unregister("batch_ids")
+
+            new_rows = [r for r in live if r["id"] in new_id_set]
+        else:
+            # First flush — all rows are new
+            new_rows = live
+
+        # Upsert all live rows into sidecar (new + dupes)
+        sidecar_table = pa.table(
+            {
+                "id": pa.array(live_ids, type=pa.string()),
+                "first_seen": pa.array(live_first_seen, type=pa.timestamp("us")),
+                "last_seen": pa.array(live_last_seen, type=pa.timestamp("us")),
+                "deleted_at": pa.array([None] * len(live_ids), type=pa.timestamp("us")),
+            },
+            schema=SIDECAR_SCHEMA,
         )
+        self._statements._sidecar.upsert(sidecar_table)
+
+        # Write only new rows to main table
+        if new_rows:
+            table = pa.Table.from_pylist(new_rows, schema=ARROW_SCHEMA)
+            write_deltalake(
+                str(self._statements.uri),
+                table,
+                partition_by=PARTITIONS,
+                mode="append",
+                schema_mode="merge",
+                writer_properties=WRITER,
+                target_file_size=TARGET_SIZE,
+                storage_options=storage_options(),
+                configuration={"delta.enableChangeDataFeed": "true"},
+            )
+
+            # Update dedup connection for subsequent batches in the same flush
+            if con is not None:
+                new_ids_arr = pa.table(
+                    {"id": pa.array([r["id"] for r in new_rows], type=pa.string())}
+                )
+                con.register("_new_batch", new_ids_arr)
+                con.execute("INSERT INTO existing_ids SELECT id FROM _new_batch")
+                con.unregister("_new_batch")
+
+        return len(new_rows)
 
     def query(
         self,
@@ -270,21 +365,35 @@ class EntityRepository(ParquetDiffMixin, BaseRepository):
         self._tags.set(tag.JOURNAL_UPDATED)
 
     def _collect_entity_statements(self, entity_id: str) -> list[Statement]:
-        """Read all statements for an entity from parquet + journal."""
+        """Read all statements for an entity from parquet + journal.
+
+        Uses sidecar join when available to filter already-deleted statements.
+        """
         stmts_by_id: dict[str, Statement] = {}
 
-        # Read from parquet
+        # Read from parquet (with sidecar filtering if available)
         try:
             dt = self._statements._store.deltatable
-            rel = duckdb.arrow(dt.to_pyarrow_dataset())
-            cols = {f.name for f in dt.schema().to_arrow()}
-            where = f"entity_id = '{entity_id}'"
-            if "deleted_at" in cols:
-                where += " AND deleted_at IS NULL"
-            result = rel.query(
-                "arrow",
-                f"SELECT * FROM arrow WHERE {where}",
-            )
+            sidecar = self._statements._sidecar
+
+            if sidecar.exists:
+                sidecar_dt = sidecar.deltatable
+                con = duckdb.connect()
+                con.register("arrow", dt.to_pyarrow_dataset())
+                con.register("sidecar", sidecar_dt.to_pyarrow_dataset())
+                result = con.sql(
+                    "SELECT arrow.* FROM arrow "
+                    "JOIN sidecar sc ON arrow.id = sc.id "
+                    "WHERE sc.deleted_at IS NULL "
+                    f"AND arrow.entity_id = '{entity_id}'"
+                )
+            else:
+                rel = duckdb.arrow(dt.to_pyarrow_dataset())
+                result = rel.query(
+                    "arrow",
+                    f"SELECT * FROM arrow WHERE entity_id = '{entity_id}'",
+                )
+
             for row in result.fetchall():
                 row_dict = dict(zip(result.columns, row))
                 stmt = Statement.from_dict(row_dict)

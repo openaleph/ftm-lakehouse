@@ -63,28 +63,37 @@ class ParquetDiffMixin:
         """Tag key for storing current diff state."""
         return f"{self._diff_base_path}-current"
 
-    def _get_diff_state(self) -> tuple[int, datetime] | None:
-        """Get the last diff export state (version and timestamp)."""
-        state = self._tags.get(self._diff_state_key)
-        if state is not None:
-            return unpack_diff_name(state)
-        return None
+    def _get_diff_state(self) -> tuple[int, int | None, datetime] | None:
+        """Get the last diff export state (main_version, sidecar_version, timestamp).
 
-    def _set_diff_state(self, name: str) -> None:
+        Format: v{main}_{TS}:s{sidecar}
+        """
+        state = self._tags.get(self._diff_state_key)
+        if state is None:
+            return None
+        diff_part, sidecar_part = state.split(":")
+        main_v, ts = unpack_diff_name(diff_part)
+        sidecar_v = int(sidecar_part[1:]) if sidecar_part else None
+        return main_v, sidecar_v, ts
+
+    def _set_diff_state(self, name: str, sidecar_version: int | None = None) -> None:
         """Store the diff export state."""
-        self._tags.put(self._diff_state_key, name)
+        sv = f"s{sidecar_version}" if sidecar_version is not None else ""
+        self._tags.put(self._diff_state_key, f"{name}:{sv}")
 
     def export_diff(self, **kwargs) -> str | None:
         """Export only data changed since last diff export using Delta CDC.
 
         Uses Delta Lake Change Data Capture to identify changed entities since
-        the last processed version.
+        the last processed version. Also detects sidecar-only changes (soft
+        deletes) that don't produce main table CDF entries.
 
         Returns:
             Created diff name (v{v}_{ts}) or None if nothing created
         """
         with self._tags.touch(self._diff_base_path) as now:
             current_version = self._statements.version
+            current_sidecar_version = self._statements.sidecar_version
             current_timestamp = now.astimezone(timezone.utc)
 
             # No table yet - nothing to diff
@@ -95,30 +104,43 @@ class ParquetDiffMixin:
 
             state = self._get_diff_state()
             if state is not None:
-                last_version, _ = state
+                last_version, last_sidecar_version, _ = state
             else:
                 last_version = None
+                last_sidecar_version = None
 
             # No diff state yet - create initial diff by copying the full export
             # This handles cases where the Delta table is already at version > 0
             if last_version is None:
                 self._write_initial_diff(current_version, current_timestamp, **kwargs)
-                self._set_diff_state(diff_name)
+                self._set_diff_state(diff_name, current_sidecar_version)
                 self.log.info(
                     f"Exported initial diff for `{self._diff_base_path}`.",
                     version=diff_name,
                 )
                 return diff_name
 
-            # Nothing new since last diff
-            if last_version >= current_version:
+            # Check if anything changed (main table or sidecar)
+            main_changed = last_version < current_version
+            sidecar_changed = current_sidecar_version is not None and (
+                last_sidecar_version is None
+                or last_sidecar_version < current_sidecar_version
+            )
+
+            if not main_changed and not sidecar_changed:
                 return
 
-            start_version = last_version + 1
+            # Collect changed entity IDs from main table CDC
+            changed_entity_ids: set[str] = set()
+            if main_changed:
+                start_version = last_version + 1
+                changes = self._statements.get_changes(start_version, current_version)
+                changed_entity_ids = self._filter_changes(changes)
 
-            # Collect changed entity IDs from CDC
-            changes = self._statements.get_changes(start_version, current_version)
-            changed_entity_ids = self._filter_changes(changes)
+            # Also include entities that were soft-deleted via sidecar
+            if sidecar_changed:
+                deleted_ids = self._statements.get_deleted_entity_ids()
+                changed_entity_ids |= deleted_ids
 
             if not changed_entity_ids:
                 return
@@ -129,7 +151,7 @@ class ParquetDiffMixin:
             )
 
             # Update state tracking
-            self._set_diff_state(diff_name)
+            self._set_diff_state(diff_name, current_sidecar_version)
 
             self.log.info(
                 f"Exported {self._diff_base_path} diff.",

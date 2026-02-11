@@ -1,10 +1,11 @@
-"""Integration tests for soft delete (tombstone) operations.
+"""Integration tests for soft delete operations via sidecar metadata table.
 
-Tombstones are written through the journal WAL and flushed to parquet.
-TombstoneAwareLakeStore filters them from all query paths automatically —
-compact is optional cleanup, not required for correctness.
+Deletes are written through the journal WAL. On flush, tombstones are routed
+to the sidecar table (mark_deleted). SidecarAwareLakeStore joins main + sidecar
+for all queries, filtering out deleted rows automatically.
 """
 
+import duckdb
 from followthemoney import EntityProxy
 
 from ftm_lakehouse.repository.entities import EntityRepository
@@ -45,7 +46,7 @@ def test_delete_entity_filters_from_query(tmp_path):
     count = repo.delete_entity("jane")
     assert count > 0
 
-    # Flush to parquet (tombstones are written with deleted_at)
+    # Flush to parquet (tombstones are routed to sidecar)
     repo.flush()
 
     # Query should exclude jane without compact
@@ -111,7 +112,7 @@ def test_delete_and_readd(tmp_path):
         writer.add_entity(jane)
     repo.flush()
 
-    # Jane should be alive — re-added statements have last_seen > deleted_at
+    # Jane should be alive — sidecar upsert clears deleted_at via new insert
     entities = list(repo.query(flush_first=False))
     entity_ids = {e.id for e in entities}
     assert "jane" in entity_ids
@@ -141,25 +142,32 @@ def test_delete_entity_in_journal_only(tmp_path):
     assert len(entities) == 0
 
 
-def test_delete_then_compact_cleans_up(tmp_path):
-    """Compact removes tombstone rows and deleted_at column."""
+def test_delete_then_compact_cleans_main_and_sidecar(tmp_path):
+    """Compact applies sidecar to main table: removes deleted rows, cleans sidecar."""
     repo = _make_repo(tmp_path)
     _populate(repo)
 
     repo.delete_entity("jane")
     repo.flush()
 
-    # Compact to clean up
     repo._statements.compact()
 
-    # After compact: only john, deleted_at column preserved as all NULLs
+    # Main table should no longer contain jane's rows
     from deltalake import DeltaTable
 
     dt = DeltaTable(str(repo._statements.uri))
     raw = dt.to_pyarrow_table()
-    assert "deleted_at" in raw.column_names
-    assert all(v is None for v in raw.column("deleted_at").to_pylist())
+    entity_ids = set(raw.column("entity_id").to_pylist())
+    assert "jane" not in entity_ids
+    assert "john" in entity_ids
 
+    # Sidecar should not contain jane's entries
+    sidecar_dt = repo._statements._sidecar.deltatable
+    rel = duckdb.arrow(sidecar_dt.to_pyarrow_dataset())
+    rows = rel.query("sc", "SELECT id FROM sc WHERE deleted_at IS NOT NULL").fetchall()
+    assert len(rows) == 0
+
+    # Queries still work
     entities = list(repo.query(flush_first=False))
     assert len(entities) == 1
     assert entities[0].id == "john"
@@ -207,3 +215,26 @@ def test_delete_preserves_others(tmp_path):
     stmts = list(repo._statements.query_statements())
     assert all(s.entity_id == "john" for s in stmts)
     assert len(stmts) > 0
+
+
+def test_sidecar_has_deletion_entries(tmp_path):
+    """After delete + flush, sidecar contains deleted_at entries."""
+    repo = _make_repo(tmp_path)
+    _populate(repo)
+
+    repo.delete_entity("jane")
+    repo.flush()
+
+    # Sidecar should exist and contain deleted_at entries for jane
+    assert repo._statements._sidecar.exists
+    sidecar_dt = repo._statements._sidecar.deltatable
+    rel = duckdb.arrow(sidecar_dt.to_pyarrow_dataset())
+    deleted = rel.query(
+        "sc", "SELECT id FROM sc WHERE deleted_at IS NOT NULL"
+    ).fetchall()
+    assert len(deleted) > 0
+
+    # Main table should NOT have deleted_at column
+    dt = repo._statements._store.deltatable
+    main_cols = {f.name for f in dt.schema().to_arrow()}
+    assert "deleted_at" not in main_cols

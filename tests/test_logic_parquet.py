@@ -1,15 +1,14 @@
-"""Unit tests for ftm_lakehouse.logic.parquet — pure dedup/compact functions."""
+"""Unit tests for ftm_lakehouse.logic.parquet — sidecar-aware query functions."""
 
 from datetime import datetime, timezone
 
+import duckdb
 import pyarrow as pa
 from deltalake import DeltaTable, write_deltalake
 from ftmq.store.lake import ARROW_SCHEMA
 
-from ftm_lakehouse.logic.parquet import compact_deletes, query_deduped
-from ftm_lakehouse.storage.parquet import PARTITIONS
-
-TOMBSTONE_SCHEMA = ARROW_SCHEMA.append(pa.field("deleted_at", pa.timestamp("us")))
+from ftm_lakehouse.logic.parquet import sidecar_aware_sql
+from ftm_lakehouse.storage.parquet import PARTITIONS, SIDECAR_SCHEMA
 
 
 def _make_row(
@@ -57,206 +56,136 @@ def _write_rows(path: str, rows: list[dict], partition_by: list[str] | None = No
     return DeltaTable(path)
 
 
-def _write_tombstones(path: str, rows: list[dict], deleted_at: datetime):
-    """Write tombstone rows (with deleted_at) directly via write_deltalake."""
-    for row in rows:
-        row["deleted_at"] = deleted_at
-    table = pa.Table.from_pylist(rows, schema=TOMBSTONE_SCHEMA)
-    write_deltalake(
-        path,
-        table,
-        partition_by=PARTITIONS,
-        mode="append",
-        schema_mode="merge",
-        configuration={"delta.enableChangeDataFeed": "true"},
-    )
+def _write_sidecar(path: str, rows: list[dict]):
+    """Write sidecar metadata rows."""
+    table = pa.Table.from_pylist(rows, schema=SIDECAR_SCHEMA)
+    write_deltalake(path, table, mode="append", schema_mode="merge")
+    return DeltaTable(path)
 
 
-def test_query_deduped_no_tombstones(tmp_path):
-    """Normal reads are unaffected when no tombstones exist."""
-    uri = str(tmp_path / "table")
+def _make_sidecar_row(
+    stmt_id: str,
+    first_seen: datetime | None = None,
+    last_seen: datetime | None = None,
+    deleted_at: datetime | None = None,
+) -> dict:
+    """Build a sidecar metadata row."""
+    ts = first_seen or datetime(2024, 1, 1, tzinfo=timezone.utc)
+    return {
+        "id": stmt_id,
+        "first_seen": ts,
+        "last_seen": last_seen or ts,
+        "deleted_at": deleted_at,
+    }
+
+
+def test_sidecar_aware_sql_filters_deleted(tmp_path):
+    """Deleted rows (deleted_at set in sidecar) are excluded from queries."""
+    main_uri = str(tmp_path / "main")
+    sidecar_uri = str(tmp_path / "sidecar")
+
+    rows = [
+        _make_row("jane", "name", "Jane Doe"),
+        _make_row("john", "name", "John Smith"),
+    ]
+    dt = _write_rows(main_uri, rows)
+
+    # Sidecar: jane is deleted, john is live
+    sidecar_rows = [
+        _make_sidecar_row(
+            "jane-name-Jane Doe", deleted_at=datetime(2025, 1, 1, tzinfo=timezone.utc)
+        ),
+        _make_sidecar_row("john-name-John Smith"),
+    ]
+    sidecar_dt = _write_sidecar(sidecar_uri, sidecar_rows)
+
+    from ftmq.query import Query
+    from ftmq.store.lake import compile_query
+
+    compiled = compile_query(Query().sql.statements)
+
+    sql = sidecar_aware_sql(compiled, dt, sidecar_dt)
+
+    con = duckdb.connect()
+    con.register("arrow", dt.to_pyarrow_dataset())
+    con.register("sidecar", sidecar_dt.to_pyarrow_dataset())
+    result = con.execute(sql).fetchall()
+
+    entity_ids = {r[1] for r in result}  # entity_id is second column
+    assert "jane" not in entity_ids
+    assert "john" in entity_ids
+
+
+def test_sidecar_aware_sql_uses_sidecar_timestamps(tmp_path):
+    """Sidecar first_seen/last_seen overrides main table values."""
+    main_uri = str(tmp_path / "main")
+    sidecar_uri = str(tmp_path / "sidecar")
+
+    main_ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    rows = [_make_row("jane", "name", "Jane Doe", last_seen=main_ts)]
+    dt = _write_rows(main_uri, rows)
+
+    sidecar_ts = datetime(2025, 6, 15, tzinfo=timezone.utc)
+    sidecar_rows = [
+        _make_sidecar_row(
+            "jane-name-Jane Doe", first_seen=main_ts, last_seen=sidecar_ts
+        ),
+    ]
+    sidecar_dt = _write_sidecar(sidecar_uri, sidecar_rows)
+
+    from ftmq.query import Query
+    from ftmq.store.lake import compile_query
+
+    compiled = compile_query(Query().sql.statements)
+
+    sql = sidecar_aware_sql(compiled, dt, sidecar_dt)
+
+    con = duckdb.connect()
+    con.register("arrow", dt.to_pyarrow_dataset())
+    con.register("sidecar", sidecar_dt.to_pyarrow_dataset())
+    result = con.execute(sql)
+    rows_out = result.fetchall()
+    cols = [desc[0] for desc in result.description]
+
+    assert len(rows_out) == 1
+    row_dict = dict(zip(cols, rows_out[0]))
+    # last_seen should come from sidecar (DuckDB may strip tzinfo)
+    result_ts = row_dict["last_seen"]
+    expected_ts = sidecar_ts.replace(tzinfo=None)
+    assert result_ts == expected_ts
+
+
+def test_sidecar_aware_sql_no_deletes(tmp_path):
+    """All rows visible when sidecar has no deletions."""
+    main_uri = str(tmp_path / "main")
+    sidecar_uri = str(tmp_path / "sidecar")
+
     rows = [
         _make_row("jane", "name", "Jane Doe"),
         _make_row("jane", "firstName", "Jane"),
         _make_row("john", "name", "John Smith"),
     ]
-    dt = _write_rows(uri, rows)
+    dt = _write_rows(main_uri, rows)
 
-    result = query_deduped(dt).fetch_arrow_table()
+    sidecar_rows = [
+        _make_sidecar_row("jane-name-Jane Doe"),
+        _make_sidecar_row("jane-firstName-Jane"),
+        _make_sidecar_row("john-name-John Smith"),
+    ]
+    sidecar_dt = _write_sidecar(sidecar_uri, sidecar_rows)
+
+    from ftmq.query import Query
+    from ftmq.store.lake import compile_query
+
+    compiled = compile_query(Query().sql.statements)
+
+    sql = sidecar_aware_sql(compiled, dt, sidecar_dt)
+
+    con = duckdb.connect()
+    con.register("arrow", dt.to_pyarrow_dataset())
+    con.register("sidecar", sidecar_dt.to_pyarrow_dataset())
+    result = con.execute(sql).fetchall()
+
     assert len(result) == 3
-
-    ids = set(result.column("entity_id").to_pylist())
-    assert ids == {"jane", "john"}
-
-
-def test_query_deduped_with_tombstones(tmp_path):
-    """Deleted rows are filtered out by dedup."""
-    uri = str(tmp_path / "table")
-    rows = [
-        _make_row("jane", "name", "Jane Doe"),
-        _make_row("jane", "firstName", "Jane"),
-        _make_row("john", "name", "John Smith"),
-    ]
-    _write_rows(uri, rows)
-
-    # Write tombstones for jane's statements
-    ts = datetime(2025, 1, 1, tzinfo=timezone.utc)
-    tombstone_rows = [
-        _make_row("jane", "name", "Jane Doe"),
-        _make_row("jane", "firstName", "Jane"),
-    ]
-    _write_tombstones(uri, tombstone_rows, ts)
-
-    dt = DeltaTable(uri)
-    result = query_deduped(dt).fetch_arrow_table()
-
-    # Only john should remain
-    assert len(result) == 1
-    assert result.column("entity_id").to_pylist() == ["john"]
-    # deleted_at is preserved (as NULL for live rows)
-    assert "deleted_at" in result.column_names
-    assert result.column("deleted_at").to_pylist() == [None]
-
-
-def test_query_deduped_readd_after_delete(tmp_path):
-    """Re-added entity after deletion is visible."""
-    uri = str(tmp_path / "table")
-    rows = [
-        _make_row(
-            "jane",
-            "name",
-            "Jane Doe",
-            last_seen=datetime(2024, 1, 1, tzinfo=timezone.utc),
-        ),
-    ]
-    _write_rows(uri, rows)
-
-    # Delete jane
-    ts_del = datetime(2025, 1, 1, tzinfo=timezone.utc)
-    _write_tombstones(uri, [_make_row("jane", "name", "Jane Doe")], ts_del)
-
-    # Re-add jane with a newer last_seen (after the tombstone)
-    readd = [
-        _make_row(
-            "jane",
-            "name",
-            "Jane Doe",
-            last_seen=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        ),
-    ]
-    _write_rows(uri, readd)
-
-    dt = DeltaTable(uri)
-    result = query_deduped(dt).fetch_arrow_table()
-
-    # Jane should be alive — the re-add with last_seen=2026 is newer than tombstone at 2025
-    assert len(result) == 1
-    assert result.column("entity_id").to_pylist() == ["jane"]
-
-
-def test_compact_removes_tombstones(tmp_path):
-    """Table is clean after compaction — tombstones removed."""
-    uri = str(tmp_path / "table")
-    rows = [
-        _make_row("jane", "name", "Jane Doe"),
-        _make_row("john", "name", "John Smith"),
-    ]
-    _write_rows(uri, rows)
-
-    # Delete jane
-    ts = datetime(2025, 1, 1, tzinfo=timezone.utc)
-    _write_tombstones(uri, [_make_row("jane", "name", "Jane Doe")], ts)
-
-    dt = DeltaTable(uri)
-    compact_deletes(dt, PARTITIONS)
-
-    # Re-load after compact
-    dt = DeltaTable(uri)
-    result = dt.to_pyarrow_table()
-
-    # Only john should remain
-    assert len(result) == 1
-    assert result.column("entity_id").to_pylist() == ["john"]
-
-
-def test_compact_preserves_deleted_at_column(tmp_path):
-    """deleted_at column is preserved after compaction (all NULLs for live rows)."""
-    uri = str(tmp_path / "table")
-    rows = [
-        _make_row("jane", "name", "Jane Doe"),
-        _make_row("john", "name", "John Smith"),
-    ]
-    _write_rows(uri, rows)
-
-    # Delete jane to add deleted_at column
-    ts = datetime(2025, 1, 1, tzinfo=timezone.utc)
-    _write_tombstones(uri, [_make_row("jane", "name", "Jane Doe")], ts)
-
-    dt = DeltaTable(uri)
-    assert "deleted_at" in {f.name for f in dt.schema().to_arrow()}
-
-    compact_deletes(dt, PARTITIONS)
-
-    # After compact, deleted_at column is preserved (all NULLs)
-    dt = DeltaTable(uri)
-    assert "deleted_at" in {f.name for f in dt.schema().to_arrow()}
-    raw = dt.to_pyarrow_table()
-    assert all(v is None for v in raw.column("deleted_at").to_pylist())
-
-
-def test_compact_only_rewrites_affected_partitions(tmp_path):
-    """Compact only touches partitions that have tombstones."""
-    uri = str(tmp_path / "table")
-    # Two different origins → two partitions
-    rows = [
-        _make_row("jane", "name", "Jane Doe", origin="origin_a"),
-        _make_row("john", "name", "John Smith", origin="origin_b"),
-    ]
-    _write_rows(uri, rows)
-
-    # Tombstone only in origin_a
-    ts = datetime(2025, 1, 1, tzinfo=timezone.utc)
-    _write_tombstones(
-        uri, [_make_row("jane", "name", "Jane Doe", origin="origin_a")], ts
-    )
-
-    dt = DeltaTable(uri)
-    version_before = dt.version()
-
-    compact_deletes(dt, PARTITIONS)
-
-    dt = DeltaTable(uri)
-    result = dt.to_pyarrow_table()
-
-    # jane removed, john untouched
-    assert set(result.column("entity_id").to_pylist()) == {"john"}
-
-    # Verify only origin_a partition was rewritten by checking file actions
-    # The compact should have created a new version
-    assert dt.version() > version_before
-
-    # origin_b data is intact
-    import pyarrow.compute as pc
-
-    john_rows = result.filter(pc.equal(result.column("origin"), "origin_b"))
-    assert len(john_rows) == 1
-
-
-def test_compact_preserves_live_data(tmp_path):
-    """Compact without tombstones preserves all data."""
-    uri = str(tmp_path / "table")
-    rows = [
-        _make_row("jane", "name", "Jane Doe"),
-        _make_row("john", "name", "John Smith"),
-    ]
-    dt = _write_rows(uri, rows)
-
-    compact_deletes(dt, PARTITIONS)
-
-    # After compact, verify the table is readable and intact
-    dt = DeltaTable(uri)
-    result = dt.to_pyarrow_table()
-    assert len(result) == 2
-
-    entity_ids = set(result.column("entity_id").to_pylist())
+    entity_ids = {r[1] for r in result}
     assert entity_ids == {"jane", "john"}

@@ -1,4 +1,4 @@
-"""ParquetStore - Delta Lake statement parquet storage."""
+"""ParquetStore - Delta Lake statement parquet storage with sidecar metadata."""
 
 from datetime import datetime
 from typing import Any, Generator
@@ -7,18 +7,17 @@ import pyarrow as pa
 from anystore.logging import get_logger
 from anystore.types import Uri
 from anystore.util import Took, join_uri
+from deltalake import DeltaTable, write_deltalake
 from deltalake.exceptions import TableNotFoundError
 from ftmq.model.stats import DatasetStats
 from ftmq.query import Query
-from ftmq.store.lake import (
-    ARROW_SCHEMA,
-)
 from ftmq.store.lake import TABLE as _TABLE
 from ftmq.store.lake import (
     LakeQueryView,
     LakeStore,
     LakeWriter,
     setup_duckdb_storage,
+    storage_options,
     stream_duckdb,
 )
 from ftmq.types import StatementEntities, Statements
@@ -26,35 +25,141 @@ from sqlalchemy import Select
 
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.logic.parquet import (
-    compact_deletes,
-    query_duckdb_tombstone_aware,
-    stream_duckdb_tombstone_aware,
+    compact_with_sidecar,
+    filter_live_sidecar,
+)
+from ftm_lakehouse.logic.parquet import (
+    get_deleted_entity_ids as _get_deleted_entity_ids,
+)
+from ftm_lakehouse.logic.parquet import (
+    query_duckdb_sidecar,
+    stream_duckdb_sidecar,
 )
 
 # Use same partitions as ftmq but exclude dataset (handled at directory level)
 PARTITIONS = ["bucket", "origin"]
 
-# ARROW_SCHEMA extended with deleted_at — always written so the column is always present
-STATEMENT_SCHEMA = ARROW_SCHEMA.append(pa.field("deleted_at", pa.timestamp("us")))
+SIDECAR_SCHEMA = pa.schema(
+    [
+        pa.field("id", pa.string()),
+        pa.field("first_seen", pa.timestamp("us")),
+        pa.field("last_seen", pa.timestamp("us")),
+        pa.field("deleted_at", pa.timestamp("us")),
+    ]
+)
 
 
-class TombstoneAwareLakeStore(LakeStore):
-    """LakeStore subclass that filters tombstoned rows from all queries.
+class SidecarStore:
+    """Manages a lightweight sidecar Delta table for per-statement metadata.
 
-    Queries are wrapped with CTEs to exclude deleted rows. The deleted_at
-    column is always present in tables written by the current code. Falls
-    back to standard stream_duckdb for legacy tables without the column.
+    Tracks first_seen, last_seen, and deleted_at per statement ID.
+    The main parquet table stores immutable FtM statements; the sidecar
+    provides mutable metadata via Delta Lake MERGE operations.
     """
+
+    def __init__(self, uri: Uri, dataset: str) -> None:
+        self.uri = join_uri(uri, path.SIDECAR)
+        self.dataset = dataset
+        setup_duckdb_storage()
+
+    @property
+    def deltatable(self) -> DeltaTable:
+        return DeltaTable(str(self.uri), storage_options=storage_options())
+
+    @property
+    def exists(self) -> bool:
+        try:
+            self.deltatable.version()
+            return True
+        except TableNotFoundError:
+            return False
+
+    def upsert(self, table: pa.Table) -> None:
+        """Insert or update sidecar rows. Updates last_seen on conflict."""
+        if not self.exists:
+            write_deltalake(
+                str(self.uri),
+                table,
+                mode="overwrite",
+                schema_mode="overwrite",
+                storage_options=storage_options(),
+            )
+            return
+        (
+            self.deltatable.merge(
+                source=table,
+                predicate="target.id = source.id",
+                source_alias="source",
+                target_alias="target",
+            )
+            .when_matched_update(
+                {
+                    "last_seen": "source.last_seen",
+                }
+            )
+            .when_not_matched_insert_all()
+            .execute()
+        )
+
+    def mark_deleted(self, table: pa.Table) -> None:
+        """Set deleted_at on existing sidecar rows.
+
+        Args:
+            table: PyArrow table with columns (id, deleted_at)
+        """
+        if not self.exists:
+            return
+        (
+            self.deltatable.merge(
+                source=table,
+                predicate="target.id = source.id",
+                source_alias="source",
+                target_alias="target",
+            )
+            .when_matched_update(
+                {
+                    "deleted_at": "source.deleted_at",
+                }
+            )
+            .execute()
+        )
+
+    def compact(self) -> None:
+        """Remove deleted entries from sidecar."""
+        if not self.exists:
+            return
+
+        live = filter_live_sidecar(self.deltatable)
+        write_deltalake(
+            str(self.uri),
+            live,
+            mode="overwrite",
+            schema_mode="overwrite",
+            storage_options=storage_options(),
+        )
+
+
+class SidecarAwareLakeStore(LakeStore):
+    """LakeStore subclass that joins with sidecar for timestamps and soft deletes.
+
+    All queries join the main table with the sidecar to get accurate
+    first_seen/last_seen and filter deleted rows (deleted_at IS NOT NULL).
+    Falls back to standard stream_duckdb when sidecar doesn't exist yet.
+    """
+
+    def __init__(self, *args, sidecar: SidecarStore, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._sidecar = sidecar
 
     def _execute(self, q: Select, stream: bool = True) -> Generator[Any, None, None]:
         try:
             dt = self.deltatable
         except TableNotFoundError:
             return
-        if "deleted_at" not in {f.name for f in dt.schema().to_arrow()}:
+        if not self._sidecar.exists:
             yield from stream_duckdb(q, dt)
             return
-        yield from stream_duckdb_tombstone_aware(q, dt)
+        yield from stream_duckdb_sidecar(q, dt, self._sidecar.deltatable)
 
 
 class ParquetStore:
@@ -64,9 +169,9 @@ class ParquetStore:
     Wraps ftmq's LakeStore to provide statement storage with:
     - Partitioned parquet files (by bucket, origin)
     - Delta Lake transaction log for versioning
+    - Sidecar metadata table for timestamps and soft deletes
     - Change data capture (CDC) support
     - Efficient querying via DuckDB
-    - Tombstone-based soft deletes (materialized on compact)
 
     Layout: statements/bucket={bucket}/origin={origin}/{auto-identifier}.parquet
     """
@@ -76,10 +181,12 @@ class ParquetStore:
     def __init__(self, uri: Uri, dataset: str) -> None:
         self.uri = join_uri(uri, path.STATEMENTS)
         self.dataset = dataset
-        self._store = TombstoneAwareLakeStore(
+        self._sidecar = SidecarStore(uri, dataset)
+        self._store = SidecarAwareLakeStore(
             uri=self.uri,
             dataset=dataset,
             partition_by=PARTITIONS,
+            sidecar=self._sidecar,
         )
         self.log = get_logger(
             f"{self.dataset}.{self.__class__.__name__}",
@@ -90,12 +197,18 @@ class ParquetStore:
 
     @property
     def version(self) -> int | None:
-        """Current version of the Delta table."""
+        """Current version of the main Delta table."""
         try:
             return self._store.deltatable.version()
         except TableNotFoundError:
-            # deltatable doesn't exist
-            return
+            return None
+
+    @property
+    def sidecar_version(self) -> int | None:
+        """Current version of the sidecar Delta table."""
+        if not self._sidecar.exists:
+            return None
+        return self._sidecar.deltatable.version()
 
     @property
     def exists(self) -> bool:
@@ -152,13 +265,44 @@ class ParquetStore:
         self._store._backend.ensure_parent(output_uri)
         dt = self._store.deltatable
         q = Query().sql.statements
-        db = query_duckdb_tombstone_aware(q, dt)
+        if self._sidecar.exists:
+            db, _ = query_duckdb_sidecar(q, dt, self._sidecar.deltatable)
+        else:
+            from ftmq.store.lake import query_duckdb
+
+            db = query_duckdb(q, dt)
         db.write_csv(output_uri)
 
     def compact(self) -> None:
-        """Dedup, remove tombstones, rewrite, callers should call optimize
-        afterwards."""
-        compact_deletes(self._store.deltatable, PARTITIONS)
+        """Apply sidecar to main table: remove deleted rows, update timestamps.
+
+        After compact the main table is self-contained (accurate first_seen/
+        last_seen, no deleted rows) and the sidecar only contains live entries.
+        Caller should call optimize() afterwards for file compaction.
+        """
+        if not self._sidecar.exists:
+            return
+
+        live = compact_with_sidecar(self._store.deltatable, self._sidecar.deltatable)
+
+        write_deltalake(
+            str(self.uri),
+            live,
+            partition_by=PARTITIONS,
+            mode="overwrite",
+            schema_mode="overwrite",
+            storage_options=storage_options(),
+            configuration={"delta.enableChangeDataFeed": "true"},
+        )
+
+        self._sidecar.compact()
+
+    def get_deleted_entity_ids(self) -> set[str]:
+        """Get entity IDs that have been soft-deleted via sidecar."""
+        if not self._sidecar.exists:
+            return set()
+
+        return _get_deleted_entity_ids(self._store.deltatable, self._sidecar.deltatable)
 
     def get_changes(
         self,

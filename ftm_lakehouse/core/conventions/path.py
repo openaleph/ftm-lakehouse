@@ -225,6 +225,9 @@ ENTITIES_JSON = "entities.ftm.json"
 STATEMENTS = f"{ENTITIES}/statements"
 """Base path for storing statement data"""
 
+SIDECAR = f"{ENTITIES}/sidecar"
+"""Base path for sidecar metadata table"""
+
 
 def statement_origin(origin: str) -> str:
     """

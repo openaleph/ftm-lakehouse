@@ -1,172 +1,135 @@
-"""Pure functions for Delta Lake parquet operations with tombstone-based soft deletes.
+"""Pure functions for Delta Lake parquet operations with sidecar-based metadata.
 
 Provides stateless operations on DeltaTable/DuckDB/PyArrow for:
-- Deduplication with tombstone filtering (used during compaction)
-- Full compaction (dedup + rewrite + optimize + vacuum)
+- Sidecar-aware querying (join main table + sidecar for accurate timestamps and soft deletes)
+- Compaction (apply sidecar to main table, remove deleted sidecar entries)
+- Deleted entity ID retrieval
 """
 
 from typing import Generator
 
 import duckdb
-from deltalake import DeltaTable, write_deltalake
-from ftmq.store.lake import Row, compile_query, storage_options
-from sqlalchemy import Select
+import pyarrow as pa
+from deltalake import DeltaTable
+from ftmq.store.lake import Row, compile_query
 
 
-def query_deduped(dt: DeltaTable) -> duckdb.DuckDBPyRelation:
-    """Return a DuckDB relation with tombstones filtered and rows deduped.
+def sidecar_aware_sql(
+    compiled_query: str, dt: DeltaTable, sidecar_dt: DeltaTable
+) -> str:
+    """Wrap a compiled SQL query with a CTE that joins the sidecar.
 
-    Uses ROW_NUMBER() OVER (PARTITION BY id ORDER BY COALESCE(deleted_at, last_seen) DESC)
-    to keep only the most recent action per statement. Rows where deleted_at IS NOT NULL
-    are filtered out.
-
-    The deleted_at column is kept in output (as all NULLs for live rows) so that
-    compact preserves it in the rewritten table.
-
-    NOTE: This scans and sorts the entire table. Only use during compaction.
-    """
-    rel = duckdb.arrow(dt.to_pyarrow_dataset())
-
-    all_cols = [f.name for f in dt.schema().to_arrow()]
-
-    # Legacy tables without deleted_at — just return as-is
-    if "deleted_at" not in all_cols:
-        return rel.query("arrow", "SELECT * FROM arrow")
-
-    cols_sql = ", ".join(all_cols)
-
-    sql = f"""
-        WITH ranked AS (
-            SELECT *,
-                ROW_NUMBER() OVER (
-                    PARTITION BY id
-                    ORDER BY COALESCE(deleted_at, last_seen) DESC
-                ) AS rn
-            FROM arrow
-        )
-        SELECT {cols_sql}
-        FROM ranked
-        WHERE rn = 1 AND deleted_at IS NULL
-    """
-    return rel.query("arrow", sql)
-
-
-def compact_deletes(dt: DeltaTable, partition_by: list[str]) -> None:
-    """Dedup + drop tombstones, rewriting only affected partitions.
-
-    Identifies partitions containing tombstone rows, deduplicates and filters
-    only those partitions, then overwrites them using predicate-based replace.
-    Unaffected partitions are never read or rewritten.
-
-    After this call affected partitions are clean (no tombstone rows, deleted_at
-    column preserved as all NULLs). Caller is responsible for optimize + vacuum
-    afterwards.
+    The CTE joins the main arrow table with the sidecar to:
+    - Use sidecar's first_seen/last_seen instead of main table's
+    - Filter out rows where sidecar.deleted_at IS NOT NULL
     """
     all_cols = [f.name for f in dt.schema().to_arrow()]
-    if "deleted_at" not in all_cols:
-        return
+    # Use sidecar's first_seen/last_seen instead of main table's
+    main_cols = [f"arrow.{c}" for c in all_cols if c not in ("first_seen", "last_seen")]
+    select_cols = ", ".join(main_cols + ["sc.first_seen", "sc.last_seen"])
 
-    rel = duckdb.arrow(dt.to_pyarrow_dataset())
-
-    # Find which partitions have tombstones
-    parts_cols = ", ".join(partition_by)
-    affected = rel.query(
-        "arrow",
-        f"SELECT DISTINCT {parts_cols} FROM arrow WHERE deleted_at IS NOT NULL",
-    ).fetchall()
-
-    if not affected:
-        return
-
-    # Build predicate covering all affected partitions
-    partition_predicates = []
-    for values in affected:
-        clause = " AND ".join(
-            f"{col} = '{val}'" for col, val in zip(partition_by, values)
-        )
-        partition_predicates.append(f"({clause})")
-    predicate = " OR ".join(partition_predicates)
-
-    # Dedup only affected partitions
-    cols_sql = ", ".join(all_cols)
-    sql = f"""
-        WITH scoped AS (
-            SELECT * FROM arrow WHERE {predicate}
-        ),
-        ranked AS (
-            SELECT *,
-                ROW_NUMBER() OVER (
-                    PARTITION BY id
-                    ORDER BY COALESCE(deleted_at, last_seen) DESC
-                ) AS rn
-            FROM scoped
-        )
-        SELECT {cols_sql}
-        FROM ranked
-        WHERE rn = 1 AND deleted_at IS NULL
-    """
-    clean = rel.query("arrow", sql).fetch_arrow_reader()
-
-    write_deltalake(
-        str(dt.table_uri),
-        clean,
-        partition_by=partition_by,
-        mode="overwrite",
-        predicate=predicate,
-        schema_mode="overwrite",
-        storage_options=storage_options(),
-        configuration={"delta.enableChangeDataFeed": "true"},
-    )
-
-
-def tombstone_aware_sql(compiled_query: str, dt: DeltaTable) -> str:
-    """Wrap a compiled SQL query with CTEs that filter tombstoned rows.
-
-    The CTE strategy:
-    - __tombstoned: collects max(deleted_at) per statement id from tombstone rows
-    - __live: keeps rows where deleted_at IS NULL and either no tombstone exists
-      or last_seen > max(deleted_at) (handles re-add after delete)
-    - original query runs against __live instead of arrow/statement
-    """
-    all_cols = [f.name for f in dt.schema().to_arrow()]
-    # Qualify with arrow. to avoid ambiguous refs after LEFT JOIN
-    live_cols = ", ".join(f"arrow.{c}" for c in all_cols if c != "deleted_at")
-
-    cte = f"""WITH __tombstoned AS (
-    SELECT id, MAX(deleted_at) AS __max_del
-    FROM arrow WHERE deleted_at IS NOT NULL GROUP BY id
-),
-__live AS (
-    SELECT {live_cols}
+    cte = f"""WITH __live AS (
+    SELECT {select_cols}
     FROM arrow
-    LEFT JOIN __tombstoned ON arrow.id = __tombstoned.id
-    WHERE arrow.deleted_at IS NULL
-    AND (__tombstoned.id IS NULL OR arrow.last_seen > __tombstoned.__max_del)
+    JOIN sidecar sc ON arrow.id = sc.id
+    WHERE sc.deleted_at IS NULL
 )
 """
-    # Replace FROM clause: "FROM arrow as statement" or "FROM statement"
     rewritten = compiled_query.replace(
         "FROM arrow as statement", "FROM __live as statement"
     )
     return cte + rewritten
 
 
-def stream_duckdb_tombstone_aware(
-    q: Select, dt: DeltaTable
+def stream_duckdb_sidecar(
+    q, dt: DeltaTable, sidecar_dt: DeltaTable
 ) -> Generator[Row, None, None]:
-    """Like stream_duckdb but filters tombstoned rows via CTE."""
-    rel = duckdb.arrow(dt.to_pyarrow_dataset())
+    """Like stream_duckdb but joins with sidecar for accurate timestamps and soft deletes."""
+    con = duckdb.connect()
+    con.register("arrow", dt.to_pyarrow_dataset())
+    con.register("sidecar", sidecar_dt.to_pyarrow_dataset())
     compiled = compile_query(q)
-    sql = tombstone_aware_sql(compiled, dt)
-    res = rel.query("arrow", sql)
-    while rows := res.fetchmany(100_000):
+    sql = sidecar_aware_sql(compiled, dt, sidecar_dt)
+    rel = con.sql(sql)
+    columns = rel.columns
+    while rows := rel.fetchmany(100_000):
         for row in rows:
-            yield Row(dict(zip(res.columns, row)))
+            yield Row(dict(zip(columns, row)))
 
 
-def query_duckdb_tombstone_aware(q: Select, dt: DeltaTable) -> duckdb.DuckDBPyRelation:
-    """Like query_duckdb but filters tombstoned rows via CTE."""
-    rel = duckdb.arrow(dt.to_pyarrow_dataset())
+def query_duckdb_sidecar(
+    q, dt: DeltaTable, sidecar_dt: DeltaTable
+) -> tuple[duckdb.DuckDBPyRelation, duckdb.DuckDBPyConnection]:
+    """Like query_duckdb but joins with sidecar for accurate timestamps and soft deletes.
+
+    Returns (relation, connection) tuple. Caller must hold the connection reference
+    to prevent GC from closing it while the relation is still in use.
+    """
+    con = duckdb.connect()
+    con.register("arrow", dt.to_pyarrow_dataset())
+    con.register("sidecar", sidecar_dt.to_pyarrow_dataset())
     compiled = compile_query(q)
-    sql = tombstone_aware_sql(compiled, dt)
-    return rel.query("arrow", sql)
+    sql = sidecar_aware_sql(compiled, dt, sidecar_dt)
+    return con.sql(sql), con
+
+
+def compact_with_sidecar(
+    dt: DeltaTable, sidecar_dt: DeltaTable
+) -> pa.RecordBatchReader:
+    """Join main table with sidecar, returning only live rows with accurate timestamps.
+
+    Args:
+        dt: Main statement DeltaTable
+        sidecar_dt: Sidecar metadata DeltaTable
+
+    Returns:
+        RecordBatchReader of live rows with sidecar timestamps applied
+    """
+    all_cols = [f.name for f in dt.schema().to_arrow()]
+    main_cols = [f"arrow.{c}" for c in all_cols if c not in ("first_seen", "last_seen")]
+    select_cols = ", ".join(main_cols + ["sc.first_seen", "sc.last_seen"])
+
+    con = duckdb.connect()
+    con.register("arrow", dt.to_pyarrow_dataset())
+    con.register("sidecar", sidecar_dt.to_pyarrow_dataset())
+    return con.sql(
+        f"SELECT {select_cols} FROM arrow "
+        "JOIN sidecar sc ON arrow.id = sc.id "
+        "WHERE sc.deleted_at IS NULL"
+    ).fetch_arrow_reader()
+
+
+def get_deleted_entity_ids(dt: DeltaTable, sidecar_dt: DeltaTable) -> set[str]:
+    """Get entity IDs that have been soft-deleted via sidecar.
+
+    Args:
+        dt: Main statement DeltaTable
+        sidecar_dt: Sidecar metadata DeltaTable
+
+    Returns:
+        Set of entity_id strings with at least one deleted statement
+    """
+    con = duckdb.connect()
+    con.register("arrow", dt.to_pyarrow_dataset())
+    con.register("sidecar", sidecar_dt.to_pyarrow_dataset())
+    result = con.execute(
+        "SELECT DISTINCT arrow.entity_id FROM arrow "
+        "JOIN sidecar sc ON arrow.id = sc.id "
+        "WHERE sc.deleted_at IS NOT NULL"
+    )
+    return {r[0] for r in result.fetchall()}
+
+
+def filter_live_sidecar(sidecar_dt: DeltaTable) -> pa.RecordBatchReader:
+    """Return only live (non-deleted) sidecar rows.
+
+    Args:
+        sidecar_dt: Sidecar metadata DeltaTable
+
+    Returns:
+        RecordBatchReader of sidecar rows where deleted_at IS NULL
+    """
+    rel = duckdb.arrow(sidecar_dt.to_pyarrow_dataset())
+    return rel.query(
+        "sidecar", "SELECT * FROM sidecar WHERE deleted_at IS NULL"
+    ).fetch_arrow_reader()
