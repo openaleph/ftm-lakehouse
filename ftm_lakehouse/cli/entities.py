@@ -6,10 +6,13 @@ Provides ``write-entities`` (bulk ingest from FtM JSON) and
 
 from typing import Annotated
 
+from anystore.io import logged_items
 from ftmq.io import smart_read_proxies, smart_write_proxies
 from typer import Option
 
 from ftm_lakehouse.cli import DatasetContext, cli
+
+BULK_ORIGIN = "bulk"
 
 
 @cli.command("write-entities")
@@ -18,11 +21,18 @@ def cli_write_entities(
     flush: Annotated[
         bool, Option(help="Flush journal to parquet after writing")
     ] = False,
+    origin: Annotated[str, Option(..., help="Data origin")] = BULK_ORIGIN,
 ):
-    """Write FtM entities from an input source into the statement store."""
+    """Write FtM entities from an input source into the journal."""
     with DatasetContext() as dataset:
-        with dataset.entities.bulk(origin="bulk") as writer:
-            for proxy in smart_read_proxies(in_uri):
+        with dataset.entities.bulk(origin=origin) as writer:
+            for proxy in logged_items(
+                smart_read_proxies(in_uri),
+                "Write",
+                item_name="Entity",
+                logger=dataset._log,
+                journal=dataset.entities._journal.uri,
+            ):
                 writer.add_entity(proxy)
         if flush:
             dataset.entities.flush()
