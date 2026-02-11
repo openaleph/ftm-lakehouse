@@ -5,7 +5,6 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ftm_lakehouse.dataset import Dataset
-from ftm_lakehouse.lake import get_lakehouse
 from ftm_lakehouse.model import DatasetJobModel
 from ftm_lakehouse.operation.base import DatasetJobOperation
 from ftm_lakehouse.operation.crawl import CrawlJob, CrawlOperation
@@ -34,12 +33,8 @@ router = APIRouter()
 
 
 def get_dataset(dataset: str, request: Request) -> Dataset:
-    store = request.app.state.store
-    catalog = get_lakehouse(store.uri)
-    return catalog.get_dataset(dataset)
+    return request.app.state.lake.get_dataset(dataset)
 
-
-Ds = Annotated[Dataset, Depends(get_dataset)]
 
 OPERATIONS: dict[str, tuple[type[DatasetJobModel], type[DatasetJobOperation]]] = {
     "CrawlJob": (CrawlJob, CrawlOperation),
@@ -58,7 +53,7 @@ OPERATIONS: dict[str, tuple[type[DatasetJobModel], type[DatasetJobOperation]]] =
 
 @router.post("/{dataset}/_operation")
 async def run_operation(
-    dataset: Ds,
+    dataset: Annotated[Dataset, Depends(get_dataset)],
     request: Request,
     force: bool = False,
 ) -> DatasetJobModel:

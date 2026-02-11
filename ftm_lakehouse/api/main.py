@@ -8,6 +8,7 @@ from ftm_lakehouse.api.auth import ensure_auth
 from ftm_lakehouse.api.routes.journal import router as journal_router
 from ftm_lakehouse.api.routes.operations import router as operations_router
 from ftm_lakehouse.core.settings import Settings
+from ftm_lakehouse.lake import get_lakehouse
 
 settings = Settings()
 
@@ -17,9 +18,9 @@ async def _not_found_handler(_request: Request, exc: Exception) -> JSONResponse:
 
 
 def get_app(lake_uri: str | None = None) -> FastAPI:
-    store = get_store(lake_uri or settings.uri)
     app = FastAPI(docs_url=None, redoc_url="/")
-    app.state.store = store
+    app.state.store = get_store(lake_uri or settings.uri)
+    app.state.lake = get_lakehouse(lake_uri or settings.uri)
     app.state.journal_uri = settings.journal_uri
     app.include_router(storage_router, dependencies=[Depends(ensure_auth)])
     app.include_router(journal_router, dependencies=[Depends(ensure_auth)])
