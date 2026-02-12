@@ -1,20 +1,30 @@
 import shutil
+import socket
 import subprocess
 import sys
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator
 
 import boto3
 import pytest
 import requests
+import uvicorn
+from anystore.exceptions import DoesNotExist
+from anystore.store import get_store
 from boto3.resources.base import ServiceResource
+from fastapi import APIRouter, FastAPI
 from moto.server import ThreadedMotoServer
 
+from ftm_lakehouse.api.main import _not_found_handler
 from ftm_lakehouse.catalog import Catalog
+from ftm_lakehouse.core.api import get_api
 from ftm_lakehouse.dataset import Dataset
 from ftm_lakehouse.lake import get_lakehouse
 from ftm_lakehouse.repository import factories
+from ftm_lakehouse.storage.journal import get_journal
 
 FIXTURES_PATH = (Path(__file__).parent / "fixtures").absolute()
 
@@ -45,6 +55,7 @@ def clear_factory_caches():
     factories.get_jobs.cache_clear()
     factories.get_versions.cache_clear()
     factories.get_tags.cache_clear()
+    get_journal.cache_clear()
     yield
     # Clear after test
     factories.get_archive.cache_clear()
@@ -53,6 +64,7 @@ def clear_factory_caches():
     factories.get_jobs.cache_clear()
     factories.get_versions.cache_clear()
     factories.get_tags.cache_clear()
+    get_journal.cache_clear()
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -103,3 +115,59 @@ def moto_server() -> Generator[ServiceResource, None, None]:
     endpoint = f"http://{host}:{port}"
     yield boto3.resource("s3", region_name="us-east-1", endpoint_url=endpoint)
     server.stop()
+
+
+@contextmanager
+def live_test_api_server(app):
+    """Run FastAPI app on a real port for full HTTP integration testing."""
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    while not server.started:
+        time.sleep(0.01)
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+
+
+@contextmanager
+def make_test_api(
+    tmp_path: Path,
+    routers: list[APIRouter],
+    journal_uri: str | None = None,
+) -> Generator[str, None, None]:
+    """Create a test FastAPI app with the given routers and yield its base URL.
+
+    Sets up app state (store, lake, optional journal_uri), mounts routers,
+    registers exception handlers, and runs a live uvicorn server.
+
+    Args:
+        tmp_path: Root storage directory for the test lake.
+        routers: FastAPI routers to mount (archive_router should be last).
+        journal_uri: If provided, sets app.state.journal_uri and passes it
+            to get_lakehouse().
+    """
+    app = FastAPI()
+    app.state.store = get_store(tmp_path)
+    lake_kwargs = {}
+    if journal_uri:
+        app.state.journal_uri = journal_uri
+        lake_kwargs["journal_uri"] = journal_uri
+    app.state.lake = get_lakehouse(tmp_path, **lake_kwargs)
+    for router in routers:
+        app.include_router(router)
+    app.add_exception_handler(DoesNotExist, _not_found_handler)
+    app.add_exception_handler(FileNotFoundError, _not_found_handler)
+
+    with live_test_api_server(app) as base_url:
+        yield base_url
+
+    get_api.cache_clear()

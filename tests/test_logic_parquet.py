@@ -5,7 +5,8 @@ from datetime import datetime, timezone
 import duckdb
 import pyarrow as pa
 from deltalake import DeltaTable, write_deltalake
-from ftmq.store.lake import ARROW_SCHEMA
+from ftmq.query import Query
+from ftmq.store.lake import ARROW_SCHEMA, compile_query
 
 from ftm_lakehouse.logic.parquet import sidecar_aware_sql
 from ftm_lakehouse.storage.parquet import PARTITIONS, SIDECAR_SCHEMA
@@ -99,12 +100,9 @@ def test_sidecar_aware_sql_filters_deleted(tmp_path):
     ]
     sidecar_dt = _write_sidecar(sidecar_uri, sidecar_rows)
 
-    from ftmq.query import Query
-    from ftmq.store.lake import compile_query
-
     compiled = compile_query(Query().sql.statements)
 
-    sql = sidecar_aware_sql(compiled, dt, sidecar_dt)
+    sql = sidecar_aware_sql(compiled, dt)
 
     con = duckdb.connect()
     con.register("arrow", dt.to_pyarrow_dataset())
@@ -133,12 +131,9 @@ def test_sidecar_aware_sql_uses_sidecar_timestamps(tmp_path):
     ]
     sidecar_dt = _write_sidecar(sidecar_uri, sidecar_rows)
 
-    from ftmq.query import Query
-    from ftmq.store.lake import compile_query
-
     compiled = compile_query(Query().sql.statements)
 
-    sql = sidecar_aware_sql(compiled, dt, sidecar_dt)
+    sql = sidecar_aware_sql(compiled, dt)
 
     con = duckdb.connect()
     con.register("arrow", dt.to_pyarrow_dataset())
@@ -174,12 +169,9 @@ def test_sidecar_aware_sql_no_deletes(tmp_path):
     ]
     sidecar_dt = _write_sidecar(sidecar_uri, sidecar_rows)
 
-    from ftmq.query import Query
-    from ftmq.store.lake import compile_query
-
     compiled = compile_query(Query().sql.statements)
 
-    sql = sidecar_aware_sql(compiled, dt, sidecar_dt)
+    sql = sidecar_aware_sql(compiled, dt)
 
     con = duckdb.connect()
     con.register("arrow", dt.to_pyarrow_dataset())

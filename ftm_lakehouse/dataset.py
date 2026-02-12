@@ -4,6 +4,7 @@ from functools import cached_property
 from typing import Any, Generic
 
 from anystore.logging import get_logger
+from anystore.logic.uri import UriHandler
 from anystore.store import get_store
 from anystore.types import Uri
 from anystore.util import join_uri, mask_uri
@@ -19,6 +20,7 @@ from ftm_lakehouse.repository import (
     JobRepository,
     MappingRepository,
 )
+from ftm_lakehouse.repository.base import _to_anystore_uri
 from ftm_lakehouse.storage import TagStore
 from ftm_lakehouse.storage.versions import VersionStore
 
@@ -65,7 +67,11 @@ class Dataset(Generic[DM]):
         self.uri = uri
         self._model_class = model_class
         self._settings = Settings()
-        self._journal_uri = journal_uri or self._settings.journal_uri
+        journal_uri = journal_uri or self._settings.journal_uri
+        # HTTP journals need dataset-scoped URIs; SQL journals scope via table filtering
+        if UriHandler(journal_uri).is_http:
+            journal_uri = join_uri(journal_uri, name)
+        self._journal_uri = journal_uri
         self._log = log.bind(dataset=name, uri=mask_uri(uri))
 
     def __repr__(self) -> str:
@@ -78,17 +84,17 @@ class Dataset(Generic[DM]):
     @cached_property
     def _store(self):
         """Raw storage access."""
-        return get_store(uri=self.uri, serialization_mode="raw")
+        return get_store(uri=_to_anystore_uri(self.uri), serialization_mode="raw")
 
     @cached_property
     def _tags(self) -> TagStore:
         """Tag store for freshness tracking."""
-        return TagStore(self.uri)
+        return TagStore(_to_anystore_uri(self.uri))
 
     @cached_property
     def _versions(self) -> VersionStore:
         """Version store for snapshots."""
-        return VersionStore(self.uri)
+        return VersionStore(_to_anystore_uri(self.uri))
 
     # -------------------------------------------------------------------------
     # Model access (config.yml via VersionStore)

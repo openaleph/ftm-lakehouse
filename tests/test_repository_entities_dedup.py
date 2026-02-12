@@ -1,16 +1,22 @@
 """Tests for flush dedup: re-adding existing entities skips main table writes
 and updates sidecar last_seen."""
 
-import duckdb
+import time
+from pathlib import Path
+from typing import Generator
+
+import pytest
 from followthemoney import EntityProxy
 
+from ftm_lakehouse.api.main import archive_router, entities_router, journal_router
 from ftm_lakehouse.repository.entities import EntityRepository
+from tests.conftest import make_test_api
 from tests.shared import JANE, JOHN
 
 DATASET = "test"
 
 
-def _make_repo(tmp_path) -> EntityRepository:
+def _make_local_repo(tmp_path) -> EntityRepository:
     return EntityRepository(
         DATASET,
         tmp_path,
@@ -18,9 +24,25 @@ def _make_repo(tmp_path) -> EntityRepository:
     )
 
 
-def test_flush_dedup_no_new_rows(tmp_path):
+@pytest.fixture(params=["local", "api"])
+def repo(
+    request, tmp_path
+) -> Generator[tuple[EntityRepository, Path | None], None, None]:
+    if request.param == "local":
+        yield _make_local_repo(tmp_path), tmp_path
+    else:
+        routers = [entities_router, journal_router, archive_router]
+        with make_test_api(
+            tmp_path, routers, journal_uri="sqlite:///:memory:"
+        ) as base_url:
+            dataset_url = f"{base_url}/{DATASET}"
+            r = EntityRepository(DATASET, uri=dataset_url, journal_uri=dataset_url)
+            yield r, tmp_path / DATASET
+
+
+def test_flush_dedup_no_new_rows(repo):
     """Writing the same entity twice doesn't duplicate rows in main parquet."""
-    repo = _make_repo(tmp_path)
+    repo, _ = repo
 
     jane = EntityProxy.from_dict(JANE)
 
@@ -35,40 +57,9 @@ def test_flush_dedup_no_new_rows(tmp_path):
     assert count2 == 0  # no new rows written to main table
 
 
-def test_flush_dedup_updates_last_seen(tmp_path):
-    """Re-adding an entity updates last_seen in the sidecar."""
-    repo = _make_repo(tmp_path)
-
-    jane = EntityProxy.from_dict(JANE)
-
-    # First write + flush
-    repo.add(jane)
-    repo.flush()
-
-    # Read sidecar last_seen
-    sidecar_dt = repo._statements._sidecar.deltatable
-    rel = duckdb.arrow(sidecar_dt.to_pyarrow_dataset())
-    rows1 = rel.query("sc", "SELECT id, last_seen FROM sc").fetchall()
-    last_seen_1 = {r[0]: r[1] for r in rows1}
-
-    # Second write + flush
-    repo.add(jane)
-    repo.flush()
-
-    # Sidecar last_seen should be updated
-    sidecar_dt2 = repo._statements._sidecar.deltatable
-    rel2 = duckdb.arrow(sidecar_dt2.to_pyarrow_dataset())
-    rows2 = rel2.query("sc", "SELECT id, last_seen FROM sc").fetchall()
-    last_seen_2 = {r[0]: r[1] for r in rows2}
-
-    # Every statement's last_seen should be >= original
-    for stmt_id in last_seen_1:
-        assert last_seen_2[stmt_id] >= last_seen_1[stmt_id]
-
-
-def test_flush_dedup_query_returns_entity(tmp_path):
+def test_flush_dedup_query_returns_entity(repo):
     """Entity is still queryable after dedup flush (sidecar join works)."""
-    repo = _make_repo(tmp_path)
+    repo, _ = repo
 
     jane = EntityProxy.from_dict(JANE)
 
@@ -85,9 +76,9 @@ def test_flush_dedup_query_returns_entity(tmp_path):
     assert jane.id in entity_ids
 
 
-def test_flush_dedup_mixed_new_and_existing(tmp_path):
+def test_flush_dedup_mixed_new_and_existing(repo):
     """Flush with both new and existing entities: only new ones go to main table."""
-    repo = _make_repo(tmp_path)
+    repo, _ = repo
 
     jane = EntityProxy.from_dict(JANE)
     john = EntityProxy.from_dict(JOHN)
@@ -105,7 +96,7 @@ def test_flush_dedup_mixed_new_and_existing(tmp_path):
 
     # Only john's statements should be new
     john_stmt_count = len(
-        list(s for s in repo._statements.query_statements() if s.entity_id == "john")
+        list(s for s in repo.query_statements() if s.entity_id == "john")
     )
     assert count2 == john_stmt_count
 
@@ -113,3 +104,24 @@ def test_flush_dedup_mixed_new_and_existing(tmp_path):
     entities = list(repo.query(flush_first=False))
     entity_ids = {e.id for e in entities}
     assert entity_ids == {"jane", "john"}
+
+
+def test_flush_dedup_updates_last_seen(tmp_path):
+    """Re-adding an entity updates last_seen in the sidecar."""
+    repo = _make_local_repo(tmp_path)
+
+    jane = EntityProxy.from_dict(JANE)
+
+    # First write + flush
+    repo.add(jane)
+    repo.flush()
+
+    last_seen1 = repo.get(jane.id).last_seen
+
+    time.sleep(2)
+    # Second write + flush
+    repo.add(jane)
+    repo.flush()
+
+    last_seen2 = repo.get(jane.id).last_seen
+    assert last_seen1 < last_seen2

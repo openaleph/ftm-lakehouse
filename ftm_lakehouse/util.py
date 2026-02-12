@@ -77,3 +77,11 @@ def check_dataset(name: str, data: SDict) -> str:
 
 def make_entity(data: SDict, dataset: str) -> StatementEntity:
     return _make_entity(data, StatementEntity, dataset)
+
+
+def make_envelope(data: SDict, op: str = "ADD") -> SDict:
+    """Create diff action envelope for data dict
+
+    Ref. https://www.opensanctions.org/docs/bulk/delta/
+    """
+    return {"op": op, "entity": data}

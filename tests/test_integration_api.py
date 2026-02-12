@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from ftm_lakehouse.api.auth import create_access_token, settings
 from ftm_lakehouse.api.main import get_app
+from ftm_lakehouse.core.settings import __version__
 from ftm_lakehouse.operation.crawl import crawl
 
 DATASET = "tmp_dataset"
@@ -30,12 +31,12 @@ def test_api(fixtures_path, tmp_catalog):
     client = TestClient(app)
 
     # unauthenticated requests are rejected
-    res = client.post("/_list", params={"prefix": f"{DATASET}/archive"})
+    res = client.get(f"{DATASET}/archive", params={"keys": "true"})
     assert res.status_code == 401
 
     # authenticated: list keys
     auth = _auth_header()
-    res = client.post("/_list", params={"prefix": f"{DATASET}/archive"}, headers=auth)
+    res = client.get(f"{DATASET}/archive", params={"keys": "true"}, headers=auth)
     assert res.status_code == 200
     keys = res.text.strip().split("\n")
     assert len(keys) > 0
@@ -59,8 +60,8 @@ def test_api(fixtures_path, tmp_catalog):
     read_auth = _auth_header(methods=["GET", "HEAD"])
     res = client.get(key, headers=read_auth)
     assert res.status_code == 200
-    res = client.post("/_list", headers=read_auth)
-    assert res.status_code == 403  # POST not allowed
+    res = client.put(key, headers=read_auth, content=b"test")
+    assert res.status_code == 403  # PUT not allowed
 
     # restricted token: prefix-scoped
     scoped_auth = _auth_header(prefixes=[f"/{DATASET}/archive/"])
@@ -89,7 +90,7 @@ def test_api_public_mode(fixtures_path, tmp_catalog):
 
     # discover a key with auth first
     auth = _auth_header()
-    res = client.post("/_list", params={"prefix": f"{DATASET}/archive"}, headers=auth)
+    res = client.get(f"{DATASET}/archive", params={"keys": "true"}, headers=auth)
     assert res.status_code == 200
     keys = res.text.strip().split("\n")
     assert len(keys) > 0
@@ -97,7 +98,7 @@ def test_api_public_mode(fixtures_path, tmp_catalog):
 
     with patch.object(settings, "auth_required", False):
         # write methods are rejected in public mode
-        res = client.post("/_list", params={"prefix": f"{DATASET}/archive"})
+        res = client.put(key, content=b"test")
         assert res.status_code == 403
 
         # GET without token works
@@ -109,3 +110,11 @@ def test_api_public_mode(fixtures_path, tmp_catalog):
         res = client.head(key)
         assert res.status_code == 200
         assert "Content-Length" in res.headers
+
+
+def test_api_version_header(tmp_catalog):
+    app = get_app(lake_uri=tmp_catalog.uri)
+    client = TestClient(app)
+    auth = _auth_header()
+    res = client.get("/", headers=auth)
+    assert res.headers["X-Lakehouse-Version"] == __version__

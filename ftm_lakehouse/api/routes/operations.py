@@ -1,6 +1,7 @@
 """Operation API routes: execute DatasetJob as operation"""
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from ftm_lakehouse.api.helpers import Dataset
 from ftm_lakehouse.model import DatasetJobModel
@@ -48,7 +49,7 @@ OPERATIONS: dict[str, tuple[type[DatasetJobModel], type[DatasetJobOperation]]] =
 @router.post("/{dataset}/_api/operations")
 async def run_operation(
     dataset: Dataset, request: Request, force: bool = False
-) -> DatasetJobModel:
+) -> JSONResponse:
     """Run a job operation on the given dataset.
 
     The request body must be a serialized DatasetJobModel with a `name` field
@@ -64,4 +65,4 @@ async def run_operation(
     model_cls, op_cls = OPERATIONS[name]
     job = model_cls.make(dataset=dataset.name, **body)
     result = op_cls.from_job(job, dataset).run(force=force)
-    return result
+    return JSONResponse(result.model_dump(mode="json"))

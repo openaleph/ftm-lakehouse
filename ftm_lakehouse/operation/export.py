@@ -123,7 +123,7 @@ class ExportStatisticsOperation(BaseExportOperation[ExportStatisticsJob]):
 
     def handle(self, run: JobRun, *args, **kwargs) -> None:
         if self.ensure_flush():
-            stats = self.entities.make_statistics()
+            stats = self.entities.get_statistics()
             self.versions.make(path.EXPORTS_STATISTICS, stats)
             run.job.done = 1
 

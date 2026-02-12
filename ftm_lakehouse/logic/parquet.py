@@ -14,9 +14,7 @@ from deltalake import DeltaTable
 from ftmq.store.lake import Row, compile_query
 
 
-def sidecar_aware_sql(
-    compiled_query: str, dt: DeltaTable, sidecar_dt: DeltaTable
-) -> str:
+def sidecar_aware_sql(compiled_query: str, dt: DeltaTable) -> str:
     """Wrap a compiled SQL query with a CTE that joins the sidecar.
 
     The CTE joins the main arrow table with the sidecar to:
@@ -49,7 +47,7 @@ def stream_duckdb_sidecar(
     con.register("arrow", dt.to_pyarrow_dataset())
     con.register("sidecar", sidecar_dt.to_pyarrow_dataset())
     compiled = compile_query(q)
-    sql = sidecar_aware_sql(compiled, dt, sidecar_dt)
+    sql = sidecar_aware_sql(compiled, dt)
     rel = con.sql(sql)
     columns = rel.columns
     while rows := rel.fetchmany(100_000):
@@ -69,7 +67,7 @@ def query_duckdb_sidecar(
     con.register("arrow", dt.to_pyarrow_dataset())
     con.register("sidecar", sidecar_dt.to_pyarrow_dataset())
     compiled = compile_query(q)
-    sql = sidecar_aware_sql(compiled, dt, sidecar_dt)
+    sql = sidecar_aware_sql(compiled, dt)
     return con.sql(sql), con
 
 
@@ -133,3 +131,14 @@ def filter_live_sidecar(sidecar_dt: DeltaTable) -> pa.RecordBatchReader:
     return rel.query(
         "sidecar", "SELECT * FROM sidecar WHERE deleted_at IS NULL"
     ).fetch_arrow_reader()
+
+
+def make_dedup_connection(dt: DeltaTable) -> duckdb.DuckDBPyConnection | None:
+    """Create a DuckDB connection with a temp table of existing statement IDs.
+
+    Returns None if the main parquet table doesn't exist yet (first flush).
+    """
+    con = duckdb.connect()
+    con.register("arrow", dt.to_pyarrow_dataset())
+    con.execute("CREATE TEMP TABLE existing_ids AS SELECT DISTINCT id FROM arrow")
+    return con

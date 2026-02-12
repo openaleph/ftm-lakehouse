@@ -1,16 +1,38 @@
+from pathlib import Path
+from typing import Generator
+
+import pytest
 from anystore.store import get_store
-from anystore.types import Uri
 from moto import mock_aws
 from rigour.mime.types import PLAIN
 
+from ftm_lakehouse.api.main import archive_router
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.repository.archive import ArchiveRepository
 from ftm_lakehouse.util import make_checksum_key
+from tests.conftest import make_test_api
 
 
-def _test_repository_archive(
-    archive: ArchiveRepository, crawl_uri: Uri, base_path=None
-):
+@pytest.fixture(params=["local", "api", "s3"])
+def repo(
+    request, tmp_path
+) -> Generator[tuple[ArchiveRepository, Path | None], None, None]:
+    if request.param == "local":
+        yield ArchiveRepository("test", tmp_path), tmp_path
+    elif request.param == "api":
+        with make_test_api(tmp_path, [archive_router]) as base_url:
+            yield ArchiveRepository("test", f"{base_url}/test"), tmp_path / "test"
+    else:  # s3
+        moto_server = request.getfixturevalue("moto_server")
+        with mock_aws():
+            moto_server.create_bucket(Bucket="lakehouse")
+            yield ArchiveRepository("test", "s3://lakehouse/test"), None
+
+
+def test_repository_archive(repo, fixtures_path):
+    archive, base_path = repo
+    crawl_uri = fixtures_path / "src"
+
     # Initially no archive tag
     assert not archive._tags.exists(tag.ARCHIVE_UPDATED)
 
@@ -48,36 +70,17 @@ def _test_repository_archive(
     return True
 
 
-def test_repository_archive_local(tmp_path, fixtures_path):
-    archive = ArchiveRepository("test", tmp_path)
-    assert _test_repository_archive(archive, fixtures_path / "src", base_path=tmp_path)
-
-
-@mock_aws
-def test_repository_archive_s3_dataset(fixtures_path, moto_server):
-    moto_server.create_bucket(Bucket="lakehouse")
-    archive = ArchiveRepository("test", "s3://lakehouse/test")
-    assert _test_repository_archive(archive, fixtures_path / "src")
-
-
-# def test_repository_archive_remote_dataset():
-#     dataset = _test_repository_archive_dataset("remote_dataset")
-#     assert dataset.store.readonly
-#     assert dataset.readonly
-#     assert isinstance(dataset, ReadOnlyDatasetArchive)
-
-
-def test_repository_archive_multi_metadata(tmp_path, fixtures_path):
+def test_repository_archive_multi_metadata(repo, tmp_path):
     """Test that multiple crawlers can archive the same file with different metadata."""
-    archive = ArchiveRepository("test", tmp_path)
+    archive, base_path = repo
 
     # Create two files with identical content but different paths
     content = b"identical content for multi-metadata test"
     file1_path = tmp_path / "crawler1" / "documents" / "file.txt"
     file2_path = tmp_path / "crawler2" / "data" / "same_file.txt"
 
-    file1_path.parent.mkdir(parents=True)
-    file2_path.parent.mkdir(parents=True)
+    file1_path.parent.mkdir(parents=True, exist_ok=True)
+    file2_path.parent.mkdir(parents=True, exist_ok=True)
     file1_path.write_bytes(content)
     file2_path.write_bytes(content)
 
@@ -99,20 +102,20 @@ def test_repository_archive_multi_metadata(tmp_path, fixtures_path):
     assert result1.key == "file.txt"
     assert result2.key == "same_file.txt"
 
-    # Blob should exist only once
-    blob_path = tmp_path / path.archive_blob(checksum)
-    assert blob_path.exists()
+    # Verify storage layout on local backends
+    if base_path:
+        blob_path = base_path / path.archive_blob(checksum)
+        assert blob_path.exists()
 
-    # Both metadata files should exist
-    meta1_path = tmp_path / path.archive_meta(checksum, result1.id)
-    meta2_path = tmp_path / path.archive_meta(checksum, result2.id)
-    assert meta1_path.exists()
-    assert meta2_path.exists()
+        meta1_path = base_path / path.archive_meta(checksum, result1.id)
+        meta2_path = base_path / path.archive_meta(checksum, result2.id)
+        assert meta1_path.exists()
+        assert meta2_path.exists()
 
 
-def test_repository_archive_lookup_files(tmp_path):
+def test_repository_archive_lookup_files(repo, tmp_path):
     """Test lookup_files returns all metadata for a checksum."""
-    archive = ArchiveRepository("test", tmp_path)
+    archive, _ = repo
 
     content = b"content for lookup_files test"
     paths = [
@@ -140,9 +143,9 @@ def test_repository_archive_lookup_files(tmp_path):
     assert len(ids) == 3
 
 
-def test_repository_archive_get_file_by_id(tmp_path):
+def test_repository_archive_get_file_by_id(repo, tmp_path):
     """Test get_file with specific file_id returns correct metadata."""
-    archive = ArchiveRepository("test", tmp_path)
+    archive, _ = repo
 
     content = b"content for lookup by id test"
     file1 = tmp_path / "path1" / "doc.txt"
@@ -170,9 +173,9 @@ def test_repository_archive_get_file_by_id(tmp_path):
     assert found2.key == result2.key
 
 
-def test_repository_archive_iter_files_multi_metadata(tmp_path):
+def test_repository_archive_iter_files_multi_metadata(repo, tmp_path):
     """Test iter_files returns all metadata entries across checksums."""
-    archive = ArchiveRepository("test", tmp_path)
+    archive, _ = repo
 
     # Create files with two different contents
     content_a = b"content A"
@@ -198,9 +201,9 @@ def test_repository_archive_iter_files_multi_metadata(tmp_path):
     assert len(all_files) == 4
 
 
-def test_repository_archive_put_text_multi_origin(tmp_path, fixtures_path):
+def test_repository_archive_put_text_multi_origin(repo, fixtures_path):
     """Test put_text stores text keyed by origin."""
-    archive = ArchiveRepository("test", tmp_path)
+    archive, base_path = repo
 
     file = archive.store(fixtures_path / "src" / "utf.txt")
     checksum = file.checksum
@@ -210,31 +213,32 @@ def test_repository_archive_put_text_multi_origin(tmp_path, fixtures_path):
     archive.put_txt(checksum, "Text from azure", origin="azure")
     archive.put_txt(checksum, "Default extraction", origin="default")
 
-    # All text files should exist
-    text_tesseract = tmp_path / path.archive_txt(checksum, "tesseract")
-    text_azure = tmp_path / path.archive_txt(checksum, "azure")
-    text_default = tmp_path / path.archive_txt(checksum, "default")
+    # Verify storage layout on local backends
+    if base_path:
+        text_tesseract = base_path / path.archive_txt(checksum, "tesseract")
+        text_azure = base_path / path.archive_txt(checksum, "azure")
+        text_default = base_path / path.archive_txt(checksum, "default")
 
-    assert text_tesseract.exists()
-    assert text_azure.exists()
-    assert text_default.exists()
+        assert text_tesseract.exists()
+        assert text_azure.exists()
+        assert text_default.exists()
 
-    assert text_tesseract.read_text() == "Text from tesseract"
-    assert text_azure.read_text() == "Text from azure"
-    assert text_default.read_text() == "Default extraction"
+        assert text_tesseract.read_text() == "Text from tesseract"
+        assert text_azure.read_text() == "Text from azure"
+        assert text_default.read_text() == "Default extraction"
 
 
-def test_repository_archive_store_and_retrieve(tmp_path, fixtures_path):
-    """Test arbitrary data and blog r/w"""
-
-    archive = ArchiveRepository("test", tmp_path)
+def test_repository_archive_store_and_retrieve(repo, fixtures_path):
+    """Test arbitrary data and blob r/w"""
+    archive, base_path = repo
 
     checksum = "bbb1f047ff1f0c333560e09cff0c4a052eb87a2998d6d16775a276645877c5b7"
 
     # arbitrary data
     archive.put_data(checksum, "data.txt", b"hello")
     assert archive.get_data(checksum, "data.txt") == b"hello"
-    assert (tmp_path / make_checksum_key(checksum) / "data.txt").exists()
+    if base_path:
+        assert (base_path / make_checksum_key(checksum) / "data.txt").exists()
 
     # write via file handler
     fixture = str(fixtures_path / "src/utf.txt")

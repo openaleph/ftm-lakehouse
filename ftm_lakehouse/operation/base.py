@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Generic, Self
 
 from anystore.types import Uri
 
+from ftm_lakehouse.core.api import LakehouseApiMixin, api_delegate, require_api
 from ftm_lakehouse.model.job import DJ
 from ftm_lakehouse.repository.archive import ArchiveRepository
 from ftm_lakehouse.repository.documents import DocumentRepository
@@ -24,7 +25,7 @@ if TYPE_CHECKING:
     from ftm_lakehouse.dataset import Dataset
 
 
-class DatasetJobOperation(Generic[DJ]):
+class DatasetJobOperation(LakehouseApiMixin, Generic[DJ]):
     """
     A (long-running) operation for a specific dataset that updates tags and
     checks dependencies for freshness to be able to skip this operation. The job
@@ -57,6 +58,7 @@ class DatasetJobOperation(Generic[DJ]):
         self.jobs = jobs or get_jobs(job.dataset, job.__class__, uri)
         self.tags = tags or get_tags(job.dataset, uri)
         self.versions = versions or get_versions(job.dataset, uri)
+        super().__init__(uri or self.archive.uri)
 
     @classmethod
     def from_job(cls, job: DJ, dataset: Dataset) -> Self:
@@ -73,7 +75,7 @@ class DatasetJobOperation(Generic[DJ]):
             job=job,
             archive=dataset.archive,
             entities=dataset.entities,
-            jobs=dataset.jobs,
+            jobs=get_jobs(dataset.name, job.__class__, dataset.uri),
             tags=dataset._tags,
             versions=dataset._versions,
         )
@@ -91,6 +93,7 @@ class DatasetJobOperation(Generic[DJ]):
     def handle(self, run: JobRun, *args, **kwargs) -> None:
         raise NotImplementedError
 
+    @api_delegate("_api_run")
     def run(self, force: bool | None = False, *args, **kwargs) -> DJ:
         """Execute the handle function, force to run it regardless of freshness
         dependencies"""
@@ -129,6 +132,18 @@ class DatasetJobOperation(Generic[DJ]):
         if result is not None:
             return result
         raise RuntimeError("Result is `None`")
+
+    @require_api
+    def _api_run(self, force: bool | None = False, *args, **kwargs) -> DJ:
+        """Delegate run to remote api"""
+        url = self._api.make_url("_api/operations")
+        res = self._api.make_request(
+            url,
+            "POST",
+            params={"force": force},
+            json=self.job.model_dump(mode="json"),
+        )
+        return self.job.__class__(**res.json())
 
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__}({self.job.dataset})>"

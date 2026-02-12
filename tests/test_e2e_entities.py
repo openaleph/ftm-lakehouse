@@ -1,22 +1,48 @@
 import csv
+from pathlib import Path
+from typing import Generator
 
+import pytest
 from followthemoney import Statement, model
 from ftmq.model.stats import DatasetStats
 from ftmq.util import make_entity
 
+from ftm_lakehouse.api.main import (
+    archive_router,
+    entities_router,
+    journal_router,
+    operations_router,
+)
 from ftm_lakehouse.core.conventions import path
+from ftm_lakehouse.dataset import Dataset
+from ftm_lakehouse.lake import get_lakehouse
 from ftm_lakehouse.operation import (
     export_entities,
     export_statements,
     export_statistics,
     optimize,
 )
+from tests.conftest import make_test_api
 from tests.shared import JANE, JANE_FIRSTNAME
 
 
-def test_entities(tmp_dataset):
+@pytest.fixture(params=["local", "api"])
+def dataset(request, tmp_path) -> Generator[Dataset, None, None]:
+    if request.param == "local":
+        lake = get_lakehouse(tmp_path)
+        yield lake.get_dataset("test")
+    else:
+        routers = [entities_router, journal_router, operations_router, archive_router]
+        with make_test_api(
+            tmp_path, routers, journal_uri="sqlite:///:memory:"
+        ) as base_url:
+            lake = get_lakehouse(base_url, journal_uri=base_url)
+            yield lake.get_dataset("test")
+
+
+def test_entities(dataset):
     """Test the unified DatasetEntities interface."""
-    entities = tmp_dataset.entities
+    entities = dataset.entities
 
     # Initially empty
     assert len([e for e in entities.query(flush_first=False)]) == 0
@@ -28,12 +54,12 @@ def test_entities(tmp_dataset):
     with entities.bulk() as bulk:
         bulk.add_entity(jane)
 
-    assert len([e for e in entities.query()]) == 1
+    assert len([e for e in entities.query(flush_first=True)]) == 1
 
     with entities.bulk(origin="update") as bulk:
         bulk.add_entity(jane_fragment)
 
-    assert len([e for e in entities.query()]) == 1
+    assert len([e for e in entities.query(flush_first=True)]) == 1
 
     # Get entity by ID
     jane = entities.get("jane")
@@ -48,7 +74,7 @@ def test_entities(tmp_dataset):
     assert jane.first("firstName") == "Jane"
 
     # Export statements.csv
-    export_statements(tmp_dataset)
+    export_statements(dataset)
 
     # Add a new entity to trigger re-export
     john = make_entity(
@@ -56,7 +82,7 @@ def test_entities(tmp_dataset):
     )
     with entities.bulk() as bulk:
         bulk.add_entity(john)
-    export_statements(tmp_dataset)  # Operation's ensure_flush handles flushing
+    export_statements(dataset)  # Operation's ensure_flush handles flushing
 
     with entities._store.open(path.EXPORTS_STATEMENTS, "r") as fh:
         reader = csv.DictReader(fh)
@@ -69,19 +95,19 @@ def test_entities(tmp_dataset):
     assert origins == {"update", "default"}
 
     # Optimize
-    optimize(tmp_dataset, vacuum=True)
+    optimize(dataset, vacuum=True)
 
     # Statistics
-    export_statistics(tmp_dataset)
+    export_statistics(dataset)
     stats: DatasetStats = entities._store.get(
         path.EXPORTS_STATISTICS, model=DatasetStats
     )
     assert stats.entity_count == 2  # jane and john
 
 
-def test_entities_export(tmp_dataset):
+def test_entities_export(dataset):
     """Test entity export to JSON."""
-    entities = tmp_dataset.entities
+    entities = dataset.entities
     jane = make_entity(JANE)
     jane_fragment = make_entity(JANE_FIRSTNAME)
 
@@ -90,8 +116,8 @@ def test_entities_export(tmp_dataset):
     with entities.bulk(origin="update") as bulk:
         bulk.add_entity(jane_fragment)
 
-    export_statements(tmp_dataset)  # Operation's ensure_flush handles flushing
-    export_entities(tmp_dataset)
+    export_statements(dataset)  # Operation's ensure_flush handles flushing
+    export_entities(dataset)
 
     # stream() reads from exported entities.ftm.json
     ents = [e for e in entities.stream()]
@@ -102,13 +128,13 @@ def test_entities_export(tmp_dataset):
     assert "update" in entity.context.get("origin")
 
 
-def test_entity_multi_origin_fragments(tmp_dataset):
+def test_entity_multi_origin_fragments(dataset):
     """Test entity assembled from fragments with different origins.
 
     When the same entity ID is added from multiple origins, the resulting
     entity should contain all properties and track all origins.
     """
-    entities = tmp_dataset.entities
+    entities = dataset.entities
 
     # Add same entity ID from three different origins with different properties
     with entities.bulk(origin="source_a") as bulk:
@@ -134,8 +160,8 @@ def test_entity_multi_origin_fragments(tmp_dataset):
 
     # Flush and export
     entities.flush()
-    export_statements(tmp_dataset)
-    export_entities(tmp_dataset)
+    export_statements(dataset)
+    export_entities(dataset)
 
     # Query merged entity (all origins)
     merged = entities.get("multi-origin-person")
@@ -168,14 +194,13 @@ def test_entity_multi_origin_fragments(tmp_dataset):
     assert source_a_only.first("email") is None  # From source_c
 
 
-def test_entity_multi_origin_statements(tmp_dataset):
+def test_entity_multi_origin_statements(dataset):
     """Test entity assembled from individual statements with different origins.
 
     Add statements directly via bulk writer from multiple origins
     and verify they merge correctly.
     """
-    entities = tmp_dataset.entities
-    dataset = tmp_dataset.name
+    entities = dataset.entities
 
     # Create statements directly for the same entity from different origins
     stmts_source_a = [
@@ -184,14 +209,14 @@ def test_entity_multi_origin_statements(tmp_dataset):
             prop="name",
             schema="Company",
             value="Acme Corporation",
-            dataset=dataset,
+            dataset=dataset.name,
         ),
         Statement(
             entity_id="stmt-entity",
             prop="jurisdiction",
             schema="Company",
             value="us",
-            dataset=dataset,
+            dataset=dataset.name,
         ),
     ]
 
@@ -201,14 +226,14 @@ def test_entity_multi_origin_statements(tmp_dataset):
             prop="incorporationDate",
             schema="Company",
             value="2010-05-20",
-            dataset=dataset,
+            dataset=dataset.name,
         ),
         Statement(
             entity_id="stmt-entity",
             prop="status",
             schema="Company",
             value="active",
-            dataset=dataset,
+            dataset=dataset.name,
         ),
     ]
 
@@ -218,7 +243,7 @@ def test_entity_multi_origin_statements(tmp_dataset):
             prop="website",
             schema="Company",
             value="https://acme.example.com",
-            dataset=dataset,
+            dataset=dataset.name,
         ),
     ]
 
@@ -237,8 +262,8 @@ def test_entity_multi_origin_statements(tmp_dataset):
 
     # Flush and export
     entities.flush()
-    export_statements(tmp_dataset)
-    export_entities(tmp_dataset)
+    export_statements(dataset)
+    export_entities(dataset)
 
     # Query merged entity
     merged = entities.get("stmt-entity")

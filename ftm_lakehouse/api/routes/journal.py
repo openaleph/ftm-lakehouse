@@ -13,7 +13,8 @@ router = APIRouter()
 
 
 def _serialize_row(row: JournalRow) -> bytes:
-    return f"{'\t'.join(row[:5])}\t{_to_iso(row[5])}\n".encode()
+    fields = "\t".join(row[:5])
+    return f"{fields}\t{_to_iso(row[5])}\n".encode()
 
 
 @router.post("/{dataset}/_api/journal/bulk")

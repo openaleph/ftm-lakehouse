@@ -23,6 +23,7 @@ from ftmq.store.lake import (
 from ftmq.types import StatementEntities, Statements
 from sqlalchemy import Select
 
+from ftm_lakehouse.core.api import LakehouseApiMixin, no_api
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.logic.parquet import (
     compact_with_sidecar,
@@ -49,7 +50,7 @@ SIDECAR_SCHEMA = pa.schema(
 )
 
 
-class SidecarStore:
+class SidecarStore(LakehouseApiMixin):
     """Manages a lightweight sidecar Delta table for per-statement metadata.
 
     Tracks first_seen, last_seen, and deleted_at per statement ID.
@@ -59,6 +60,7 @@ class SidecarStore:
 
     def __init__(self, uri: Uri, dataset: str) -> None:
         self.uri = join_uri(uri, path.SIDECAR)
+        super().__init__(self.uri)
         self.dataset = dataset
         setup_duckdb_storage()
 
@@ -74,6 +76,7 @@ class SidecarStore:
         except TableNotFoundError:
             return False
 
+    @no_api
     def upsert(self, table: pa.Table) -> None:
         """Insert or update sidecar rows. Updates last_seen on conflict."""
         if not self.exists:
@@ -101,6 +104,7 @@ class SidecarStore:
             .execute()
         )
 
+    @no_api
     def mark_deleted(self, table: pa.Table) -> None:
         """Set deleted_at on existing sidecar rows.
 
@@ -124,6 +128,7 @@ class SidecarStore:
             .execute()
         )
 
+    @no_api
     def compact(self) -> None:
         """Remove deleted entries from sidecar."""
         if not self.exists:
@@ -139,7 +144,7 @@ class SidecarStore:
         )
 
 
-class SidecarAwareLakeStore(LakeStore):
+class SidecarAwareLakeStore(LakeStore, LakehouseApiMixin):
     """LakeStore subclass that joins with sidecar for timestamps and soft deletes.
 
     All queries join the main table with the sidecar to get accurate
@@ -148,7 +153,8 @@ class SidecarAwareLakeStore(LakeStore):
     """
 
     def __init__(self, *args, sidecar: SidecarStore, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
+        LakeStore.__init__(self, *args, **kwargs)
+        LakehouseApiMixin.__init__(self, self.uri)
         self._sidecar = sidecar
 
     def _execute(self, q: Select, stream: bool = True) -> Generator[Any, None, None]:
@@ -162,7 +168,7 @@ class SidecarAwareLakeStore(LakeStore):
         yield from stream_duckdb_sidecar(q, dt, self._sidecar.deltatable)
 
 
-class ParquetStore:
+class ParquetStore(LakehouseApiMixin):
     """
     Delta Lake parquet storage for entity statements.
 
@@ -180,6 +186,7 @@ class ParquetStore:
 
     def __init__(self, uri: Uri, dataset: str) -> None:
         self.uri = join_uri(uri, path.STATEMENTS)
+        super().__init__(self.uri)
         self.dataset = dataset
         self._sidecar = SidecarStore(uri, dataset)
         self._store = SidecarAwareLakeStore(
@@ -198,10 +205,8 @@ class ParquetStore:
     @property
     def version(self) -> int | None:
         """Current version of the main Delta table."""
-        try:
+        if self._store.exists:
             return self._store.deltatable.version()
-        except TableNotFoundError:
-            return None
 
     @property
     def sidecar_version(self) -> int | None:
@@ -213,16 +218,19 @@ class ParquetStore:
     @property
     def exists(self) -> bool:
         """Check existence of deltatable"""
-        return self.version is not None
+        return self._store.exists
 
+    @no_api
     def writer(self, origin: str | None = None) -> LakeWriter:
         """Get a writer for adding statements."""
         return self._store.writer(origin)
 
+    @no_api
     def view(self) -> LakeQueryView:
         """Get a view for querying statements."""
         return self._store.default_view()
 
+    @no_api
     def query(self, q: Query | None = None) -> StatementEntities:
         """
         Query Entities from the store.
@@ -236,6 +244,7 @@ class ParquetStore:
         view = self.view()
         yield from view.query(q or Query())
 
+    @no_api
     def query_statements(self, q: Select | None = None) -> Statements:
         """
         Query ordered Statements from the store.
@@ -251,10 +260,12 @@ class ParquetStore:
             q if q is not None else Query().sql.statements
         )
 
+    @no_api
     def stats(self) -> DatasetStats:
         """Compute statistics from the statement store."""
         return self.view().stats()
 
+    @no_api
     def export_csv(self, output_uri: str) -> None:
         """
         Export statements to a sorted, de-duplicated CSV file.
@@ -273,6 +284,7 @@ class ParquetStore:
             db = query_duckdb(q, dt)
         db.write_csv(output_uri)
 
+    @no_api
     def compact(self) -> None:
         """Apply sidecar to main table: remove deleted rows, update timestamps.
 
@@ -297,6 +309,7 @@ class ParquetStore:
 
         self._sidecar.compact()
 
+    @no_api
     def get_deleted_entity_ids(self) -> set[str]:
         """Get entity IDs that have been soft-deleted via sidecar."""
         if not self._sidecar.exists:
@@ -304,6 +317,7 @@ class ParquetStore:
 
         return _get_deleted_entity_ids(self._store.deltatable, self._sidecar.deltatable)
 
+    @no_api
     def get_changes(
         self,
         start_version: int | None = None,
@@ -334,6 +348,7 @@ class ParquetStore:
         except StopIteration:
             return
 
+    @no_api
     def optimize(
         self,
         vacuum: bool = False,
@@ -353,6 +368,7 @@ class ParquetStore:
         writer = self._store.writer()
         writer.optimize(vacuum, vacuum_keep_hours, bucket=bucket, origin=origin)
 
+    @no_api
     def destroy(self) -> None:
         """
         Destroy the deltalake by removing the transaction log in "_delta_log"

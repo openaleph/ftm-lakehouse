@@ -8,9 +8,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from followthemoney.statement import Statement
 
-from ftm_lakehouse.api.routes.journal import _get_journal, router
+from ftm_lakehouse.api.routes.journal import router
+from ftm_lakehouse.core.api import get_api
 from ftm_lakehouse.helpers.statements import unpack_statement
 from ftm_lakehouse.storage.journal import ApiJournalStore, JournalRows, SqlJournalStore
+from ftm_lakehouse.storage.journal import get_journal as _get_journal_factory
 from ftm_lakehouse.storage.journal.base import BaseJournalStore
 
 DATASET = "test"
@@ -60,8 +62,8 @@ def _make_api_journal() -> ApiJournalStore:
     )
     client = httpx.Client(transport=transport, base_url="http://testserver")
 
-    store = ApiJournalStore(dataset=DATASET, uri="http://testserver/")
-    store.client = client
+    store = ApiJournalStore(dataset=DATASET, uri=f"http://testserver/{DATASET}")
+    store._api.client = client
     return store
 
 
@@ -72,8 +74,9 @@ def journal(request) -> Generator[BaseJournalStore, None, None]:
     else:
         store = _make_api_journal()
         yield store
-        store.client.close()
-    _get_journal.cache_clear()
+        store.close()
+    _get_journal_factory.cache_clear()
+    get_api.cache_clear()
 
 
 def test_storage_journal_initialize(journal):

@@ -1,10 +1,10 @@
 """ApiJournalStore - HTTP API journal backed by TSV wire format."""
 
 from datetime import datetime
-import httpx
-from anystore.logging import get_logger
-from anystore.util import join_relpaths, join_uri
 
+from anystore.logging import get_logger
+
+from ftm_lakehouse.core.api import LakehouseApiMixin
 from ftm_lakehouse.storage.journal.base import (
     BaseJournalStore,
     BaseJournalWriter,
@@ -33,7 +33,15 @@ def _to_iso(value: str | datetime | None) -> str:
 
 def serialize_row(row: dict[str, str | datetime | None]) -> bytes:
     # "id", "bucket", "origin", "canonical_id", "data", "deleted_at"
-    return f'{row["id"]}\t{row["bucket"]}\t{row["origin"]}\t{row["canonical_id"]}\t{row["data"]}\t{_to_iso(row["deleted_at"])}'.encode()
+    parts = (
+        row["id"],
+        row["bucket"],
+        row["origin"],
+        row["canonical_id"],
+        row["data"],
+        _to_iso(row["deleted_at"]),
+    )
+    return "\t".join(str(p) for p in parts).encode()
 
 
 def serialize_rows(rows: list[dict]) -> bytes:
@@ -51,8 +59,8 @@ class ApiJournalWriter(BaseJournalWriter["ApiJournalStore"]):
     def _upsert_batch(self) -> None:
         if not self.batch:
             return
-        url = self.store.make_url("bulk")
-        self.store.make_request(
+        url = self.store._make_url("bulk")
+        self.store._api.make_request(
             url,
             "POST",
             content=serialize_rows(self.batch),
@@ -61,46 +69,35 @@ class ApiJournalWriter(BaseJournalWriter["ApiJournalStore"]):
         self.batch = []
 
 
-class ApiJournalStore(BaseJournalStore[ApiJournalWriter]):
+class ApiJournalStore(BaseJournalStore[ApiJournalWriter], LakehouseApiMixin):
     _writer_cls = ApiJournalWriter
 
     def __init__(self, dataset: str, uri: str | None = None) -> None:
-        super().__init__(dataset, uri)
-        self.client = httpx.Client()
+        BaseJournalStore.__init__(self, dataset, uri)
+        LakehouseApiMixin.__init__(self, self.uri)
 
-    def make_url(self, endpoint: str) -> str:
-        url = join_relpaths(self.dataset, "journal", endpoint)
-        return join_uri(self.uri, url)
-
-    def make_request(
-        self, url: str, method: str = "GET", **kwargs  # noqa: ANN003
-    ) -> httpx.Response:
-        res = self.client.request(method, url, **kwargs)
-        res.raise_for_status()
-        return res
+    def _make_url(self, endpoint: str) -> str:
+        return self._api.make_url(f"_api/journal/{endpoint}")
 
     def iterate(self) -> JournalRows:
-        url = self.make_url("iterate")
-        yield from self._iterate_stream(url)
+        url = self._make_url("iterate")
+        for line in self._api.stream_request(url):
+            yield deserialize_row(line)
 
     def flush(self) -> JournalRows:
-        url = self.make_url("flush")
-        yield from self._iterate_stream(url, "POST")
+        url = self._make_url("flush")
+        for line in self._api.stream_request(url, "POST"):
+            yield deserialize_row(line)
 
     def count(self) -> int:
-        url = self.make_url("count")
-        res = self.make_request(url)
+        url = self._make_url("count")
+        res = self._api.make_request(url)
         return int(res.text)
 
     def clear(self) -> int:
-        url = self.make_url("clear")
-        res = self.make_request(url, "DELETE")
+        url = self._make_url("clear")
+        res = self._api.make_request(url, "DELETE")
         return int(res.text)
 
     def close(self) -> None:
-        self.client.close()
-
-    def _iterate_stream(self, url: str, method: str = "GET") -> JournalRows:
-        with self.client.stream(method, url) as stream:
-            for line in stream.iter_lines():
-                yield deserialize_row(line)
+        self._api.client.close()

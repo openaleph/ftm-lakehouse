@@ -1,7 +1,7 @@
 """JournalStore - SQL or http api statement buffer for write-ahead logging."""
 
 from datetime import datetime
-from typing import Generator, Self, TypeAlias, cast
+from typing import Generator, Generic, Self, TypeAlias, TypeVar, cast
 
 from anystore.logging import get_logger
 from followthemoney import EntityProxy, Statement, StatementEntity
@@ -24,7 +24,10 @@ JournalRow = tuple[
 JournalRows: TypeAlias = Generator[JournalRow, None, None]
 
 
-class BaseJournalWriter[S: "BaseJournalStore"]:
+S = TypeVar("S", bound="BaseJournalStore")
+
+
+class BaseJournalWriter(Generic[S]):
     """
     Bulk writer for the journal with batched upserts.
 
@@ -137,7 +140,10 @@ class BaseJournalWriter[S: "BaseJournalStore"]:
         self.close()
 
 
-class BaseJournalStore[W: BaseJournalWriter]:
+W = TypeVar("W", bound=BaseJournalWriter)
+
+
+class BaseJournalStore(Generic[W]):
     """
     Journal for buffering statement writes.
 

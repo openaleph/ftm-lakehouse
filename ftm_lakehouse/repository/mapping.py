@@ -40,7 +40,7 @@ class MappingRepository(BaseRepository):
 
     def __init__(self, dataset: str, uri: Uri) -> None:
         super().__init__(dataset, uri)
-        self._versions = VersionedModelStore(uri, DatasetMapping)
+        self._versions = VersionedModelStore(self._store_uri, DatasetMapping)
 
     def exists(self, content_hash: str) -> bool:
         """Check if a mapping configuration exists."""

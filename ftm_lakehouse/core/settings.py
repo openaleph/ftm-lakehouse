@@ -6,6 +6,8 @@ from pydantic_settings import SettingsConfigDict
 
 CHECKSUM_ALGORITHM = "sha256"  # never change this! ;)
 
+__version__ = "0.0.2"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -54,3 +56,5 @@ class ApiSettings(BaseSettings):
     contact: ApiContactSettings | None = None
 
     allowed_origins: list[HttpUrlStr] = ["http://localhost:3000"]
+
+    static_headers: dict[str, str] = {}
