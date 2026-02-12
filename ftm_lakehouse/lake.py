@@ -46,6 +46,7 @@ log = get_logger(__name__)
 def get_lakehouse(
     uri: Uri | None = None,
     model_class: type[DM] = DatasetModel,
+    journal_uri: str | None = None,
 ) -> Catalog[DM]:
     """
     Get a lakehouse catalog.
@@ -53,6 +54,7 @@ def get_lakehouse(
     Args:
         uri: Storage URI (default from LAKEHOUSE_URI setting)
         model_class: Custom DatasetModel subclass
+        journal_uri: Journal database URI override
 
     Returns:
         Catalog instance
@@ -60,7 +62,7 @@ def get_lakehouse(
     settings = Settings()
     storage_uri = ensure_uri(uri or settings.uri)
     log.info("Loading catalog", uri=storage_uri)
-    return Catalog(uri=storage_uri, model_class=model_class)
+    return Catalog(uri=storage_uri, model_class=model_class, journal_uri=journal_uri)
 
 
 def get_dataset(

@@ -59,11 +59,13 @@ class Dataset(Generic[DM]):
         name: str,
         uri: Uri,
         model_class: type[DM] = DatasetModel,
+        journal_uri: str | None = None,
     ) -> None:
         self.name = name
         self.uri = uri
         self._model_class = model_class
         self._settings = Settings()
+        self._journal_uri = journal_uri or self._settings.journal_uri
         self._log = log.bind(dataset=name, uri=mask_uri(uri))
 
     def __repr__(self) -> str:
@@ -140,7 +142,7 @@ class Dataset(Generic[DM]):
     @cached_property
     def entities(self) -> EntityRepository:
         """Entity/statement operations."""
-        return EntityRepository(self.name, self.uri, self._settings.journal_uri)
+        return EntityRepository(self.name, self.uri, self._journal_uri)
 
     @cached_property
     def mappings(self) -> MappingRepository:

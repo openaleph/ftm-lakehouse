@@ -8,21 +8,19 @@ from anystore.logging import get_logger
 from anystore.store import get_store
 from anystore.types import Uri
 from anystore.util import join_uri, mask_uri
-from ftmq.model.dataset import D
 
 from ftm_lakehouse.core.config import load_config
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.model import CatalogModel, DatasetModel
+from ftm_lakehouse.model.dataset import DM
 from ftm_lakehouse.storage import TagStore
 from ftm_lakehouse.storage.versions import VersionStore
 
 if TYPE_CHECKING:
     from ftm_lakehouse.dataset import Dataset
 
-log = get_logger(__name__)
 
-
-class Catalog(Generic[D]):
+class Catalog(Generic[DM]):
     """
     Multi-dataset lakehouse catalog.
 
@@ -46,11 +44,13 @@ class Catalog(Generic[D]):
     def __init__(
         self,
         uri: Uri,
-        model_class: type[D] = DatasetModel,
+        model_class: type[DM] = DatasetModel,
+        journal_uri: str | None = None,
     ) -> None:
         self.uri = uri
         self._model_class = model_class
-        self._log = log.bind(catalog=mask_uri(uri))
+        self._journal_uri = journal_uri
+        self._log = get_logger(__name__, catalog=mask_uri(uri))
 
     def __repr__(self) -> str:
         return f"Catalog({self.uri!r})"
@@ -105,7 +105,7 @@ class Catalog(Generic[D]):
     # Dataset management
     # -------------------------------------------------------------------------
 
-    def get_dataset(self, name: str, **data: Any) -> "Dataset[D]":
+    def get_dataset(self, name: str, **data: Any) -> "Dataset[DM]":
         """
         Get a Dataset instance by name.
 
@@ -123,6 +123,7 @@ class Catalog(Generic[D]):
             name=name,
             uri=dataset_uri,
             model_class=self._model_class,
+            journal_uri=self._journal_uri,
         )
 
         # Auto-save config if data provided and dataset exists
@@ -131,7 +132,7 @@ class Catalog(Generic[D]):
 
         return dataset
 
-    def list_datasets(self) -> Generator["Dataset[D]", None, None]:
+    def list_datasets(self) -> Generator["Dataset[DM]", None, None]:
         """
         Iterate through all datasets in the catalog.
 
@@ -143,7 +144,7 @@ class Catalog(Generic[D]):
             if self._store.exists(f"{dataset_name}/{path.CONFIG}"):
                 yield self.get_dataset(dataset_name)
 
-    def create_dataset(self, name: str, **data: Any) -> "Dataset[D]":
+    def create_dataset(self, name: str, **data: Any) -> "Dataset[DM]":
         """
         Create a new dataset.
 
