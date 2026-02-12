@@ -1,13 +1,13 @@
 """Journal API routes: bulk write, iterate, flush, count, clear."""
 
-from functools import cache
-from typing import Annotated, AsyncIterator
+from typing import AsyncIterator
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
-from ftm_lakehouse.storage.journal import JournalRow, JournalStore
-from ftm_lakehouse.storage.journal.api import TSV_CONTENT_TYPE, deserialize_row, _to_iso
+from ftm_lakehouse.api.helpers import Journal
+from ftm_lakehouse.storage.journal import JournalRow
+from ftm_lakehouse.storage.journal.api import TSV_CONTENT_TYPE, _to_iso, deserialize_row
 
 router = APIRouter()
 
@@ -16,22 +16,8 @@ def _serialize_row(row: JournalRow) -> bytes:
     return f"{'\t'.join(row[:5])}\t{_to_iso(row[5])}\n".encode()
 
 
-@cache
-def _get_journal(dataset: str, uri: str) -> JournalStore:
-    return JournalStore(dataset, uri)
-
-
-def get_journal(dataset: str, request: Request) -> JournalStore:
-    """Get a JournalStore instance using the configured URI."""
-    journal_uri = request.app.state.journal_uri
-    return _get_journal(dataset, journal_uri)
-
-
-Journal = Annotated[JournalStore, Depends(get_journal)]
-
-
-@router.post("/{dataset}/journal/bulk")
-async def journal_bulk(journal: Journal, request: Request) -> dict:
+@router.post("/{dataset}/_api/journal/bulk")
+async def journal_bulk(journal: Journal, request: Request) -> PlainTextResponse:
     """Write TSV rows into the journal via bulk writer."""
     count = 0
     body = await request.body()
@@ -42,11 +28,11 @@ async def journal_bulk(journal: Journal, request: Request) -> dict:
             row = deserialize_row(line.decode())
             writer.add(*row)
             count += 1
-    return {"status": "ok", "count": count}
+    return PlainTextResponse(str(count))
 
 
-@router.get("/{dataset}/journal/iterate")
-async def journal_iterate(journal: Journal) -> Response:
+@router.get("/{dataset}/_api/journal/iterate")
+async def journal_iterate(journal: Journal) -> StreamingResponse:
     """Stream all journal rows as TSV."""
 
     async def generate() -> AsyncIterator[bytes]:
@@ -56,8 +42,8 @@ async def journal_iterate(journal: Journal) -> Response:
     return StreamingResponse(generate(), media_type=TSV_CONTENT_TYPE)
 
 
-@router.post("/{dataset}/journal/flush")
-async def journal_flush(journal: Journal) -> Response:
+@router.post("/{dataset}/_api/journal/flush")
+async def journal_flush(journal: Journal) -> StreamingResponse:
     """Stream all journal rows as TSV and delete from storage"""
 
     async def generate() -> AsyncIterator[bytes]:
@@ -67,13 +53,13 @@ async def journal_flush(journal: Journal) -> Response:
     return StreamingResponse(generate(), media_type=TSV_CONTENT_TYPE)
 
 
-@router.get("/{dataset}/journal/count")
+@router.get("/{dataset}/_api/journal/count")
 async def journal_count(journal: Journal) -> PlainTextResponse:
     """Get the number of rows in the journal."""
     return PlainTextResponse(str(journal.count()))
 
 
-@router.delete("/{dataset}/journal/clear")
+@router.delete("/{dataset}/_api/journal/clear")
 async def journal_clear(journal: Journal) -> PlainTextResponse:
     """Delete all rows from the journal without flushing."""
     return PlainTextResponse(str(journal.clear()))

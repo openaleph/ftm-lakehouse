@@ -1,10 +1,8 @@
 """Operation API routes: execute DatasetJob as operation"""
 
-from typing import Annotated
+from fastapi import APIRouter, HTTPException, Request
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-
-from ftm_lakehouse.dataset import Dataset
+from ftm_lakehouse.api.helpers import Dataset
 from ftm_lakehouse.model import DatasetJobModel
 from ftm_lakehouse.operation.base import DatasetJobOperation
 from ftm_lakehouse.operation.crawl import CrawlJob, CrawlOperation
@@ -32,10 +30,6 @@ from ftm_lakehouse.operation.recreate import RecreateJob, RecreateOperation
 router = APIRouter()
 
 
-def get_dataset(dataset: str, request: Request) -> Dataset:
-    return request.app.state.lake.get_dataset(dataset)
-
-
 OPERATIONS: dict[str, tuple[type[DatasetJobModel], type[DatasetJobOperation]]] = {
     "CrawlJob": (CrawlJob, CrawlOperation),
     "OptimizeJob": (OptimizeJob, OptimizeOperation),
@@ -51,11 +45,9 @@ OPERATIONS: dict[str, tuple[type[DatasetJobModel], type[DatasetJobOperation]]] =
 }
 
 
-@router.post("/{dataset}/_operation")
+@router.post("/{dataset}/_api/operations")
 async def run_operation(
-    dataset: Annotated[Dataset, Depends(get_dataset)],
-    request: Request,
-    force: bool = False,
+    dataset: Dataset, request: Request, force: bool = False
 ) -> DatasetJobModel:
     """Run a job operation on the given dataset.
 
@@ -64,6 +56,7 @@ async def run_operation(
     """
     body = await request.json()
     name = body.pop("name", None)
+    body.pop("dataset", None)  # Use dataset from URL, not body
 
     if name not in OPERATIONS:
         raise HTTPException(status_code=400, detail=f"Unknown operation: `{name}`")
