@@ -1,5 +1,8 @@
 """JournalStore - SQL statement buffer for write-ahead logging."""
 
+import random
+import time
+
 from anystore.logging import get_logger
 from sqlalchemy import (
     Column,
@@ -10,11 +13,13 @@ from sqlalchemy import (
     Table,
     Text,
     delete,
+    func,
     select,
 )
 from sqlalchemy.dialects.postgresql import insert as psql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection, Engine, Transaction, create_engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import StaticPool
 
 from ftm_lakehouse.storage.journal.base import (
@@ -24,6 +29,8 @@ from ftm_lakehouse.storage.journal.base import (
 )
 
 log = get_logger(__name__)
+
+DEADLOCK_BASE_DELAY = 1  # seconds
 
 
 def make_journal_table(metadata: MetaData, dataset: str) -> Table:
@@ -37,8 +44,15 @@ def make_journal_table(metadata: MetaData, dataset: str) -> Table:
         Column("canonical_id", String(255), nullable=False),
         Column("data", Text, nullable=False),
         Column("deleted_at", DateTime(timezone=True), nullable=True),
-        Index(f"ix_{dataset}_sort", "bucket", "origin", "canonical_id"),
+        # Covering index for flush ORDER BY — includes id for DELETE lookups
+        Index(f"ix_{dataset}_sort", "bucket", "origin", "canonical_id", "id"),
     )
+
+
+def _is_deadlock(exc: OperationalError) -> bool:
+    """Check if an OperationalError is a deadlock."""
+    msg = str(exc.orig).lower()
+    return "deadlock" in msg
 
 
 class SqlJournalWriter(BaseJournalWriter["SqlJournalStore"]):
@@ -52,14 +66,15 @@ class SqlJournalWriter(BaseJournalWriter["SqlJournalStore"]):
     def _upsert_batch(self) -> None:
         if not self.batch:
             return
-        if self.tx is None:
-            self.tx = self.conn.begin()
 
+        rows = list(self.batch.values())
         dialect = self.store.engine.dialect.name
         table = self.store.table
 
         if dialect == "sqlite":
-            sqlite_istmt = sqlite_insert(table).values(self.batch)
+            if self.tx is None:
+                self.tx = self.conn.begin()
+            sqlite_istmt = sqlite_insert(table).values(rows)
             sqlite_stmt = sqlite_istmt.on_conflict_do_update(
                 index_elements=["id"],
                 set_={
@@ -72,26 +87,49 @@ class SqlJournalWriter(BaseJournalWriter["SqlJournalStore"]):
             )
             self.conn.execute(sqlite_stmt)
         elif dialect in ("postgresql", "postgres"):
-            psql_istmt = psql_insert(table).values(self.batch)
-            psql_stmt = psql_istmt.on_conflict_do_update(
-                index_elements=["id"],
-                set_={
-                    "bucket": psql_istmt.excluded.bucket,
-                    "origin": psql_istmt.excluded.origin,
-                    "canonical_id": psql_istmt.excluded.canonical_id,
-                    "data": psql_istmt.excluded.data,
-                    "deleted_at": psql_istmt.excluded.deleted_at,
-                },
-            )
-            self.conn.execute(psql_stmt)
+            # Autocommit per batch with deadlock retry — keeps transactions
+            # short to minimize lock contention from concurrent writers.
+            attempt = 0
+            while True:
+                tx = self.conn.begin()
+                try:
+                    psql_istmt = psql_insert(table).values(rows)
+                    psql_stmt = psql_istmt.on_conflict_do_update(
+                        index_elements=["id"],
+                        set_={
+                            "bucket": psql_istmt.excluded.bucket,
+                            "origin": psql_istmt.excluded.origin,
+                            "canonical_id": psql_istmt.excluded.canonical_id,
+                            "data": psql_istmt.excluded.data,
+                            "deleted_at": psql_istmt.excluded.deleted_at,
+                        },
+                    )
+                    self.conn.execute(psql_stmt)
+                    tx.commit()
+                    break
+                except OperationalError as exc:
+                    tx.rollback()
+                    if not _is_deadlock(exc):
+                        raise
+                    delay = DEADLOCK_BASE_DELAY * (
+                        2 ** min(attempt, 5)
+                    ) + random.uniform(0, DEADLOCK_BASE_DELAY)
+                    log.warning(
+                        "Deadlock detected, retrying in %.2fs (attempt %d)",
+                        delay,
+                        attempt + 1,
+                    )
+                    time.sleep(delay)
+                    attempt += 1
         else:
             raise NotImplementedError(f"Upsert not implemented for dialect {dialect}")
 
-        self.batch = []
+        self.batch = {}
 
     def flush(self) -> None:
         """Flush pending rows and commit transaction."""
         self._upsert_batch()
+        # SQLite accumulates a single transaction
         if self.tx is not None:
             self.tx.commit()
             self.tx = None
@@ -129,13 +167,13 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
                 poolclass=StaticPool,
             )
         else:
-            self.engine = create_engine(self.uri)
+            self.engine = create_engine(self.uri, hide_parameters=True)
 
         self.metadata = MetaData()
         self.table = make_journal_table(self.metadata, dataset)
         self.metadata.create_all(self.engine, tables=[self.table], checkfirst=True)
 
-    def iterate(self) -> JournalRows:
+    def iterate(self, *args, **kwargs) -> JournalRows:
         """Iterate all rows ordered for batch processing."""
         q = select(self.table).order_by(
             self.table.c.bucket,
@@ -168,10 +206,13 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
             self.table.c.canonical_id,
         )
 
-        with self.engine.connect() as conn:
-            tx = conn.begin()
+        # Use separate connections for read (streaming) and write (delete).
+        # PostgreSQL server-side cursors (stream_results) apply to the
+        # entire DBAPI connection, so DELETE on the same connection fails.
+        with self.engine.connect() as read_conn, self.engine.connect() as write_conn:
+            write_tx = write_conn.begin()
             try:
-                cursor = conn.execution_options(stream_results=True).execute(q)
+                cursor = read_conn.execution_options(stream_results=True).execute(q)
 
                 while rows := cursor.fetchmany(10_000):
                     flushed: list[str] = []
@@ -185,18 +226,18 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
                             row.data,
                             row.deleted_at,
                         )
-                    # Delete the rows we yielded
-                    conn.execute(delete(self.table).where(self.table.c.id.in_(flushed)))
+                    write_conn.execute(
+                        delete(self.table).where(self.table.c.id.in_(flushed))
+                    )
 
-                tx.commit()
+                cursor.close()
+                write_tx.commit()
             except BaseException:
-                tx.rollback()
+                write_tx.rollback()
                 raise
 
     def count(self) -> int:
         """Count rows for this dataset."""
-        from sqlalchemy import func
-
         q = select(func.count()).select_from(self.table)
         with self.engine.connect() as conn:
             result = conn.execute(q).scalar()

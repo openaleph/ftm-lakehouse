@@ -64,7 +64,7 @@ dataset.entities.add(entity, origin="import")
 ### Bulk Write Entities
 
 ```python
-with dataset.entities.bulk(origin="import") as writer:
+with dataset.entities.writer(origin="import") as writer:
     for entity in source_entities:
         writer.add_entity(entity)
 ```

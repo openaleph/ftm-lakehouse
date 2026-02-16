@@ -57,7 +57,7 @@ class MappingOperation(DatasetJobOperation[MappingJob]):
         mapping = self.mappings.get(self.job.content_hash)
         file = self.archive.get_file(self.job.content_hash)
         with self.archive.local_path(file.checksum) as csv_path:
-            with self.entities.bulk(origin=origin) as bulk:
+            with self.entities.writer(origin=origin) as bulk:
                 for entity in map_entities(mapping, csv_path):
                     bulk.add_entity(entity)
                     run.job.done += 1

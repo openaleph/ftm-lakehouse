@@ -1,7 +1,7 @@
 all: clean install test
 
 api:
-	LEAKRFC_ARCHIVE__URI=./tests/fixtures/archive DEBUG=1 uvicorn ftm_lakehouse.api:app --reload --port 5000
+	LAKEHOUSE_API_AUTH_ENABLED=0 DEBUG=1 granian --interface asgi --reload --port 5000 ftm_lakehouse.api:app
 
 install:
 	poetry install --with dev --all-extras

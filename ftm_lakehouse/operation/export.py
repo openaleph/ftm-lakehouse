@@ -5,7 +5,6 @@ from typing import TypeVar
 from anystore import get_store
 from anystore.types import HttpUrlStr
 from anystore.util import join_uri, mask_uri
-from ftmq.io import smart_write_proxies
 from ftmq.model.dataset import make_dataset
 from ftmq.model.stats import DatasetStats
 
@@ -110,7 +109,7 @@ class ExportEntitiesOperation(BaseExportOperation[ExportEntitiesJob]):
     def handle(self, run: JobRun[ExportEntitiesJob], *args, **kwargs) -> None:
         if self.ensure_flush():
             output_uri = self.entities._store.to_uri(path.ENTITIES_JSON)
-            smart_write_proxies(output_uri, self.entities.query(flush_first=False))
+            self.entities.export_entities(output_uri)
             if run.job.make_diff:
                 self.entities.export_diff()
             run.job.done = 1

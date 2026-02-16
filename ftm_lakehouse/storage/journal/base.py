@@ -38,7 +38,7 @@ class BaseJournalWriter(Generic[S]):
         self.store = store
         self.dataset = store.dataset
         self.origin = origin or DEFAULT_ORIGIN
-        self.batch: list[dict] = []
+        self.batch: dict[str, dict] = {}
         self.namespace = Namespace()
 
     def _upsert_batch(self) -> None:
@@ -53,17 +53,15 @@ class BaseJournalWriter(Generic[S]):
         data: str,
         deleted_at: datetime | None = None,
     ) -> None:
-        """Add a raw row to the journal batch."""
-        self.batch.append(
-            {
-                "id": row_id,
-                "bucket": bucket,
-                "origin": origin,
-                "canonical_id": canonical_id,
-                "data": data,
-                "deleted_at": deleted_at,
-            }
-        )
+        """Add a raw row to the journal batch. Last-write-wins on duplicate id."""
+        self.batch[row_id] = {
+            "id": row_id,
+            "bucket": bucket,
+            "origin": origin,
+            "canonical_id": canonical_id,
+            "data": data,
+            "deleted_at": deleted_at,
+        }
 
         if len(self.batch) >= WRITE_BATCH_SIZE:
             self._upsert_batch()
@@ -163,13 +161,13 @@ class BaseJournalStore(Generic[W]):
         uri: str | None = None,
     ) -> None:
         self.dataset = dataset
-        self.uri = uri or settings.journal_uri
+        self.uri = uri or settings.resolved_journal_uri
 
     def writer(self, origin: str | None = None) -> W:
         """Get a bulk writer for adding rows."""
         return self._writer_cls(self, origin=origin)
 
-    def iterate(self) -> JournalRows:
+    def iterate(self, *args, **kwargs) -> JournalRows:
         """
         Iterate all rows for this dataset, ordered for batch processing.
 

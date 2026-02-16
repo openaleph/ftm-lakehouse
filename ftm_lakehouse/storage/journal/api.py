@@ -1,7 +1,8 @@
-"""ApiJournalStore - HTTP API journal backed by TSV wire format."""
+"""ApiJournalStore - HTTP API journal backed by JSONL wire format."""
 
 from datetime import datetime
 
+import orjson
 from anystore.logging import get_logger
 
 from ftm_lakehouse.core.api import LakehouseApiMixin
@@ -14,12 +15,12 @@ from ftm_lakehouse.storage.journal.base import (
 
 log = get_logger(__name__)
 
-TSV_CONTENT_TYPE = "text/tab-separated-values"
+JSONL_CONTENT_TYPE = "application/x-ndjson"
 
 
 def _from_iso(value: str) -> datetime | None:
     if not value:
-        return
+        return None
     return datetime.fromisoformat(value)
 
 
@@ -32,26 +33,25 @@ def _to_iso(value: str | datetime | None) -> str:
 
 
 def serialize_row(row: dict[str, str | datetime | None]) -> bytes:
-    # "id", "bucket", "origin", "canonical_id", "data", "deleted_at"
-    parts = (
+    parts = [
         row["id"],
         row["bucket"],
         row["origin"],
         row["canonical_id"],
         row["data"],
         _to_iso(row["deleted_at"]),
-    )
-    return "\t".join(str(p) for p in parts).encode()
+    ]
+    return orjson.dumps(parts)
 
 
 def serialize_rows(rows: list[dict]) -> bytes:
-    """Serialize journal row dicts as TSV lines."""
+    """Serialize journal row dicts as JSONL."""
     return b"\n".join(map(serialize_row, rows))
 
 
 def deserialize_row(line: str) -> JournalRow:
-    """Deserialize a TSV line into a JournalRow."""
-    id, bucket, origin, canonical_id, data, deleted_at = line.split("\t", maxsplit=5)
+    """Deserialize a JSONL line into a JournalRow."""
+    id, bucket, origin, canonical_id, data, deleted_at = orjson.loads(line)
     return id, bucket, origin, canonical_id, data, _from_iso(deleted_at)
 
 
@@ -59,14 +59,15 @@ class ApiJournalWriter(BaseJournalWriter["ApiJournalStore"]):
     def _upsert_batch(self) -> None:
         if not self.batch:
             return
+        payload = serialize_rows(list(self.batch.values()))
+        self.batch = {}
         url = self.store._make_url("bulk")
         self.store._api.make_request(
             url,
             "POST",
-            content=serialize_rows(self.batch),
-            headers={"Content-Type": TSV_CONTENT_TYPE},
+            content=payload,
+            headers={"Content-Type": JSONL_CONTENT_TYPE},
         )
-        self.batch = []
 
 
 class ApiJournalStore(BaseJournalStore[ApiJournalWriter], LakehouseApiMixin):
@@ -77,9 +78,9 @@ class ApiJournalStore(BaseJournalStore[ApiJournalWriter], LakehouseApiMixin):
         LakehouseApiMixin.__init__(self, self.uri)
 
     def _make_url(self, endpoint: str) -> str:
-        return self._api.make_url(f"_api/journal/{endpoint}")
+        return self._api.make_url(f"{self.dataset}/_api/journal/{endpoint}")
 
-    def iterate(self) -> JournalRows:
+    def iterate(self, *args, **kwargs) -> JournalRows:
         url = self._make_url("iterate")
         for line in self._api.stream_request(url):
             yield deserialize_row(line)

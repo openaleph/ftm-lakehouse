@@ -21,7 +21,7 @@ from ftm_lakehouse import ensure_dataset
 dataset = ensure_dataset("my_dataset")
 
 # Write entities
-with dataset.entities.bulk(origin="import") as writer:
+with dataset.entities.writer(origin="import") as writer:
     for entity in entities:
         writer.add_entity(entity)
 
@@ -72,7 +72,7 @@ from ftm_lakehouse import ensure_dataset
 dataset = ensure_dataset("my_dataset")
 
 # Using the context manager
-with dataset.entities.bulk(origin="bulk_import") as writer:
+with dataset.entities.writer(origin="bulk_import") as writer:
     for entity in large_entity_source():
         writer.add_entity(entity)
 ```
@@ -153,11 +153,11 @@ from ftm_lakehouse import ensure_dataset
 dataset = ensure_dataset("my_dataset")
 
 # Import from different sources
-with dataset.entities.bulk(origin="source_a") as writer:
+with dataset.entities.writer(origin="source_a") as writer:
     for entity in source_a_entities:
         writer.add_entity(entity)
 
-with dataset.entities.bulk(origin="source_b") as writer:
+with dataset.entities.writer(origin="source_b") as writer:
     for entity in source_b_entities:
         writer.add_entity(entity)
 
@@ -308,7 +308,7 @@ def main():
     ]
 
     # Write entities
-    with dataset.entities.bulk(origin="manual") as writer:
+    with dataset.entities.writer(origin="manual") as writer:
         for person in people:
             writer.add_entity(person)
 

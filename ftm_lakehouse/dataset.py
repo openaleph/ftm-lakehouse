@@ -4,11 +4,11 @@ from functools import cached_property
 from typing import Any, Generic
 
 from anystore.logging import get_logger
-from anystore.logic.uri import UriHandler
 from anystore.store import get_store
 from anystore.types import Uri
 from anystore.util import join_uri, mask_uri
 
+from ftm_lakehouse.core.api import ensure_api_uri
 from ftm_lakehouse.core.config import load_config
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.core.settings import Settings
@@ -20,8 +20,8 @@ from ftm_lakehouse.repository import (
     JobRepository,
     MappingRepository,
 )
-from ftm_lakehouse.repository.base import _to_anystore_uri
-from ftm_lakehouse.storage import TagStore
+from ftm_lakehouse.repository.factories import get_tags, get_versions
+from ftm_lakehouse.storage.tags import TagStore
 from ftm_lakehouse.storage.versions import VersionStore
 
 log = get_logger(__name__)
@@ -61,17 +61,11 @@ class Dataset(Generic[DM]):
         name: str,
         uri: Uri,
         model_class: type[DM] = DatasetModel,
-        journal_uri: str | None = None,
     ) -> None:
         self.name = name
         self.uri = uri
         self._model_class = model_class
         self._settings = Settings()
-        journal_uri = journal_uri or self._settings.journal_uri
-        # HTTP journals need dataset-scoped URIs; SQL journals scope via table filtering
-        if UriHandler(journal_uri).is_http:
-            journal_uri = join_uri(journal_uri, name)
-        self._journal_uri = journal_uri
         self._log = log.bind(dataset=name, uri=mask_uri(uri))
 
     def __repr__(self) -> str:
@@ -84,17 +78,17 @@ class Dataset(Generic[DM]):
     @cached_property
     def _store(self):
         """Raw storage access."""
-        return get_store(uri=_to_anystore_uri(self.uri), serialization_mode="raw")
+        return get_store(uri=ensure_api_uri(self.uri), serialization_mode="raw")
 
     @cached_property
     def _tags(self) -> TagStore:
         """Tag store for freshness tracking."""
-        return TagStore(_to_anystore_uri(self.uri))
+        return get_tags(self.name, self.uri)
 
     @cached_property
     def _versions(self) -> VersionStore:
         """Version store for snapshots."""
-        return VersionStore(_to_anystore_uri(self.uri))
+        return get_versions(self.name, self.uri)
 
     # -------------------------------------------------------------------------
     # Model access (config.yml via VersionStore)
@@ -148,7 +142,7 @@ class Dataset(Generic[DM]):
     @cached_property
     def entities(self) -> EntityRepository:
         """Entity/statement operations."""
-        return EntityRepository(self.name, self.uri, self._journal_uri)
+        return EntityRepository(self.name, self.uri)
 
     @cached_property
     def mappings(self) -> MappingRepository:

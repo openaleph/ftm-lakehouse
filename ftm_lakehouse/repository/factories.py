@@ -7,6 +7,7 @@ public convenience.
 from anystore.functools import weakref_cache as cache
 from anystore.types import Uri
 
+from ftm_lakehouse.core.api import ensure_api_uri
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.repository.archive import ArchiveRepository
 from ftm_lakehouse.repository.documents import DocumentRepository
@@ -35,23 +36,20 @@ def get_archive(dataset: str, uri: Uri | None = None) -> ArchiveRepository:
 
 
 @cache
-def get_entities(
-    dataset: str, uri: Uri | None = None, journal_uri: str | None = None
-) -> EntityRepository:
+def get_entities(dataset: str, uri: Uri | None = None) -> EntityRepository:
     """
     Get the entity repository for a dataset.
 
     Args:
         dataset: Dataset name
         uri: Dataset URI override (default: {LAKEHOUSE_URI}/{dataset})
-        journal_uri: Journal database URI override
 
     Returns:
         EntityRepository instance (cached)
     """
     settings = Settings()
     uri = uri or f"{settings.uri}/{dataset}"
-    return EntityRepository(dataset, uri, journal_uri)
+    return EntityRepository(dataset, uri)
 
 
 @cache
@@ -120,6 +118,7 @@ def get_versions(dataset: str, uri: Uri | None = None) -> VersionStore:
     """
     settings = Settings()
     uri = uri or f"{settings.uri}/{dataset}"
+    uri = ensure_api_uri(uri)
     return VersionStore(uri)
 
 
@@ -140,4 +139,5 @@ def get_tags(
     """
     settings = Settings()
     uri = uri or f"{settings.uri}/{dataset}"
+    uri = ensure_api_uri(uri)
     return TagStore(uri, tenant)

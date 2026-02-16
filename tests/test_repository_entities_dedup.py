@@ -17,11 +17,7 @@ DATASET = "test"
 
 
 def _make_local_repo(tmp_path) -> EntityRepository:
-    return EntityRepository(
-        DATASET,
-        tmp_path,
-        journal_uri="sqlite:///:memory:",
-    )
+    return EntityRepository(DATASET, tmp_path)
 
 
 @pytest.fixture(params=["local", "api"])
@@ -32,11 +28,9 @@ def repo(
         yield _make_local_repo(tmp_path), tmp_path
     else:
         routers = [entities_router, journal_router, archive_router]
-        with make_test_api(
-            tmp_path, routers, journal_uri="sqlite:///:memory:"
-        ) as base_url:
+        with make_test_api(tmp_path, routers) as base_url:
             dataset_url = f"{base_url}/{DATASET}"
-            r = EntityRepository(DATASET, uri=dataset_url, journal_uri=dataset_url)
+            r = EntityRepository(DATASET, uri=dataset_url)
             yield r, tmp_path / DATASET
 
 
@@ -89,7 +83,7 @@ def test_flush_dedup_mixed_new_and_existing(repo):
     assert count1 > 0
 
     # Second flush — jane (dupe) + john (new)
-    with repo.bulk() as writer:
+    with repo.writer() as writer:
         writer.add_entity(jane)
         writer.add_entity(john)
     count2 = repo.flush()

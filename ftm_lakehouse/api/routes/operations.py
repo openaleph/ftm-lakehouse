@@ -1,5 +1,7 @@
 """Operation API routes: execute DatasetJob as operation"""
 
+import asyncio
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
@@ -64,5 +66,6 @@ async def run_operation(
 
     model_cls, op_cls = OPERATIONS[name]
     job = model_cls.make(dataset=dataset.name, **body)
-    result = op_cls.from_job(job, dataset).run(force=force)
+    op = op_cls.from_job(job, dataset)
+    result = await asyncio.to_thread(op.run, force=force)
     return JSONResponse(result.model_dump(mode="json"))

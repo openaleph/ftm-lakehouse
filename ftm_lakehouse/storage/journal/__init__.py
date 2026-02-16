@@ -1,7 +1,5 @@
 from functools import cache
 
-from anystore.logic.uri import UriHandler
-
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.storage.journal.api import ApiJournalStore, ApiJournalWriter
 from ftm_lakehouse.storage.journal.base import (
@@ -20,9 +18,9 @@ JournalWriter = SqlJournalWriter
 @cache
 def get_journal(dataset: str, uri: str | None = None) -> BaseJournalStore:
     """Create journal store: ApiJournalStore for HTTP URIs, SqlJournalStore otherwise."""
-    uri = uri or Settings().journal_uri
-    handler = UriHandler(uri)
-    if handler.is_http:
+    settings = Settings()
+    uri = uri or settings.resolved_journal_uri
+    if settings.api_mode:
         return ApiJournalStore(dataset, uri)
     return SqlJournalStore(dataset, uri)
 

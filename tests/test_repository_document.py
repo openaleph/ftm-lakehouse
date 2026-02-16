@@ -12,7 +12,7 @@ from ftm_lakehouse.repository import (
 def _archive_with_entities(archive: ArchiveRepository, entities: EntityRepository, uri):
     """Archive a file and write its entities to the entity repository."""
     file = archive.store(uri)
-    with entities.bulk() as writer:
+    with entities.writer() as writer:
         for entity in file.make_entities():
             writer.add_entity(entity)
     return file

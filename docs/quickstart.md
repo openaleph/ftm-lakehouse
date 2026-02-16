@@ -80,7 +80,7 @@ from ftm_lakehouse import ensure_dataset
 dataset = ensure_dataset("my_dataset")
 
 # Write many entities efficiently
-with dataset.entities.bulk(origin="bulk_import") as writer:
+with dataset.entities.writer(origin="bulk_import") as writer:
     for entity in large_entity_source():
         writer.add_entity(entity)
 

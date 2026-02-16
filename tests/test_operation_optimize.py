@@ -20,7 +20,7 @@ def test_operation_optimize(tmp_path):
 
     # Add entities in multiple batches to create multiple parquet files
     for i in range(3):
-        with repo.bulk(origin=f"batch_{i}") as writer:
+        with repo.writer(origin=f"batch_{i}") as writer:
             for j in range(2):
                 entity = make_entity(
                     {
@@ -71,7 +71,7 @@ def test_operation_optimize_vacuum(tmp_path):
 
     # Add entities in multiple batches
     for i in range(3):
-        with repo.bulk(origin=f"batch_{i}") as writer:
+        with repo.writer(origin=f"batch_{i}") as writer:
             entity = make_entity(
                 {
                     "id": f"entity-{i}",

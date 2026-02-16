@@ -34,10 +34,7 @@ async def _not_found_handler(_request: Request, exc: Exception) -> JSONResponse:
 def get_app(lake_uri: str | None = None) -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url="/")
     app.state.store = get_store(lake_uri or settings.uri)
-    app.state.journal_uri = settings.journal_uri
-    app.state.lake = get_lakehouse(
-        lake_uri or settings.uri, journal_uri=settings.journal_uri
-    )
+    app.state.lake = get_lakehouse(lake_uri or settings.uri)
     app.include_router(entities_router, dependencies=[Depends(ensure_auth)])
     app.include_router(journal_router, dependencies=[Depends(ensure_auth)])
     app.include_router(operations_router, dependencies=[Depends(ensure_auth)])

@@ -222,7 +222,7 @@ def main():
         print(f"Archived: {file.name} ({file.checksum})")
 
     # Convert to entities
-    with dataset.entities.bulk(origin="archive") as writer:
+    with dataset.entities.writer(origin="archive") as writer:
         for file in files:
             entity = file.to_entity()
             writer.add_entity(entity)

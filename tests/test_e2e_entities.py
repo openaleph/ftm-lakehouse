@@ -33,10 +33,8 @@ def dataset(request, tmp_path) -> Generator[Dataset, None, None]:
         yield lake.get_dataset("test")
     else:
         routers = [entities_router, journal_router, operations_router, archive_router]
-        with make_test_api(
-            tmp_path, routers, journal_uri="sqlite:///:memory:"
-        ) as base_url:
-            lake = get_lakehouse(base_url, journal_uri=base_url)
+        with make_test_api(tmp_path, routers) as base_url:
+            lake = get_lakehouse(base_url)
             yield lake.get_dataset("test")
 
 
@@ -51,12 +49,12 @@ def test_entities(dataset):
     jane_fragment = make_entity(JANE_FIRSTNAME)
 
     # Write entities using bulk writer
-    with entities.bulk() as bulk:
+    with entities.writer() as bulk:
         bulk.add_entity(jane)
 
     assert len([e for e in entities.query(flush_first=True)]) == 1
 
-    with entities.bulk(origin="update") as bulk:
+    with entities.writer(origin="update") as bulk:
         bulk.add_entity(jane_fragment)
 
     assert len([e for e in entities.query(flush_first=True)]) == 1
@@ -80,7 +78,7 @@ def test_entities(dataset):
     john = make_entity(
         {"id": "john", "schema": "Person", "properties": {"name": ["John Doe"]}}
     )
-    with entities.bulk() as bulk:
+    with entities.writer() as bulk:
         bulk.add_entity(john)
     export_statements(dataset)  # Operation's ensure_flush handles flushing
 
@@ -111,9 +109,9 @@ def test_entities_export(dataset):
     jane = make_entity(JANE)
     jane_fragment = make_entity(JANE_FIRSTNAME)
 
-    with entities.bulk() as bulk:
+    with entities.writer() as bulk:
         bulk.add_entity(jane)
-    with entities.bulk(origin="update") as bulk:
+    with entities.writer(origin="update") as bulk:
         bulk.add_entity(jane_fragment)
 
     export_statements(dataset)  # Operation's ensure_flush handles flushing
@@ -137,21 +135,21 @@ def test_entity_multi_origin_fragments(dataset):
     entities = dataset.entities
 
     # Add same entity ID from three different origins with different properties
-    with entities.bulk(origin="source_a") as bulk:
+    with entities.writer(origin="source_a") as bulk:
         entity = model.make_entity("Person")
         entity.id = "multi-origin-person"
         entity.add("name", "John Smith")
         entity.add("nationality", "us")
         bulk.add_entity(entity)
 
-    with entities.bulk(origin="source_b") as bulk:
+    with entities.writer(origin="source_b") as bulk:
         entity = model.make_entity("Person")
         entity.id = "multi-origin-person"
         entity.add("birthDate", "1980-01-15")
         entity.add("gender", "male")
         bulk.add_entity(entity)
 
-    with entities.bulk(origin="source_c") as bulk:
+    with entities.writer(origin="source_c") as bulk:
         entity = model.make_entity("Person")
         entity.id = "multi-origin-person"
         entity.add("email", "john@example.com")
@@ -248,15 +246,15 @@ def test_entity_multi_origin_statements(dataset):
     ]
 
     # Add statements via bulk writer with different origins
-    with entities.bulk(origin="registry") as bulk:
+    with entities.writer(origin="registry") as bulk:
         for stmt in stmts_source_a:
             bulk.add_statement(stmt)
 
-    with entities.bulk(origin="filings") as bulk:
+    with entities.writer(origin="filings") as bulk:
         for stmt in stmts_source_b:
             bulk.add_statement(stmt)
 
-    with entities.bulk(origin="enrichment") as bulk:
+    with entities.writer(origin="enrichment") as bulk:
         for stmt in stmts_source_c:
             bulk.add_statement(stmt)
 

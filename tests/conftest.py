@@ -76,6 +76,7 @@ def cleanup_fixtures_tags():
         FIXTURES_PATH / "lake" / "tmp_dataset" / "tags",
         FIXTURES_PATH / "lake" / "tmp_dataset" / "exports",
         FIXTURES_PATH / "lake" / "tmp_dataset" / "jobs",
+        FIXTURES_PATH / "lake" / "tmp_dataset" / "diffs",
     ):
         if _dir.exists():
             shutil.rmtree(_dir)
@@ -142,26 +143,19 @@ def live_test_api_server(app):
 def make_test_api(
     tmp_path: Path,
     routers: list[APIRouter],
-    journal_uri: str | None = None,
 ) -> Generator[str, None, None]:
     """Create a test FastAPI app with the given routers and yield its base URL.
 
-    Sets up app state (store, lake, optional journal_uri), mounts routers,
-    registers exception handlers, and runs a live uvicorn server.
+    Sets up app state (store, lake), mounts routers, registers exception
+    handlers, and runs a live uvicorn server.
 
     Args:
         tmp_path: Root storage directory for the test lake.
         routers: FastAPI routers to mount (archive_router should be last).
-        journal_uri: If provided, sets app.state.journal_uri and passes it
-            to get_lakehouse().
     """
     app = FastAPI()
     app.state.store = get_store(tmp_path)
-    lake_kwargs = {}
-    if journal_uri:
-        app.state.journal_uri = journal_uri
-        lake_kwargs["journal_uri"] = journal_uri
-    app.state.lake = get_lakehouse(tmp_path, **lake_kwargs)
+    app.state.lake = get_lakehouse(tmp_path)
     for router in routers:
         app.include_router(router)
     app.add_exception_handler(DoesNotExist, _not_found_handler)

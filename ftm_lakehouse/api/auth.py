@@ -131,6 +131,8 @@ def ensure_token_context(token: str, request: Request) -> TokenData:
 
 
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+TOKEN_ALL_ACCESS = TokenData(methods=["*"], prefixes=["/"])
+TOKEN_READONLY = TokenData(methods=list(SAFE_METHODS), prefixes=["/"])
 
 
 def ensure_auth(request: Request, token: str = Depends(oauth2_scheme)) -> TokenData:
@@ -139,8 +141,10 @@ def ensure_auth(request: Request, token: str = Depends(oauth2_scheme)) -> TokenD
     If auth is not required, allow read-only (GET, HEAD, OPTIONS) requests
     without a token. Write requests are always rejected in public mode.
     """
+    if not settings.auth_enabled:
+        return TOKEN_ALL_ACCESS
     if not settings.auth_required:
         if request.method.upper() in SAFE_METHODS:
-            return TokenData(methods=list(SAFE_METHODS), prefixes=["/"])
+            return TOKEN_READONLY
         raise FORBIDDEN
     return ensure_token_context(token, request)

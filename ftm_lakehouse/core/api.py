@@ -7,8 +7,29 @@ import httpx
 from anystore.logic.uri import join_uri
 from anystore.store.resource import UriResource
 from anystore.types import Uri
+from fsspec.config import conf as fsspec_conf
+
+from ftm_lakehouse.core.settings import __version__
 
 F = TypeVar("F", bound=Callable)
+
+USER_AGENT = f"ftm-lakehouse/{__version__}"
+
+# Set default User-Agent for all ApiFileSystem (anystore+http[s]) instances
+_fsspec_client_kwargs = {"headers": {"User-Agent": USER_AGENT}}
+fsspec_conf.setdefault("anystore+http", {})["client_kwargs"] = _fsspec_client_kwargs
+fsspec_conf.setdefault("anystore+https", {})["client_kwargs"] = _fsspec_client_kwargs
+
+
+@cache
+def ensure_api_uri(uri: Uri) -> Uri:
+    """Convert http[s]:// URIs to anystore+http[s]:// for ApiFileSystem support."""
+    uri_str = str(uri)
+    if uri_str.startswith("https://"):
+        return f"anystore+{uri_str}"
+    if uri_str.startswith("http://"):
+        return f"anystore+{uri_str}"
+    return uri
 
 
 class LakehouseApi(UriResource):
@@ -16,7 +37,10 @@ class LakehouseApi(UriResource):
         super().__init__(*args, **kwargs)
         if not self.is_http:
             raise RuntimeError(f"Lakehouse api uri is not http: `{self.uri}`")
-        self.client = httpx.Client()
+        self.client = httpx.Client(
+            timeout=httpx.Timeout(timeout=3600.0 * 6),
+            headers={"User-Agent": USER_AGENT},
+        )
 
     def make_url(self, endpoint: str) -> str:
         return join_uri(self.uri, endpoint)

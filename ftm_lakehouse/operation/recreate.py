@@ -93,7 +93,7 @@ class RecreateOperation(DatasetJobOperation[RecreateJob]):
 
         self.log.info(f"Importing from `{path.ENTITIES_JSON}` ...", uri=mask_uri(uri))
 
-        with self.entities.bulk() as writer:
+        with self.entities.writer() as writer:
             for entity in self.entities.stream():
                 writer.add_entity(entity)
                 run.job.entities_imported += 1
@@ -120,7 +120,7 @@ class RecreateOperation(DatasetJobOperation[RecreateJob]):
             f"Importing from `{path.EXPORTS_STATEMENTS}` ...", uri=mask_uri(uri)
         )
 
-        with self.entities.bulk() as writer:
+        with self.entities.writer() as writer:
             with smart_open(uri, "rb") as fh:
                 for stmt in read_csv_statements(fh):  # type: ignore[arg-type]
                     writer.add_statement(stmt)
@@ -144,7 +144,7 @@ class RecreateOperation(DatasetJobOperation[RecreateJob]):
         """Collect files metadata to add document entities"""
         self.log.info("Importing from archive ...", uri=mask_uri(self.archive.uri))
 
-        with self.entities.bulk(origin=tag.CRAWL_ORIGIN) as writer:
+        with self.entities.writer(origin=tag.CRAWL_ORIGIN) as writer:
             for file in self.archive.iterate_files():
                 if file.origin == tag.CRAWL_ORIGIN:
                     for entity in file.make_entities():

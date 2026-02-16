@@ -45,11 +45,9 @@ class Catalog(Generic[DM]):
         self,
         uri: Uri,
         model_class: type[DM] = DatasetModel,
-        journal_uri: str | None = None,
     ) -> None:
         self.uri = uri
         self._model_class = model_class
-        self._journal_uri = journal_uri
         self._log = get_logger(__name__, catalog=mask_uri(uri))
 
     def __repr__(self) -> str:
@@ -123,7 +121,6 @@ class Catalog(Generic[DM]):
             name=name,
             uri=dataset_uri,
             model_class=self._model_class,
-            journal_uri=self._journal_uri,
         )
 
         # Auto-save config if data provided and dataset exists

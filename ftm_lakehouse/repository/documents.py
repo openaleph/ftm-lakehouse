@@ -2,6 +2,7 @@
 clients, including diffs"""
 
 from datetime import datetime
+from itertools import chain
 from typing import Generator
 
 from anystore.io import smart_stream_csv_models, smart_write_models
@@ -56,13 +57,16 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
         Returns:
             Mapping of folder ID to complete path (e.g. "root/sub/folder")
         """
-        q = Query().where(schema="Folder")
+        q = Query().where(schema="Folder").sql.statements
 
         # First pass: collect caption and parent for each folder
         folders: dict[str, tuple[str, str | None]] = {}
-        for entity in self._statements.query(q):
-            assert entity.id  # FIXME (typing)
-            folders[entity.id] = (entity.caption, entity.first("parent"))
+        for d in self._statements.query_raw(q):
+            props = d.get("properties", {})
+            file_names = props.get("fileName", [])
+            parents = props.get("parent", [])
+            caption = file_names[0] if file_names else d.get("caption", "")
+            folders[d["id"]] = (caption, parents[0] if parents else None)
 
         # Second pass: resolve full paths by walking up parent chain
         paths: dict[str, str] = {}
@@ -87,18 +91,20 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
             Query()
             .where(schema="Document", schema_include_descendants=True, **filters)
             .order_by("contentHash")
+            .sql.statements
         )
-        for entity in self._statements.query(q):
-            if entity.schema.name == "Folder":
+        for d in self._statements.query_raw(q):
+            if d.get("schema") == "Folder":
                 continue
-            assert entity.id  # FIXME (typing)
-            document = Document.from_entity(entity)
+            document = Document.from_entity_dict(d)
+            if document is None:
+                continue
             if public_url_prefix:
                 document.public_url = join_uri(
                     public_url_prefix, path.archive_blob(document.checksum)
                 )
             yielded = False
-            for parent in entity.get("parent"):
+            for parent in d.get("properties", {}).get("parent", []):
                 path_ = paths.get(parent)
                 if path_:
                     document.path = path_
@@ -108,9 +114,11 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
                 yield document
 
     def export_csv(self, public_url_prefix: str | None = None) -> None:
-        smart_write_models(
-            self.csv_uri, self.collect(public_url_prefix), output_format="csv"
-        )
+        docs = self.collect(public_url_prefix)
+        first = next(docs, None)
+        if first is None:
+            return
+        smart_write_models(self.csv_uri, chain([first], docs), output_format="csv")
 
     # DiffMixin implementation
 
@@ -144,7 +152,9 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
             self.log.info(
                 f"Exporting `{path.EXPORTS_DOCUMENTS}` first to create initial diff."
             )
-            self.export_csv()
+            self.export_csv(kwargs.get("public_url_prefix"))
+        if not self._storage.exists(path.EXPORTS_DOCUMENTS):
+            return
         with self._storage.open(path.EXPORTS_DOCUMENTS, "rb") as i:
             with self._storage.open(path.documents_diff(version, ts), "wb") as o:
                 stream(i, o, CHUNK_SIZE_LARGE)

@@ -7,7 +7,7 @@ from typing import Generator, Iterable, cast
 import duckdb
 import orjson
 import pyarrow as pa
-from anystore.io import smart_write_json
+from anystore.io import smart_open, smart_write_json
 from anystore.store import get_store
 from anystore.types import SDict, Uri
 from anystore.util import Took, mask_uri
@@ -61,7 +61,7 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         repo = EntityRepository(uri="s3://bucket/dataset", dataset="my_data")
 
         # Write entities
-        with repo.bulk(origin="import") as writer:
+        with repo.writer(origin="import") as writer:
             writer.add_entity(entity)
 
         # Flush to parquet
@@ -77,22 +77,21 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         self,
         dataset: str,
         uri: Uri,
-        journal_uri: str | None = None,
     ) -> None:
         super().__init__(dataset, uri)
-        self._journal = get_journal(dataset, journal_uri or settings.journal_uri)
+        self._journal = get_journal(dataset)
         self._statements = ParquetStore(uri, dataset)
         self._store = get_store(self._store_uri)
 
     @contextmanager
-    def bulk(
+    def writer(
         self, origin: str | None = None
     ) -> Generator[BaseJournalWriter, None, None]:
         """
         Get a bulk writer for adding entities/statements.
 
         Usage:
-            with repo.bulk(origin="import") as writer:
+            with repo.writer(origin="import") as writer:
                 writer.add_entity(entity)
         """
         with self._tags.touch(tag.JOURNAL_UPDATED):
@@ -115,9 +114,11 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         self, entities: Iterable[EntityProxy], origin: str | None = None
     ) -> None:
         """Add an entity iterator to the journal."""
-        with self.bulk(origin) as writer:
+        with self.writer(origin) as writer:
             for entity in entities:
                 writer.add_entity(entity)
+        if self._journal.count() >= 1_000_000:
+            self.flush()
 
     @api_delegate("_api_flush")
     def flush(self) -> int:
@@ -337,6 +338,22 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         if self._store.exists(path.ENTITIES_JSON):
             uri = self._store.to_uri(path.ENTITIES_JSON)
             yield from smart_read_proxies(uri)
+
+    @no_api
+    def export_entities(self, output_uri: str) -> None:
+        """
+        Export entities to a JSON lines file without FtM object construction.
+
+        Uses query_raw() / aggregate_unsafe() to bypass
+        Statement/StatementEntity/to_dict() and writes directly to orjson output.
+
+        Args:
+            output_uri: Destination URI for the entities.ftm.json file
+        """
+        self._store.ensure_parent(path.ENTITIES_JSON)
+        with smart_open(output_uri, mode="wb") as fh:
+            for entity in self._statements.query_raw():
+                fh.write(orjson.dumps(entity, option=orjson.OPT_APPEND_NEWLINE))
 
     @api_delegate("_api_delete_entity")
     def delete_entity(self, entity_id: str) -> int:

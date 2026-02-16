@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from followthemoney import Statement
 from ftmq.store.base import DEFAULT_ORIGIN
+from ftmq.store.lake import get_schema_bucket
 
 UNIT_SEP = "\x1f"
 
@@ -98,8 +99,6 @@ def unpack_tombstone_row(data: str) -> dict:
     would fail Statement validation. This function bypasses Statement and
     returns a dict suitable for write_deltalake.
     """
-    from ftmq.store.lake import get_schema_bucket
-
     parts = data.split(UNIT_SEP)
     return {
         "id": parts[0],

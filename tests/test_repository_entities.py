@@ -21,11 +21,9 @@ def repo(
         yield EntityRepository("test", tmp_path), tmp_path
     else:
         routers = [entities_router, journal_router, archive_router]
-        with make_test_api(
-            tmp_path, routers, journal_uri="sqlite:///:memory:"
-        ) as base_url:
+        with make_test_api(tmp_path, routers) as base_url:
             dataset_url = f"{base_url}/test"
-            repo = EntityRepository("test", uri=dataset_url, journal_uri=dataset_url)
+            repo = EntityRepository("test", uri=dataset_url)
             yield repo, tmp_path / "test"
 
 
@@ -41,7 +39,7 @@ def test_repository_entities(repo):
     john = make_entity(JOHN)
 
     # Write entities using bulk writer
-    with repo.bulk() as writer:
+    with repo.writer() as writer:
         writer.add_entity(jane)
         writer.add_entity(john)
 
@@ -83,7 +81,7 @@ def test_repository_entities(repo):
     assert repo.get("nobody") is None
 
     # Adding more entities updates the journal tag
-    with repo.bulk() as writer:
+    with repo.writer() as writer:
         writer.add_entity(
             make_entity(
                 {"id": "bob", "schema": "Person", "properties": {"name": ["Bob"]}}
@@ -97,14 +95,14 @@ def test_repository_entities_multi_origin(repo):
     repo, _ = repo
 
     # Add same entity ID from different origins with different properties
-    with repo.bulk(origin="source_a") as writer:
+    with repo.writer(origin="source_a") as writer:
         entity = model.make_entity("Person")
         entity.id = "multi-origin"
         entity.add("name", "John Smith")
         entity.add("nationality", "us")
         writer.add_entity(entity)
 
-    with repo.bulk(origin="source_b") as writer:
+    with repo.writer(origin="source_b") as writer:
         entity = model.make_entity("Person")
         entity.id = "multi-origin"
         entity.add("birthDate", "1980-01-15")
@@ -139,12 +137,12 @@ def test_repository_entities_export_diff(tmp_path):
 
     # Create multiple flushes to simulate real usage where table is at v > 0
     # before first diff export
-    with repo.bulk() as writer:
+    with repo.writer() as writer:
         writer.add_entity(make_entity(JANE))
     repo.flush()
     assert repo.version == 0
 
-    with repo.bulk() as writer:
+    with repo.writer() as writer:
         writer.add_entity(make_entity(JOHN))
     repo.flush()
     assert repo.version == 1
@@ -168,7 +166,7 @@ def test_repository_entities_export_diff(tmp_path):
     assert entities == {"jane", "john"}
 
     # Add more data: creates Delta table v2
-    with repo.bulk() as writer:
+    with repo.writer() as writer:
         writer.add_entity(make_entity(BOB))
     repo.flush()
 
@@ -191,7 +189,7 @@ def test_repository_entities_export_diff(tmp_path):
     assert delta["entity"]["id"] == "bob"
 
     # Re-adding jane without changes doesn't create new diff
-    with repo.bulk() as writer:
+    with repo.writer() as writer:
         writer.add_entity(make_entity(JANE))
     repo.flush()
 
@@ -200,7 +198,7 @@ def test_repository_entities_export_diff(tmp_path):
     assert len(diff_files) == 2
 
     # Updating Jane firstName creates diff
-    with repo.bulk() as writer:
+    with repo.writer() as writer:
         writer.add_entity(make_entity(JANE_FIRSTNAME))
     repo.flush()
 
@@ -227,7 +225,7 @@ def test_repository_entities_export_diff_delete(tmp_path):
     repo = EntityRepository("test", tmp_path)
 
     # Add two entities and flush
-    with repo.bulk() as writer:
+    with repo.writer() as writer:
         writer.add_entity(make_entity(JANE))
         writer.add_entity(make_entity(JOHN))
     repo.flush()
@@ -272,12 +270,12 @@ def test_repository_entities_export_diff_no_changes(tmp_path):
     repo = EntityRepository("test", tmp_path)
 
     # Create data and flush
-    with repo.bulk() as writer:
+    with repo.writer() as writer:
         writer.add_entity(make_entity(JANE))
     repo.flush()
     assert repo.version == 0
 
-    with repo.bulk() as writer:
+    with repo.writer() as writer:
         writer.add_entity(make_entity(JOHN))
     repo.flush()
     assert repo.version == 1

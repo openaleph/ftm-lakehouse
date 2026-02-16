@@ -55,6 +55,31 @@ class Document(BaseModel):
             public_url=public_url,
         )
 
+    @classmethod
+    def from_entity_dict(
+        cls, d: dict[str, Any], public_url: str | None = None
+    ) -> Self | None:
+        """Create a Document from an entity dict (as returned by query_raw).
+
+        Returns None when required fields are missing.
+        """
+        props = d.get("properties", {})
+        checksums = props.get("contentHash", [])
+        if not checksums or not d.get("id"):
+            return None
+        caption = d.get("caption", "")
+        mimetypes = props.get("mimeType", [])
+        file_sizes = props.get("fileSize", [])
+        return cls(
+            id=d["id"],
+            checksum=checksums[0],
+            name=caption,
+            mimetype=pick_mime(mimetypes, guess_mimetype(caption)),
+            size=int(file_sizes[0]) if file_sizes else 0,
+            updated_at=d.get("last_change"),
+            public_url=public_url,
+        )
+
     @property
     def relative_path(self) -> str:
         if self.path is None:

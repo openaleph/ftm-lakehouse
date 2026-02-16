@@ -23,7 +23,7 @@ Entity/statement operations combining JournalStore and ParquetStore.
 
 ```python
 dataset.entities.add(entity, origin="import")
-dataset.entities.bulk(origin="import")
+dataset.entities.writer(origin="import")
 dataset.entities.flush()
 dataset.entities.query(origin="import")
 ```

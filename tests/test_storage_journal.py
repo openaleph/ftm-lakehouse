@@ -1,5 +1,6 @@
-"""Tests for JournalStore implementations (SQL and API)."""
+"""Tests for JournalStore implementations (SQL-SQLite, SQL-PostgreSQL, and API)."""
 
+import socket
 from typing import Generator
 
 import httpx
@@ -16,6 +17,17 @@ from ftm_lakehouse.storage.journal import get_journal as _get_journal_factory
 from ftm_lakehouse.storage.journal.base import BaseJournalStore
 
 DATASET = "test"
+PSQL_URI = "postgresql://lakehouse:lakehouse@localhost:5432/lakehouse"
+
+
+def _psql_available() -> bool:
+    """Check if PostgreSQL is reachable on localhost:5432."""
+    try:
+        sock = socket.create_connection(("localhost", 5432), timeout=1)
+        sock.close()
+        return True
+    except OSError:
+        return False
 
 
 def make_statement(
@@ -44,9 +56,14 @@ def _make_sql_journal() -> SqlJournalStore:
     return SqlJournalStore(dataset=DATASET, uri="sqlite:///:memory:")
 
 
+def _make_psql_journal() -> SqlJournalStore:
+    store = SqlJournalStore(dataset=DATASET, uri=PSQL_URI)
+    store.clear()
+    return store
+
+
 def _make_api_journal() -> ApiJournalStore:
     app = FastAPI()
-    app.state.journal_uri = "sqlite:///:memory:"
     app.include_router(router)
 
     test_client = TestClient(app)
@@ -62,15 +79,27 @@ def _make_api_journal() -> ApiJournalStore:
     )
     client = httpx.Client(transport=transport, base_url="http://testserver")
 
-    store = ApiJournalStore(dataset=DATASET, uri=f"http://testserver/{DATASET}")
+    store = ApiJournalStore(dataset=DATASET, uri="http://testserver")
     store._api.client = client
     return store
 
 
-@pytest.fixture(params=["sql", "api"])
+def _journal_params():
+    params = ["sql", "api"]
+    if _psql_available():
+        params.append("psql")
+    return params
+
+
+@pytest.fixture(params=_journal_params())
 def journal(request) -> Generator[BaseJournalStore, None, None]:
     if request.param == "sql":
         yield _make_sql_journal()
+    elif request.param == "psql":
+        store = _make_psql_journal()
+        yield store
+        store.clear()
+        store.dispose()
     else:
         store = _make_api_journal()
         yield store
@@ -223,7 +252,8 @@ def test_storage_journal_flush_sorted_order(journal):
 
 def test_storage_journal_rollback_on_consumer_error(request, journal):
     """Test that statements are preserved if consumer raises an error."""
-    if request.node.callspec.params["journal"] == "api":
+    param = request.node.callspec.params["journal"]
+    if param == "api":
         pytest.skip("API transport buffers full response; rollback is server-side only")
     with journal.writer() as w:
         for i in range(5):
@@ -298,15 +328,29 @@ def test_storage_journal_clear(journal):
     assert journal.count() == 0
 
 
-def test_storage_journal_flush_concurrent_write(tmp_path):
+@pytest.fixture(params=["sqlite"] + (["psql"] if _psql_available() else []))
+def concurrent_journal(request, tmp_path):
+    """Journal fixture for concurrent write tests (needs file-based or network DB)."""
+    if request.param == "sqlite":
+        uri = f"sqlite:///{tmp_path / 'journal.db'}"
+        store = SqlJournalStore(dataset=DATASET, uri=uri)
+        yield store
+        store.dispose()
+    else:
+        store = SqlJournalStore(dataset=DATASET, uri=PSQL_URI)
+        store.clear()
+        yield store
+        store.clear()
+        store.dispose()
+
+
+def test_storage_journal_flush_concurrent_write(concurrent_journal):
     """Test that rows written during flush are not deleted.
 
     Simulates a concurrent writer inserting rows while flush() is yielding.
     The new rows must survive the flush DELETE since they were never yielded.
-    Uses file-based SQLite so writer and flush use separate connections.
     """
-    uri = f"sqlite:///{tmp_path / 'journal.db'}"
-    journal = SqlJournalStore(dataset=DATASET, uri=uri)
+    journal = concurrent_journal
 
     # Write initial rows
     with journal.writer() as w:

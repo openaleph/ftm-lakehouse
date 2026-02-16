@@ -19,10 +19,9 @@ def get_dataset(dataset: str, request: Request) -> _Dataset:
 Dataset = Annotated[_Dataset, Depends(get_dataset)]
 
 
-def get_journal(dataset: str, request: Request) -> BaseJournalStore:
-    """Get a JournalStore instance using the configured URI."""
-    journal_uri = request.app.state.journal_uri
-    return _get_journal(dataset, journal_uri)
+def get_journal(dataset: str) -> BaseJournalStore:
+    """Get a JournalStore instance using settings-resolved URI."""
+    return _get_journal(dataset)
 
 
 Journal = Annotated[BaseJournalStore, Depends(get_journal)]

@@ -1,7 +1,7 @@
 """ParquetStore - Delta Lake statement parquet storage with sidecar metadata."""
 
 from datetime import datetime
-from typing import Any, Generator
+from typing import Any, Generator, Iterator
 
 import pyarrow as pa
 from anystore.logging import get_logger
@@ -16,6 +16,7 @@ from ftmq.store.lake import (
     LakeQueryView,
     LakeStore,
     LakeWriter,
+    query_duckdb,
     setup_duckdb_storage,
     storage_options,
     stream_duckdb,
@@ -25,6 +26,7 @@ from sqlalchemy import Select
 
 from ftm_lakehouse.core.api import LakehouseApiMixin, no_api
 from ftm_lakehouse.core.conventions import path
+from ftm_lakehouse.logic.entities import aggregate_unsafe
 from ftm_lakehouse.logic.parquet import (
     compact_with_sidecar,
     filter_live_sidecar,
@@ -279,10 +281,38 @@ class ParquetStore(LakehouseApiMixin):
         if self._sidecar.exists:
             db, _ = query_duckdb_sidecar(q, dt, self._sidecar.deltatable)
         else:
-            from ftmq.store.lake import query_duckdb
-
             db = query_duckdb(q, dt)
         db.write_csv(output_uri)
+
+    @no_api
+    def query_raw(self, q: Select | None = None) -> Iterator[dict[str, Any]]:
+        """
+        Query entity dicts via aggregate_unsafe(), bypassing FtM object construction.
+
+        Args:
+            q: Optional SQLAlchemy select (default: Query().sql.statements)
+
+        Yields:
+            Entity dicts (id, schema, properties, caption, ...)
+        """
+        if not self.exists:
+            return
+        dt = self._store.deltatable
+        if q is None:
+            q = Query().sql.statements
+
+        if self._sidecar.exists:
+            rel, con = query_duckdb_sidecar(q, dt, self._sidecar.deltatable)
+        else:
+            rel = query_duckdb(q, dt)
+            con = None  # noqa: F841 — prevent GC of sidecar connection
+
+        columns = rel.columns
+        yield from aggregate_unsafe(
+            dict(zip(columns, row))
+            for batch in iter(lambda: rel.fetchmany(100_000), [])
+            for row in batch
+        )
 
     @no_api
     def compact(self) -> None:

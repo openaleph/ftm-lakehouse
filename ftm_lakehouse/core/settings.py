@@ -24,6 +24,17 @@ class Settings(BaseSettings):
 
     public_url_prefix: str | None = None
 
+    @property
+    def api_mode(self) -> bool:
+        return self.uri.startswith("http")
+
+    @property
+    def resolved_journal_uri(self) -> str:
+        if self.api_mode:
+            # force journal uri to use api as well
+            return self.uri
+        return self.journal_uri
+
 
 class ApiContactSettings(BaseSettings):
     name: str | None
@@ -49,6 +60,7 @@ class ApiSettings(BaseSettings):
     secret_key: str = "change-for-production"
     access_token_expire: int = 5  # minutes
     access_token_algorithm: str = "HS256"
+    auth_enabled: bool = True  # if disabled, trust reverse proxy!
     auth_required: bool = True
 
     title: str = "FollowTheMoney Data Lakehouse Api"

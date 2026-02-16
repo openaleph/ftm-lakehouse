@@ -23,7 +23,7 @@ def test_operation_download_archive(tmp_path, fixtures_path):
     # Archive files and write their entities
     for key in ["utf.txt", "companies.csv"]:
         doc = archive.store(fixtures_path / "src" / key)
-        with repo.bulk() as writer:
+        with repo.writer() as writer:
             for entity in doc.make_entities():
                 writer.add_entity(entity)
     repo.flush()

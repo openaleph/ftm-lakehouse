@@ -48,10 +48,8 @@ def dataset(request, tmp_path) -> Generator[tuple[Dataset, Path], None, None]:
         yield lake.get_dataset(DATASET), tmp_path / DATASET
     else:
         routers = [entities_router, journal_router, operations_router, archive_router]
-        with make_test_api(
-            tmp_path, routers, journal_uri="sqlite:///:memory:"
-        ) as base_url:
-            lake = get_lakehouse(base_url, journal_uri=base_url)
+        with make_test_api(tmp_path, routers) as base_url:
+            lake = get_lakehouse(base_url)
             yield lake.get_dataset(DATASET), tmp_path / DATASET
 
 
@@ -144,7 +142,7 @@ def test_e2e_workflows_incremental_entity_addition(dataset):
     dataset, base_path = dataset
 
     # Initial entities
-    with dataset.entities.bulk(origin="initial") as writer:
+    with dataset.entities.writer(origin="initial") as writer:
         for i in range(3):
             entity = model.make_entity("Company")
             entity.make_id(f"company-{i}")
@@ -186,7 +184,7 @@ def test_e2e_workflows_bulk_entity_writing(dataset):
     dataset, base_path = dataset
 
     # Create multiple entities in bulk
-    with dataset.entities.bulk(origin="bulk_test") as writer:
+    with dataset.entities.writer(origin="bulk_test") as writer:
         for i in range(10):
             entity = model.make_entity("Company")
             entity.make_id(f"company-{i}")
@@ -212,14 +210,14 @@ def test_e2e_workflows_multiple_origins(dataset):
     dataset, base_path = dataset
 
     # Add entities from different origins
-    with dataset.entities.bulk(origin="source_a") as writer:
+    with dataset.entities.writer(origin="source_a") as writer:
         for i in range(5):
             entity = model.make_entity("Person")
             entity.make_id(f"person-a-{i}")
             entity.add("name", f"Person A{i}")
             writer.add_entity(entity)
 
-    with dataset.entities.bulk(origin="source_b") as writer:
+    with dataset.entities.writer(origin="source_b") as writer:
         for i in range(3):
             entity = model.make_entity("Organization")
             entity.make_id(f"org-b-{i}")
@@ -248,7 +246,7 @@ def test_e2e_workflows_export_files_created(dataset):
     store = dataset.entities._store
 
     # Add initial data
-    with dataset.entities.bulk(origin="test") as writer:
+    with dataset.entities.writer(origin="test") as writer:
         entity = model.make_entity("Person")
         entity.make_id("person-1")
         entity.add("name", "Initial Person")
@@ -266,7 +264,7 @@ def test_e2e_workflows_export_files_created(dataset):
     initial_csv_size = len(initial_csv_content)
 
     # Add more data and re-export
-    with dataset.entities.bulk(origin="test") as writer:
+    with dataset.entities.writer(origin="test") as writer:
         entity = model.make_entity("Company")
         entity.make_id("company-1")
         entity.add("name", "New Company")
@@ -330,7 +328,7 @@ def test_e2e_workflows_index_includes_statistics(dataset):
     dataset, base_path = dataset
 
     # Add some data
-    with dataset.entities.bulk(origin="test") as writer:
+    with dataset.entities.writer(origin="test") as writer:
         for i in range(5):
             entity = model.make_entity("Person")
             entity.make_id(f"person-{i}")
@@ -354,7 +352,7 @@ def test_e2e_workflows_iterate_vs_query_entities(dataset):
     dataset, base_path = dataset
 
     # Add data
-    with dataset.entities.bulk(origin="test") as writer:
+    with dataset.entities.writer(origin="test") as writer:
         for i in range(3):
             entity = model.make_entity("Person")
             entity.make_id(f"person-{i}")
@@ -374,7 +372,7 @@ def test_e2e_workflows_get_entity_by_id(dataset):
     dataset, base_path = dataset
 
     # Add entities
-    with dataset.entities.bulk(origin="test") as writer:
+    with dataset.entities.writer(origin="test") as writer:
         for i in range(3):
             entity = model.make_entity("Person")
             entity.make_id(f"person-{i}")
@@ -418,7 +416,7 @@ def test_e2e_workflows_full_workflow_with_multiple_updates(dataset):
     dataset, base_path = dataset
 
     # Phase 1: Initial entities
-    with dataset.entities.bulk(origin="initial") as writer:
+    with dataset.entities.writer(origin="initial") as writer:
         for i in range(3):
             entity = model.make_entity("Company")
             entity.make_id(f"company-{i}")
@@ -432,7 +430,7 @@ def test_e2e_workflows_full_workflow_with_multiple_updates(dataset):
     assert len(phase1_entities) == 3
 
     # Phase 2: Add manual entities
-    with dataset.entities.bulk(origin="manual") as writer:
+    with dataset.entities.writer(origin="manual") as writer:
         person = model.make_entity("Person")
         person.make_id("manual-person-1")
         person.add("name", "Manual Person")

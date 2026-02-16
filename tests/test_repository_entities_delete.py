@@ -22,18 +22,14 @@ DATASET = "test"
 
 def _make_local_repo(tmp_path) -> EntityRepository:
     """Create a local EntityRepository with in-memory journal."""
-    return EntityRepository(
-        DATASET,
-        tmp_path,
-        journal_uri="sqlite:///:memory:",
-    )
+    return EntityRepository(DATASET, tmp_path)
 
 
 def _populate(repo: EntityRepository) -> None:
     """Add two entities (jane, john) to the repo and flush to parquet."""
     jane = EntityProxy.from_dict(JANE)
     john = EntityProxy.from_dict(JOHN)
-    with repo.bulk() as writer:
+    with repo.writer() as writer:
         writer.add_entity(jane)
         writer.add_entity(john)
     repo.flush()
@@ -52,11 +48,9 @@ def repo(
         yield _make_local_repo(tmp_path), tmp_path
     else:
         routers = [entities_router, journal_router, archive_router]
-        with make_test_api(
-            tmp_path, routers, journal_uri="sqlite:///:memory:"
-        ) as base_url:
+        with make_test_api(tmp_path, routers) as base_url:
             dataset_url = f"{base_url}/{DATASET}"
-            r = EntityRepository(DATASET, uri=dataset_url, journal_uri=dataset_url)
+            r = EntityRepository(DATASET, uri=dataset_url)
             yield r, tmp_path / DATASET
 
 
@@ -120,7 +114,7 @@ def test_delete_and_readd(repo):
             "properties": {"name": ["Jane Doe v2"]},
         }
     )
-    with repo.bulk() as writer:
+    with repo.writer() as writer:
         writer.add_entity(jane)
     repo.flush()
 
@@ -142,7 +136,7 @@ def test_delete_entity_in_journal_only(repo):
             "properties": {"name": ["Jane Doe"]},
         }
     )
-    with repo.bulk() as writer:
+    with repo.writer() as writer:
         writer.add_entity(jane)
 
     # Delete before flush — UPSERT overwrites with deleted_at=now

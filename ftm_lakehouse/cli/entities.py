@@ -25,7 +25,7 @@ def cli_write_entities(
 ):
     """Write FtM entities from an input source into the journal."""
     with DatasetContext() as dataset:
-        with dataset.entities.bulk(origin=origin) as writer:
+        with dataset.entities.writer(origin=origin) as writer:
             for proxy in logged_items(
                 smart_read_proxies(in_uri),
                 "Write",
