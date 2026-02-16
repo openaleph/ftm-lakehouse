@@ -15,7 +15,7 @@ log = get_logger(__name__)
 _ZFS_COMPONENT_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 
 
-def validate_dataset(dataset: str, allowed_prefix: str | None) -> str | None:
+def validate_dataset(dataset: str, allowed_pool: str | None) -> str | None:
     """Validate a ZFS dataset path. Returns an error string or None if valid.
 
     Only the leaf (last) path component is checked with ``dataset_name_check``
@@ -41,12 +41,12 @@ def validate_dataset(dataset: str, allowed_prefix: str | None) -> str | None:
     except ValueError:
         return f"invalid dataset name: {leaf!r}"
 
-    if allowed_prefix and not dataset.startswith(allowed_prefix):
-        return f"dataset {dataset!r} not under allowed prefix {allowed_prefix!r}"
+    if allowed_pool and not dataset.startswith(allowed_pool):
+        return f"dataset {dataset!r} not under pool {allowed_pool!r}"
     return None
 
 
-def handle_request(data: dict, allowed_prefix: str | None) -> dict:
+def handle_request(data: dict, allowed_pool: str | None) -> dict:
     """Process a single JSON request and return a response dict."""
     action = data.get("action")
     if action != "create":
@@ -54,7 +54,7 @@ def handle_request(data: dict, allowed_prefix: str | None) -> dict:
         return {"ok": False, "error": f"unknown action: {action!r}"}
 
     dataset = data.get("dataset", "")
-    err = validate_dataset(dataset, allowed_prefix)
+    err = validate_dataset(dataset, allowed_pool)
     if err:
         log.warning("Dataset validation failed", dataset=dataset, error=err)
         return {"ok": False, "error": err}
@@ -74,7 +74,7 @@ def handle_request(data: dict, allowed_prefix: str | None) -> dict:
     return {"ok": True}
 
 
-def handle_connection(conn: socket.socket, allowed_prefix: str | None) -> None:
+def handle_connection(conn: socket.socket, allowed_pool: str | None) -> None:
     """Read one JSON line from a connection, process it, write the response."""
     try:
         line = conn.makefile().readline()
@@ -87,7 +87,7 @@ def handle_connection(conn: socket.socket, allowed_prefix: str | None) -> None:
             log.warning("Received invalid JSON", error=str(e))
             response = {"ok": False, "error": f"invalid JSON: {e}"}
         else:
-            response = handle_request(data, allowed_prefix)
+            response = handle_request(data, allowed_pool)
         conn.sendall(orjson.dumps(response) + b"\n")
     finally:
         conn.close()

@@ -19,7 +19,7 @@ class TestValidateDataset:
     def test_valid_name(self):
         assert validate_dataset("tank/lakehouse/my_dataset/archive", None) is None
 
-    def test_valid_with_prefix(self):
+    def test_valid_with_pool(self):
         assert validate_dataset("tank/lakehouse/ds", "tank/lakehouse") is None
 
     def test_empty_name(self):
@@ -34,10 +34,10 @@ class TestValidateDataset:
     def test_path_traversal(self):
         assert validate_dataset("tank/../etc/shadow", None) is not None
 
-    def test_prefix_mismatch(self):
+    def test_pool_mismatch(self):
         err = validate_dataset("other/pool/ds", "tank/lakehouse")
         assert err is not None
-        assert "not under allowed prefix" in err
+        assert "not under pool" in err
 
     def test_hyphens_allowed_in_parents(self):
         assert validate_dataset("tank/lakehouse-dev/my_dataset", None) is None
@@ -93,13 +93,13 @@ class TestHandleRequest:
         assert resp["ok"] is False
         assert "invalid path component" in resp["error"]
 
-    def test_prefix_enforced(self):
+    def test_pool_enforced(self):
         resp = handle_request(
             {"action": "create", "dataset": "rogue/pool"},
             "tank/lakehouse",
         )
         assert resp["ok"] is False
-        assert "not under allowed prefix" in resp["error"]
+        assert "not under pool" in resp["error"]
 
     @patch(
         "ftm_lakehouse.core.zfs.agent.zfs_create_local",

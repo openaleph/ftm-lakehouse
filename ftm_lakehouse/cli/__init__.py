@@ -74,7 +74,7 @@ class DatasetContext(ErrorHandler):
         return STATE["dataset"]
 
 
-SKIP_CATALOG_COMMANDS = {"zfs-agent"}
+SKIP_CATALOG_COMMANDS = {"zfs-agent", "zfs-init"}
 
 
 @cli.callback(invoke_without_command=True)

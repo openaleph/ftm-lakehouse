@@ -1,4 +1,4 @@
-"""ZFS socket agent CLI command."""
+"""ZFS CLI commands: socket agent and manual dataset creation."""
 
 import os
 import signal
@@ -12,6 +12,7 @@ from anystore.logging import get_logger
 from ftm_lakehouse.cli import cli, console
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.core.zfs.agent import handle_connection
+from ftm_lakehouse.core.zfs.helpers import ensure_zfs_dataset
 
 log = get_logger(__name__)
 
@@ -22,12 +23,12 @@ def cli_zfs_agent(
         Optional[str],
         typer.Option("--socket", "-s", help="Unix socket path to listen on"),
     ] = None,
-    prefix: Annotated[
+    pool: Annotated[
         Optional[str],
         typer.Option(
-            "--prefix",
+            "--pool",
             "-p",
-            help="Required ZFS dataset prefix for validation (e.g. 'tank/lakehouse')",
+            help="ZFS pool path (or set LAKEHOUSE_ZFS_POOL)",
         ),
     ] = None,
 ):
@@ -45,6 +46,13 @@ def cli_zfs_agent(
         )
         raise typer.Exit(code=1)
 
+    zfs_pool = pool or settings.zfs_pool
+    if not zfs_pool:
+        console.print(
+            "[red]No pool specified. " "Use --pool or set LAKEHOUSE_ZFS_POOL.[/red]"
+        )
+        raise typer.Exit(code=1)
+
     if os.path.exists(sock_path):
         os.unlink(sock_path)
 
@@ -53,7 +61,7 @@ def cli_zfs_agent(
     os.chmod(sock_path, 0o666)
     server.listen(5)
 
-    log.info("zfs-agent listening", socket=sock_path, prefix=prefix)
+    log.info("zfs-agent listening", socket=sock_path, pool=zfs_pool)
 
     def _shutdown(_signum, _frame):
         log.info("Shutting down zfs-agent")
@@ -68,8 +76,32 @@ def cli_zfs_agent(
     try:
         while True:
             conn, _ = server.accept()
-            handle_connection(conn, prefix)
+            handle_connection(conn, zfs_pool)
     finally:
         server.close()
         if os.path.exists(sock_path):
             os.unlink(sock_path)
+
+
+@cli.command("zfs-init")
+def cli_zfs_init(
+    dataset: Annotated[str, typer.Argument(help="Dataset name to initialize")],
+    pool: Annotated[
+        Optional[str],
+        typer.Option("--pool", "-p", help="ZFS pool path (or set LAKEHOUSE_ZFS_POOL)"),
+    ] = None,
+):
+    """Create ZFS datasets for a lakehouse dataset.
+
+    Creates the parent, archive, and statements ZFS datasets with
+    tuned properties under the given pool.
+    """
+    settings = Settings()
+    zfs_pool = pool or settings.zfs_pool
+    if not zfs_pool:
+        console.print(
+            "[red]No ZFS pool specified. " "Use --pool or set LAKEHOUSE_ZFS_POOL.[/red]"
+        )
+        raise typer.Exit(code=1)
+    ensure_zfs_dataset(zfs_pool, dataset)
+    log.info("ZFS datasets initialized", pool=zfs_pool, dataset=dataset)

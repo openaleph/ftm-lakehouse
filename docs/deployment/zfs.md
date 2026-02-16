@@ -48,13 +48,13 @@ flowchart LR
 On the host:
 
 ```bash
-ftm-lakehouse zfs-agent --socket /run/zfs.sock --prefix tank/lakehouse
+ftm-lakehouse zfs-agent --socket /run/zfs.sock --pool zpools/tank/lakehouse
 ```
 
 | Option | Description |
 |--------|-------------|
 | `--socket, -s` | Unix socket path to listen on (or set `LAKEHOUSE_ZFS_SOCKET`) |
-| `--prefix, -p` | Required ZFS dataset prefix for validation (rejects paths outside this prefix) |
+| `--pool, -p` | ZFS pool path (or set `LAKEHOUSE_ZFS_POOL`). Required -- the agent only creates datasets under this path. |
 
 ### Configuring the Container
 
@@ -75,6 +75,16 @@ services:
 ```
 
 When `LAKEHOUSE_ZFS_SOCKET` is set and `LAKEHOUSE_ON_ZFS` is enabled, `zfs_create()` sends requests over the socket instead of calling `zfs` via subprocess.
+
+## Manual Initialization
+
+To manually create ZFS datasets for a dataset without starting the full application:
+
+```bash
+ftm-lakehouse zfs-init my_dataset --pool zpools/tank/lakehouse
+```
+
+This creates the parent, archive, and statements ZFS datasets with tuned properties. The pool can also be set via `LAKEHOUSE_ZFS_POOL`.
 
 ## Protocol
 
@@ -106,10 +116,7 @@ The agent validates every request before execution:
 
 - **Leaf dataset validation** -- the final path component (the FTM dataset name) is checked using `followthemoney.dataset.util.dataset_name_check` (lowercase alphanumeric and underscores only). Parent path components allow standard ZFS naming (alphanumeric, hyphens, dots, underscores).
 - **Path traversal prevention** -- `..` sequences are rejected
-- **Prefix restriction** -- when `--prefix` is set, the agent rejects any dataset path that doesn't start with the given prefix
-
-!!! warning
-    Always use `--prefix` in production to restrict which ZFS datasets the agent can create. Without it, any valid path is accepted.
+- **Pool restriction** -- the agent rejects any dataset path that doesn't start with the configured pool path
 
 ## Environment Variables
 
