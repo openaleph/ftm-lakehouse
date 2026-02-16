@@ -65,7 +65,7 @@ mkdocs-click = "^0.9.0"
 mkdocs-autorefs = "^1.2.0"
 mkdocstrings-python = "^2.0.1"
 mkdocs-typer2 = "^0.2.0"
-redis = "^7.1.0"
+redis = "^7.2.0"
 sqlalchemy = "^2.0.46"
 uvicorn = "^0.40.0"
 granian = {extras = ["reload"], version = "^2.7.1"}
