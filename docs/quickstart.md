@@ -173,4 +173,4 @@ export LAKEHOUSE_JOURNAL_URI=postgresql://user:pass@localhost/journal
 - [Working with Entities](usage/entities.md) - Deep dive into entity operations
 - [Working with Files](usage/archive.md) - Learn about the file archive
 - [CLI Reference](usage/cli.md) - Complete CLI documentation
-- [Configuration](usage/configuration.md) - Advanced configuration options
+- [Configuration](deployment/configuration.md) - Advanced configuration options

@@ -8,14 +8,15 @@ nav:
   - RFC: rfc.md
   - functionality.md
   - architecture.md
-  - api.md
   - Detailed Usage:
     - Working with Entities: usage/entities.md
     - Working with Files: usage/archive.md
     - Working with Mappings: usage/mappings.md
     - CLI Reference: usage/cli.md
-    - Configuration: usage/configuration.md
-    - ZFS Integration: usage/zfs.md
+  - Deployment:
+    - Configuration: deployment/configuration.md
+    - REST API: deployment/api.md
+    - ZFS Integration: deployment/zfs.md
   - Reference:
     - ftm_lakehouse.lake: reference/lake.md
     - ftm_lakehouse.core: reference/core.md

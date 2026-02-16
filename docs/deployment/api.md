@@ -67,7 +67,22 @@ token = create_access_token(methods=["*"], prefixes=["/*/tags"])
 
 ### Storage
 
-The base storage routes are provided by [anystore](https://docs.investigraph.dev/lib/anystore/) and expose raw key-value access to the lakehouse store.
+The base storage routes are provided by [anystore](https://docs.investigraph.dev/lib/anystore/) and expose raw key-value access to the underlying lakehouse store. All keys are path-based -- for example, `my_dataset/archive/ab/cd/ef/{checksum}/blob` addresses a file blob.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/{key:path}` | Retrieve a stored value by key |
+| `GET` | `/{prefix:path}?keys=true` | List all keys under a prefix |
+| `GET` | `/{prefix:path}?keys=true&glob=*.json` | List keys matching a glob pattern |
+| `HEAD` | `/{key:path}` | Get metadata (size, content type, timestamps) |
+| `HEAD` | `/{key:path}?checksum=true` | Get metadata with checksum in `x-anystore-checksum` header |
+| `PUT` | `/{key:path}` | Store a value (request body streamed directly to storage) |
+| `DELETE` | `/{key:path}` | Delete a value |
+| `PATCH` | `/{key:path}` | Touch a key (update its timestamp) |
+
+`GET` supports HTTP range requests via the `Range` header (e.g. `Range: bytes=0-1023`) and returns `206 Partial Content` with the requested byte range.
+
+Response headers include `Content-Length`, `Content-Type`, `Accept-Ranges`, `Last-Modified`, and `x-anystore-*` metadata fields.
 
 ### Journal
 
@@ -98,16 +113,16 @@ Available operations:
 
 | Job name | Description |
 |----------|-------------|
-| [`CrawlJob`](reference/operation.md#ftm_lakehouse.operation.crawl.CrawlJob) | Batch file ingestion from a source URI |
-| [`OptimizeJob`](reference/operation.md#ftm_lakehouse.operation.optimize.OptimizeJob) | Compact parquet files, optional vacuum and sidecar apply |
-| [`ExportStatementsJob`](reference/operation.md#ftm_lakehouse.operation.export.ExportStatementsJob) | Export to `statements.csv` |
-| [`ExportEntitiesJob`](reference/operation.md#ftm_lakehouse.operation.export.ExportEntitiesJob) | Export to `entities.ftm.json` |
-| [`ExportStatisticsJob`](reference/operation.md#ftm_lakehouse.operation.export.ExportStatisticsJob) | Export to `statistics.json` |
-| [`ExportDocumentsJob`](reference/operation.md#ftm_lakehouse.operation.export.ExportDocumentsJob) | Export to `documents.csv` |
-| [`ExportIndexJob`](reference/operation.md#ftm_lakehouse.operation.export.ExportIndexJob) | Export `index.json` with resources |
-| [`MappingJob`](reference/operation.md#ftm_lakehouse.operation.mapping.MappingJob) | Process a CSV mapping configuration |
-| [`RecreateJob`](reference/operation.md#ftm_lakehouse.operation.recreate.RecreateJob) | Rebuild parquet store from exports |
-| [`DownloadArchiveJob`](reference/operation.md#ftm_lakehouse.operation.download.DownloadArchiveJob) | Export archive files to original paths |
-| [`MakeJob`](reference/operation.md#ftm_lakehouse.operation.make.MakeJob) | Full workflow: flush + all exports |
+| [`CrawlJob`](../reference/operation.md#ftm_lakehouse.operation.crawl.CrawlJob) | Batch file ingestion from a source URI |
+| [`OptimizeJob`](../reference/operation.md#ftm_lakehouse.operation.optimize.OptimizeJob) | Compact parquet files, optional vacuum and sidecar apply |
+| [`ExportStatementsJob`](../reference/operation.md#ftm_lakehouse.operation.export.ExportStatementsJob) | Export to `statements.csv` |
+| [`ExportEntitiesJob`](../reference/operation.md#ftm_lakehouse.operation.export.ExportEntitiesJob) | Export to `entities.ftm.json` |
+| [`ExportStatisticsJob`](../reference/operation.md#ftm_lakehouse.operation.export.ExportStatisticsJob) | Export to `statistics.json` |
+| [`ExportDocumentsJob`](../reference/operation.md#ftm_lakehouse.operation.export.ExportDocumentsJob) | Export to `documents.csv` |
+| [`ExportIndexJob`](../reference/operation.md#ftm_lakehouse.operation.export.ExportIndexJob) | Export `index.json` with resources |
+| [`MappingJob`](../reference/operation.md#ftm_lakehouse.operation.mapping.MappingJob) | Process a CSV mapping configuration |
+| [`RecreateJob`](../reference/operation.md#ftm_lakehouse.operation.recreate.RecreateJob) | Rebuild parquet store from exports |
+| [`DownloadArchiveJob`](../reference/operation.md#ftm_lakehouse.operation.download.DownloadArchiveJob) | Export archive files to original paths |
+| [`MakeJob`](../reference/operation.md#ftm_lakehouse.operation.make.MakeJob) | Full workflow: flush + all exports |
 
 Pass `?force=true` to skip freshness checks.
