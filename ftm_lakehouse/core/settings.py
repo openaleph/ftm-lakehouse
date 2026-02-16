@@ -14,12 +14,14 @@ class Settings(BaseSettings):
         env_prefix="lakehouse_",
         env_nested_delimiter="__",
         env_file=".env",
+        secrets_dir="/run/secrets",
         nested_model_default_partial_update=True,
         extra="ignore",
     )
 
     uri: str = "data"
     journal_uri: str = "sqlite:///data/journal.db"
+    api_key: str | None = None
     on_zfs: bool = False
 
     public_url_prefix: str | None = None

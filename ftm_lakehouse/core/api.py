@@ -9,14 +9,19 @@ from anystore.store.resource import UriResource
 from anystore.types import Uri
 from fsspec.config import conf as fsspec_conf
 
-from ftm_lakehouse.core.settings import __version__
+from ftm_lakehouse.core.settings import Settings, __version__
 
 F = TypeVar("F", bound=Callable)
 
 USER_AGENT = f"ftm-lakehouse/{__version__}"
 
-# Set default User-Agent for all ApiFileSystem (anystore+http[s]) instances
-_fsspec_client_kwargs = {"headers": {"User-Agent": USER_AGENT}}
+_default_headers: dict[str, str] = {"User-Agent": USER_AGENT}
+_settings = Settings()
+if _settings.api_key:
+    _default_headers["X-Api-Key"] = _settings.api_key
+
+# Set default headers for all ApiFileSystem (anystore+http[s]) instances
+_fsspec_client_kwargs = {"headers": _default_headers}
 fsspec_conf.setdefault("anystore+http", {})["client_kwargs"] = _fsspec_client_kwargs
 fsspec_conf.setdefault("anystore+https", {})["client_kwargs"] = _fsspec_client_kwargs
 
@@ -39,7 +44,7 @@ class LakehouseApi(UriResource):
             raise RuntimeError(f"Lakehouse api uri is not http: `{self.uri}`")
         self.client = httpx.Client(
             timeout=httpx.Timeout(timeout=3600.0 * 6),
-            headers={"User-Agent": USER_AGENT},
+            headers=_default_headers,
         )
 
     def make_url(self, endpoint: str) -> str:
