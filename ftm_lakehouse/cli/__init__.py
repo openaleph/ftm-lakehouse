@@ -68,8 +68,12 @@ class DatasetContext(ErrorHandler):
         return STATE["dataset"]
 
 
+SKIP_CATALOG_COMMANDS = {"zfs-agent"}
+
+
 @cli.callback(invoke_without_command=True)
 def cli_ftm_lakehouse(
+    ctx: typer.Context,
     version: Annotated[Optional[bool], typer.Option(..., help="Show version")] = False,
     settings: Annotated[
         Optional[bool], typer.Option(..., help="Show current settings")
@@ -87,6 +91,8 @@ def cli_ftm_lakehouse(
         raise typer.Exit()
     settings_ = Settings()
     configure_logging(level=settings_.log_level)
+    if ctx.invoked_subcommand in SKIP_CATALOG_COMMANDS:
+        return
     catalog = get_lakehouse(uri)
     STATE["catalog"] = catalog
     if dataset:
