@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     journal_uri: str = "sqlite:///data/journal.db"
     api_key: str | None = None
     on_zfs: bool = False
+    zfs_socket: str | None = None
 
     public_url_prefix: str | None = None
 

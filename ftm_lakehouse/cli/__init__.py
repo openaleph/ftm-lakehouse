@@ -124,4 +124,5 @@ from ftm_lakehouse.cli import (  # noqa: E402, F401
     entities,
     mappings,
     operations,
+    zfs,
 )

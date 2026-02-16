@@ -15,6 +15,7 @@ nav:
     - Working with Mappings: usage/mappings.md
     - CLI Reference: usage/cli.md
     - Configuration: usage/configuration.md
+    - ZFS Integration: usage/zfs.md
   - Reference:
     - ftm_lakehouse.lake: reference/lake.md
     - ftm_lakehouse.core: reference/core.md

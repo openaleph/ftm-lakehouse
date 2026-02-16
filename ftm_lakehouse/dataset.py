@@ -68,6 +68,9 @@ class Dataset(Generic[DM]):
         self._settings = Settings()
         self._log = log.bind(dataset=name, uri=mask_uri(uri))
 
+        if self._settings.on_zfs:
+            self.ensure()
+
     def __repr__(self) -> str:
         return f"Dataset({self.name!r})"
 
