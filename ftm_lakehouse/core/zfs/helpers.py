@@ -7,8 +7,7 @@ from functools import cache
 
 import orjson
 from anystore.logging import get_logger
-from anystore.logic.uri import uri_to_path
-from anystore.types import Uri
+from followthemoney.dataset.util import dataset_name_check
 
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.core.settings import Settings
@@ -101,9 +100,9 @@ def zfs_create(
 
 
 @cache
-def ensure_zfs_dataset(lake_uri: Uri, dataset: str):
-    base = uri_to_path(lake_uri)
-    base = f"{base}/{dataset}".lstrip("/")
+def ensure_zfs_dataset(pool: str, dataset: str):
+    dataset_name_check(dataset)
+    base = f"{pool}/{dataset}"
     zfs_create(base, PARENT_PROPS)
     zfs_create(f"{base}/{path.ARCHIVE}", ARCHIVE.to_props())
     zfs_create(f"{base}/{path.STATEMENTS}", STATEMENTS.to_props())

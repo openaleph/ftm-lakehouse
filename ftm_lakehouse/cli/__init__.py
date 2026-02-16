@@ -64,7 +64,13 @@ class DatasetContext(ErrorHandler):
                 raise e
             console.print(f"[red][bold]{e.__class__.__name__}[/bold]: {e}[/red]")
             raise typer.Exit(code=1)
-        STATE["dataset"].ensure()
+        try:
+            STATE["dataset"].ensure()
+        except Exception as e:
+            if settings.debug:
+                raise
+            console.print(f"[red][bold]{type(e).__name__}[/bold]: {e}[/red]")
+            raise typer.Exit(code=1)
         return STATE["dataset"]
 
 
@@ -93,13 +99,19 @@ def cli_ftm_lakehouse(
     configure_logging(level=settings_.log_level)
     if ctx.invoked_subcommand in SKIP_CATALOG_COMMANDS:
         return
-    catalog = get_lakehouse(uri)
-    STATE["catalog"] = catalog
-    if dataset:
-        # if dataset_uri:
-        #     STATE["dataset"] = get_dataset(dataset, dataset_uri)
-        # else:
-        STATE["dataset"] = get_dataset(dataset)
+    try:
+        catalog = get_lakehouse(uri)
+        STATE["catalog"] = catalog
+        if dataset:
+            # if dataset_uri:
+            #     STATE["dataset"] = get_dataset(dataset, dataset_uri)
+            # else:
+            STATE["dataset"] = get_dataset(dataset)
+    except Exception as e:
+        if settings_.debug:
+            raise
+        console.print(f"[red][bold]{type(e).__name__}[/bold]: {e}[/red]")
+        raise typer.Exit(code=1)
     if settings:
         console.print(settings_)
         console.print(STATE)

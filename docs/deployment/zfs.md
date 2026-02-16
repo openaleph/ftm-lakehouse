@@ -9,7 +9,10 @@ If the lakehouse runs directly on a ZFS-backed filesystem, enable ZFS dataset cr
 ```bash
 export LAKEHOUSE_URI=/zpools/tank/lakehouse
 export LAKEHOUSE_ON_ZFS=1
+export LAKEHOUSE_ZFS_POOL=zpools/tank/lakehouse
 ```
+
+`LAKEHOUSE_ZFS_POOL` is the ZFS dataset path (without leading slash) under which per-dataset children are created. It must match your actual ZFS pool layout.
 
 When a new dataset is created, `ftm-lakehouse` calls `zfs create` to set up child datasets with optimized properties:
 
@@ -64,6 +67,7 @@ services:
     environment:
       LAKEHOUSE_URI: /zpools/tank/lakehouse
       LAKEHOUSE_ON_ZFS: "1"
+      LAKEHOUSE_ZFS_POOL: zpools/tank/lakehouse
       LAKEHOUSE_ZFS_SOCKET: /run/zfs.sock
     volumes:
       - /run/zfs.sock:/run/zfs.sock
@@ -100,7 +104,7 @@ The socket agent uses a JSON-lines protocol over Unix domain sockets. Each reque
 
 The agent validates every request before execution:
 
-- **Path component validation** -- each segment of the ZFS dataset path is checked using `followthemoney.dataset.util.dataset_name_check` (lowercase alphanumeric and underscores only)
+- **Leaf dataset validation** -- the final path component (the FTM dataset name) is checked using `followthemoney.dataset.util.dataset_name_check` (lowercase alphanumeric and underscores only). Parent path components allow standard ZFS naming (alphanumeric, hyphens, dots, underscores).
 - **Path traversal prevention** -- `..` sequences are rejected
 - **Prefix restriction** -- when `--prefix` is set, the agent rejects any dataset path that doesn't start with the given prefix
 
@@ -112,4 +116,5 @@ The agent validates every request before execution:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `LAKEHOUSE_ON_ZFS` | Enable ZFS dataset creation | `false` |
+| `LAKEHOUSE_ZFS_POOL` | ZFS dataset path for the lakehouse root (e.g. `zpools/tank/lakehouse`) | (required when `ON_ZFS` is enabled) |
 | `LAKEHOUSE_ZFS_SOCKET` | Path to the Unix socket for remote ZFS operations | (unset -- use local subprocess) |

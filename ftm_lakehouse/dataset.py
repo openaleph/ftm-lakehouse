@@ -169,7 +169,11 @@ class Dataset(Generic[DM]):
         """Ensure dataset exists, create config.yml if needed."""
         if not self.exists():
             if self._store.is_local and self._settings.on_zfs:
-                ensure_zfs_dataset(self.name)
+                if self._settings.zfs_pool is None:
+                    raise RuntimeError(
+                        "Configure LAKEHOUSE_ZFS_POOL for zfs integration!"
+                    )
+                ensure_zfs_dataset(self._settings.zfs_pool, self.name)
             self.update_model()
             self._log.info("Created dataset")
 

@@ -7,7 +7,7 @@ import sys
 from typing import Annotated, Optional
 
 import typer
-from anystore.logging import configure_logging, get_logger
+from anystore.logging import get_logger
 
 from ftm_lakehouse.cli import cli, console
 from ftm_lakehouse.core.settings import Settings
@@ -15,14 +15,8 @@ from ftm_lakehouse.core.zfs.agent import handle_connection
 
 log = get_logger(__name__)
 
-zfs = typer.Typer(
-    no_args_is_help=True,
-    invoke_without_command=True,
-)
-cli.add_typer(zfs, name="zfs-agent", help="ZFS socket agent for container deployments")
 
-
-@zfs.callback(invoke_without_command=True)
+@cli.command("zfs-agent")
 def cli_zfs_agent(
     socket_path: Annotated[
         Optional[str],
@@ -43,8 +37,6 @@ def cli_zfs_agent(
     of containerized clients that lack local ZFS tools.
     """
     settings = Settings()
-    configure_logging(level=settings.log_level)
-
     sock_path = socket_path or settings.zfs_socket
     if not sock_path:
         console.print(
@@ -58,7 +50,10 @@ def cli_zfs_agent(
 
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(sock_path)
+    os.chmod(sock_path, 0o666)
     server.listen(5)
+
+    log.info("zfs-agent listening", socket=sock_path, prefix=prefix)
 
     def _shutdown(_signum, _frame):
         log.info("Shutting down zfs-agent")
@@ -69,8 +64,6 @@ def cli_zfs_agent(
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
-
-    log.info("zfs-agent listening", socket=sock_path, prefix=prefix)
 
     try:
         while True:

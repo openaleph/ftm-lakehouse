@@ -1,5 +1,6 @@
 """ZFS socket agent: server-side request validation and handling."""
 
+import re
 import socket
 
 import orjson
@@ -11,17 +12,35 @@ from ftm_lakehouse.core.zfs.helpers import zfs_create_local
 log = get_logger(__name__)
 
 
+_ZFS_COMPONENT_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+
+
 def validate_dataset(dataset: str, allowed_prefix: str | None) -> str | None:
-    """Validate a ZFS dataset path. Returns an error string or None if valid."""
+    """Validate a ZFS dataset path. Returns an error string or None if valid.
+
+    Only the leaf (last) path component is checked with ``dataset_name_check``
+    (FTM dataset naming rules).  Parent components use permissive ZFS naming
+    rules (alphanumeric, hyphens, dots, underscores).
+    """
     if not dataset:
         return "empty dataset name"
     if ".." in dataset:
         return f"path traversal not allowed: {dataset!r}"
-    for part in dataset.split("/"):
-        try:
-            dataset_name_check(part)
-        except ValueError:
+
+    parts = dataset.split("/")
+
+    # Parent components: permissive ZFS naming
+    for part in parts[:-1]:
+        if not _ZFS_COMPONENT_RE.match(part):
             return f"invalid path component: {part!r}"
+
+    # Leaf component: strict FTM dataset name
+    leaf = parts[-1]
+    try:
+        dataset_name_check(leaf)
+    except ValueError:
+        return f"invalid dataset name: {leaf!r}"
+
     if allowed_prefix and not dataset.startswith(allowed_prefix):
         return f"dataset {dataset!r} not under allowed prefix {allowed_prefix!r}"
     return None

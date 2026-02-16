@@ -25,8 +25,11 @@ class TestValidateDataset:
     def test_empty_name(self):
         assert validate_dataset("", None) is not None
 
-    def test_invalid_chars(self):
+    def test_invalid_chars_in_leaf(self):
         assert validate_dataset("tank/ds; rm -rf /", None) is not None
+
+    def test_invalid_chars_in_parent(self):
+        assert validate_dataset("tank/ds; rm/leaf", None) is not None
 
     def test_path_traversal(self):
         assert validate_dataset("tank/../etc/shadow", None) is not None
@@ -36,11 +39,20 @@ class TestValidateDataset:
         assert err is not None
         assert "not under allowed prefix" in err
 
-    def test_uppercase_rejected(self):
-        assert validate_dataset("Tank/Lakehouse", None) is not None
+    def test_hyphens_allowed_in_parents(self):
+        assert validate_dataset("tank/lakehouse-dev/my_dataset", None) is None
 
-    def test_hyphens_rejected(self):
+    def test_dots_allowed_in_parents(self):
+        assert validate_dataset("tank/lake.house/my_dataset", None) is None
+
+    def test_uppercase_allowed_in_parents(self):
+        assert validate_dataset("Tank/Lakehouse/my_dataset", None) is None
+
+    def test_hyphens_rejected_in_leaf(self):
         assert validate_dataset("tank/my-dataset", None) is not None
+
+    def test_uppercase_rejected_in_leaf(self):
+        assert validate_dataset("tank/MyDataset", None) is not None
 
 
 # --- Request handler tests ---

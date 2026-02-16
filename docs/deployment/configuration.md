@@ -11,6 +11,7 @@
 | `LAKEHOUSE_URI` | Base path to lakehouse storage | `./data` |
 | `LAKEHOUSE_JOURNAL_URI` | SQLAlchemy URI for statement journal | `sqlite:///:memory:` |
 | `LAKEHOUSE_ON_ZFS` | Enable ZFS dataset creation for local storage | `false` |
+| `LAKEHOUSE_ZFS_POOL` | ZFS dataset path for the lakehouse root (e.g. `zpools/tank/lakehouse`) | (required when `ON_ZFS` is enabled) |
 | `LAKEHOUSE_ZFS_SOCKET` | Unix socket path for remote ZFS operations (see [ZFS Integration](zfs.md)) | (unset) |
 | `LOG_LEVEL` | Logging level (DEBUG, INFO, WARNING, ERROR) | `INFO` |
 | `DEBUG` | Enable debug mode | `false` |
