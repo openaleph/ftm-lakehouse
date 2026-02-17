@@ -1,0 +1,63 @@
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: lakehouse
+      POSTGRES_PASSWORD: lakehouse
+      POSTGRES_DATABASE: lakehouse
+    ports:
+      - 5432:5432
+
+  api:
+    build: .
+    command: >-
+      granian --interface asgi --host 0.0.0.0 --port 5000
+      --workers 4
+      --runtime-mode mt
+      --loop uvloop
+      --backpressure 16
+      --http 1
+      --no-ws
+      --log --log-level warning
+      ftm_lakehouse.api:app
+    environment:
+      LAKEHOUSE_URI: /data
+      LAKEHOUSE_JOURNAL_URI: postgresql://lakehouse:lakehouse@postgres/lakehouse
+      LAKEHOUSE_API_AUTH_ENABLED: 0
+    volumes:
+      - ./data:/data
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - 8000:80
+    volumes:
+      - ./data:/data:ro
+    configs:
+      - source: nginx_conf
+        target: /etc/nginx/nginx.conf
+
+configs:
+  nginx_conf:
+    content: |
+      worker_processes auto;
+      events {}
+      http {
+        include mime.types;
+        upstream api {
+          server api:5000;
+        }
+        server {
+          listen 80;
+          location / {
+            root /data;
+            try_files $uri @api;
+          }
+          location @api {
+            proxy_pass http://api;
+          }
+          location ~* /_api(/|$$) {
+            proxy_pass http://api;
+          }
+        }
+      }

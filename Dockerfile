@@ -1,15 +1,15 @@
-FROM ghcr.io/dataresearchcenter/ftmq:latest
+FROM python:3.13-slim
 
+RUN apt-get update && apt-get install -y git pkg-config libicu-dev build-essential && rm -rf /var/lib/apt/lists/*
 
 COPY ftm_lakehouse /src/ftm_lakehouse
-COPY setup.py /src/setup.py
-COPY README.md /src/README.md
-COPY pyproject.toml /src/pyproject.toml
-COPY VERSION /src/VERSION
-COPY LICENSE /src/LICENSE
-COPY NOTICE /src/NOTICE
+COPY setup.py pyproject.toml README.md VERSION LICENSE NOTICE /src/
 
 WORKDIR /src
-RUN pip install --no-cache-dir -q "."
+RUN pip install --no-cache-dir psycopg2-binary
+RUN pip install --no-cache-dir -q ".[api]"
+RUN pip install --no-cache-dir --force-reinstall --no-deps \
+    "ftmq[lake] @ git+https://github.com/dataresearchcenter/ftmq.git" \
+    "anystore @ git+https://github.com/dataresearchcenter/anystore.git"
 
-ENTRYPOINT ["ftm-lakehouse"]
+ENTRYPOINT [""]
