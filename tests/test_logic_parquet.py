@@ -1,4 +1,4 @@
-"""Unit tests for ftm_lakehouse.logic.parquet — sidecar-aware query functions."""
+"""Unit tests for ftm_lakehouse.logic.parquet — translog-aware query functions."""
 
 from datetime import datetime, timezone
 
@@ -8,8 +8,8 @@ from deltalake import DeltaTable, write_deltalake
 from ftmq.query import Query
 from ftmq.store.lake import ARROW_SCHEMA, compile_query
 
-from ftm_lakehouse.logic.parquet import sidecar_aware_sql
-from ftm_lakehouse.storage.parquet import PARTITIONS, SIDECAR_SCHEMA
+from ftm_lakehouse.logic.parquet import translog_aware_sql
+from ftm_lakehouse.storage.parquet import PARTITIONS, TRANSLOG_SCHEMA
 
 
 def _make_row(
@@ -57,20 +57,20 @@ def _write_rows(path: str, rows: list[dict], partition_by: list[str] | None = No
     return DeltaTable(path)
 
 
-def _write_sidecar(path: str, rows: list[dict]):
-    """Write sidecar metadata rows."""
-    table = pa.Table.from_pylist(rows, schema=SIDECAR_SCHEMA)
+def _write_translog(path: str, rows: list[dict]):
+    """Write translog metadata rows."""
+    table = pa.Table.from_pylist(rows, schema=TRANSLOG_SCHEMA)
     write_deltalake(path, table, mode="append", schema_mode="merge")
     return DeltaTable(path)
 
 
-def _make_sidecar_row(
+def _make_translog_row(
     stmt_id: str,
     first_seen: datetime | None = None,
     last_seen: datetime | None = None,
     deleted_at: datetime | None = None,
 ) -> dict:
-    """Build a sidecar metadata row."""
+    """Build a translog metadata row."""
     ts = first_seen or datetime(2024, 1, 1, tzinfo=timezone.utc)
     return {
         "id": stmt_id,
@@ -80,10 +80,10 @@ def _make_sidecar_row(
     }
 
 
-def test_sidecar_aware_sql_filters_deleted(tmp_path):
-    """Deleted rows (deleted_at set in sidecar) are excluded from queries."""
+def test_translog_aware_sql_filters_deleted(tmp_path):
+    """Deleted rows (deleted_at set in translog) are excluded from queries."""
     main_uri = str(tmp_path / "main")
-    sidecar_uri = str(tmp_path / "sidecar")
+    translog_uri = str(tmp_path / "translog")
 
     rows = [
         _make_row("jane", "name", "Jane Doe"),
@@ -91,22 +91,22 @@ def test_sidecar_aware_sql_filters_deleted(tmp_path):
     ]
     dt = _write_rows(main_uri, rows)
 
-    # Sidecar: jane is deleted, john is live
-    sidecar_rows = [
-        _make_sidecar_row(
+    # Translog: jane is deleted, john is live
+    translog_rows = [
+        _make_translog_row(
             "jane-name-Jane Doe", deleted_at=datetime(2025, 1, 1, tzinfo=timezone.utc)
         ),
-        _make_sidecar_row("john-name-John Smith"),
+        _make_translog_row("john-name-John Smith"),
     ]
-    sidecar_dt = _write_sidecar(sidecar_uri, sidecar_rows)
+    translog_dt = _write_translog(translog_uri, translog_rows)
 
     compiled = compile_query(Query().sql.statements)
 
-    sql = sidecar_aware_sql(compiled, dt)
+    sql = translog_aware_sql(compiled, dt)
 
     con = duckdb.connect()
     con.register("arrow", dt.to_pyarrow_dataset())
-    con.register("sidecar", sidecar_dt.to_pyarrow_dataset())
+    con.register("translog", translog_dt.to_pyarrow_dataset())
     result = con.execute(sql).fetchall()
 
     entity_ids = {r[1] for r in result}  # entity_id is second column
@@ -114,46 +114,46 @@ def test_sidecar_aware_sql_filters_deleted(tmp_path):
     assert "john" in entity_ids
 
 
-def test_sidecar_aware_sql_uses_sidecar_timestamps(tmp_path):
-    """Sidecar first_seen/last_seen overrides main table values."""
+def test_translog_aware_sql_uses_translog_timestamps(tmp_path):
+    """Translog first_seen/last_seen overrides main table values."""
     main_uri = str(tmp_path / "main")
-    sidecar_uri = str(tmp_path / "sidecar")
+    translog_uri = str(tmp_path / "translog")
 
     main_ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
     rows = [_make_row("jane", "name", "Jane Doe", last_seen=main_ts)]
     dt = _write_rows(main_uri, rows)
 
-    sidecar_ts = datetime(2025, 6, 15, tzinfo=timezone.utc)
-    sidecar_rows = [
-        _make_sidecar_row(
-            "jane-name-Jane Doe", first_seen=main_ts, last_seen=sidecar_ts
+    translog_ts = datetime(2025, 6, 15, tzinfo=timezone.utc)
+    translog_rows = [
+        _make_translog_row(
+            "jane-name-Jane Doe", first_seen=main_ts, last_seen=translog_ts
         ),
     ]
-    sidecar_dt = _write_sidecar(sidecar_uri, sidecar_rows)
+    translog_dt = _write_translog(translog_uri, translog_rows)
 
     compiled = compile_query(Query().sql.statements)
 
-    sql = sidecar_aware_sql(compiled, dt)
+    sql = translog_aware_sql(compiled, dt)
 
     con = duckdb.connect()
     con.register("arrow", dt.to_pyarrow_dataset())
-    con.register("sidecar", sidecar_dt.to_pyarrow_dataset())
+    con.register("translog", translog_dt.to_pyarrow_dataset())
     result = con.execute(sql)
     rows_out = result.fetchall()
     cols = [desc[0] for desc in result.description]
 
     assert len(rows_out) == 1
     row_dict = dict(zip(cols, rows_out[0]))
-    # last_seen should come from sidecar (DuckDB may strip tzinfo)
+    # last_seen should come from translog (DuckDB may strip tzinfo)
     result_ts = row_dict["last_seen"]
-    expected_ts = sidecar_ts.replace(tzinfo=None)
+    expected_ts = translog_ts.replace(tzinfo=None)
     assert result_ts == expected_ts
 
 
-def test_sidecar_aware_sql_no_deletes(tmp_path):
-    """All rows visible when sidecar has no deletions."""
+def test_translog_aware_sql_no_deletes(tmp_path):
+    """All rows visible when translog has no deletions."""
     main_uri = str(tmp_path / "main")
-    sidecar_uri = str(tmp_path / "sidecar")
+    translog_uri = str(tmp_path / "translog")
 
     rows = [
         _make_row("jane", "name", "Jane Doe"),
@@ -162,20 +162,20 @@ def test_sidecar_aware_sql_no_deletes(tmp_path):
     ]
     dt = _write_rows(main_uri, rows)
 
-    sidecar_rows = [
-        _make_sidecar_row("jane-name-Jane Doe"),
-        _make_sidecar_row("jane-firstName-Jane"),
-        _make_sidecar_row("john-name-John Smith"),
+    translog_rows = [
+        _make_translog_row("jane-name-Jane Doe"),
+        _make_translog_row("jane-firstName-Jane"),
+        _make_translog_row("john-name-John Smith"),
     ]
-    sidecar_dt = _write_sidecar(sidecar_uri, sidecar_rows)
+    translog_dt = _write_translog(translog_uri, translog_rows)
 
     compiled = compile_query(Query().sql.statements)
 
-    sql = sidecar_aware_sql(compiled, dt)
+    sql = translog_aware_sql(compiled, dt)
 
     con = duckdb.connect()
     con.register("arrow", dt.to_pyarrow_dataset())
-    con.register("sidecar", sidecar_dt.to_pyarrow_dataset())
+    con.register("translog", translog_dt.to_pyarrow_dataset())
     result = con.execute(sql).fetchall()
 
     assert len(result) == 3

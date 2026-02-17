@@ -1,4 +1,4 @@
-"""ParquetStore - Delta Lake statement parquet storage with sidecar metadata."""
+"""ParquetStore - Delta Lake statement parquet storage with translog metadata."""
 
 from datetime import datetime
 from typing import Any, Generator, Iterator
@@ -28,21 +28,21 @@ from ftm_lakehouse.core.api import LakehouseApiMixin, no_api
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.logic.entities import aggregate_unsafe
 from ftm_lakehouse.logic.parquet import (
-    compact_with_sidecar,
-    filter_live_sidecar,
+    compact_with_translog,
+    filter_live_translog,
 )
 from ftm_lakehouse.logic.parquet import (
     get_deleted_entity_ids as _get_deleted_entity_ids,
 )
 from ftm_lakehouse.logic.parquet import (
-    query_duckdb_sidecar,
-    stream_duckdb_sidecar,
+    query_duckdb_translog,
+    stream_duckdb_translog,
 )
 
 # Use same partitions as ftmq but exclude dataset (handled at directory level)
 PARTITIONS = ["bucket", "origin"]
 
-SIDECAR_SCHEMA = pa.schema(
+TRANSLOG_SCHEMA = pa.schema(
     [
         pa.field("id", pa.string()),
         pa.field("first_seen", pa.timestamp("us")),
@@ -52,16 +52,16 @@ SIDECAR_SCHEMA = pa.schema(
 )
 
 
-class SidecarStore(LakehouseApiMixin):
-    """Manages a lightweight sidecar Delta table for per-statement metadata.
+class TranslogStore(LakehouseApiMixin):
+    """Manages a lightweight translog Delta table for per-statement metadata.
 
     Tracks first_seen, last_seen, and deleted_at per statement ID.
-    The main parquet table stores immutable FtM statements; the sidecar
+    The main parquet table stores immutable FtM statements; the translog
     provides mutable metadata via Delta Lake MERGE operations.
     """
 
     def __init__(self, uri: Uri, dataset: str) -> None:
-        self.uri = join_uri(uri, path.SIDECAR)
+        self.uri = join_uri(uri, path.TRANSLOG)
         super().__init__(self.uri)
         self.dataset = dataset
         setup_duckdb_storage()
@@ -80,7 +80,7 @@ class SidecarStore(LakehouseApiMixin):
 
     @no_api
     def upsert(self, table: pa.Table) -> None:
-        """Insert or update sidecar rows. Updates last_seen on conflict."""
+        """Insert or update translog rows. Updates last_seen on conflict."""
         if not self.exists:
             write_deltalake(
                 str(self.uri),
@@ -108,7 +108,7 @@ class SidecarStore(LakehouseApiMixin):
 
     @no_api
     def mark_deleted(self, table: pa.Table) -> None:
-        """Set deleted_at on existing sidecar rows.
+        """Set deleted_at on existing translog rows.
 
         Args:
             table: PyArrow table with columns (id, deleted_at)
@@ -132,11 +132,11 @@ class SidecarStore(LakehouseApiMixin):
 
     @no_api
     def compact(self) -> None:
-        """Remove deleted entries from sidecar."""
+        """Remove deleted entries from translog."""
         if not self.exists:
             return
 
-        live = filter_live_sidecar(self.deltatable)
+        live = filter_live_translog(self.deltatable)
         write_deltalake(
             str(self.uri),
             live,
@@ -146,28 +146,28 @@ class SidecarStore(LakehouseApiMixin):
         )
 
 
-class SidecarAwareLakeStore(LakeStore, LakehouseApiMixin):
-    """LakeStore subclass that joins with sidecar for timestamps and soft deletes.
+class TranslogAwareLakeStore(LakeStore, LakehouseApiMixin):
+    """LakeStore subclass that joins with translog for timestamps and soft deletes.
 
-    All queries join the main table with the sidecar to get accurate
+    All queries join the main table with the translog to get accurate
     first_seen/last_seen and filter deleted rows (deleted_at IS NOT NULL).
-    Falls back to standard stream_duckdb when sidecar doesn't exist yet.
+    Falls back to standard stream_duckdb when translog doesn't exist yet.
     """
 
-    def __init__(self, *args, sidecar: SidecarStore, **kwargs) -> None:
+    def __init__(self, *args, translog: TranslogStore, **kwargs) -> None:
         LakeStore.__init__(self, *args, **kwargs)
         LakehouseApiMixin.__init__(self, self.uri)
-        self._sidecar = sidecar
+        self._translog = translog
 
     def _execute(self, q: Select, stream: bool = True) -> Generator[Any, None, None]:
         try:
             dt = self.deltatable
         except TableNotFoundError:
             return
-        if not self._sidecar.exists:
+        if not self._translog.exists:
             yield from stream_duckdb(q, dt)
             return
-        yield from stream_duckdb_sidecar(q, dt, self._sidecar.deltatable)
+        yield from stream_duckdb_translog(q, dt, self._translog.deltatable)
 
 
 class ParquetStore(LakehouseApiMixin):
@@ -177,7 +177,7 @@ class ParquetStore(LakehouseApiMixin):
     Wraps ftmq's LakeStore to provide statement storage with:
     - Partitioned parquet files (by bucket, origin)
     - Delta Lake transaction log for versioning
-    - Sidecar metadata table for timestamps and soft deletes
+    - Translog metadata table for timestamps and soft deletes
     - Change data capture (CDC) support
     - Efficient querying via DuckDB
 
@@ -190,12 +190,12 @@ class ParquetStore(LakehouseApiMixin):
         self.uri = join_uri(uri, path.STATEMENTS)
         super().__init__(self.uri)
         self.dataset = dataset
-        self._sidecar = SidecarStore(uri, dataset)
-        self._store = SidecarAwareLakeStore(
+        self._translog = TranslogStore(uri, dataset)
+        self._store = TranslogAwareLakeStore(
             uri=self.uri,
             dataset=dataset,
             partition_by=PARTITIONS,
-            sidecar=self._sidecar,
+            translog=self._translog,
         )
         self.log = get_logger(
             f"{self.dataset}.{self.__class__.__name__}",
@@ -211,11 +211,11 @@ class ParquetStore(LakehouseApiMixin):
             return self._store.deltatable.version()
 
     @property
-    def sidecar_version(self) -> int | None:
-        """Current version of the sidecar Delta table."""
-        if not self._sidecar.exists:
+    def translog_version(self) -> int | None:
+        """Current version of the translog Delta table."""
+        if not self._translog.exists:
             return None
-        return self._sidecar.deltatable.version()
+        return self._translog.deltatable.version()
 
     @property
     def exists(self) -> bool:
@@ -278,8 +278,8 @@ class ParquetStore(LakehouseApiMixin):
         self._store._backend.ensure_parent(output_uri)
         dt = self._store.deltatable
         q = Query().sql.statements
-        if self._sidecar.exists:
-            db, _ = query_duckdb_sidecar(q, dt, self._sidecar.deltatable)
+        if self._translog.exists:
+            db, _ = query_duckdb_translog(q, dt, self._translog.deltatable)
         else:
             db = query_duckdb(q, dt)
         db.write_csv(output_uri)
@@ -301,11 +301,11 @@ class ParquetStore(LakehouseApiMixin):
         if q is None:
             q = Query().sql.statements
 
-        if self._sidecar.exists:
-            rel, con = query_duckdb_sidecar(q, dt, self._sidecar.deltatable)
+        if self._translog.exists:
+            rel, con = query_duckdb_translog(q, dt, self._translog.deltatable)
         else:
             rel = query_duckdb(q, dt)
-            con = None  # noqa: F841 — prevent GC of sidecar connection
+            con = None  # noqa: F841 — prevent GC of translog connection
 
         columns = rel.columns
         yield from aggregate_unsafe(
@@ -316,16 +316,16 @@ class ParquetStore(LakehouseApiMixin):
 
     @no_api
     def compact(self) -> None:
-        """Apply sidecar to main table: remove deleted rows, update timestamps.
+        """Apply translog to main table: remove deleted rows, update timestamps.
 
         After compact the main table is self-contained (accurate first_seen/
-        last_seen, no deleted rows) and the sidecar only contains live entries.
+        last_seen, no deleted rows) and the translog only contains live entries.
         Caller should call optimize() afterwards for file compaction.
         """
-        if not self._sidecar.exists:
+        if not self._translog.exists:
             return
 
-        live = compact_with_sidecar(self._store.deltatable, self._sidecar.deltatable)
+        live = compact_with_translog(self._store.deltatable, self._translog.deltatable)
 
         write_deltalake(
             str(self.uri),
@@ -337,15 +337,17 @@ class ParquetStore(LakehouseApiMixin):
             configuration={"delta.enableChangeDataFeed": "true"},
         )
 
-        self._sidecar.compact()
+        self._translog.compact()
 
     @no_api
     def get_deleted_entity_ids(self) -> set[str]:
-        """Get entity IDs that have been soft-deleted via sidecar."""
-        if not self._sidecar.exists:
+        """Get entity IDs that have been soft-deleted via translog."""
+        if not self._translog.exists:
             return set()
 
-        return _get_deleted_entity_ids(self._store.deltatable, self._sidecar.deltatable)
+        return _get_deleted_entity_ids(
+            self._store.deltatable, self._translog.deltatable
+        )
 
     @no_api
     def get_changes(

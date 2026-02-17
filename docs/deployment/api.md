@@ -114,7 +114,7 @@ Available operations:
 | Job name | Description |
 |----------|-------------|
 | [`CrawlJob`](../reference/operation.md#ftm_lakehouse.operation.crawl.CrawlJob) | Batch file ingestion from a source URI |
-| [`OptimizeJob`](../reference/operation.md#ftm_lakehouse.operation.optimize.OptimizeJob) | Compact parquet files, optional vacuum and sidecar apply |
+| [`OptimizeJob`](../reference/operation.md#ftm_lakehouse.operation.optimize.OptimizeJob) | Compact parquet files, optional vacuum and translog apply |
 | [`ExportStatementsJob`](../reference/operation.md#ftm_lakehouse.operation.export.ExportStatementsJob) | Export to `statements.csv` |
 | [`ExportEntitiesJob`](../reference/operation.md#ftm_lakehouse.operation.export.ExportEntitiesJob) | Export to `entities.ftm.json` |
 | [`ExportStatisticsJob`](../reference/operation.md#ftm_lakehouse.operation.export.ExportStatisticsJob) | Export to `statistics.json` |

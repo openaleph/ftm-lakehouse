@@ -44,26 +44,26 @@ for entity in map_entities(mapping, csv_path):
         heading_level: 3
         show_root_heading: true
 
-## Sidecar-Aware Parquet Operations
+## Translog-Aware Parquet Operations
 
-Pure DuckDB/PyArrow functions that operate on the main statement table and sidecar metadata table. Used internally by `ParquetStore`, `SidecarStore`, and `SidecarAwareLakeStore`.
+Pure DuckDB/PyArrow functions that operate on the main statement table and translog metadata table. Used internally by `ParquetStore`, `TranslogStore`, and `TranslogAwareLakeStore`.
 
-::: ftm_lakehouse.logic.parquet.sidecar_aware_sql
+::: ftm_lakehouse.logic.parquet.translog_aware_sql
     options:
         heading_level: 3
         show_root_heading: true
 
-::: ftm_lakehouse.logic.parquet.stream_duckdb_sidecar
+::: ftm_lakehouse.logic.parquet.stream_duckdb_translog
     options:
         heading_level: 3
         show_root_heading: true
 
-::: ftm_lakehouse.logic.parquet.query_duckdb_sidecar
+::: ftm_lakehouse.logic.parquet.query_duckdb_translog
     options:
         heading_level: 3
         show_root_heading: true
 
-::: ftm_lakehouse.logic.parquet.compact_with_sidecar
+::: ftm_lakehouse.logic.parquet.compact_with_translog
     options:
         heading_level: 3
         show_root_heading: true
@@ -73,7 +73,7 @@ Pure DuckDB/PyArrow functions that operate on the main statement table and sidec
         heading_level: 3
         show_root_heading: true
 
-::: ftm_lakehouse.logic.parquet.filter_live_sidecar
+::: ftm_lakehouse.logic.parquet.filter_live_translog
     options:
         heading_level: 3
         show_root_heading: true

@@ -40,7 +40,7 @@ from ftm_lakehouse.storage import ParquetStore
 from ftm_lakehouse.storage.journal import get_journal
 from ftm_lakehouse.storage.journal.base import BaseJournalWriter
 from ftm_lakehouse.storage.journal.sql import SqlJournalStore
-from ftm_lakehouse.storage.parquet import PARTITIONS, SIDECAR_SCHEMA
+from ftm_lakehouse.storage.parquet import PARTITIONS, TRANSLOG_SCHEMA
 from ftm_lakehouse.util import make_envelope
 
 settings = Settings()
@@ -126,9 +126,9 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         Flush statements from journal to parquet store.
 
         Uses dedup logic:
-        - New statements (not in main table): append to main + insert into sidecar
-        - Duplicate statements (already in main): update sidecar last_seen only
-        - Tombstones (deleted_at set): update sidecar deleted_at only
+        - New statements (not in main table): append to main + insert into translog
+        - Duplicate statements (already in main): update translog last_seen only
+        - Tombstones (deleted_at set): update translog deleted_at only
 
         Returns:
             Number of new statements flushed to the main table
@@ -194,9 +194,9 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
     ) -> int:
         """Write a partition batch with three-way split.
 
-        1. Tombstones → sidecar mark_deleted only
-        2. New rows (anti-join with existing IDs) → write main table + sidecar upsert
-        3. Duplicate rows (semi-join) → sidecar upsert only (updates last_seen)
+        1. Tombstones → translog mark_deleted only
+        2. New rows (anti-join with existing IDs) → write main table + translog upsert
+        3. Duplicate rows (semi-join) → translog upsert only (updates last_seen)
 
         Returns:
             Number of new rows written to main table
@@ -207,7 +207,7 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         tombstones = [r for r in batch if r.get("_deleted_at") is not None]
         live = [r for r in batch if r.get("_deleted_at") is None]
 
-        # Handle tombstones → sidecar only
+        # Handle tombstones → translog only
         if tombstones:
             tomb_ids = [r["id"] for r in tombstones]
             tomb_deleted_at = [r["_deleted_at"] for r in tombstones]
@@ -217,12 +217,12 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
                     "deleted_at": pa.array(tomb_deleted_at, type=pa.timestamp("us")),
                 }
             )
-            self._statements._sidecar.mark_deleted(tomb_table)
+            self._statements._translog.mark_deleted(tomb_table)
 
         if not live:
             return 0
 
-        # Build sidecar rows for all live statements
+        # Build translog rows for all live statements
         live_ids = [r["id"] for r in live]
         live_first_seen = [r.get("first_seen") or now for r in live]
         live_last_seen = [r.get("last_seen") or now for r in live]
@@ -245,17 +245,17 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
             # First flush — all rows are new
             new_rows = live
 
-        # Upsert all live rows into sidecar (new + dupes)
-        sidecar_table = pa.table(
+        # Upsert all live rows into translog (new + dupes)
+        translog_table = pa.table(
             {
                 "id": pa.array(live_ids, type=pa.string()),
                 "first_seen": pa.array(live_first_seen, type=pa.timestamp("us")),
                 "last_seen": pa.array(live_last_seen, type=pa.timestamp("us")),
                 "deleted_at": pa.array([None] * len(live_ids), type=pa.timestamp("us")),
             },
-            schema=SIDECAR_SCHEMA,
+            schema=TRANSLOG_SCHEMA,
         )
-        self._statements._sidecar.upsert(sidecar_table)
+        self._statements._translog.upsert(translog_table)
 
         # Write only new rows to main table
         if new_rows:
@@ -393,24 +393,24 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
     def _collect_entity_statements(self, entity_id: str) -> list[Statement]:
         """Read all statements for an entity from parquet + journal.
 
-        Uses sidecar join when available to filter already-deleted statements.
+        Uses translog join when available to filter already-deleted statements.
         """
         stmts_by_id: dict[str, Statement] = {}
         journal = cast(SqlJournalStore, self._journal)
 
-        # Read from parquet (with sidecar filtering if available)
+        # Read from parquet (with translog filtering if available)
         if self._statements.exists:
             dt = self._statements._store.deltatable
-            sidecar = self._statements._sidecar
+            translog = self._statements._translog
 
-            if sidecar.exists:
-                sidecar_dt = sidecar.deltatable
+            if translog.exists:
+                translog_dt = translog.deltatable
                 con = duckdb.connect()
                 con.register("arrow", dt.to_pyarrow_dataset())
-                con.register("sidecar", sidecar_dt.to_pyarrow_dataset())
+                con.register("translog", translog_dt.to_pyarrow_dataset())
                 result = con.sql(
                     "SELECT arrow.* FROM arrow "
-                    "JOIN sidecar sc ON arrow.id = sc.id "
+                    "JOIN translog sc ON arrow.id = sc.id "
                     "WHERE sc.deleted_at IS NULL "
                     f"AND arrow.entity_id = '{entity_id}'"
                 )

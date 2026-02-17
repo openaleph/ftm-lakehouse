@@ -105,7 +105,7 @@ Same as add entity - statements are written to the journal.
 
 - Sets `journal/last_updated` tag
 
-On flush, tombstones are routed to the sidecar table, marking the statements as deleted. All subsequent queries exclude these statements automatically.
+On flush, tombstones are routed to the translog table, marking the statements as deleted. All subsequent queries exclude these statements automatically.
 
 ### Delete statement
 
@@ -245,7 +245,7 @@ Queue items are ordered by UUID7 (time-based). Consumers pop items and execute c
 
 These are triggered by the lakehouse, not directly by tenants.
 
-### Flush (journal → parquet + sidecar)
+### Flush (journal → parquet + translog)
 
 **Trigger:** Explicit call or automatic before query/export via `ensure_flush()`
 
@@ -254,9 +254,9 @@ These are triggered by the lakehouse, not directly by tenants.
 1. Read statements from journal ordered by (bucket, origin, canonical_id)
 2. Build a temp table of existing statement IDs from the main parquet table
 3. For each batch, split into three categories:
-    - **New statements** (not in main table): append to main parquet + insert into sidecar
-    - **Duplicate statements** (already in main table): update sidecar `last_seen` only
-    - **Tombstones** (deleted_at set): update sidecar `deleted_at` only
+    - **New statements** (not in main table): append to main parquet + insert into translog
+    - **Duplicate statements** (already in main table): update translog `last_seen` only
+    - **Tombstones** (deleted_at set): update translog `deleted_at` only
 4. Clear flushed entries from journal
 
 **Returns:** Number of new statements written to the main table (duplicates and tombstones return 0)
@@ -266,20 +266,20 @@ These are triggered by the lakehouse, not directly by tenants.
 - Always sets `journal/last_flushed` tag
 - Sets `statements/last_updated` tag (only if data was flushed)
 
-### Compact (apply sidecar to main table)
+### Compact (apply translog to main table)
 
 **Trigger:** Explicit call
 
 **Process:**
 
-1. Join main table with sidecar, keeping only live rows (`deleted_at IS NULL`)
-2. Overwrite main table with the result (accurate `first_seen`/`last_seen` from sidecar, deleted rows removed)
-3. Remove deleted entries from sidecar
+1. Join main table with translog, keeping only live rows (`deleted_at IS NULL`)
+2. Overwrite main table with the result (accurate `first_seen`/`last_seen` from translog, deleted rows removed)
+3. Remove deleted entries from translog
 
 After compact, the main table is self-contained. This is a destructive operation — it rewrites the main table.
 
 !!! note
-    Compaction is optional. The sidecar join handles filtering automatically during queries. Compact when you want to reclaim space or produce a standalone table.
+    Compaction is optional. The translog join handles filtering automatically during queries. Compact when you want to reclaim space or produce a standalone table.
 
 ### Optimize (compact parquet files)
 
@@ -395,7 +395,7 @@ flowchart TD
     AR --> |"create Document"| B
 
     B --> |"flush()"| C[(Parquet Store)]
-    B --> |"flush()"| SC[(Sidecar)]
+    B --> |"flush()"| SC[(Translog)]
     SC --> |"timestamps + deletes"| C
     C --> |"export_statements()"| D[statements.csv]
     C --> |"export_entities()"| E[entities.ftm.json]
@@ -448,7 +448,7 @@ lakehouse/
     │   ├── statements/           # Delta Lake parquet store (immutable FtM data)
     │   │   └── origin={origin}/
     │   │       └── *.parquet
-    │   └── sidecar/              # Sidecar metadata table (mutable)
+    │   └── translog/              # Translog metadata table (mutable)
     │       └── *.parquet         # Tracks first_seen, last_seen, deleted_at per statement
     │
     ├── entities.ftm.json         # Aggregated entities export

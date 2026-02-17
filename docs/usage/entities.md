@@ -215,17 +215,17 @@ dataset.entities.flush()
 
 ## Deduplication
 
-When flushing, `ftm-lakehouse` automatically deduplicates statements. If the same statement (same `id`) is written again, only the sidecar metadata (`last_seen` timestamp) is updated — no duplicate rows are added to the main table.
+When flushing, `ftm-lakehouse` automatically deduplicates statements. If the same statement (same `id`) is written again, only the translog metadata (`last_seen` timestamp) is updated — no duplicate rows are added to the main table.
 
 ```python
 dataset.entities.add(entity)
-dataset.entities.flush()  # writes to main table + sidecar
+dataset.entities.flush()  # writes to main table + translog
 
 dataset.entities.add(entity)  # same entity again
-dataset.entities.flush()  # returns 0 — only updates sidecar last_seen
+dataset.entities.flush()  # returns 0 — only updates translog last_seen
 ```
 
-This means repeated imports of the same data are cheap: the main parquet table doesn't grow, and only the lightweight sidecar is updated.
+This means repeated imports of the same data are cheap: the main parquet table doesn't grow, and only the lightweight translog is updated.
 
 ## Maintenance
 
@@ -243,14 +243,14 @@ print(f"Flushed {count} new statements")
 
 ### Compact
 
-Compaction applies the sidecar to the main table: deleted rows are removed and timestamps are updated. After compaction, the main table is self-contained.
+Compaction applies the translog to the main table: deleted rows are removed and timestamps are updated. After compaction, the main table is self-contained.
 
 ```python
 from ftm_lakehouse import get_dataset
 
 dataset = get_dataset("my_dataset")
 
-# Apply sidecar to main table
+# Apply translog to main table
 dataset.entities.compact()
 
 # Follow up with optimize to compact parquet files
@@ -258,7 +258,7 @@ dataset.entities.optimize()
 ```
 
 !!! note
-    Compaction is optional. Queries always join with the sidecar, so deleted
+    Compaction is optional. Queries always join with the translog, so deleted
     entities are filtered automatically even without compaction. Compact when
     you want to reclaim space or produce a clean, standalone main table.
 

@@ -47,6 +47,7 @@ Dataset Layout
                 statements/                 # statement store (partitioned)
                     origin={origin}/
                         *.parquet
+                translog/                   # translog metadata table (mutable)
 
             entities.ftm.json               # aggregated entities export
 
@@ -225,8 +226,8 @@ ENTITIES_JSON = "entities.ftm.json"
 STATEMENTS = f"{ENTITIES}/statements"
 """Base path for storing statement data"""
 
-SIDECAR = f"{ENTITIES}/sidecar"
-"""Base path for sidecar metadata table"""
+TRANSLOG = f"{ENTITIES}/translog"
+"""Base path for translog metadata table"""
 
 
 def statement_origin(origin: str) -> str:

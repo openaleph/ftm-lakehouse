@@ -1,5 +1,5 @@
 """Tests for flush dedup: re-adding existing entities skips main table writes
-and updates sidecar last_seen."""
+and updates translog last_seen."""
 
 import time
 from pathlib import Path
@@ -52,7 +52,7 @@ def test_flush_dedup_no_new_rows(repo):
 
 
 def test_flush_dedup_query_returns_entity(repo):
-    """Entity is still queryable after dedup flush (sidecar join works)."""
+    """Entity is still queryable after dedup flush (translog join works)."""
     repo, _ = repo
 
     jane = EntityProxy.from_dict(JANE)
@@ -101,7 +101,7 @@ def test_flush_dedup_mixed_new_and_existing(repo):
 
 
 def test_flush_dedup_updates_last_seen(tmp_path):
-    """Re-adding an entity updates last_seen in the sidecar."""
+    """Re-adding an entity updates last_seen in the translog."""
     repo = _make_local_repo(tmp_path)
 
     jane = EntityProxy.from_dict(JANE)

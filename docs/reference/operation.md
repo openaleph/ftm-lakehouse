@@ -111,7 +111,7 @@ Process CSV-to-entity mapping configurations.
 
 ## OptimizeOperation
 
-Compact Delta Lake parquet files and optionally apply sidecar to main table.
+Compact Delta Lake parquet files and optionally apply translog to main table.
 
 ::: ftm_lakehouse.operation.optimize.OptimizeJob
     options:

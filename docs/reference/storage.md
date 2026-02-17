@@ -13,18 +13,18 @@ SQL statement buffer for write-ahead logging.
 
 ## ParquetStore
 
-Delta Lake parquet storage for statements. Uses a sidecar metadata table for tracking timestamps and soft deletes.
+Delta Lake parquet storage for statements. Uses a translog metadata table for tracking timestamps and soft deletes.
 
 ::: ftm_lakehouse.storage.ParquetStore
     options:
         heading_level: 3
         show_root_heading: true
 
-## SidecarStore
+## TranslogStore
 
 Lightweight Delta table for per-statement metadata (`first_seen`, `last_seen`, `deleted_at`). Used internally by ParquetStore.
 
-::: ftm_lakehouse.storage.parquet.SidecarStore
+::: ftm_lakehouse.storage.parquet.TranslogStore
     options:
         heading_level: 3
         show_root_heading: true

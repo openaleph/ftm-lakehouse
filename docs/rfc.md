@@ -63,7 +63,7 @@ lakehouse/
             statements/             # statement store (partitioned parquet, immutable FtM data)
                 origin={origin}/
                     *.parquet
-            sidecar/                # per-statement metadata (mutable, Delta Lake)
+            translog/                # per-statement metadata (mutable, Delta Lake)
                 *.parquet           # tracks first_seen, last_seen, deleted_at
 
         entities.ftm.json           # aggregated entities export
@@ -83,7 +83,7 @@ Some thoughts on this:
 
 - The entity data is not versioned here. In OpenSanctions, we're actually using a subfolder called `artifacts/[run_id]` to identify different ETL runs. This may not apply as well to Aleph, since it has no strong segregation of individual ETL runs.
     - In the current implementation for the [deltalake](https://delta-io.github.io/delta-rs/) statement store data is versioned, but the versions not necessarily match to specific ETL runs.
-- The **sidecar** table separates mutable metadata (timestamps, soft deletes) from the immutable statement parquet files. All queries join both tables, filtering out soft-deleted rows (`deleted_at IS NULL`) and using sidecar timestamps. Re-adding a previously deleted entity inserts a fresh sidecar row. Optional compaction applies the sidecar to the main table for a self-contained snapshot.
+- The **translog** table separates mutable metadata (timestamps, soft deletes) from the immutable statement parquet files. All queries join both tables, filtering out soft-deleted rows (`deleted_at IS NULL`) and using translog timestamps. Re-adding a previously deleted entity inserts a fresh translog row. Optional compaction applies the translog to the main table for a self-contained snapshot.
 - This still doesn't have a nice way to do garbage collection on the archive without refcounting on entities.
 - We may want the entity object structure in the lake to be a new format, e.g. with a `dataset` field and `statements` lists on each entity (instead of `properties`).
 

@@ -1,7 +1,7 @@
-"""Integration tests for soft delete operations via sidecar metadata table.
+"""Integration tests for soft delete operations via translog metadata table.
 
 Deletes are written through the journal WAL. On flush, tombstones are routed
-to the sidecar table (mark_deleted). SidecarAwareLakeStore joins main + sidecar
+to the translog table (mark_deleted). TranslogAwareLakeStore joins main + translog
 for all queries, filtering out deleted rows automatically.
 """
 
@@ -72,7 +72,7 @@ def test_delete_entity_filters_from_query(repo):
     count = repo.delete_entity("jane")
     assert count > 0
 
-    # Flush to parquet (tombstones are routed to sidecar)
+    # Flush to parquet (tombstones are routed to translog)
     repo.flush()
 
     # Query should exclude jane without compact
@@ -118,7 +118,7 @@ def test_delete_and_readd(repo):
         writer.add_entity(jane)
     repo.flush()
 
-    # Jane should be alive — sidecar upsert clears deleted_at via new insert
+    # Jane should be alive — translog upsert clears deleted_at via new insert
     entities = list(repo.query(flush_first=False))
     entity_ids = {e.id for e in entities}
     assert "jane" in entity_ids
@@ -217,8 +217,8 @@ def test_delete_entity_filters_from_export_csv(tmp_path):
         assert "john" in line
 
 
-def test_delete_then_compact_cleans_main_and_sidecar(tmp_path):
-    """Compact applies sidecar to main table: removes deleted rows, cleans sidecar."""
+def test_delete_then_compact_cleans_main_and_translog(tmp_path):
+    """Compact applies translog to main table: removes deleted rows, cleans translog."""
     repo = _make_local_repo(tmp_path)
     _populate(repo)
 
@@ -236,9 +236,9 @@ def test_delete_then_compact_cleans_main_and_sidecar(tmp_path):
     assert "jane" not in entity_ids
     assert "john" in entity_ids
 
-    # Sidecar should not contain jane's entries
-    sidecar_dt = repo._statements._sidecar.deltatable
-    rel = duckdb.arrow(sidecar_dt.to_pyarrow_dataset())
+    # Translog should not contain jane's entries
+    translog_dt = repo._statements._translog.deltatable
+    rel = duckdb.arrow(translog_dt.to_pyarrow_dataset())
     rows = rel.query("sc", "SELECT id FROM sc WHERE deleted_at IS NOT NULL").fetchall()
     assert len(rows) == 0
 
@@ -248,18 +248,18 @@ def test_delete_then_compact_cleans_main_and_sidecar(tmp_path):
     assert entities[0].id == "john"
 
 
-def test_sidecar_has_deletion_entries(tmp_path):
-    """After delete + flush, sidecar contains deleted_at entries."""
+def test_translog_has_deletion_entries(tmp_path):
+    """After delete + flush, translog contains deleted_at entries."""
     repo = _make_local_repo(tmp_path)
     _populate(repo)
 
     repo.delete_entity("jane")
     repo.flush()
 
-    # Sidecar should exist and contain deleted_at entries for jane
-    assert repo._statements._sidecar.exists
-    sidecar_dt = repo._statements._sidecar.deltatable
-    rel = duckdb.arrow(sidecar_dt.to_pyarrow_dataset())
+    # Translog should exist and contain deleted_at entries for jane
+    assert repo._statements._translog.exists
+    translog_dt = repo._statements._translog.deltatable
+    rel = duckdb.arrow(translog_dt.to_pyarrow_dataset())
     deleted = rel.query(
         "sc", "SELECT id FROM sc WHERE deleted_at IS NOT NULL"
     ).fetchall()
