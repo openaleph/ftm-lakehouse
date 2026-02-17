@@ -1,8 +1,10 @@
 from anystore.api.routes import router as archive_router
 from anystore.exceptions import DoesNotExist
+from anystore.logging import get_logger
 from anystore.store import get_store
 from fastapi import Depends, FastAPI, Request, Response
 from fastapi.responses import JSONResponse
+from followthemoney.dataset.util import dataset_name_check
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
 from ftm_lakehouse.api.auth import ensure_auth
@@ -10,10 +12,33 @@ from ftm_lakehouse.api.routes.entities import router as entities_router
 from ftm_lakehouse.api.routes.journal import router as journal_router
 from ftm_lakehouse.api.routes.operations import router as operations_router
 from ftm_lakehouse.core.settings import ApiSettings, Settings, __version__
+from ftm_lakehouse.core.zfs import ensure_zfs_dataset
 from ftm_lakehouse.lake import get_lakehouse
 
 settings = Settings()
 api_settings = ApiSettings()
+log = get_logger(__name__)
+
+_WRITE_METHODS = {"PUT", "POST", "DELETE", "PATCH"}
+
+
+class ZfsEnsureMiddleware(BaseHTTPMiddleware):
+    """Ensure ZFS datasets exist before any write hits storage."""
+
+    async def dispatch(
+        self, request: Request, call_next: RequestResponseEndpoint
+    ) -> Response:
+        if request.method in _WRITE_METHODS:
+            path = request.url.path.lstrip("/")
+            dataset = path.split("/")[0] if path else None
+            if dataset:
+                try:
+                    dataset_name_check(dataset)
+                except ValueError:
+                    pass
+                else:
+                    ensure_zfs_dataset(settings.zfs_pool, dataset)
+        return await call_next(request)
 
 
 class StaticHeadersMiddleware(BaseHTTPMiddleware):
@@ -40,6 +65,8 @@ def get_app(lake_uri: str | None = None) -> FastAPI:
     app.include_router(operations_router, dependencies=[Depends(ensure_auth)])
     app.include_router(archive_router, dependencies=[Depends(ensure_auth)])
     app.add_middleware(StaticHeadersMiddleware)
+    if settings.on_zfs and settings.zfs_pool:
+        app.add_middleware(ZfsEnsureMiddleware)
     app.add_exception_handler(DoesNotExist, _not_found_handler)
     app.add_exception_handler(FileNotFoundError, _not_found_handler)
     return app

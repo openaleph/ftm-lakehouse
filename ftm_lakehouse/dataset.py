@@ -68,8 +68,10 @@ class Dataset(Generic[DM]):
         self._settings = Settings()
         self._log = log.bind(dataset=name, uri=mask_uri(uri))
 
-        if self._settings.on_zfs:
-            self.ensure()
+        if self._store.is_local and self._settings.on_zfs:
+            if self._settings.zfs_pool is None:
+                raise RuntimeError("Configure LAKEHOUSE_ZFS_POOL for zfs integration!")
+            ensure_zfs_dataset(self._settings.zfs_pool, self.name)
 
     def __repr__(self) -> str:
         return f"Dataset({self.name!r})"
@@ -168,12 +170,6 @@ class Dataset(Generic[DM]):
     def ensure(self) -> None:
         """Ensure dataset exists, create config.yml if needed."""
         if not self.exists():
-            if self._store.is_local and self._settings.on_zfs:
-                if self._settings.zfs_pool is None:
-                    raise RuntimeError(
-                        "Configure LAKEHOUSE_ZFS_POOL for zfs integration!"
-                    )
-                ensure_zfs_dataset(self._settings.zfs_pool, self.name)
             self.update_model()
             self._log.info("Created dataset")
 
