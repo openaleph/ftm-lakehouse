@@ -57,7 +57,7 @@ def zfs_create_local(
 ):
     """Create a ZFS dataset via local subprocess."""
     log.info("Creating ZFS dataset (local)", dataset=dataset, props=props)
-    cmd = ["zfs", "create"]
+    cmd = ["zfs", "create", "-p"]
     for k, v in (props or {}).items():
         cmd.extend(["-o", f"{k}={v}"])
     cmd.append(dataset)
