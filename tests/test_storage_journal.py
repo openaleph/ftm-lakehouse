@@ -1,6 +1,6 @@
 """Tests for JournalStore implementations (SQL-SQLite, SQL-PostgreSQL, and API)."""
 
-import socket
+import os
 from typing import Generator
 
 import httpx
@@ -17,17 +17,7 @@ from ftm_lakehouse.storage.journal import get_journal as _get_journal_factory
 from ftm_lakehouse.storage.journal.base import BaseJournalStore
 
 DATASET = "test"
-PSQL_URI = "postgresql://lakehouse:lakehouse@localhost:5432/lakehouse"
-
-
-def _psql_available() -> bool:
-    """Check if PostgreSQL is reachable on localhost:5432."""
-    try:
-        sock = socket.create_connection(("localhost", 5432), timeout=1)
-        sock.close()
-        return True
-    except OSError:
-        return False
+PSQL_URI = os.environ.get("PYTEST_POSTGRESQL_URI")
 
 
 def make_statement(
@@ -86,7 +76,7 @@ def _make_api_journal() -> ApiJournalStore:
 
 def _journal_params():
     params = ["sql", "api"]
-    if _psql_available():
+    if PSQL_URI:
         params.append("psql")
     return params
 
@@ -328,7 +318,7 @@ def test_storage_journal_clear(journal):
     assert journal.count() == 0
 
 
-@pytest.fixture(params=["sqlite"] + (["psql"] if _psql_available() else []))
+@pytest.fixture(params=["sqlite"] + (["psql"] if PSQL_URI else []))
 def concurrent_journal(request, tmp_path):
     """Journal fixture for concurrent write tests (needs file-based or network DB)."""
     if request.param == "sqlite":

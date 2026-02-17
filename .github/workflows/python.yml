@@ -17,6 +17,21 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
 
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: lakehouse
+          POSTGRES_PASSWORD: lakehouse
+          POSTGRES_DB: lakehouse
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U lakehouse"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
     - uses: actions/checkout@v6
     - name: Set up Python ${{ matrix.python-version }}
@@ -50,6 +65,8 @@ jobs:
       run: make lint
     - name: Test with pytest
       run: make test
+      env:
+        PYTEST_POSTGRESQL_URI: postgresql://lakehouse:lakehouse@localhost:5432/lakehouse
     - name: Test building
       run: poetry build
     - name: Coveralls
