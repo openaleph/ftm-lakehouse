@@ -58,7 +58,7 @@ jobs:
         path: ~/.cache/pre-commit
         key: pre-commit-${{ runner.os }}-${{ env.PY }}-${{ hashFiles('.pre-commit-config.yaml') }}
     - name: Install dependencies
-      run: poetry install --with dev --all-extras
+      run: poetry install --with dev --all-extras && poetry run pip install psycopg2-binary
     - name: Run pre-commit hooks
       run: poetry run pre-commit run
     - name: Lint with flake8
