@@ -130,4 +130,5 @@ def ensure_zfs_dataset(pool: str, dataset: str):
     base = f"{pool}/{dataset}"
     zfs_create(base, PARENT_PROPS)
     zfs_create(f"{base}/{path.ARCHIVE}", ARCHIVE.to_props())
+    zfs_create(f"{base}/{path.ENTITIES}", PARENT_PROPS)
     zfs_create(f"{base}/{path.STATEMENTS}", STATEMENTS.to_props())
