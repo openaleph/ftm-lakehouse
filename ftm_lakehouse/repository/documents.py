@@ -2,10 +2,10 @@
 clients, including diffs"""
 
 from datetime import datetime
-from itertools import chain
+from itertools import chain, islice
 from typing import Generator
 
-from anystore.io import smart_stream_csv_models, smart_write_models
+from anystore.io import smart_stream_csv_models, smart_write_csv, smart_write_models
 from anystore.logic.constants import CHUNK_SIZE_LARGE
 from anystore.logic.io import stream
 from anystore.store import get_store
@@ -15,6 +15,7 @@ from followthemoney import model
 from ftmq.query import Query
 
 from ftm_lakehouse.core.conventions import path
+from ftm_lakehouse.logic.parquet import QUERY_IN_BATCH_SIZE
 from ftm_lakehouse.model.file import Document, Documents
 from ftm_lakehouse.repository.base import BaseRepository
 from ftm_lakehouse.repository.diff import ParquetDiffMixin
@@ -139,12 +140,26 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
         return changed_entity_ids
 
     def _write_diff(self, entity_ids: set[str], v: int, ts: datetime, **kwargs) -> str:
-        """Write documents as CSV."""
-        docs = self.collect(kwargs.get("public_url_prefix"), entity_id__in=entity_ids)
+        """Write documents as CSV with op column."""
         key = path.documents_diff(v, ts)
         with self._storage.open(key, "w") as o:
-            smart_write_models(o, docs, output_format="csv")
+            smart_write_csv(
+                o,
+                self._get_delta_documents(entity_ids, kwargs.get("public_url_prefix")),
+            )
         return self._storage.to_uri(key)
+
+    def _get_delta_documents(
+        self, entity_ids: set[str], public_url_prefix: str | None = None
+    ) -> Generator[dict, None, None]:
+        seen_ids: set[str] = set()
+        it = iter(entity_ids)
+        while batch := list(islice(it, QUERY_IN_BATCH_SIZE)):
+            for doc in self.collect(public_url_prefix, entity_id__in=batch):
+                seen_ids.add(doc.id)
+                yield {"op": "ADD", **doc.model_dump(by_alias=True, mode="json")}
+        for entity_id in entity_ids - seen_ids:
+            yield {"op": "DEL", "id": entity_id}
 
     def _write_initial_diff(self, version: int, ts: datetime, **kwargs) -> None:
         """Copy over exported documents.csv to initial diff version"""

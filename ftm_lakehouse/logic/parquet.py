@@ -13,6 +13,8 @@ import pyarrow as pa
 from deltalake import DeltaTable
 from ftmq.store.lake import Row, compile_query
 
+QUERY_IN_BATCH_SIZE = 5_000
+
 
 def translog_aware_sql(compiled_query: str, dt: DeltaTable) -> str:
     """Wrap a compiled SQL query with a CTE that joins the translog.

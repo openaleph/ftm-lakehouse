@@ -2,6 +2,7 @@
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from itertools import islice
 from typing import Generator, Iterable, cast
 
 import duckdb
@@ -32,15 +33,14 @@ from ftm_lakehouse.core.api import api_delegate, no_api
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.helpers.statements import unpack_statement, unpack_tombstone_row
-from ftm_lakehouse.logic.parquet import make_dedup_connection
+from ftm_lakehouse.logic.parquet import QUERY_IN_BATCH_SIZE, make_dedup_connection
 from ftm_lakehouse.repository.base import BaseRepository
 from ftm_lakehouse.repository.diff import ParquetDiffMixin
 from ftm_lakehouse.repository.entities.api import ApiEntityRepository
-from ftm_lakehouse.storage import ParquetStore
 from ftm_lakehouse.storage.journal import get_journal
 from ftm_lakehouse.storage.journal.base import BaseJournalWriter
 from ftm_lakehouse.storage.journal.sql import SqlJournalStore
-from ftm_lakehouse.storage.parquet import PARTITIONS, TRANSLOG_SCHEMA
+from ftm_lakehouse.storage.parquet import PARTITIONS, TRANSLOG_SCHEMA, ParquetStore
 from ftm_lakehouse.util import make_envelope
 
 settings = Settings()
@@ -480,11 +480,12 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
     @no_api
     def _get_delta_entities(self, entity_ids: set[str]) -> Generator[SDict, None, None]:
         seen_ids: set[str] = set()
-        for entity in self.query(entity_ids=entity_ids, flush_first=False):
-            if entity.id:
-                seen_ids.add(entity.id)
-            yield make_envelope(entity.to_dict())
-        # Entities in changed set but not in deduped output were deleted
+        it = iter(entity_ids)
+        while batch := list(islice(it, QUERY_IN_BATCH_SIZE)):
+            for entity in self.query(entity_ids=batch, flush_first=False):
+                if entity.id:
+                    seen_ids.add(entity.id)
+                yield make_envelope(entity.to_dict())
         for entity_id in entity_ids - seen_ids:
             yield make_envelope({"id": entity_id}, op="DEL")
 
