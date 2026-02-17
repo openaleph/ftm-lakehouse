@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     on_zfs: bool = False
     zfs_pool: str | None = None
     zfs_socket: str | None = None
+    zfs_owner: str | None = None
 
     public_url_prefix: str | None = None
 

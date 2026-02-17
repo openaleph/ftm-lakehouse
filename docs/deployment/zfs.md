@@ -22,6 +22,18 @@ When a new dataset is created, `ftm-lakehouse` calls `zfs create` to set up chil
 | `{dataset}/archive` | 128K | zstd | disabled | Content-addressed file storage |
 | `{dataset}/entities/statements` | 1M | lz4 | standard | Delta Lake parquet (already snappy-compressed) |
 
+## Mountpoint Ownership
+
+By default ZFS creates mountpoints owned by `root:root`. If the lakehouse process runs as a non-root user (e.g. inside a container), set `LAKEHOUSE_ZFS_OWNER` to chown new mountpoints after creation:
+
+```bash
+export LAKEHOUSE_ZFS_OWNER=1000:1000
+```
+
+When unset (the default), no `chown` is performed and mountpoints keep the default root ownership. This is fine when the process runs as root or when the pool mountpoints are already owned correctly.
+
+The owner value is passed through the socket protocol, so the host-side agent executes the `chown` with its (root) privileges on behalf of the container.
+
 ## Socket Agent Mode
 
 In Docker or Swarm deployments the container typically doesn't have ZFS tools installed. Instead of adding ZFS to every container image, a host-side agent listens on a Unix socket and executes `zfs create` on behalf of the container.
@@ -125,3 +137,4 @@ The agent validates every request before execution:
 | `LAKEHOUSE_ON_ZFS` | Enable ZFS dataset creation | `false` |
 | `LAKEHOUSE_ZFS_POOL` | ZFS dataset path for the lakehouse root (e.g. `zpools/tank/lakehouse`) | (required when `ON_ZFS` is enabled) |
 | `LAKEHOUSE_ZFS_SOCKET` | Path to the Unix socket for remote ZFS operations | (unset -- use local subprocess) |
+| `LAKEHOUSE_ZFS_OWNER` | `uid:gid` to chown new dataset mountpoints to (e.g. `1000:1000`) | (unset -- no chown, root owns mountpoints) |

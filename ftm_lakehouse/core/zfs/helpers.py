@@ -52,8 +52,28 @@ PARENT_PROPS = {
 }
 
 
+def _chown_mountpoint(dataset: str, owner: str) -> None:
+    """Chown the mountpoint of a ZFS dataset to the given uid:gid."""
+    result = subprocess.run(
+        ["zfs", "list", "-H", "-o", "mountpoint", dataset],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        log.warning("Cannot resolve mountpoint", dataset=dataset)
+        return
+    mountpoint = result.stdout.strip()
+    if not mountpoint or mountpoint == "-":
+        return
+    log.debug("chown mountpoint", mountpoint=mountpoint, owner=owner)
+    subprocess.run(["chown", owner, mountpoint], check=True)
+
+
 def zfs_create_local(
-    dataset: str, props: dict[str, str] | None = None, exist_ok: bool = True
+    dataset: str,
+    props: dict[str, str] | None = None,
+    exist_ok: bool = True,
+    owner: str | None = None,
 ):
     """Create a ZFS dataset via local subprocess."""
     log.info("Creating ZFS dataset (local)", dataset=dataset, props=props)
@@ -70,18 +90,24 @@ def zfs_create_local(
         log.error("zfs create failed", dataset=dataset, error=result.stderr.strip())
         raise RuntimeError(f"zfs create failed: {result.stderr.strip()}")
 
+    if owner:
+        _chown_mountpoint(dataset, owner)
+
 
 def zfs_create_socket(
-    socket_path: str, dataset: str, props: dict[str, str] | None = None
+    socket_path: str,
+    dataset: str,
+    props: dict[str, str] | None = None,
+    owner: str | None = None,
 ):
     """Send a ``zfs create`` request to a remote agent over a Unix socket."""
     log.debug("Requesting zfs create via socket", socket=socket_path, dataset=dataset)
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
         sock.connect(socket_path)
-        request = orjson.dumps(
-            {"action": "create", "dataset": dataset, "props": props or {}}
-        )
-        sock.sendall(request + b"\n")
+        req: dict = {"action": "create", "dataset": dataset, "props": props or {}}
+        if owner:
+            req["owner"] = owner
+        sock.sendall(orjson.dumps(req) + b"\n")
         response = orjson.loads(sock.makefile().readline())
         if not response.get("ok"):
             error = response.get("error", "unknown")
@@ -94,9 +120,10 @@ def zfs_create(
 ):
     """Create a ZFS dataset, dispatching to socket or local subprocess."""
     settings = Settings()
+    owner = settings.zfs_owner
     if settings.zfs_socket:
-        return zfs_create_socket(settings.zfs_socket, dataset, props)
-    return zfs_create_local(dataset, props, exist_ok)
+        return zfs_create_socket(settings.zfs_socket, dataset, props, owner)
+    return zfs_create_local(dataset, props, exist_ok, owner)
 
 
 @cache
