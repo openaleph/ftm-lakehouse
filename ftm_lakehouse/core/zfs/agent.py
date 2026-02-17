@@ -65,14 +65,14 @@ def handle_request(
     if not isinstance(props, dict):
         return {"ok": False, "error": "props must be a dict"}
 
-    log.info("Creating ZFS dataset", dataset=dataset, props=props, owner=owner)
     try:
-        zfs_create_local(dataset, props, exist_ok=True, owner=owner)
+        created = zfs_create_local(dataset, props, exist_ok=True, owner=owner)
     except RuntimeError as e:
         log.error("zfs create failed", dataset=dataset, error=str(e))
         return {"ok": False, "error": str(e)}
 
-    log.info("ZFS dataset created", dataset=dataset)
+    if created:
+        log.info("ZFS dataset created", dataset=dataset)
     return {"ok": True}
 
 

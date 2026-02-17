@@ -74,9 +74,8 @@ def zfs_create_local(
     props: dict[str, str] | None = None,
     exist_ok: bool = True,
     owner: str | None = None,
-):
-    """Create a ZFS dataset via local subprocess."""
-    log.info("Creating ZFS dataset (local)", dataset=dataset, props=props)
+) -> bool:
+    """Create a ZFS dataset via local subprocess. Returns True if created."""
     cmd = ["zfs", "create", "-p"]
     for k, v in (props or {}).items():
         cmd.extend(["-o", f"{k}={v}"])
@@ -86,12 +85,14 @@ def zfs_create_local(
     if result.returncode != 0:
         if exist_ok and "dataset already exists" in result.stderr:
             log.debug("ZFS dataset already exists", dataset=dataset)
-            return
+            return False
         log.error("zfs create failed", dataset=dataset, error=result.stderr.strip())
         raise RuntimeError(f"zfs create failed: {result.stderr.strip()}")
 
+    log.info("Created ZFS dataset", dataset=dataset)
     if owner:
         _chown_mountpoint(dataset, owner)
+    return True
 
 
 def zfs_create_socket(
