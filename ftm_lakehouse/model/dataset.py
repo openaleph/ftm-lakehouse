@@ -24,8 +24,6 @@ class DatasetModel(Dataset):
     """Set storage for external lakehouse"""
     public_url_prefix: HttpUrlStr | None = None
     """Public url prefix for resources"""
-    archive_public_url_prefix: HttpUrlStr | None = None
-    """Compute public urls to source files (e.g. when using a CDN)"""
 
     def get_public_prefix(self) -> str | None:
         if self.public_url_prefix:

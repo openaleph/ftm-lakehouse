@@ -14,6 +14,8 @@
 | `LAKEHOUSE_ZFS_POOL` | ZFS dataset path for the lakehouse root (e.g. `zpools/tank/lakehouse`) | (required when `ON_ZFS` is enabled) |
 | `LAKEHOUSE_ZFS_SOCKET` | Unix socket path for remote ZFS operations (see [ZFS Integration](zfs.md)) | (unset) |
 | `LAKEHOUSE_ZFS_OWNER` | `uid:gid` to chown new ZFS mountpoints to (see [ZFS Integration](zfs.md)) | (unset -- no chown) |
+| `LAKEHOUSE_PUBLIC_URL_PREFIX` | Public URL prefix for blob URLs (supports `{{ dataset }}` Jinja-style template) | (unset) |
+| `LAKEHOUSE_ARCHIVE_URL_EXPIRE` | Expiration for signed/tokenized archive URLs in seconds | `900` (15 min) |
 | `LOG_LEVEL` | Logging level (DEBUG, INFO, WARNING, ERROR) | `INFO` |
 | `DEBUG` | Enable debug mode | `false` |
 

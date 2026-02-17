@@ -6,7 +6,7 @@ from typing import Any, Generic
 from anystore.logging import get_logger
 from anystore.store import get_store
 from anystore.types import Uri
-from anystore.util import join_uri, mask_uri
+from anystore.util import mask_uri
 
 from ftm_lakehouse.core.api import ensure_api_uri
 from ftm_lakehouse.core.config import load_config
@@ -178,7 +178,11 @@ class Dataset(Generic[DM]):
     # -------------------------------------------------------------------------
 
     def get_blob_url(self, checksum: str) -> str:
-        prefix = self.model.get_public_prefix()
-        if not prefix:
-            prefix = self.uri
-        return join_uri(prefix, path.archive_blob(checksum))
+        from ftm_lakehouse.core.archive_url import resolve_archive_url
+
+        return resolve_archive_url(
+            store=self._store,
+            dataset=self.name,
+            checksum=checksum,
+            public_prefix=self.model.get_public_prefix(),
+        )

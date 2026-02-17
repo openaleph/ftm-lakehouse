@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     zfs_owner: str | None = None
 
     public_url_prefix: str | None = None
+    archive_url_expire: int = 900  # seconds (15 minutes)
 
     @property
     def api_mode(self) -> bool:

@@ -205,6 +205,63 @@ my_dataset/
 
 The checksum is split into directory segments for better filesystem performance.
 
+## Archive URL Resolution
+
+Use `Dataset.get_blob_url()` to get a fetchable URL for an archived blob. The URL format is automatically determined by the storage backend:
+
+```python
+from ftm_lakehouse import get_dataset
+
+dataset = get_dataset("my_dataset")
+url = dataset.get_blob_url("<checksum>")
+```
+
+### Resolution Priority
+
+The first matching strategy wins:
+
+| Priority | Backend | URL Format |
+|----------|---------|------------|
+| 1 | Public prefix configured | `https://cdn.example.com/archive/ab/cd/ef/<checksum>/blob` |
+| 2 | Cloud storage (S3, GCS, Azure) | Presigned URL via fsspec `sign()` |
+| 3 | HTTP API mode | API URL with scoped JWT `?token=...` |
+| 4 | Local filesystem | `file:///path/to/archive/ab/cd/ef/<checksum>/blob` |
+
+### Public Prefix
+
+If a public URL prefix is configured (e.g. for a CDN or reverse proxy), it is joined with the blob's archive path. This takes priority over all other strategies.
+
+The prefix can be set per-dataset in `config.yml`:
+
+```yaml
+name: my_dataset
+public_url_prefix: https://cdn.example.com/my_dataset
+```
+
+Or globally via environment variable (supports `{{ dataset }}` Jinja-style template):
+
+```bash
+export LAKEHOUSE_PUBLIC_URL_PREFIX="https://cdn.example.com/{{ dataset }}"
+```
+
+### Cloud Storage (S3, GCS, Azure)
+
+When the lakehouse is backed by a cloud storage provider that supports presigned URLs, `get_blob_url()` generates a time-limited signed URL. This works with any [fsspec](https://filesystem-spec.readthedocs.io/) backend that implements the `sign()` method (S3, GCS, Azure Blob Storage, etc.).
+
+The URL expiration is controlled by `LAKEHOUSE_ARCHIVE_URL_EXPIRE` (in seconds, default: 900 = 15 minutes):
+
+```bash
+export LAKEHOUSE_ARCHIVE_URL_EXPIRE=3600  # 1 hour
+```
+
+### HTTP API Mode
+
+When running against a remote lakehouse API, `get_blob_url()` returns the API URL with a scoped JWT query parameter. The token is restricted to `GET`/`HEAD` methods on the specific blob path and expires after `LAKEHOUSE_ARCHIVE_URL_EXPIRE` seconds.
+
+### Local Filesystem
+
+For local storage, `get_blob_url()` returns a `file:///` URI pointing directly to the blob on disk.
+
 ## Complete Example
 
 ```python
