@@ -98,16 +98,15 @@ def zfs_create_socket(
     socket_path: str,
     dataset: str,
     props: dict[str, str] | None = None,
-    owner: str | None = None,
 ):
     """Send a ``zfs create`` request to a remote agent over a Unix socket."""
     log.debug("Requesting zfs create via socket", socket=socket_path, dataset=dataset)
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
         sock.connect(socket_path)
-        req: dict = {"action": "create", "dataset": dataset, "props": props or {}}
-        if owner:
-            req["owner"] = owner
-        sock.sendall(orjson.dumps(req) + b"\n")
+        request = orjson.dumps(
+            {"action": "create", "dataset": dataset, "props": props or {}}
+        )
+        sock.sendall(request + b"\n")
         response = orjson.loads(sock.makefile().readline())
         if not response.get("ok"):
             error = response.get("error", "unknown")
@@ -120,10 +119,9 @@ def zfs_create(
 ):
     """Create a ZFS dataset, dispatching to socket or local subprocess."""
     settings = Settings()
-    owner = settings.zfs_owner
     if settings.zfs_socket:
-        return zfs_create_socket(settings.zfs_socket, dataset, props, owner)
-    return zfs_create_local(dataset, props, exist_ok, owner)
+        return zfs_create_socket(settings.zfs_socket, dataset, props)
+    return zfs_create_local(dataset, props, exist_ok, settings.zfs_owner)
 
 
 @cache

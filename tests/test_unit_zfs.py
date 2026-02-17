@@ -75,6 +75,22 @@ class TestHandleRequest:
         )
 
     @patch("ftm_lakehouse.core.zfs.agent.zfs_create_local")
+    def test_create_with_owner(self, mock_create):
+        resp = handle_request(
+            {
+                "action": "create",
+                "dataset": "tank/ds",
+                "props": {"compression": "zstd"},
+            },
+            None,
+            owner="1000:1000",
+        )
+        assert resp == {"ok": True}
+        mock_create.assert_called_once_with(
+            "tank/ds", {"compression": "zstd"}, exist_ok=True, owner="1000:1000"
+        )
+
+    @patch("ftm_lakehouse.core.zfs.agent.zfs_create_local")
     def test_create_no_props(self, mock_create):
         resp = handle_request({"action": "create", "dataset": "tank/ds"}, None)
         assert resp == {"ok": True}
@@ -216,12 +232,21 @@ class TestZfsCreateDispatch:
             "tank/ds", {"compression": "zstd"}, True, None
         )
 
+    @patch("ftm_lakehouse.core.zfs.helpers.zfs_create_local")
+    @patch("ftm_lakehouse.core.zfs.helpers.Settings")
+    def test_dispatch_local_with_owner(self, mock_settings_cls, mock_local):
+        mock_settings_cls.return_value.zfs_socket = None
+        mock_settings_cls.return_value.zfs_owner = "1000:1000"
+        zfs_create("tank/ds", {"compression": "zstd"})
+        mock_local.assert_called_once_with(
+            "tank/ds", {"compression": "zstd"}, True, "1000:1000"
+        )
+
     @patch("ftm_lakehouse.core.zfs.helpers.zfs_create_socket")
     @patch("ftm_lakehouse.core.zfs.helpers.Settings")
     def test_dispatch_socket(self, mock_settings_cls, mock_socket):
         mock_settings_cls.return_value.zfs_socket = "/run/zfs.sock"
-        mock_settings_cls.return_value.zfs_owner = "1000:1000"
         zfs_create("tank/ds", {"compression": "zstd"})
         mock_socket.assert_called_once_with(
-            "/run/zfs.sock", "tank/ds", {"compression": "zstd"}, "1000:1000"
+            "/run/zfs.sock", "tank/ds", {"compression": "zstd"}
         )

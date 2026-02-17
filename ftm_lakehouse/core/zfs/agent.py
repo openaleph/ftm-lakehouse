@@ -46,7 +46,9 @@ def validate_dataset(dataset: str, allowed_pool: str | None) -> str | None:
     return None
 
 
-def handle_request(data: dict, allowed_pool: str | None) -> dict:
+def handle_request(
+    data: dict, allowed_pool: str | None, owner: str | None = None
+) -> dict:
     """Process a single JSON request and return a response dict."""
     action = data.get("action")
     if action != "create":
@@ -63,8 +65,6 @@ def handle_request(data: dict, allowed_pool: str | None) -> dict:
     if not isinstance(props, dict):
         return {"ok": False, "error": "props must be a dict"}
 
-    owner = data.get("owner") or None
-
     log.info("Creating ZFS dataset", dataset=dataset, props=props, owner=owner)
     try:
         zfs_create_local(dataset, props, exist_ok=True, owner=owner)
@@ -76,7 +76,9 @@ def handle_request(data: dict, allowed_pool: str | None) -> dict:
     return {"ok": True}
 
 
-def handle_connection(conn: socket.socket, allowed_pool: str | None) -> None:
+def handle_connection(
+    conn: socket.socket, allowed_pool: str | None, owner: str | None = None
+) -> None:
     """Read one JSON line from a connection, process it, write the response."""
     try:
         line = conn.makefile().readline()
@@ -89,7 +91,7 @@ def handle_connection(conn: socket.socket, allowed_pool: str | None) -> None:
             log.warning("Received invalid JSON", error=str(e))
             response = {"ok": False, "error": f"invalid JSON: {e}"}
         else:
-            response = handle_request(data, allowed_pool)
+            response = handle_request(data, allowed_pool, owner)
         conn.sendall(orjson.dumps(response) + b"\n")
     finally:
         conn.close()

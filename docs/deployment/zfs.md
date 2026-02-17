@@ -24,15 +24,16 @@ When a new dataset is created, `ftm-lakehouse` calls `zfs create` to set up chil
 
 ## Mountpoint Ownership
 
-By default ZFS creates mountpoints owned by `root:root`. If the lakehouse process runs as a non-root user (e.g. inside a container), set `LAKEHOUSE_ZFS_OWNER` to chown new mountpoints after creation:
+By default ZFS creates mountpoints owned by `root:root`. Set `LAKEHOUSE_ZFS_OWNER` to chown new mountpoints after creation:
 
 ```bash
 export LAKEHOUSE_ZFS_OWNER=1000:1000
 ```
 
-When unset (the default), no `chown` is performed and mountpoints keep the default root ownership. This is fine when the process runs as root or when the pool mountpoints are already owned correctly.
+When unset (the default), no `chown` is performed and mountpoints keep root ownership.
 
-The owner value is passed through the socket protocol, so the host-side agent executes the `chown` with its (root) privileges on behalf of the container.
+- **Local mode**: `LAKEHOUSE_ZFS_OWNER` is read by `zfs_create()` directly. Set it wherever `ftm-lakehouse` or `zfs-init` runs.
+- **Socket mode**: Ownership is controlled by the agent (host-side), not the client. Pass `--owner` to the agent or set `LAKEHOUSE_ZFS_OWNER` where the agent runs. The client does not send ownership information.
 
 ## Socket Agent Mode
 
@@ -60,13 +61,14 @@ flowchart LR
 On the host:
 
 ```bash
-ftm-lakehouse zfs-agent --socket /run/zfs.sock --pool zpools/tank/lakehouse
+ftm-lakehouse zfs-agent --socket /run/zfs.sock --pool zpools/tank/lakehouse --owner 1000:1000
 ```
 
 | Option | Description |
 |--------|-------------|
 | `--socket, -s` | Unix socket path to listen on (or set `LAKEHOUSE_ZFS_SOCKET`) |
 | `--pool, -p` | ZFS pool path (or set `LAKEHOUSE_ZFS_POOL`). Required -- the agent only creates datasets under this path. |
+| `--owner, -o` | `uid:gid` to chown new mountpoints to (or set `LAKEHOUSE_ZFS_OWNER`). Optional -- when unset, mountpoints keep root ownership. |
 
 ### Configuring the Container
 

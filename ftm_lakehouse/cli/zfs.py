@@ -31,6 +31,14 @@ def cli_zfs_agent(
             help="ZFS pool path (or set LAKEHOUSE_ZFS_POOL)",
         ),
     ] = None,
+    owner: Annotated[
+        Optional[str],
+        typer.Option(
+            "--owner",
+            "-o",
+            help="uid:gid to chown new mountpoints to (or set LAKEHOUSE_ZFS_OWNER)",
+        ),
+    ] = None,
 ):
     """Start a ZFS socket agent for container-based deployments.
 
@@ -38,6 +46,7 @@ def cli_zfs_agent(
     of containerized clients that lack local ZFS tools.
     """
     settings = Settings()
+    zfs_owner = owner or settings.zfs_owner
     sock_path = socket_path or settings.zfs_socket
     if not sock_path:
         console.print(
@@ -61,7 +70,7 @@ def cli_zfs_agent(
     os.chmod(sock_path, 0o666)
     server.listen(5)
 
-    log.info("zfs-agent listening", socket=sock_path, pool=zfs_pool)
+    log.info("zfs-agent listening", socket=sock_path, pool=zfs_pool, owner=zfs_owner)
 
     def _shutdown(_signum, _frame):
         log.info("Shutting down zfs-agent")
@@ -76,7 +85,7 @@ def cli_zfs_agent(
     try:
         while True:
             conn, _ = server.accept()
-            handle_connection(conn, zfs_pool)
+            handle_connection(conn, zfs_pool, zfs_owner)
     finally:
         server.close()
         if os.path.exists(sock_path):
