@@ -8,11 +8,24 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any, Generator, Iterator
 
-from followthemoney import Model, Statement, StatementEntity
+from followthemoney import Model, Schema, Statement, StatementEntity, model
+from followthemoney.exc import InvalidData
 from followthemoney.statement import StatementDict
 from followthemoney.statement.util import BASE_ID
+from ftmq.aggregate import common_ancestor
 from ftmq.types import StatementEntities, Statements
 from ftmq.util import make_dataset
+
+
+def merge_schema(s1: str | Schema, s2: str | Schema) -> Schema:
+    _s1 = model.get(s1)
+    _s2 = model.get(s2)
+    if _s1 is None or _s2 is None:
+        raise RuntimeError("Invalid schema, can't merge")
+    try:
+        return model.common_schema(s1, s2)
+    except InvalidData:
+        return common_ancestor(_s1, _s2)
 
 
 def aggregate_statements(stmts: Statements, dataset: str) -> StatementEntities:
@@ -134,7 +147,7 @@ class EntityPayload:
             if schema is None:
                 schema = model.get(name)
             elif schema.name != name:
-                schema = model.common_schema(schema, name)
+                schema = merge_schema(schema, name)
 
         if schema is None:
             return {}
