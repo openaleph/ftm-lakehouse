@@ -75,6 +75,7 @@ class DatasetJobOperation(LakehouseApiMixin, Generic[DJ]):
             job=job,
             archive=dataset.archive,
             entities=dataset.entities,
+            documents=dataset.documents,
             jobs=get_jobs(dataset.name, job.__class__, dataset.uri),
             tags=dataset._tags,
             versions=dataset._versions,

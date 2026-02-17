@@ -16,6 +16,7 @@ from ftm_lakehouse.core.zfs import ensure_zfs_dataset
 from ftm_lakehouse.model import DM, DatasetJobModel, DatasetModel
 from ftm_lakehouse.repository import (
     ArchiveRepository,
+    DocumentRepository,
     EntityRepository,
     JobRepository,
     MappingRepository,
@@ -148,6 +149,11 @@ class Dataset(Generic[DM]):
     def entities(self) -> EntityRepository:
         """Entity/statement operations."""
         return EntityRepository(self.name, self.uri)
+
+    @cached_property
+    def documents(self) -> DocumentRepository:
+        """Document metadata operations."""
+        return DocumentRepository(self.name, self.uri)
 
     @cached_property
     def mappings(self) -> MappingRepository:
