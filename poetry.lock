@@ -4822,14 +4822,14 @@ testing = ["process-tests", "pytest-xdist", "virtualenv"]
 
 [[package]]
 name = "pytest-env"
-version = "1.3.2"
+version = "1.4.0"
 description = "pytest plugin that allows you to add environment variables."
 optional = false
 python-versions = ">=3.10"
 groups = ["dev"]
 files = [
-    {file = "pytest_env-1.3.2-py3-none-any.whl", hash = "sha256:e8626b776a035112a8ad58fcc9e04926868c58f15225de484de7c8af4b4b526c"},
-    {file = "pytest_env-1.3.2.tar.gz", hash = "sha256:f091a2c6a8eb91befcae2b4c1bd2905a51f33bc1c6567707b7feed4e51b76b47"},
+    {file = "pytest_env-1.4.0-py3-none-any.whl", hash = "sha256:bbad94133b7ac4155061a18e44b476de4f3514ee7b0c7d1a4af3bd8f8053e43e"},
+    {file = "pytest_env-1.4.0.tar.gz", hash = "sha256:713e19187538c7286a30d3fddd08dcf27f2f979eafb2948c6f114b11b33f70d9"},
 ]
 
 [package.dependencies]
@@ -6776,4 +6776,4 @@ api = ["fastapi", "granian", "pyjwt", "uvloop"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<3.14"
-content-hash = "19349b5c59f495a592de687218f2df5aef9f708c0bfef6979de3598f1928d266"
+content-hash = "a51efc406374803d05e92d79a757a396167e3c14ad529d94497e64d4a8312940"
