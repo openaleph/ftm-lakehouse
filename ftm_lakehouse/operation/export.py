@@ -157,10 +157,11 @@ class ExportIndexOperation(BaseExportOperation[ExportIndexJob]):
         if dataset is None:
             # we need a stub dataset to patch
             dataset = make_dataset(run.job.dataset, DatasetModel, uri=self.versions.uri)
+
+        store = get_store(dataset.uri)
         public_prefix = dataset.get_public_prefix()
 
         if public_prefix:
-            store = get_store(dataset.uri)
             if store.exists(path.EXPORTS_STATEMENTS):
                 uri = join_uri(dataset.uri, path.EXPORTS_STATEMENTS)
                 public_url = join_uri(public_prefix, path.EXPORTS_STATEMENTS)
@@ -180,9 +181,9 @@ class ExportIndexOperation(BaseExportOperation[ExportIndexJob]):
                 uri = join_uri(dataset.uri, path.EXPORTS_STATISTICS)
                 public_url = join_uri(public_prefix, path.EXPORTS_STATISTICS)
                 dataset.resources.append(make_statistics_resource(uri, public_url))
-                dataset.apply_stats(
-                    store.get(path.EXPORTS_STATISTICS, model=DatasetStats)
-                )
+
+        if store.exists(path.EXPORTS_STATISTICS):
+            dataset.apply_stats(store.get(path.EXPORTS_STATISTICS, model=DatasetStats))
 
         self.versions.make(path.INDEX, dataset)
 
