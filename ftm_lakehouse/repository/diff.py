@@ -58,7 +58,12 @@ class ParquetDiffMixin:
         state = self._tags.get(self._diff_state_key)
         if state is None:
             return None
-        ts_str, main_v, translog_v = state.split(":")
+        parts = state.split(":")
+        if len(parts) != 3:
+            # Old format (v{ver}_{ts}:s{sidecar_ver}) — reset to initial diff
+            self.log.info("Resetting diff state from legacy format.", old_state=state)
+            return None
+        ts_str, main_v, translog_v = parts
         return (
             datetime.strptime(ts_str, path.TS_FORMAT).replace(tzinfo=timezone.utc),
             int(main_v),
