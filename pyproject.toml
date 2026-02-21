@@ -69,7 +69,7 @@ redis = "^7.2.0"
 sqlalchemy = "^2.0.46"
 uvicorn = "^0.41.0"
 granian = {extras = ["reload"], version = "^2.7.1"}
-griffe = "<2"
+griffe = "<3"
 
 [build-system]
 requires = ["poetry-core"]
