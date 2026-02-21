@@ -125,23 +125,20 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
 
     _diff_base_path = path.DIFFS_DOCUMENTS
 
-    def _filter_changes(
-        self,
-        changes: Generator[tuple[datetime, str, dict], None, None],
-    ) -> set[str]:
-        """Filter for Document entities with contentHash changes."""
-        changed_entity_ids: set[str] = set()
-        for _, change_type, row in changes:
-            if change_type in ("insert", "update_postimage"):
-                schema = model.get(row.get("schema"))
-                if schema and schema.is_a("Document") and not schema.name == "Folder":
-                    if row.get("prop") == "contentHash":
-                        changed_entity_ids.add(row["entity_id"])
-        return changed_entity_ids
+    def _get_changed_ids_from_translog(self, since: datetime) -> set[str]:
+        """Get Document entity IDs with contentHash changes since the given timestamp."""
+        schemata = [
+            s.name
+            for s in model.schemata.values()
+            if s.is_a("Document") and s.name != "Folder"
+        ]
+        return self._statements.get_changed_entity_ids(
+            since, schema_in=schemata, prop="contentHash"
+        )
 
-    def _write_diff(self, entity_ids: set[str], v: int, ts: datetime, **kwargs) -> str:
+    def _write_diff(self, entity_ids: set[str], ts: datetime, **kwargs) -> str:
         """Write documents as CSV with op column."""
-        key = path.documents_diff(v, ts)
+        key = path.documents_diff(ts)
         with self._storage.open(key, "w") as o:
             smart_write_csv(
                 o,
@@ -161,7 +158,7 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
         for entity_id in entity_ids - seen_ids:
             yield {"op": "DEL", "id": entity_id}
 
-    def _write_initial_diff(self, version: int, ts: datetime, **kwargs) -> None:
+    def _write_initial_diff(self, ts: datetime, **kwargs) -> None:
         """Copy over exported documents.csv to initial diff version"""
         if not self._storage.exists(path.EXPORTS_DOCUMENTS):
             self.log.info(
@@ -171,5 +168,5 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
         if not self._storage.exists(path.EXPORTS_DOCUMENTS):
             return
         with self._storage.open(path.EXPORTS_DOCUMENTS, "rb") as i:
-            with self._storage.open(path.documents_diff(version, ts), "wb") as o:
+            with self._storage.open(path.documents_diff(ts), "wb") as o:
                 stream(i, o, CHUNK_SIZE_LARGE)

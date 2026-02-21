@@ -94,7 +94,7 @@ def cli_export_documents():
 def cli_optimize(
     vacuum: Annotated[
         Optional[bool], typer.Option(help="Delete staled files after optimization")
-    ] = False,
+    ] = True,
     compact: Annotated[
         Optional[bool],
         typer.Option(help="Dedupe statements and clear out deletion tombstones"),

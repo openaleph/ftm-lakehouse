@@ -78,6 +78,11 @@ Pure DuckDB/PyArrow functions that operate on the main statement table and trans
         heading_level: 3
         show_root_heading: true
 
+::: ftm_lakehouse.logic.parquet.get_changed_entity_ids
+    options:
+        heading_level: 3
+        show_root_heading: true
+
 ## Statement Serialization
 
 Pack and unpack statements for efficient storage:

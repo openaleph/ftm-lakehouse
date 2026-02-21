@@ -126,11 +126,16 @@ def test_repository_entities_multi_origin(repo):
 
 
 def test_repository_entities_export_diff(tmp_path):
-    """Test incremental diff export using Delta CDC.
+    """Test incremental diff export using translog-based change detection.
 
     Initial diff copies entities.ftm.json regardless of Delta table version.
-    Subsequent diffs capture incremental changes via CDC.
+    Subsequent diffs capture incremental changes via translog timestamps.
+
+    Sleeps cross second boundaries because FtM truncates timestamps to seconds
+    and diff detection uses first_seen >= floor(since).
     """
+    import time
+
     from ftmq.io import smart_write_proxies
 
     repo = EntityRepository("test", tmp_path)
@@ -151,10 +156,13 @@ def test_repository_entities_export_diff(tmp_path):
     entities_json_path = tmp_path / path.ENTITIES_JSON
     smart_write_proxies(str(entities_json_path), repo.query(flush_first=False))
 
+    # Cross second boundary so initial entities are in an earlier second
+    time.sleep(1.1)
+
     # Initial diff - copies entities.ftm.json even though table is at v1
     diff_name_1 = repo.export_diff()
     assert diff_name_1 is not None
-    assert diff_name_1.startswith("v1_")
+    assert diff_name_1.endswith("Z")  # timestamp format
     diff_files = list((tmp_path / path.DIFFS_ENTITIES).glob("*.delta.json"))
     assert len(diff_files) == 1  # Initial diff file created
 
@@ -170,16 +178,18 @@ def test_repository_entities_export_diff(tmp_path):
         writer.add_entity(make_entity(BOB))
     repo.flush()
 
-    # Incremental diff - captures changes from v1 to v2
+    # Cross second boundary so BOB's first_seen is before next diff state
+    time.sleep(1.1)
+
+    # Incremental diff - captures changes via translog
     diff_name_2 = repo.export_diff()
     assert diff_name_2 is not None
-    assert diff_name_2.startswith("v2_")
     assert diff_name_2 != diff_name_1
 
     diff_files = list((tmp_path / path.DIFFS_ENTITIES).glob("*.delta.json"))
     assert len(diff_files) == 2
 
-    # Find and verify the incremental diff (v2) contains only BOB
+    # Find and verify the incremental diff contains only BOB
     diff_files_sorted = sorted(diff_files, key=lambda p: p.name)
     with open(diff_files_sorted[1]) as f:
         lines = f.readlines()
@@ -204,11 +214,10 @@ def test_repository_entities_export_diff(tmp_path):
 
     diff_name_3 = repo.export_diff()
     assert diff_name_3 is not None
-    assert diff_name_3.startswith("v3_")
     diff_files = list((tmp_path / path.DIFFS_ENTITIES).glob("*.delta.json"))
     assert len(diff_files) == 3
 
-    # Find and verify the incremental diff (v3) contains only JANE
+    # Find and verify the incremental diff contains only JANE
     diff_files_sorted = sorted(diff_files, key=lambda p: p.name)
     with open(diff_files_sorted[2]) as f:
         lines = f.readlines()
@@ -284,9 +293,10 @@ def test_repository_entities_export_diff_no_changes(tmp_path):
     entities_json_path = tmp_path / path.ENTITIES_JSON
     smart_write_proxies(str(entities_json_path), repo.query(flush_first=False))
 
-    # Initial diff (v1) - copies entities.ftm.json
+    # Initial diff - copies entities.ftm.json
     diff_name_1 = repo.export_diff()
-    assert diff_name_1.startswith("v1_")
+    assert diff_name_1 is not None
+    assert diff_name_1.endswith("Z")
 
     # Second diff without any new data - no new diff file
     assert repo.export_diff() is None

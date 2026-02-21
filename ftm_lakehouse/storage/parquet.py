@@ -26,28 +26,21 @@ from sqlalchemy import Select
 
 from ftm_lakehouse.core.api import LakehouseApiMixin, no_api
 from ftm_lakehouse.core.conventions import path
+from ftm_lakehouse.logic import parquet as parquet_logic
 from ftm_lakehouse.logic.entities import aggregate_unsafe
-from ftm_lakehouse.logic.parquet import (
-    compact_with_translog,
-    filter_live_translog,
-)
-from ftm_lakehouse.logic.parquet import (
-    get_deleted_entity_ids as _get_deleted_entity_ids,
-)
-from ftm_lakehouse.logic.parquet import (
-    query_duckdb_translog,
-    stream_duckdb_translog,
-)
 
 # Use same partitions as ftmq but exclude dataset (handled at directory level)
 PARTITIONS = ["bucket", "origin"]
 
+TRANSLOG_TS = pa.timestamp("us", tz="UTC")
+"""Timezone-aware microsecond timestamp type for translog columns."""
+
 TRANSLOG_SCHEMA = pa.schema(
     [
         pa.field("id", pa.string()),
-        pa.field("first_seen", pa.timestamp("us")),
-        pa.field("last_seen", pa.timestamp("us")),
-        pa.field("deleted_at", pa.timestamp("us")),
+        pa.field("first_seen", TRANSLOG_TS),
+        pa.field("last_seen", TRANSLOG_TS),
+        pa.field("deleted_at", TRANSLOG_TS),
     ]
 )
 
@@ -136,7 +129,7 @@ class TranslogStore(LakehouseApiMixin):
         if not self.exists:
             return
 
-        live = filter_live_translog(self.deltatable)
+        live = parquet_logic.filter_live_translog(self.deltatable)
         write_deltalake(
             str(self.uri),
             live,
@@ -167,7 +160,9 @@ class TranslogAwareLakeStore(LakeStore, LakehouseApiMixin):
         if not self._translog.exists:
             yield from stream_duckdb(q, dt)
             return
-        yield from stream_duckdb_translog(q, dt, self._translog.deltatable)
+        yield from parquet_logic.stream_duckdb_translog(
+            q, dt, self._translog.deltatable
+        )
 
 
 class ParquetStore(LakehouseApiMixin):
@@ -178,7 +173,7 @@ class ParquetStore(LakehouseApiMixin):
     - Partitioned parquet files (by bucket, origin)
     - Delta Lake transaction log for versioning
     - Translog metadata table for timestamps and soft deletes
-    - Change data capture (CDC) support
+    - Translog-based change detection for incremental diff exports
     - Efficient querying via DuckDB
 
     Layout: statements/bucket={bucket}/origin={origin}/{auto-identifier}.parquet
@@ -279,7 +274,9 @@ class ParquetStore(LakehouseApiMixin):
         dt = self._store.deltatable
         q = Query().sql.statements
         if self._translog.exists:
-            db, _ = query_duckdb_translog(q, dt, self._translog.deltatable)
+            db, _ = parquet_logic.query_duckdb_translog(
+                q, dt, self._translog.deltatable
+            )
         else:
             db = query_duckdb(q, dt)
         db.write_csv(output_uri)
@@ -302,7 +299,9 @@ class ParquetStore(LakehouseApiMixin):
             q = Query().sql.statements
 
         if self._translog.exists:
-            rel, con = query_duckdb_translog(q, dt, self._translog.deltatable)
+            rel, con = parquet_logic.query_duckdb_translog(
+                q, dt, self._translog.deltatable
+            )
         else:
             rel = query_duckdb(q, dt)
             con = None  # noqa: F841 — prevent GC of translog connection
@@ -325,7 +324,9 @@ class ParquetStore(LakehouseApiMixin):
         if not self._translog.exists:
             return
 
-        live = compact_with_translog(self._store.deltatable, self._translog.deltatable)
+        live = parquet_logic.compact_with_translog(
+            self._store.deltatable, self._translog.deltatable
+        )
 
         write_deltalake(
             str(self.uri),
@@ -345,40 +346,39 @@ class ParquetStore(LakehouseApiMixin):
         if not self._translog.exists:
             return set()
 
-        return _get_deleted_entity_ids(
+        return parquet_logic.get_deleted_entity_ids(
             self._store.deltatable, self._translog.deltatable
         )
 
     @no_api
-    def get_changes(
+    def get_changed_entity_ids(
         self,
-        start_version: int | None = None,
-        end_version: int | None = None,
-    ) -> Generator[tuple[datetime, str, dict], None, None]:
-        """
-        Get statement changes for a version range using change data capture.
+        since: datetime,
+        schema_in: list[str] | None = None,
+        prop: str | None = None,
+    ) -> set[str]:
+        """Get entity IDs with statements added since a timestamp.
+
+        Uses the translog's first_seen to detect new statements without
+        relying on Delta Lake CDF (which breaks after compact+vacuum).
 
         Args:
-            start_version: Starting version number (default: 0)
-            end_version: Ending version number (default: latest)
+            since: Only include entities with statements added after this time
+            schema_in: Optional list of schema names to filter by
+            prop: Optional property name to filter by
 
-        Yields:
-            Tuples of (commit_timestamp, change_type, row_dict)
+        Returns:
+            Set of entity_id strings with changed statements
         """
-        reader = self._store.deltatable.load_cdf(
-            starting_version=start_version or 0,
-            ending_version=end_version,
+        if not self._translog.exists:
+            return set()
+        return parquet_logic.get_changed_entity_ids(
+            self._store.deltatable,
+            self._translog.deltatable,
+            since,
+            schema_in,
+            prop,
         )
-        try:
-            while batch := reader.read_next_batch():
-                for row in batch.to_struct_array().to_pylist():
-                    yield (
-                        row["_commit_timestamp"],
-                        row["_change_type"],
-                        row,
-                    )
-        except StopIteration:
-            return
 
     @no_api
     def optimize(

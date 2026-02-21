@@ -33,14 +33,24 @@ from ftm_lakehouse.core.api import api_delegate, no_api
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.helpers.statements import unpack_statement, unpack_tombstone_row
-from ftm_lakehouse.logic.parquet import QUERY_IN_BATCH_SIZE, make_dedup_connection
+from ftm_lakehouse.logic.parquet import (
+    QUERY_IN_BATCH_SIZE,
+    STATEMENTS,
+    TRANSLOG,
+    make_dedup_connection,
+)
 from ftm_lakehouse.repository.base import BaseRepository
 from ftm_lakehouse.repository.diff import ParquetDiffMixin
 from ftm_lakehouse.repository.entities.api import ApiEntityRepository
 from ftm_lakehouse.storage.journal import get_journal
 from ftm_lakehouse.storage.journal.base import BaseJournalWriter
 from ftm_lakehouse.storage.journal.sql import SqlJournalStore
-from ftm_lakehouse.storage.parquet import PARTITIONS, TRANSLOG_SCHEMA, ParquetStore
+from ftm_lakehouse.storage.parquet import (
+    PARTITIONS,
+    TRANSLOG_SCHEMA,
+    TRANSLOG_TS,
+    ParquetStore,
+)
 from ftm_lakehouse.util import make_envelope
 
 settings = Settings()
@@ -214,7 +224,7 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
             tomb_table = pa.table(
                 {
                     "id": pa.array(tomb_ids, type=pa.string()),
-                    "deleted_at": pa.array(tomb_deleted_at, type=pa.timestamp("us")),
+                    "deleted_at": pa.array(tomb_deleted_at, type=TRANSLOG_TS),
                 }
             )
             self._statements._translog.mark_deleted(tomb_table)
@@ -222,7 +232,6 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         if not live:
             return 0
 
-        # Build translog rows for all live statements
         live_ids = [r["id"] for r in live]
         live_first_seen = [r.get("first_seen") or now for r in live]
         live_last_seen = [r.get("last_seen") or now for r in live]
@@ -249,9 +258,9 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         translog_table = pa.table(
             {
                 "id": pa.array(live_ids, type=pa.string()),
-                "first_seen": pa.array(live_first_seen, type=pa.timestamp("us")),
-                "last_seen": pa.array(live_last_seen, type=pa.timestamp("us")),
-                "deleted_at": pa.array([None] * len(live_ids), type=pa.timestamp("us")),
+                "first_seen": pa.array(live_first_seen, type=TRANSLOG_TS),
+                "last_seen": pa.array(live_last_seen, type=TRANSLOG_TS),
+                "deleted_at": pa.array([None] * len(live_ids), type=TRANSLOG_TS),
             },
             schema=TRANSLOG_SCHEMA,
         )
@@ -406,13 +415,13 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
             if translog.exists:
                 translog_dt = translog.deltatable
                 con = duckdb.connect()
-                con.register("arrow", dt.to_pyarrow_dataset())
-                con.register("translog", translog_dt.to_pyarrow_dataset())
+                con.register(STATEMENTS, dt.to_pyarrow_dataset())
+                con.register(TRANSLOG, translog_dt.to_pyarrow_dataset())
                 result = con.sql(
-                    "SELECT arrow.* FROM arrow "
-                    "JOIN translog sc ON arrow.id = sc.id "
+                    f"SELECT {STATEMENTS}.* FROM {STATEMENTS} "
+                    f"JOIN {TRANSLOG} sc ON {STATEMENTS}.id = sc.id "
                     "WHERE sc.deleted_at IS NULL "
-                    f"AND arrow.entity_id = '{entity_id}'"
+                    f"AND {STATEMENTS}.entity_id = '{entity_id}'"
                 )
             else:
                 rel = duckdb.arrow(dt.to_pyarrow_dataset())
@@ -458,21 +467,14 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
     _diff_base_path = path.DIFFS_ENTITIES
 
     @no_api
-    def _filter_changes(
-        self,
-        changes: Generator[tuple[datetime, str, dict], None, None],
-    ) -> set[str]:
-        """Track all entity IDs that have any statement change."""
-        changed_entity_ids: set[str] = set()
-        for _, change_type, row in changes:
-            if change_type in ("insert", "update_postimage"):
-                changed_entity_ids.add(row["entity_id"])
-        return changed_entity_ids
+    def _get_changed_ids_from_translog(self, since: datetime) -> set[str]:
+        """Get entity IDs with statements added since the given timestamp."""
+        return self._statements.get_changed_entity_ids(since)
 
     @no_api
-    def _write_diff(self, entity_ids: set[str], v: int, ts: datetime, **kwargs) -> str:
+    def _write_diff(self, entity_ids: set[str], ts: datetime, **kwargs) -> str:
         """Write entities as line-based JSON with operation envelopes."""
-        key = path.entities_diff(v, ts)
+        key = path.entities_diff(ts)
         with self._store.open(key, "wb") as o:
             smart_write_json(o, self._get_delta_entities(entity_ids))
         return self._store.to_uri(key)
@@ -490,9 +492,9 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
             yield make_envelope({"id": entity_id}, op="DEL")
 
     @no_api
-    def _write_initial_diff(self, version: int, ts: datetime, **kwargs) -> None:
+    def _write_initial_diff(self, ts: datetime, **kwargs) -> None:
         """Copy over exported entities.ftm.json to initial diff version"""
-        with self._store.open(path.entities_diff(version, ts), "wb") as o:
+        with self._store.open(path.entities_diff(ts), "wb") as o:
             for data in self._store.stream(path.ENTITIES_JSON):
                 line = orjson.dumps(
                     make_envelope(data), option=orjson.OPT_APPEND_NEWLINE

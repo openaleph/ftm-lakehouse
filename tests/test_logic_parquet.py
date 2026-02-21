@@ -8,7 +8,7 @@ from deltalake import DeltaTable, write_deltalake
 from ftmq.query import Query
 from ftmq.store.lake import ARROW_SCHEMA, compile_query
 
-from ftm_lakehouse.logic.parquet import translog_aware_sql
+from ftm_lakehouse.logic.parquet import STATEMENTS, TRANSLOG, translog_aware_sql
 from ftm_lakehouse.storage.parquet import PARTITIONS, TRANSLOG_SCHEMA
 
 
@@ -105,8 +105,8 @@ def test_translog_aware_sql_filters_deleted(tmp_path):
     sql = translog_aware_sql(compiled, dt)
 
     con = duckdb.connect()
-    con.register("arrow", dt.to_pyarrow_dataset())
-    con.register("translog", translog_dt.to_pyarrow_dataset())
+    con.register(STATEMENTS, dt.to_pyarrow_dataset())
+    con.register(TRANSLOG, translog_dt.to_pyarrow_dataset())
     result = con.execute(sql).fetchall()
 
     entity_ids = {r[1] for r in result}  # entity_id is second column
@@ -136,18 +136,19 @@ def test_translog_aware_sql_uses_translog_timestamps(tmp_path):
     sql = translog_aware_sql(compiled, dt)
 
     con = duckdb.connect()
-    con.register("arrow", dt.to_pyarrow_dataset())
-    con.register("translog", translog_dt.to_pyarrow_dataset())
+    con.register(STATEMENTS, dt.to_pyarrow_dataset())
+    con.register(TRANSLOG, translog_dt.to_pyarrow_dataset())
     result = con.execute(sql)
     rows_out = result.fetchall()
     cols = [desc[0] for desc in result.description]
 
     assert len(rows_out) == 1
     row_dict = dict(zip(cols, rows_out[0]))
-    # last_seen should come from translog (DuckDB may strip tzinfo)
+    # last_seen should come from translog (tz-aware UTC)
     result_ts = row_dict["last_seen"]
-    expected_ts = translog_ts.replace(tzinfo=None)
-    assert result_ts == expected_ts
+    if result_ts.tzinfo is not None:
+        result_ts = result_ts.astimezone(timezone.utc)
+    assert result_ts == translog_ts
 
 
 def test_translog_aware_sql_no_deletes(tmp_path):
@@ -174,8 +175,8 @@ def test_translog_aware_sql_no_deletes(tmp_path):
     sql = translog_aware_sql(compiled, dt)
 
     con = duckdb.connect()
-    con.register("arrow", dt.to_pyarrow_dataset())
-    con.register("translog", translog_dt.to_pyarrow_dataset())
+    con.register(STATEMENTS, dt.to_pyarrow_dataset())
+    con.register(TRANSLOG, translog_dt.to_pyarrow_dataset())
     result = con.execute(sql).fetchall()
 
     assert len(result) == 3

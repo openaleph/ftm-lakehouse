@@ -105,9 +105,9 @@ The main parquet table stores immutable FtM statements using the upstream `ARROW
 | Column | Type | Purpose |
 |--------|------|---------|
 | `id` | string | Statement ID (primary key) |
-| `first_seen` | timestamp[us] | When the statement was first written |
-| `last_seen` | timestamp[us] | When the statement was last seen (updated on re-add) |
-| `deleted_at` | timestamp[us] | Soft-delete marker (NULL = live) |
+| `first_seen` | timestamp[us, tz=UTC] | When the statement was first written |
+| `last_seen` | timestamp[us, tz=UTC] | When the statement was last seen (updated on re-add) |
+| `deleted_at` | timestamp[us, tz=UTC] | Soft-delete marker (NULL = live) |
 
 All queries join main + translog, filtering `deleted_at IS NULL` and using translog timestamps. This separates immutable data (statements) from mutable metadata (timestamps, deletes) and avoids writing tombstone rows into the main table.
 

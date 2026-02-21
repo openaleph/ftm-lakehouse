@@ -1,11 +1,9 @@
-"""DiffMixin - shared CDC-based diff export logic for repositories."""
+"""DiffMixin - translog-based diff export logic for repositories."""
 
 from abc import abstractmethod
 from datetime import datetime, timezone
-from typing import Generator
 
 from anystore.util import mask_uri
-from pyarrow import timestamp
 from structlog.stdlib import BoundLogger
 
 from ftm_lakehouse.core.conventions import path
@@ -13,25 +11,16 @@ from ftm_lakehouse.storage.parquet import ParquetStore
 from ftm_lakehouse.storage.tags import TagStore
 
 
-def unpack_diff_name(name: str) -> tuple[int, datetime]:
-    """v1_YYYYMMDDTHHMMSSZ.* -> (1, datetime)"""
-    name = name.split(".")[0]
-    v, ts = name.split("_")
-    return int(v[1:]), datetime.strptime(ts, path.TS_FORMAT)
-
-
-def pack_diff_name(v: int, ts: datetime) -> str:
-    """Generate diff name: v1_YYYYMMDDTHHMMSSZ"""
-    return f"v{v}_{datetime.strftime(ts, path.TS_FORMAT)}"
-
-
 class ParquetDiffMixin:
-    """Mixin providing CDC-based diff export functionality.
+    """Mixin providing translog-based diff export functionality.
+
+    Uses the translog's first_seen timestamps to detect changed entities,
+    replacing the previous CDF-based approach (which broke after compact+vacuum).
 
     Subclasses must implement:
-        - _filter_changes: method filtering CDC changes for relevant data
-        - _write_diff: method writing the diff output
-        - _write_initial_diff: method for writing the initial diff file
+        - _get_changed_ids_from_translog: get entity IDs changed since a timestamp
+        - _write_diff: write the diff output
+        - _write_initial_diff: write the initial diff file
     """
 
     log: BoundLogger
@@ -41,22 +30,19 @@ class ParquetDiffMixin:
     _diff_base_path: str
 
     @abstractmethod
-    def _filter_changes(
-        self,
-        changes: Generator[tuple[datetime, str, dict], None, None],
-    ) -> set[str]:
-        """Filter CDC changes and return set of changed entity IDs."""
+    def _get_changed_ids_from_translog(self, since: datetime) -> set[str]:
+        """Get entity IDs with statements added since the given timestamp."""
         ...
 
     @abstractmethod
-    def _write_diff(self, entity_ids: set[str], v: int, ts: timestamp, **kwargs) -> str:
+    def _write_diff(self, entity_ids: set[str], ts: datetime, **kwargs) -> str:
         """Write the diff file for the given entity IDs and return the uri to
-        the diff file"""
+        the diff file."""
         ...
 
     @abstractmethod
-    def _write_initial_diff(self, version: int, ts: datetime, **kwargs) -> None:
-        """Create initial diff"""
+    def _write_initial_diff(self, ts: datetime, **kwargs) -> None:
+        """Create initial diff."""
         ...
 
     @property
@@ -64,33 +50,37 @@ class ParquetDiffMixin:
         """Tag key for storing current diff state."""
         return f"{self._diff_base_path}-current"
 
-    def _get_diff_state(self) -> tuple[int, int | None, datetime] | None:
-        """Get the last diff export state (main_version, translog_version, timestamp).
+    def _get_diff_state(self) -> tuple[datetime, int, int | None] | None:
+        """Get last diff state: (timestamp, main_version, translog_version).
 
-        Format: v{main}_{TS}:s{translog}
+        Format: {TS}:{main_version}:{translog_version}
         """
         state = self._tags.get(self._diff_state_key)
         if state is None:
             return None
-        diff_part, translog_part = state.split(":")
-        main_v, ts = unpack_diff_name(diff_part)
-        translog_v = int(translog_part[1:]) if translog_part else None
-        return main_v, translog_v, ts
+        ts_str, main_v, translog_v = state.split(":")
+        return (
+            datetime.strptime(ts_str, path.TS_FORMAT).replace(tzinfo=timezone.utc),
+            int(main_v),
+            int(translog_v) if translog_v else None,
+        )
 
-    def _set_diff_state(self, name: str, translog_version: int | None = None) -> None:
+    def _set_diff_state(
+        self, ts: datetime, main_version: int, translog_version: int | None
+    ) -> None:
         """Store the diff export state."""
-        sv = f"s{translog_version}" if translog_version is not None else ""
-        self._tags.put(self._diff_state_key, f"{name}:{sv}")
+        ts_str = ts.strftime(path.TS_FORMAT)
+        sv = str(translog_version) if translog_version is not None else ""
+        self._tags.put(self._diff_state_key, f"{ts_str}:{main_version}:{sv}")
 
     def export_diff(self, **kwargs) -> str | None:
-        """Export only data changed since last diff export using Delta CDC.
+        """Export only data changed since last diff export using the translog.
 
-        Uses Delta Lake Change Data Capture to identify changed entities since
-        the last processed version. Also detects translog-only changes (soft
-        deletes) that don't produce main table CDF entries.
+        Uses the translog's first_seen timestamps to identify changed entities
+        since the last export. Also detects soft deletes via translog deleted_at.
 
         Returns:
-            Created diff name (v{v}_{ts}) or None if nothing created
+            Timestamp string of the created diff, or None if nothing created
         """
         with self._tags.touch(self._diff_base_path) as now:
             current_version = self._statements.version
@@ -101,25 +91,22 @@ class ParquetDiffMixin:
             if current_version is None:
                 return
 
-            diff_name = pack_diff_name(current_version, current_timestamp)
-
             state = self._get_diff_state()
-            if state is not None:
-                last_version, last_translog_version, _ = state
-            else:
-                last_version = None
-                last_translog_version = None
 
-            # No diff state yet - create initial diff by copying the full export
-            # This handles cases where the Delta table is already at version > 0
-            if last_version is None:
-                self._write_initial_diff(current_version, current_timestamp, **kwargs)
-                self._set_diff_state(diff_name, current_translog_version)
+            # No prior state — create initial diff
+            if state is None:
+                self._write_initial_diff(current_timestamp, **kwargs)
+                self._set_diff_state(
+                    current_timestamp, current_version, current_translog_version
+                )
+                ts_label = current_timestamp.strftime(path.TS_FORMAT)
                 self.log.info(
                     f"Exported initial diff for `{self._diff_base_path}`.",
-                    version=diff_name,
+                    version=ts_label,
                 )
-                return diff_name
+                return ts_label
+
+            last_timestamp, last_version, last_translog_version = state
 
             # Check if anything changed (main table or translog)
             main_changed = last_version < current_version
@@ -131,12 +118,10 @@ class ParquetDiffMixin:
             if not main_changed and not translog_changed:
                 return
 
-            # Collect changed entity IDs from main table CDC
+            # Collect changed entity IDs from translog timestamps
             changed_entity_ids: set[str] = set()
             if main_changed:
-                start_version = last_version + 1
-                changes = self._statements.get_changes(start_version, current_version)
-                changed_entity_ids = self._filter_changes(changes)
+                changed_entity_ids = self._get_changed_ids_from_translog(last_timestamp)
 
             # Also include entities that were soft-deleted via translog
             if translog_changed:
@@ -146,18 +131,17 @@ class ParquetDiffMixin:
             if not changed_entity_ids:
                 return
 
-            # Generate diff path and write (pass relative path, not URI)
-            diff_uri = self._write_diff(
-                changed_entity_ids, current_version, current_timestamp, **kwargs
+            diff_uri = self._write_diff(changed_entity_ids, current_timestamp, **kwargs)
+
+            self._set_diff_state(
+                current_timestamp, current_version, current_translog_version
             )
 
-            # Update state tracking
-            self._set_diff_state(diff_name, current_translog_version)
-
+            ts_label = current_timestamp.strftime(path.TS_FORMAT)
             self.log.info(
                 f"Exported {self._diff_base_path} diff.",
-                version=diff_name,
+                version=ts_label,
                 diff_uri=mask_uri(diff_uri),
                 added_entities=len(changed_entity_ids),
             )
-            return diff_name
+            return ts_label

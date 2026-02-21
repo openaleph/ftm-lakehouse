@@ -59,10 +59,10 @@ Dataset Layout
 
             diffs/
                 entities.ftm.json/
-                    v10_20240116T103000Z.delta.json  # entities delta
+                    20240116T103000000000Z.delta.json  # entities delta
                 exports/
                     documents.csv/
-                        v10_20240116T103000Z.documents.diff.csv  # documents delta
+                        20240116T103000000000Z.diff.csv  # documents delta
 
             jobs/
                 runs/
@@ -265,14 +265,13 @@ DIFFS_ENTITIES = f"{DIFFS}/{ENTITIES_JSON}"
 """Base path for entities.ftm.json diffs"""
 
 
-def documents_diff(version: int, ts: datetime | None = None) -> str:
+def documents_diff(ts: datetime | None = None) -> str:
     """
     Get path for a documents diff export file.
 
-    Layout: diffs/exports/documents.csv/v{version}_{ts}.diff.csv
+    Layout: diffs/exports/documents.csv/{ts}.diff.csv
 
     Args:
-        version: Delta table version number
         ts: Compact timestamp (YYYYMMDDTHHMMSSZ), defaults to current time
 
     Returns:
@@ -281,14 +280,14 @@ def documents_diff(version: int, ts: datetime | None = None) -> str:
     if ts is None:
         ts = datetime.now(timezone.utc)
     ts_iso = ts.strftime(TS_FORMAT)
-    return f"{DIFFS_DOCUMENTS}/v{version}_{ts_iso}.diff.csv"
+    return f"{DIFFS_DOCUMENTS}/{ts_iso}.diff.csv"
 
 
-def entities_diff(version: int, ts: datetime | None = None) -> str:
+def entities_diff(ts: datetime | None = None) -> str:
     """
     Get path for an entities diff export file.
 
-    Layout: diffs/entities.ftm.json/v{version}_{ts}.delta.json
+    Layout: diffs/entities.ftm.json/{ts}.delta.json
 
     The delta file contains line-based JSON with operation envelopes:
         {"op": "ADD", "entity": {"id": "...", "schema": "...", "properties": {...}}}
@@ -296,7 +295,6 @@ def entities_diff(version: int, ts: datetime | None = None) -> str:
         {"op": "DEL", "entity": {"id": "..."}}
 
     Args:
-        version: Delta table version number
         ts: Compact timestamp (YYYYMMDDTHHMMSSZ), defaults to current time
 
     Returns:
@@ -305,7 +303,7 @@ def entities_diff(version: int, ts: datetime | None = None) -> str:
     if ts is None:
         ts = datetime.now(timezone.utc)
     ts_iso = ts.strftime(TS_FORMAT)
-    return f"{DIFFS_ENTITIES}/v{version}_{ts_iso}.delta.json"
+    return f"{DIFFS_ENTITIES}/{ts_iso}.delta.json"
 
 
 JOBS = "jobs"
