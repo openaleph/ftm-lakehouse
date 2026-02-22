@@ -4,14 +4,10 @@ from datetime import datetime
 from typing import Generator, Generic, Self, TypeAlias, TypeVar, cast
 
 from anystore.logging import get_logger
-from followthemoney import EntityProxy, Statement, StatementEntity
-from followthemoney.namespace import Namespace
-from ftmq.store.base import DEFAULT_ORIGIN
-from ftmq.store.lake import get_schema_bucket
-from ftmq.util import ensure_entity
 
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.helpers.statements import pack_statement, pack_tombstone
+from ftm_lakehouse.logic.entities.buffer import EntityBuffer
 
 settings = Settings()
 log = get_logger(__name__)
@@ -20,14 +16,14 @@ WRITE_BATCH_SIZE = 10_000
 
 JournalRow = tuple[
     str, str, str, str, str, datetime | None
-]  # (id, bucket, origin, canonical_id, data)
+]  # (id, bucket, origin, canonical_id, data, deleted_at)
 JournalRows: TypeAlias = Generator[JournalRow, None, None]
 
 
 S = TypeVar("S", bound="BaseJournalStore")
 
 
-class BaseJournalWriter(Generic[S]):
+class BaseJournalWriter(EntityBuffer, Generic[S]):
     """
     Bulk writer for the journal with batched upserts.
 
@@ -35,85 +31,24 @@ class BaseJournalWriter(Generic[S]):
     """
 
     def __init__(self, store: S, origin: str | None = None) -> None:
+        super().__init__(store.dataset, origin)
         self.store = store
-        self.dataset = store.dataset
-        self.origin = origin or DEFAULT_ORIGIN
-        self.batch: dict[str, dict] = {}
-        self.namespace = Namespace()
 
     def _upsert_batch(self) -> None:
         raise NotImplementedError
 
-    def add(
-        self,
-        row_id: str,
-        bucket: str,
-        origin: str,
-        canonical_id: str,
-        data: str,
-        deleted_at: datetime | None = None,
-    ) -> None:
-        """Add a raw row to the journal batch. Last-write-wins on duplicate id."""
-        self.batch[row_id] = {
-            "id": row_id,
-            "bucket": bucket,
-            "origin": origin,
-            "canonical_id": canonical_id,
-            "data": data,
-            "deleted_at": deleted_at,
-        }
+    def flush_rows(self) -> JournalRows:
+        for bucket, origin, canonical_id, stmt, deleted_at in self.flush_buffer():
+            if deleted_at is not None:
+                data = pack_tombstone(stmt)
+            else:
+                data = pack_statement(stmt)
+            yield cast(str, stmt.id), bucket, origin, canonical_id, data, deleted_at
 
-        if len(self.batch) >= WRITE_BATCH_SIZE:
+    def add_statement(self, *args, **kwargs) -> None:
+        super().add_statement(*args, **kwargs)
+        if self._buffer_size >= WRITE_BATCH_SIZE:
             self._upsert_batch()
-
-    def add_statement(
-        self, stmt: Statement, deleted_at: datetime | None = None
-    ) -> None:
-        """Add a statement to the journal.
-
-        When deleted_at is set, the statement is packed as a tombstone
-        (only routing fields, payload stripped).
-        """
-        if stmt.entity_id is None or stmt.id is None:
-            return
-
-        canonical_id = stmt.canonical_id or stmt.entity_id
-        origin = stmt.origin or self.origin
-
-        # Create new Statement with correct values (Statement is immutable)
-        stmt = Statement(
-            id=stmt.id,
-            entity_id=stmt.entity_id,
-            canonical_id=canonical_id,
-            prop=stmt.prop,
-            schema=stmt.schema,
-            value=stmt.value,
-            dataset=self.dataset,
-            lang=stmt.lang,
-            original_value=stmt.original_value,
-            external=stmt.external,
-            first_seen=stmt.first_seen,
-            last_seen=stmt.last_seen,
-            origin=origin,
-        )
-
-        data = pack_tombstone(stmt) if deleted_at is not None else pack_statement(stmt)
-
-        self.add(
-            row_id=cast(str, stmt.id),
-            bucket=get_schema_bucket(stmt.schema),
-            origin=origin,
-            canonical_id=canonical_id,
-            data=data,
-            deleted_at=deleted_at,
-        )
-
-    def add_entity(self, entity: EntityProxy) -> None:
-        """Add all statements from an entity to the journal."""
-        entity = self.namespace.apply(entity)
-        entity = ensure_entity(entity, StatementEntity, self.dataset)
-        for stmt in entity.statements:
-            self.add_statement(stmt)
 
     def flush(self) -> None:
         """Flush pending rows and commit transaction."""

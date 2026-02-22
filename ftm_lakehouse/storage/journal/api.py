@@ -32,19 +32,11 @@ def _to_iso(value: str | datetime | None) -> str:
     return value.isoformat()
 
 
-def serialize_row(row: dict[str, str | datetime | None]) -> bytes:
-    parts = [
-        row["id"],
-        row["bucket"],
-        row["origin"],
-        row["canonical_id"],
-        row["data"],
-        _to_iso(row["deleted_at"]),
-    ]
-    return orjson.dumps(parts)
+def serialize_row(row: JournalRow) -> bytes:
+    return orjson.dumps([*row[:5], _to_iso(row[5])])
 
 
-def serialize_rows(rows: list[dict]) -> bytes:
+def serialize_rows(rows: JournalRows) -> bytes:
     """Serialize journal row dicts as JSONL."""
     return b"\n".join(map(serialize_row, rows))
 
@@ -57,10 +49,9 @@ def deserialize_row(line: str) -> JournalRow:
 
 class ApiJournalWriter(BaseJournalWriter["ApiJournalStore"]):
     def _upsert_batch(self) -> None:
-        if not self.batch:
+        if not self._buffer_size:
             return
-        payload = serialize_rows(list(self.batch.values()))
-        self.batch = {}
+        payload = serialize_rows(self.flush_rows())
         url = self.store._make_url("bulk")
         self.store._api.make_request(
             url,

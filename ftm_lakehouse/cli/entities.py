@@ -18,12 +18,14 @@ BULK_ORIGIN = "bulk"
 @cli.command("write-entities")
 def cli_write_entities(
     in_uri: Annotated[str, Option("-i")] = "-",
+    journal: Annotated[bool, Option(help="Write into journal")] = True,
     flush: Annotated[
         bool, Option(help="Flush journal to parquet after writing")
-    ] = False,
+    ] = True,
     origin: Annotated[str, Option(..., help="Data origin")] = BULK_ORIGIN,
 ):
-    """Write FtM entities from an input source into the journal."""
+    """Write FtM entities from an input source into the journal or directly into
+    deltalake (--no-journal)."""
     with DatasetContext() as dataset:
         with dataset.entities.writer(origin=origin) as writer:
             for proxy in logged_items(

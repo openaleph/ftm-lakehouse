@@ -64,10 +64,10 @@ class SqlJournalWriter(BaseJournalWriter["SqlJournalStore"]):
         self.tx: Transaction | None = None
 
     def _upsert_batch(self) -> None:
-        if not self.batch:
+        if not self._buffer_size:
             return
 
-        rows = list(self.batch.values())
+        rows = list(self.flush_rows())
         dialect = self.store.engine.dialect.name
         table = self.store.table
 

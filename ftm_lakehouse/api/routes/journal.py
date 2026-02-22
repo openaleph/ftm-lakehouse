@@ -7,6 +7,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from ftm_lakehouse.api.helpers import Journal
+from ftm_lakehouse.helpers.statements import unpack_statement
 from ftm_lakehouse.storage.journal import JournalRow
 from ftm_lakehouse.storage.journal.api import (
     JSONL_CONTENT_TYPE,
@@ -33,8 +34,11 @@ async def journal_bulk(journal: Journal, request: Request) -> PlainTextResponse:
             for line in body.split(b"\n"):
                 if not line:
                     continue
-                row = deserialize_row(line.decode())
-                writer.add(*row)
+                # FIXME this is a bit inefficient as the writer will re-pack the
+                # statement again for the journal.
+                _stmt, deleted_at = deserialize_row(line.decode())[4:]
+                stmt = unpack_statement(_stmt)
+                writer.add_statement(stmt, deleted_at)
                 count += 1
         return count
 
