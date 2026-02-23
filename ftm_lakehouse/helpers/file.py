@@ -1,8 +1,7 @@
-from functools import lru_cache
+from functools import cache, lru_cache
 from pathlib import Path
 from typing import Iterable
 
-from anystore.functools import weakref_cache as cache
 from followthemoney import Schema, StatementEntity, model
 from ftmq.types import StatementEntities
 from ftmq.util import make_entity

@@ -22,9 +22,9 @@ mappings = lake.get_mappings("my_data")
 ```
 """
 
+from functools import cache
 from typing import Any
 
-from anystore.functools import weakref_cache as cache
 from anystore.logging import get_logger
 from anystore.types import Uri
 from anystore.util import ensure_uri

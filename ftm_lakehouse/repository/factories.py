@@ -4,7 +4,8 @@ settings. Useful for override runtime config uri during testing as well as for
 public convenience.
 """
 
-from anystore.functools import weakref_cache as cache
+from functools import cache
+
 from anystore.types import Uri
 
 from ftm_lakehouse.core.api import ensure_api_uri
