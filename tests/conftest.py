@@ -56,6 +56,7 @@ def clear_factory_caches():
     factories.get_versions.cache_clear()
     factories.get_tags.cache_clear()
     get_journal.cache_clear()
+    get_lakehouse.cache_clear()
     yield
     # Clear after test
     factories.get_archive.cache_clear()
@@ -65,11 +66,12 @@ def clear_factory_caches():
     factories.get_versions.cache_clear()
     factories.get_tags.cache_clear()
     get_journal.cache_clear()
+    get_lakehouse.cache_clear()
 
 
 @pytest.fixture(autouse=True, scope="session")
-def cleanup_fixtures_tags():
-    """Clean up any tags created in fixtures directory during tests."""
+def cleanup_fixtures_data():
+    """Clean up any data created in fixtures directory during tests."""
     yield
     # Clean up after all tests
     for _dir in (
@@ -77,6 +79,7 @@ def cleanup_fixtures_tags():
         FIXTURES_PATH / "lake" / "tmp_dataset" / "exports",
         FIXTURES_PATH / "lake" / "tmp_dataset" / "jobs",
         FIXTURES_PATH / "lake" / "tmp_dataset" / "diffs",
+        FIXTURES_PATH / "lake" / "new_dataset",
     ):
         if _dir.exists():
             shutil.rmtree(_dir)
