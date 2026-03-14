@@ -115,6 +115,9 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
                 writer.flush()
             finally:
                 writer.close()
+                # keep journal not too full
+                if self._journal.count() >= 1_000_000:
+                    self.flush()
 
     def add(self, entity: EntityProxy, origin: str | None = None) -> None:
         """Add a single entity to the journal."""
@@ -127,6 +130,7 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         with self.writer(origin) as writer:
             for entity in entities:
                 writer.add_entity(entity)
+        # keep journal not too full
         if self._journal.count() >= 1_000_000:
             self.flush()
 
