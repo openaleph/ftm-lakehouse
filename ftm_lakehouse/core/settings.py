@@ -6,7 +6,7 @@ from pydantic_settings import SettingsConfigDict
 
 CHECKSUM_ALGORITHM = "sha256"  # never change this! ;)
 
-__version__ = "0.0.2"
+__version__ = "0.3.0"
 
 
 class Settings(BaseSettings):
