@@ -171,6 +171,10 @@ class CrawlOperation(DatasetJobOperation[CrawlJob]):
                         return True
         return False
 
+    def _api_run(self, force: bool | None = False, *args, **kwargs) -> CrawlJob:
+        """Crawl always runs locally — source files aren't on the API server."""
+        return self._run_local(force, *args, **kwargs)
+
 
 def crawl(
     dataset,

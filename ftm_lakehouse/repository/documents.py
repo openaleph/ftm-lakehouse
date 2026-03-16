@@ -43,7 +43,7 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
     def __init__(self, dataset: str, uri: Uri) -> None:
         super().__init__(dataset, uri)
         self._statements = ParquetStore(uri, dataset)
-        self._storage = get_store(uri, serialization_mode="raw")
+        self._storage = get_store(self._store_uri, serialization_mode="raw")
 
     @property
     def csv_uri(self) -> Uri:
