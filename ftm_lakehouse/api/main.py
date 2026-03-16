@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from followthemoney.dataset.util import dataset_name_check
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
-from ftm_lakehouse.api.auth import ensure_auth
+from ftm_lakehouse.api.auth import auth_router, ensure_auth
 from ftm_lakehouse.api.routes.entities import router as entities_router
 from ftm_lakehouse.api.routes.journal import router as journal_router
 from ftm_lakehouse.api.routes.operations import router as operations_router
@@ -60,6 +60,7 @@ def get_app(lake_uri: str | None = None) -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url="/")
     app.state.store = get_store(lake_uri or settings.uri)
     app.state.lake = get_lakehouse(lake_uri or settings.uri)
+    app.include_router(auth_router)
     app.include_router(entities_router, dependencies=[Depends(ensure_auth)])
     app.include_router(journal_router, dependencies=[Depends(ensure_auth)])
     app.include_router(operations_router, dependencies=[Depends(ensure_auth)])

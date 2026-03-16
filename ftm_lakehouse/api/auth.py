@@ -36,7 +36,7 @@ from typing import Self
 
 import jwt
 from anystore.logging import get_logger
-from fastapi import Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 
@@ -104,8 +104,16 @@ def create_access_token(
     )
 
 
-def ensure_token_context(token: str, request: Request) -> TokenData:
-    """Decode token and verify it allows the request method and path."""
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+TOKEN_ALL_ACCESS = TokenData(methods=["*"], prefixes=["/"])
+TOKEN_READONLY = TokenData(methods=list(SAFE_METHODS), prefixes=["/"])
+
+
+def validate_token(token: str | None, method: str, path: str) -> TokenData:
+    """Decode a JWT token and verify it grants access to the given method/path.
+
+    Returns TokenData on success, raises UNAUTHORIZED (401) or FORBIDDEN (403).
+    """
     if not token:
         log.error("Auth: no token")
         raise UNAUTHORIZED
@@ -117,22 +125,13 @@ def ensure_token_context(token: str, request: Request) -> TokenData:
             verify=True,
         )
     except Exception as e:
-        log.error(f"Invalid token: `{e}`", token=token)
+        log.error(f"Auth: invalid token: `{e}`")
         raise UNAUTHORIZED
     data = TokenData.from_payload(payload)
-    if not data.allows(request.method, request.url.path):
-        log.error(
-            "Auth: method/path not allowed",
-            method=request.method,
-            path=request.url.path,
-        )
+    if not data.allows(method, path):
+        log.error("Auth: method/path not allowed", method=method, path=path)
         raise FORBIDDEN
     return data
-
-
-SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
-TOKEN_ALL_ACCESS = TokenData(methods=["*"], prefixes=["/"])
-TOKEN_READONLY = TokenData(methods=list(SAFE_METHODS), prefixes=["/"])
 
 
 def ensure_auth(request: Request, token: str = Depends(oauth2_scheme)) -> TokenData:
@@ -147,4 +146,48 @@ def ensure_auth(request: Request, token: str = Depends(oauth2_scheme)) -> TokenD
         if request.method.upper() in SAFE_METHODS:
             return TOKEN_READONLY
         raise FORBIDDEN
-    return ensure_token_context(token, request)
+    return validate_token(token, request.method, request.url.path)
+
+
+auth_router = APIRouter(prefix="/_auth", tags=["auth"])
+
+
+@auth_router.get("/validate")
+def validate_token_endpoint(
+    token: str = Depends(oauth2_scheme),
+    x_original_uri: str = Header("/"),  # noqa: B008
+    x_original_method: str = Header("GET"),  # noqa: B008
+) -> Response:
+    """Validate a token for nginx auth_request subrequests.
+
+    nginx sends the original request's Authorization header along with
+    X-Original-URI and X-Original-Method so we can check permissions
+    against the actual request being proxied.
+
+    Returns 200 on success, 401 for missing/invalid token, 403 if the
+    token doesn't grant access to the requested method/path.
+
+    Example nginx configuration::
+
+        location / {
+            auth_request /_auth/validate;
+            proxy_pass http://api:8000;
+        }
+
+        location = /_auth/validate {
+            internal;
+            proxy_pass http://api:8000/_auth/validate;
+            proxy_pass_request_body off;
+            proxy_set_header Content-Length "";
+            proxy_set_header X-Original-URI $request_uri;
+            proxy_set_header X-Original-Method $request_method;
+        }
+    """
+    if not settings.auth_enabled:
+        return Response(status_code=200)
+    if not settings.auth_required and not token:
+        if x_original_method.upper() in SAFE_METHODS:
+            return Response(status_code=200)
+        raise FORBIDDEN
+    validate_token(token, x_original_method, x_original_uri)
+    return Response(status_code=200)
