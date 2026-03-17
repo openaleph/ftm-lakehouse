@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     )
 
     uri: str = "data"
-    journal_uri: str = "sqlite:///data/journal.db"
+    journal_uri: str = "sqlite:///:memory:"
     api_key: str | None = None
     on_zfs: bool = False
     zfs_pool: str | None = None
