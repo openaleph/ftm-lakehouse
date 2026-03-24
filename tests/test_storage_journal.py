@@ -11,7 +11,7 @@ from followthemoney.statement import Statement
 
 from ftm_lakehouse.api.routes.journal import router
 from ftm_lakehouse.core.api import get_api
-from ftm_lakehouse.helpers.statements import unpack_statement
+from ftm_lakehouse.helpers.statements import parse_order_key, unpack_statement
 from ftm_lakehouse.storage.journal import ApiJournalStore, JournalRows, SqlJournalStore
 from ftm_lakehouse.storage.journal import get_journal as _get_journal_factory
 from ftm_lakehouse.storage.journal.base import BaseJournalStore
@@ -39,7 +39,7 @@ def make_statement(
 
 def collect_statements(items: JournalRows) -> list[Statement]:
     """Collect all statements from flush items."""
-    return [unpack_statement(stmt) for _, _, _, _, stmt, _ in items]
+    return [unpack_statement(row.data) for row in items]
 
 
 def _make_sql_journal() -> SqlJournalStore:
@@ -176,8 +176,8 @@ def test_storage_journal_statement_fields(journal):
     assert collect_statements(journal.flush()) == []
 
 
-def test_storage_journal_flush_yields_bucket_origin(journal):
-    """Test that flush yields (id, bucket, origin, canonical_id, data) tuples."""
+def test_storage_journal_flush_yields_order_key(journal):
+    """Test that flush yields (id, order_key, data, deleted_at) tuples."""
     with journal.writer() as w:
         w.add_statement(
             Statement(
@@ -213,15 +213,17 @@ def test_storage_journal_flush_yields_bucket_origin(journal):
     items = list(journal.flush())
     assert len(items) == 3
 
-    for row_id, bucket, origin, canonical_id, data, deleted_at in items:
+    for row in items:
+        shard, bucket, origin, _ = parse_order_key(row.order_key)
+        assert len(shard) == 2  # 2-char hex prefix
         assert bucket == "thing"  # Person is a Thing
         assert origin in ("source_a", "source_b")
-        stmt = unpack_statement(data)
+        stmt = unpack_statement(row.data)
         assert stmt.origin == origin
 
 
 def test_storage_journal_flush_sorted_order(journal):
-    """Test that flush yields statements in sorted order (bucket, origin, canonical_id)."""
+    """Test that flush yields statements sorted by order_key."""
     with journal.writer() as w:
         for origin in ["z_origin", "a_origin", "m_origin"]:
             for i in range(3):
@@ -236,8 +238,8 @@ def test_storage_journal_flush_sorted_order(journal):
                 w.add_statement(stmt)
 
     items = list(journal.flush())
-    origins = [origin for _, _, origin, _, _, _ in items]
-    assert origins == sorted(origins)
+    order_keys = [row.order_key for row in items]
+    assert order_keys == sorted(order_keys)
 
 
 def test_storage_journal_rollback_on_consumer_error(request, journal):
@@ -251,7 +253,7 @@ def test_storage_journal_rollback_on_consumer_error(request, journal):
 
     # Try to consume but raise error
     try:
-        for _id, _bucket, _origin, _canonical_id, _data, _deleted_at in journal.flush():
+        for _ in journal.flush():
             raise ValueError("Simulated error")
     except ValueError:
         pass
@@ -352,8 +354,8 @@ def test_storage_journal_flush_concurrent_write(concurrent_journal):
     # Start flush, inject new rows mid-iteration, then finish
     flushed_ids = []
     injected = False
-    for row_id, bucket, origin, canonical_id, data, deleted_at in journal.flush():
-        flushed_ids.append(row_id)
+    for row in journal.flush():
+        flushed_ids.append(row.id)
 
         # After first row, inject new rows via a separate writer
         if not injected:

@@ -25,6 +25,7 @@ from sqlalchemy.pool import StaticPool
 from ftm_lakehouse.storage.journal.base import (
     BaseJournalStore,
     BaseJournalWriter,
+    JournalRow,
     JournalRows,
 )
 
@@ -34,18 +35,21 @@ DEADLOCK_BASE_DELAY = 1  # seconds
 
 
 def make_journal_table(metadata: MetaData, dataset: str) -> Table:
-    """Create the journal table schema."""
+    """Create the journal table schema.
+
+    The ``order_key`` column encodes ``shard·bucket·origin·entity_id``
+    (delimited by UNIT_SEP) so a single index drives both flush ORDER BY
+    and write-time index maintenance and ensures optimized ordering for
+    consumers writing to the Delta Lake partitioned table.
+    """
     return Table(
         f"journal_{dataset}",
         metadata,
         Column("id", String(255), primary_key=True),
-        Column("bucket", String(50), nullable=False),
-        Column("origin", String(255), nullable=False),
-        Column("canonical_id", String(255), nullable=False),
+        Column("order_key", String(1024), nullable=False),
         Column("data", Text, nullable=False),
         Column("deleted_at", DateTime(timezone=True), nullable=True),
-        # Covering index for flush ORDER BY — includes id for DELETE lookups
-        Index(f"ix_{dataset}_sort", "bucket", "origin", "canonical_id", "id"),
+        Index(f"ix_{dataset}_order", "order_key"),
     )
 
 
@@ -78,9 +82,7 @@ class SqlJournalWriter(BaseJournalWriter["SqlJournalStore"]):
             sqlite_stmt = sqlite_istmt.on_conflict_do_update(
                 index_elements=["id"],
                 set_={
-                    "bucket": sqlite_istmt.excluded.bucket,
-                    "origin": sqlite_istmt.excluded.origin,
-                    "canonical_id": sqlite_istmt.excluded.canonical_id,
+                    "order_key": sqlite_istmt.excluded.order_key,
                     "data": sqlite_istmt.excluded.data,
                     "deleted_at": sqlite_istmt.excluded.deleted_at,
                 },
@@ -97,9 +99,7 @@ class SqlJournalWriter(BaseJournalWriter["SqlJournalStore"]):
                     psql_stmt = psql_istmt.on_conflict_do_update(
                         index_elements=["id"],
                         set_={
-                            "bucket": psql_istmt.excluded.bucket,
-                            "origin": psql_istmt.excluded.origin,
-                            "canonical_id": psql_istmt.excluded.canonical_id,
+                            "order_key": psql_istmt.excluded.order_key,
                             "data": psql_istmt.excluded.data,
                             "deleted_at": psql_istmt.excluded.deleted_at,
                         },
@@ -174,22 +174,16 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
         self.metadata.create_all(self.engine, tables=[self.table], checkfirst=True)
 
     def iterate(self, *args, **kwargs) -> JournalRows:
-        """Iterate all rows ordered for batch processing."""
-        q = select(self.table).order_by(
-            self.table.c.bucket,
-            self.table.c.origin,
-            self.table.c.canonical_id,
-        )
+        """Iterate all rows ordered by order_key for batch processing."""
+        q = select(self.table).order_by(self.table.c.order_key)
 
         with self.engine.connect() as conn:
             cursor = conn.execution_options(stream_results=True).execute(q)
             while rows := cursor.fetchmany(10_000):
                 for row in rows:
-                    yield (
+                    yield JournalRow(
                         row.id,
-                        row.bucket,
-                        row.origin,
-                        row.canonical_id,
+                        row.order_key,
                         row.data,
                         row.deleted_at,
                     )
@@ -200,11 +194,7 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
         Only deletes rows that were actually yielded, so rows written by
         concurrent writers during the flush are preserved.
         """
-        q = select(self.table).order_by(
-            self.table.c.bucket,
-            self.table.c.origin,
-            self.table.c.canonical_id,
-        )
+        q = select(self.table).order_by(self.table.c.order_key)
 
         # Use separate connections for read (streaming) and write (delete).
         # PostgreSQL server-side cursors (stream_results) apply to the
@@ -218,11 +208,9 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
                     flushed: list[str] = []
                     for row in rows:
                         flushed.append(row.id)
-                        yield (
+                        yield JournalRow(
                             row.id,
-                            row.bucket,
-                            row.origin,
-                            row.canonical_id,
+                            row.order_key,
                             row.data,
                             row.deleted_at,
                         )
