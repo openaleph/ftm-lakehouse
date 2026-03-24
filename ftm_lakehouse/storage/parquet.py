@@ -138,6 +138,24 @@ class TranslogStore(LakehouseApiMixin):
             storage_options=storage_options(),
         )
 
+    @no_api
+    def optimize(self, vacuum: bool = False, vacuum_keep_hours: int = 0) -> None:
+        """Compact small translog files and optionally vacuum old versions.
+
+        Delta Lake MERGE operations create new files on every upsert/mark_deleted,
+        leading to thousands of small files over time. This compacts them and
+        removes obsolete file versions.
+        """
+        if not self.exists:
+            return
+        dt = self.deltatable
+        dt.optimize.compact()
+        if vacuum:
+            dt.vacuum(
+                retention_hours=vacuum_keep_hours,
+                enforce_retention_duration=vacuum_keep_hours > 0,
+            )
+
 
 class TranslogAwareLakeStore(LakeStore, LakehouseApiMixin):
     """LakeStore subclass that joins with translog for timestamps and soft deletes.
@@ -399,6 +417,7 @@ class ParquetStore(LakehouseApiMixin):
         """
         writer = self._store.writer()
         writer.optimize(vacuum, vacuum_keep_hours, bucket=bucket, origin=origin)
+        self._translog.optimize(vacuum, vacuum_keep_hours)
 
     @no_api
     def destroy(self) -> None:
