@@ -20,12 +20,27 @@ from ftm_lakehouse.core.settings import Settings
 QUERY_IN_BATCH_SIZE = 5_000
 TRANSLOG = "translog"
 STATEMENTS = "statements"
-settings = Settings()
 
 
 def _connect() -> duckdb.DuckDBPyConnection:
     """Create a DuckDB connection with temp_directory for disk-spill on large sorts."""
-    return duckdb.connect(config={"temp_directory": settings.tmp_dir})
+    return duckdb.connect(config={"temp_directory": Settings().tmp_dir})
+
+
+def _register_delta(con: duckdb.DuckDBPyConnection, name: str, dt: DeltaTable) -> None:
+    """Register a DeltaTable as a DuckDB view via native delta reader.
+
+    Uses DuckDB's built-in delta_scan() so that all memory is managed inside
+    DuckDB's buffer pool.  This makes temp_directory spilling work — unlike
+    con.register(pyarrow_dataset) where Arrow buffers live outside DuckDB's
+    memory accounting and never trigger spill-to-disk.
+    """
+    con.execute("INSTALL delta")
+    con.execute("LOAD delta")
+    con.sql(
+        f"CREATE OR REPLACE VIEW {name} AS "
+        f"SELECT * FROM delta_scan('{dt.table_uri}')"
+    )
 
 
 def translog_aware_sql(compiled_query: str, dt: DeltaTable) -> str:
@@ -64,8 +79,8 @@ def stream_duckdb_translog(
 ) -> Generator[Row, None, None]:
     """Like stream_duckdb but joins with translog for accurate timestamps and soft deletes."""
     con = _connect()
-    con.register(STATEMENTS, dt.to_pyarrow_dataset())
-    con.register(TRANSLOG, translog_dt.to_pyarrow_dataset())
+    _register_delta(con, STATEMENTS, dt)
+    _register_delta(con, TRANSLOG, translog_dt)
     compiled = compile_query(q)
     sql = translog_aware_sql(compiled, dt)
     rel = con.sql(sql)
@@ -84,8 +99,8 @@ def query_duckdb_translog(
     to prevent GC from closing it while the relation is still in use.
     """
     con = _connect()
-    con.register(STATEMENTS, dt.to_pyarrow_dataset())
-    con.register(TRANSLOG, translog_dt.to_pyarrow_dataset())
+    _register_delta(con, STATEMENTS, dt)
+    _register_delta(con, TRANSLOG, translog_dt)
     compiled = compile_query(q)
     sql = translog_aware_sql(compiled, dt)
     return con.sql(sql), con
@@ -110,8 +125,8 @@ def compact_with_translog(
     select_cols = ", ".join(main_cols + ["sc.first_seen", "sc.last_seen"])
 
     con = _connect()
-    con.register(STATEMENTS, dt.to_pyarrow_dataset())
-    con.register(TRANSLOG, translog_dt.to_pyarrow_dataset())
+    _register_delta(con, STATEMENTS, dt)
+    _register_delta(con, TRANSLOG, translog_dt)
     return con.sql(
         f"SELECT {select_cols} FROM {STATEMENTS} "
         f"JOIN {TRANSLOG} sc ON {STATEMENTS}.id = sc.id "
@@ -130,8 +145,8 @@ def get_deleted_entity_ids(dt: DeltaTable, translog_dt: DeltaTable) -> set[str]:
         Set of entity_id strings with at least one deleted statement
     """
     con = _connect()
-    con.register(STATEMENTS, dt.to_pyarrow_dataset())
-    con.register(TRANSLOG, translog_dt.to_pyarrow_dataset())
+    _register_delta(con, STATEMENTS, dt)
+    _register_delta(con, TRANSLOG, translog_dt)
     result = con.execute(
         f"SELECT DISTINCT {STATEMENTS}.entity_id FROM {STATEMENTS} "
         f"JOIN {TRANSLOG} sc ON {STATEMENTS}.id = sc.id "
@@ -150,7 +165,7 @@ def filter_live_translog(translog_dt: DeltaTable) -> pa.RecordBatchReader:
         RecordBatchReader of translog rows where deleted_at IS NULL
     """
     con = _connect()
-    con.register(TRANSLOG, translog_dt.to_pyarrow_dataset())
+    _register_delta(con, TRANSLOG, translog_dt)
     return con.sql(
         f"SELECT * FROM {TRANSLOG} WHERE deleted_at IS NULL"
     ).fetch_arrow_reader()
@@ -187,8 +202,8 @@ def get_changed_entity_ids(
     since_truncated = since.replace(microsecond=0)
 
     con = _connect()
-    con.register(STATEMENTS, dt.to_pyarrow_dataset())
-    con.register(TRANSLOG, translog_dt.to_pyarrow_dataset())
+    _register_delta(con, STATEMENTS, dt)
+    _register_delta(con, TRANSLOG, translog_dt)
 
     sql = (
         f"SELECT DISTINCT {STATEMENTS}.entity_id FROM {STATEMENTS} "
@@ -212,7 +227,7 @@ def make_dedup_connection(dt: DeltaTable) -> duckdb.DuckDBPyConnection | None:
     Returns None if the main parquet table doesn't exist yet (first flush).
     """
     con = _connect()
-    con.register(STATEMENTS, dt.to_pyarrow_dataset())
+    _register_delta(con, STATEMENTS, dt)
     con.execute(
         f"CREATE TEMP TABLE existing_ids AS SELECT DISTINCT id FROM {STATEMENTS}"
     )
