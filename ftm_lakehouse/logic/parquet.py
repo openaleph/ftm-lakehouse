@@ -7,6 +7,7 @@ Provides stateless operations on DeltaTable/DuckDB/PyArrow for:
 - Changed entity ID detection via translog timestamps
 """
 
+import os
 from datetime import datetime
 from typing import Generator
 
@@ -20,26 +21,59 @@ from ftm_lakehouse.core.settings import Settings
 QUERY_IN_BATCH_SIZE = 5_000
 TRANSLOG = "translog"
 STATEMENTS = "statements"
+settings = Settings()
+
+
+def _default_memory_limit() -> str:
+    """60% of system RAM as an absolute GiB value."""
+    mem_bytes = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    return f"{int(mem_bytes * 0.6) // (1024 ** 3)}GiB"
 
 
 def _connect() -> duckdb.DuckDBPyConnection:
     """Create a DuckDB connection with temp_directory for disk-spill on large sorts."""
-    return duckdb.connect(config={"temp_directory": Settings().tmp_dir})
+    return duckdb.connect(
+        config={
+            "temp_directory": settings.tmp_dir,
+            "memory_limit": settings.duckdb_memory_limit or _default_memory_limit(),
+        }
+    )
 
 
 def _register_delta(con: duckdb.DuckDBPyConnection, name: str, dt: DeltaTable) -> None:
-    """Register a DeltaTable as a DuckDB view via native delta reader.
+    """Register a DeltaTable via delta_scan() for predicate pushdown.
 
-    Uses DuckDB's built-in delta_scan() so that all memory is managed inside
-    DuckDB's buffer pool.  This makes temp_directory spilling work — unlike
-    con.register(pyarrow_dataset) where Arrow buffers live outside DuckDB's
-    memory accounting and never trigger spill-to-disk.
+    Uses Delta column statistics for file skipping on filtered queries.
+    delta-kernel-rs metadata lives outside DuckDB's buffer pool, so this is
+    not suitable for full-scan operations that need reliable disk spilling —
+    use _register_parquet() for those.
     """
     con.execute("INSTALL delta")
     con.execute("LOAD delta")
     con.sql(
         f"CREATE OR REPLACE VIEW {name} AS "
         f"SELECT * FROM delta_scan('{dt.table_uri}')"
+    )
+
+
+def _register_parquet(
+    con: duckdb.DuckDBPyConnection, name: str, dt: DeltaTable
+) -> None:
+    """Register a DeltaTable via read_parquet() for full memory tracking.
+
+    Uses DeltaTable.file_uris() to resolve active files, then DuckDB's native
+    parquet reader so all memory is inside DuckDB's buffer pool and disk
+    spilling via temp_directory works reliably.  No Delta column statistics
+    for file skipping — use for full-scan operations (export, compact, dedup).
+    """
+    files = dt.file_uris()
+    if not files:
+        con.register(name, dt.to_pyarrow_dataset())
+        return
+    quoted = ", ".join(f"'{f}'" for f in files)
+    con.sql(
+        f"CREATE OR REPLACE VIEW {name} AS "
+        f"SELECT * FROM read_parquet([{quoted}], hive_partitioning=true)"
     )
 
 
@@ -97,10 +131,13 @@ def query_duckdb_translog(
 
     Returns (relation, connection) tuple. Caller must hold the connection reference
     to prevent GC from closing it while the relation is still in use.
+
+    Uses read_parquet() for full memory tracking — callers (export_csv, query_raw)
+    do full-table scans with ORDER BY that need reliable disk spilling.
     """
     con = _connect()
-    _register_delta(con, STATEMENTS, dt)
-    _register_delta(con, TRANSLOG, translog_dt)
+    _register_parquet(con, STATEMENTS, dt)
+    _register_parquet(con, TRANSLOG, translog_dt)
     compiled = compile_query(q)
     sql = translog_aware_sql(compiled, dt)
     return con.sql(sql), con
@@ -125,8 +162,8 @@ def compact_with_translog(
     select_cols = ", ".join(main_cols + ["sc.first_seen", "sc.last_seen"])
 
     con = _connect()
-    _register_delta(con, STATEMENTS, dt)
-    _register_delta(con, TRANSLOG, translog_dt)
+    _register_parquet(con, STATEMENTS, dt)
+    _register_parquet(con, TRANSLOG, translog_dt)
     return con.sql(
         f"SELECT {select_cols} FROM {STATEMENTS} "
         f"JOIN {TRANSLOG} sc ON {STATEMENTS}.id = sc.id "
@@ -227,7 +264,7 @@ def make_dedup_connection(dt: DeltaTable) -> duckdb.DuckDBPyConnection | None:
     Returns None if the main parquet table doesn't exist yet (first flush).
     """
     con = _connect()
-    _register_delta(con, STATEMENTS, dt)
+    _register_parquet(con, STATEMENTS, dt)
     con.execute(
         f"CREATE TEMP TABLE existing_ids AS SELECT DISTINCT id FROM {STATEMENTS}"
     )
