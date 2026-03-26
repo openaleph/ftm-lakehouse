@@ -1767,24 +1767,24 @@ tqdm = ["tqdm"]
 
 [[package]]
 name = "ftmq"
-version = "4.6.1"
+version = "4.7.0"
 description = "followthemoney query dsl and io helpers"
 optional = false
 python-versions = "<3.14,>=3.11"
 groups = ["main"]
 files = [
-    {file = "ftmq-4.6.1-py3-none-any.whl", hash = "sha256:e3b1e16c59e15d09759e016f60554b9a8f9179504847ffac88d688a502ccd8e2"},
-    {file = "ftmq-4.6.1.tar.gz", hash = "sha256:0f8f6563465a1d0aa7fc7dc455f45b342d60aa7f6fc22e65c757a270487859fa"},
+    {file = "ftmq-4.7.0-py3-none-any.whl", hash = "sha256:12e7f7f3729a57cd47a0f17c922ec2cbef1a86b2b2f2c482307bbefdd65af88c"},
+    {file = "ftmq-4.7.0.tar.gz", hash = "sha256:70ee24a33858967e5e74abea50ca5ca7049125a528becba751e32e113d1c04f5"},
 ]
 
 [package.dependencies]
-anystore = ">=1.1.4,<2.0.0"
+anystore = ">=1.1.5,<2.0.0"
 click = ">=8.2.1,<9.0.0"
 click-default-group = ">=1.2.4,<2.0.0"
-deltalake = {version = ">=1.4.2,<2.0.0", optional = true, markers = "extra == \"lake\""}
-duckdb = {version = ">=1.5.0,<2.0.0", optional = true, markers = "extra == \"lake\""}
-followthemoney = ">=4.6.2,<5.0.0"
-nomenklatura = ">=4.7.1,<5.0.0"
+deltalake = {version = ">=1.5.0,<2.0.0", optional = true, markers = "extra == \"lake\""}
+duckdb = {version = ">=1.5.1,<2.0.0", optional = true, markers = "extra == \"lake\""}
+followthemoney = ">=4.7.0,<5.0.0"
+nomenklatura = ">=4.7.3,<5.0.0"
 orjson = ">=3.10.18,<4.0.0"
 pandas = {version = ">=3.0.1,<4.0.0", optional = true, markers = "extra == \"lake\""}
 pyarrow = {version = ">=23.0.1,<24.0.0", optional = true, markers = "extra == \"lake\""}
@@ -1794,7 +1794,7 @@ rigour = ">=1.7.5,<2.0.0"
 
 [package.extras]
 aleph = ["alephclient (>=2.6.0,<3.0.0)", "furl (>=2.1.4,<3.0.0)"]
-lake = ["deltalake (>=1.4.2,<2.0.0)", "duckdb (>=1.5.0,<2.0.0)", "pandas (>=3.0.1,<4.0.0)", "pyarrow (>=23.0.1,<24.0.0)"]
+lake = ["deltalake (>=1.5.0,<2.0.0)", "duckdb (>=1.5.1,<2.0.0)", "pandas (>=3.0.1,<4.0.0)", "pyarrow (>=23.0.1,<24.0.0)"]
 level = ["plyvel (>=1.5.1,<2.0.0)"]
 postgres = ["psycopg[pool] (>=3.2.9,<4.0.0)", "sqlalchemy (>=2.0.36,<3.0.0)"]
 redis = ["fakeredis (>=2.26.2,<3.0.0)", "redis (>=5.2.1,<6.0.0)"]
