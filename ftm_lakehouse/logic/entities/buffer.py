@@ -8,6 +8,7 @@ from ftmq.util import ensure_entity
 
 from ftm_lakehouse.helpers.statements import make_order_key
 
+# Entities are never namespaced in ftm-lakehouse
 namespace = Namespace()
 
 # (order_key, stmt, deleted_at)

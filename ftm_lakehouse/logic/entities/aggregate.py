@@ -6,18 +6,18 @@ entities from statement streams.
 
 from collections import defaultdict
 from datetime import datetime
-from typing import Any, Generator, Iterator
+from typing import Any, Iterator, TypedDict
 
-from followthemoney import Model, Schema, Statement, StatementEntity, model
+from followthemoney import Schema, Statement, StatementEntity, model
 from followthemoney.exc import InvalidData
 from followthemoney.statement import StatementDict
 from followthemoney.statement.util import BASE_ID
 from ftmq.aggregate import common_ancestor
-from ftmq.types import StatementEntities, Statements
-from ftmq.util import make_dataset
+from ftmq.util import DEFAULT_DATASET, make_dataset
 
 
-def merge_schema(s1: str | Schema, s2: str | Schema) -> Schema:
+def _merge_schema(s1: str | Schema, s2: str | Schema) -> Schema:
+    """Lenient merge: Find common ancestors if schemata can't merge"""
     _s1 = model.get(s1)
     _s2 = model.get(s2)
     if _s1 is None or _s2 is None:
@@ -26,48 +26,6 @@ def merge_schema(s1: str | Schema, s2: str | Schema) -> Schema:
         return model.common_schema(s1, s2)
     except InvalidData:
         return common_ancestor(_s1, _s2)
-
-
-def aggregate_statements(stmts: Statements, dataset: str) -> StatementEntities:
-    """
-    Aggregate sorted statements into entities.
-
-    Takes a stream of statements sorted by canonical_id and yields
-    StatementEntity objects by grouping consecutive statements with
-    the same canonical_id.
-
-    This function is the core entity assembly logic used when exporting
-    entities from the statement store. It expects statements to be pre-sorted
-    by canonical_id for correct grouping.
-
-    Args:
-        stmts: Iterable of statements, must be sorted by canonical_id
-        dataset: Dataset name for the resulting entities
-
-    Yields:
-        StatementEntity for each unique canonical_id
-
-    Example:
-        ```python
-        from ftm_lakehouse.logic import aggregate_statements
-        from followthemoney.statement.serialize import read_csv_statements
-
-        # Read sorted statements from CSV
-        with open("statements.csv") as f:
-            statements = read_csv_statements(f)
-            for entity in aggregate_statements(statements, "my_dataset"):
-                print(f"{entity.id}: {entity.caption}")
-        ```
-    """
-    ds = make_dataset(dataset)
-    statements: list[Statement] = []
-    for s in stmts:
-        if len(statements) and statements[0].canonical_id != s.canonical_id:
-            yield StatementEntity.from_statements(ds, statements)
-            statements = []
-        statements.append(s)
-    if len(statements):
-        yield StatementEntity.from_statements(ds, statements)
 
 
 def _ts_str(value: str | datetime | None) -> str | None:
@@ -79,6 +37,19 @@ def _ts_str(value: str | datetime | None) -> str | None:
     return value
 
 
+class EntityData(TypedDict):
+    """All data needed to compile a proper EntityDict"""
+
+    schemata: set[str]
+    datasets: set[str]
+    referents: set[str]
+    origins: set[str]
+    first_seens: set[str]
+    last_seens: set[str]
+    last_changes: set[str]
+    properties: defaultdict
+
+
 class EntityPayload:
     """Lightweight entity accumulator that works on raw statement dicts.
 
@@ -88,66 +59,71 @@ class EntityPayload:
 
     __slots__ = (
         "id",
-        "_schemata",
-        "_origins",
-        "_datasets",
-        "_referents",
-        "_first_seens",
-        "_last_seens",
-        "_last_change_candidates",
-        "_properties",
+        "dataset",
+        "statements",
     )
 
-    def __init__(self, id: str | None = None) -> None:
+    def __init__(self, id: str | None = None, dataset: str | None = None) -> None:
         self.id = id
-        self._schemata: set[str] = set()
-        self._origins: set[str] = set()
-        self._datasets: set[str] = set()
-        self._referents: set[str] = set()
-        self._first_seens: list[str] = []
-        self._last_seens: list[str] = []
-        self._last_change_candidates: list[str] = []
-        self._properties: dict[str, set[str]] = defaultdict(set)
+        self.statements: list[StatementDict] = []
+        self.dataset = make_dataset(dataset or DEFAULT_DATASET)
 
     def add(self, s: StatementDict) -> None:
-        self._schemata.add(s["schema"])
-        self._datasets.add(s["dataset"])
+        self.statements.append(s)
 
-        origin = s.get("origin")
-        if origin:
-            self._origins.add(origin)
+    def _build(self) -> EntityData:
+        data = EntityData(
+            schemata=set(),
+            datasets=set(),
+            referents=set(),
+            origins=set(),
+            first_seens=set(),
+            last_seens=set(),
+            last_changes=set(),
+            properties=defaultdict(set),
+        )
 
-        entity_id = s.get("entity_id")
-        if entity_id and entity_id != self.id:
-            self._referents.add(entity_id)
+        # collect statements
+        for s in self.statements:
+            data["schemata"].add(s["schema"])
+            data["datasets"].add(s["dataset"])
 
-        first_seen = _ts_str(s.get("first_seen"))
-        last_seen = _ts_str(s.get("last_seen"))
+            origin = s.get("origin")
+            if origin:
+                data["origins"].add(origin)
 
-        if s["prop"] == BASE_ID:
-            # last_change = max of BASE_ID statement first_seen values
-            if first_seen is not None:
-                self._last_change_candidates.append(first_seen)
-        else:
-            self._properties[s["prop"]].add(s["value"])
-            # first_seen/last_seen only from non-id statements
-            # (matches StatementEntity.to_context_dict which iterates _statements,
-            # which excludes BASE_ID)
-            if first_seen is not None:
-                self._first_seens.append(first_seen)
-            if last_seen is not None:
-                self._last_seens.append(last_seen)
+            entity_id = s.get("entity_id")
+            if entity_id and entity_id != self.id:
+                data["referents"].add(entity_id)
+
+            first_seen = _ts_str(s.get("first_seen"))
+            last_seen = _ts_str(s.get("last_seen"))
+
+            if s["prop"] == BASE_ID:
+                # last_change = max of BASE_ID statement first_seen values
+                if first_seen is not None:
+                    data["last_changes"].add(first_seen)
+            else:
+                data["properties"][s["prop"]].add(s["value"])
+                # first_seen/last_seen only from non-id statements
+                # (matches StatementEntity.to_context_dict which iterates _statements,
+                # which excludes BASE_ID)
+                if first_seen is not None:
+                    data["first_seens"].add(first_seen)
+                if last_seen is not None:
+                    data["last_seens"].add(last_seen)
+
+        return data
 
     def to_dict(self) -> dict[str, Any]:
-        model = Model.instance()
-
+        compiled = self._build()
         # Schema merging — pick the most specific schema
         schema = None
-        for name in self._schemata:
+        for name in compiled["schemata"]:
             if schema is None:
                 schema = model.get(name)
             elif schema.name != name:
-                schema = merge_schema(schema, name)
+                schema = _merge_schema(schema, name)
 
         if schema is None:
             return {}
@@ -156,7 +132,7 @@ class EntityPayload:
         # (simplified: no pick_lang_name language detection)
         caption = schema.label
         for prop_name in schema.caption:
-            values = self._properties.get(prop_name)
+            values = compiled["properties"].get(prop_name)
             if values:
                 caption = next(iter(sorted(values)))
                 break
@@ -165,26 +141,30 @@ class EntityPayload:
             "id": self.id,
             "caption": caption,
             "schema": schema.name,
-            "properties": {k: list(v) for k, v in self._properties.items()},
-            "referents": list(self._referents),
-            "datasets": list(self._datasets),
+            "properties": {k: list(v) for k, v in compiled["properties"].items()},
+            "referents": list(compiled["referents"]),
+            "datasets": list(compiled["datasets"]),
         }
 
-        if self._origins:
-            data["origin"] = list(self._origins)
-        if self._first_seens:
-            data["first_seen"] = min(self._first_seens)
-        if self._last_seens:
-            data["last_seen"] = max(self._last_seens)
-        if self._last_change_candidates:
-            data["last_change"] = max(self._last_change_candidates)
+        if compiled["origins"]:
+            data["origin"] = list(compiled["origins"])
+        if compiled["first_seens"]:
+            data["first_seen"] = min(compiled["first_seens"])
+        if compiled["last_seens"]:
+            data["last_seen"] = max(compiled["last_seens"])
+        if compiled["last_changes"]:
+            data["last_change"] = max(compiled["last_changes"])
 
         return data
 
+    def to_entity(self) -> StatementEntity:
+        statements = [Statement.from_dict(s) for s in self.statements]
+        return StatementEntity.from_statements(self.dataset, statements)
+
 
 def aggregate_unsafe(
-    data: Iterator[StatementDict],
-) -> Generator[dict[str, Any], None, None]:
+    data: Iterator[StatementDict], dataset: str | None = None
+) -> Iterator[EntityPayload]:
     """
     Aggregate statement dicts (e.g. from DuckDB rows) to entity payloads.
 
@@ -196,8 +176,8 @@ def aggregate_unsafe(
     for statement in data:
         if current is None or statement["canonical_id"] != current.id:
             if current is not None:
-                yield current.to_dict()
-            current = EntityPayload(id=statement["canonical_id"])
+                yield current
+            current = EntityPayload(id=statement["canonical_id"], dataset=dataset)
         current.add(statement)
     if current is not None:
-        yield current.to_dict()
+        yield current
