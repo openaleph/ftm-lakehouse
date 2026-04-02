@@ -3201,18 +3201,18 @@ files = [
 
 [[package]]
 name = "mkdocs-typer2"
-version = "0.2.0"
+version = "0.2.1"
 description = "Mkdocs plugin for generating Typer CLI docs"
 optional = false
 python-versions = ">=3.10"
 groups = ["dev"]
 files = [
-    {file = "mkdocs_typer2-0.2.0-py3-none-any.whl", hash = "sha256:079fab0b30889f509f9f29a190722aa5cb29a8cf13c231571155fdb69838ec18"},
-    {file = "mkdocs_typer2-0.2.0.tar.gz", hash = "sha256:3f389b83f3d5f8d270bf81a2840f9307b74dbce9575243ab1f96d0e89ccbe5a1"},
+    {file = "mkdocs_typer2-0.2.1-py3-none-any.whl", hash = "sha256:688eedc73d3bb0da90619ad99283400df42251af4d412ed17b6bac32df141abd"},
+    {file = "mkdocs_typer2-0.2.1.tar.gz", hash = "sha256:8cf20cc9b29b9f38aeee27d273c28358658acf43b437cb191eede23b359aa966"},
 ]
 
 [package.dependencies]
-mkdocs = ">=1.6.1"
+mkdocs = ">=1.6.1,<2"
 pydantic = ">=2.9.2"
 typer = ">=0.12.5"
 
@@ -6851,4 +6851,4 @@ api = ["fastapi", "granian", "pyjwt", "uvloop"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<3.14"
-content-hash = "41d794e52b0947877231ffc5a771adf7cf6d9d069a8a368ca2df4edd51840100"
+content-hash = "0c8d045fd3446790f946472300a788e0eefe66a226dbb4b63070f53dc1dd19c1"
