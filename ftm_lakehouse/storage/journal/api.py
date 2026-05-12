@@ -33,7 +33,7 @@ def _to_iso(value: str | datetime | None) -> str:
 
 
 def serialize_row(row: JournalRow) -> bytes:
-    return orjson.dumps([row.id, row.order_key, row.data, _to_iso(row.deleted_at)])
+    return orjson.dumps([row.id, row.shard, row.data, _to_iso(row.deleted_at)])
 
 
 def serialize_rows(rows: JournalRows) -> bytes:
@@ -43,8 +43,8 @@ def serialize_rows(rows: JournalRows) -> bytes:
 
 def deserialize_row(line: str) -> JournalRow:
     """Deserialize a JSONL line into a JournalRow."""
-    id, order_key, data, deleted_at = orjson.loads(line)
-    return JournalRow(id, order_key, data, _from_iso(deleted_at))
+    id, shard, data, deleted_at = orjson.loads(line)
+    return JournalRow(id, shard, data, _from_iso(deleted_at))
 
 
 class ApiJournalWriter(BaseJournalWriter["ApiJournalStore"]):

@@ -6,23 +6,24 @@ from followthemoney.namespace import Namespace
 from ftmq.store.base import DEFAULT_ORIGIN
 from ftmq.util import ensure_entity
 
-from ftm_lakehouse.helpers.statements import make_order_key
+from ftm_lakehouse.core.conventions.path import entity_shard
 
 # Entities are never namespaced in ftm-lakehouse
 namespace = Namespace()
 
-# (order_key, stmt, deleted_at)
+# (shard, stmt, deleted_at)
 StatementData: TypeAlias = tuple[str, Statement, datetime | None]
 
-# {stmt_id: (order_key, stmt, deleted_at)}
+# {stmt_id: (shard, stmt, deleted_at)}
 Buffer: TypeAlias = dict[str, tuple[str, Statement, datetime | None]]
 
 
 class EntityBuffer:
-    """Buffer statements keyed by statement ID, ordered by order_key on flush."""
+    """Buffer statements keyed by statement ID, ordered by shard on flush."""
 
-    def __init__(self, dataset: str, origin: str | None = None) -> None:
+    def __init__(self, dataset: str, shards: int, origin: str | None = None) -> None:
         self.dataset: str = dataset
+        self.shards: int = shards
         self.origin: str = origin or DEFAULT_ORIGIN
         self._buffer: Buffer = {}
         self._buffer_size: int = 0
@@ -60,8 +61,8 @@ class EntityBuffer:
         if not stmt.id:
             raise RuntimeError("Missing statement ID!")
 
-        order_key = make_order_key(stmt)
-        self._buffer[stmt.id] = (order_key, stmt, deleted_at)
+        shard = entity_shard(stmt.entity_id, self.shards)
+        self._buffer[stmt.id] = (shard, stmt, deleted_at)
         self._buffer_size += 1
 
     def add_entity(self, e: EntityProxy, origin: str | None = None) -> None:
@@ -72,10 +73,10 @@ class EntityBuffer:
             self.add_statement(stmt)
 
     def flush_buffer(self) -> Generator[StatementData, None, None]:
-        """Yield (order_key, stmt, deleted_at) sorted by order_key."""
-        for order_key, stmt, deleted_at in sorted(
+        """Yield (shard, stmt, deleted_at) sorted by shard."""
+        for shard, stmt, deleted_at in sorted(
             self._buffer.values(), key=lambda v: v[0]
         ):
-            yield order_key, stmt, deleted_at
+            yield shard, stmt, deleted_at
         self._buffer = {}
         self._buffer_size = 0

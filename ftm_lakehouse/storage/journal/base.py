@@ -16,10 +16,14 @@ WRITE_BATCH_SIZE = 10_000
 
 
 class JournalRow(NamedTuple):
-    """A single journal row — used for both SQL storage and wire format."""
+    """A single journal row — used for both SQL storage and wire format.
+
+    ``shard`` is the entity-id hash bucket the statement routes to in the
+    parquet store. PyArrow handles the final sort within each batch.
+    """
 
     id: str
-    order_key: str
+    shard: str
     data: str
     deleted_at: datetime | None
 
@@ -37,18 +41,18 @@ class BaseJournalWriter(EntityBuffer, Generic[S]):
     Not intended for direct use - use JournalStore.writer() instead.
     """
 
-    def __init__(self, store: S, origin: str | None = None) -> None:
-        super().__init__(store.dataset, origin)
+    def __init__(self, store: S, shards: int, origin: str | None = None) -> None:
+        super().__init__(store.dataset, shards, origin)
         self.store = store
 
     def _upsert_batch(self) -> None:
         raise NotImplementedError
 
     def flush_rows(self) -> JournalRows:
-        for order_key, stmt, deleted_at in self.flush_buffer():
+        for shard, stmt, deleted_at in self.flush_buffer():
             if stmt.id is None:  # won't happen
                 raise RuntimeError("No Statement ID!")
-            yield JournalRow(stmt.id, order_key, pack_statement(stmt), deleted_at)
+            yield JournalRow(stmt.id, shard, pack_statement(stmt), deleted_at)
 
     def add_statement(self, *args, **kwargs) -> None:
         super().add_statement(*args, **kwargs)
@@ -103,15 +107,17 @@ class BaseJournalStore(Generic[W]):
         self.dataset = dataset
         self.uri = uri or settings.resolved_journal_uri
 
-    def writer(self, origin: str | None = None) -> W:
+    def writer(self, shards: int | None = None, origin: str | None = None) -> W:
         """Get a bulk writer for adding rows."""
-        return self._writer_cls(self, origin=origin)
+        if shards is None:
+            shards = settings.entity_shards
+        return self._writer_cls(self, shards=shards, origin=origin)
 
     def iterate(self, *args, **kwargs) -> JournalRows:
-        """Iterate all rows for this dataset, ordered by order_key.
+        """Iterate all rows for this dataset, ordered by ``shard``.
 
         Yields:
-            JournalRow(id, order_key, data, deleted_at)
+            JournalRow(id, shard, data, deleted_at)
         """
         raise NotImplementedError
 
@@ -122,7 +128,7 @@ class BaseJournalStore(Generic[W]):
         If the consumer raises an exception, the transaction is rolled back.
 
         Yields:
-            JournalRow(id, order_key, data, deleted_at)
+            JournalRow(id, shard, data, deleted_at)
         """
         raise NotImplementedError
 

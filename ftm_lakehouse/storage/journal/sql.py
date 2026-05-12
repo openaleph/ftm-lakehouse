@@ -37,19 +37,18 @@ DEADLOCK_BASE_DELAY = 1  # seconds
 def make_journal_table(metadata: MetaData, dataset: str) -> Table:
     """Create the journal table schema.
 
-    The ``order_key`` column encodes ``shard·bucket·origin·entity_id``
-    (delimited by UNIT_SEP) so a single index drives both flush ORDER BY
-    and write-time index maintenance and ensures optimized ordering for
-    consumers writing to the Delta Lake partitioned table.
+    Rows are flushed in ``shard`` order so a per-shard batch can be built
+    cheaply; the final sort by (entity_id, id, last_seen DESC) happens in
+    PyArrow before each parquet append.
     """
     return Table(
         f"journal_{dataset}",
         metadata,
         Column("id", String(255), primary_key=True),
-        Column("order_key", String(1024), nullable=False),
+        Column("shard", String(8), nullable=False),
         Column("data", Text, nullable=False),
         Column("deleted_at", DateTime(timezone=True), nullable=True),
-        Index(f"ix_{dataset}_order", "order_key"),
+        Index(f"ix_{dataset}_shard", "shard"),
     )
 
 
@@ -62,8 +61,13 @@ def _is_deadlock(exc: OperationalError) -> bool:
 class SqlJournalWriter(BaseJournalWriter["SqlJournalStore"]):
     """SQL-backed bulk writer with batched upserts."""
 
-    def __init__(self, store: "SqlJournalStore", origin: str | None = None) -> None:
-        super().__init__(store, origin)
+    def __init__(
+        self,
+        store: "SqlJournalStore",
+        shards: int,
+        origin: str | None = None,
+    ) -> None:
+        super().__init__(store, shards=shards, origin=origin)
         self.conn: Connection = store.engine.connect()
         self.tx: Transaction | None = None
 
@@ -82,7 +86,7 @@ class SqlJournalWriter(BaseJournalWriter["SqlJournalStore"]):
             sqlite_stmt = sqlite_istmt.on_conflict_do_update(
                 index_elements=["id"],
                 set_={
-                    "order_key": sqlite_istmt.excluded.order_key,
+                    "shard": sqlite_istmt.excluded.shard,
                     "data": sqlite_istmt.excluded.data,
                     "deleted_at": sqlite_istmt.excluded.deleted_at,
                 },
@@ -99,7 +103,7 @@ class SqlJournalWriter(BaseJournalWriter["SqlJournalStore"]):
                     psql_stmt = psql_istmt.on_conflict_do_update(
                         index_elements=["id"],
                         set_={
-                            "order_key": psql_istmt.excluded.order_key,
+                            "shard": psql_istmt.excluded.shard,
                             "data": psql_istmt.excluded.data,
                             "deleted_at": psql_istmt.excluded.deleted_at,
                         },
@@ -174,8 +178,8 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
         self.metadata.create_all(self.engine, tables=[self.table], checkfirst=True)
 
     def iterate(self, *args, **kwargs) -> JournalRows:
-        """Iterate all rows ordered by order_key for batch processing."""
-        q = select(self.table).order_by(self.table.c.order_key)
+        """Iterate all rows ordered by shard for batch processing."""
+        q = select(self.table).order_by(self.table.c.shard)
 
         with self.engine.connect() as conn:
             cursor = conn.execution_options(stream_results=True).execute(q)
@@ -183,42 +187,60 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
                 for row in rows:
                     yield JournalRow(
                         row.id,
-                        row.order_key,
+                        row.shard,
                         row.data,
                         row.deleted_at,
                     )
 
     def flush(self) -> JournalRows:
-        """Iterate and delete yielded rows.
+        """Iterate and delete yielded rows, one shard at a time.
 
-        Only deletes rows that were actually yielded, so rows written by
-        concurrent writers during the flush are preserved.
+        Reads the distinct shard values currently in the table (cheap — bounded
+        by ``Settings.entity_shards``), then for each shard streams rows with
+        ``WHERE shard = ?`` (index seek via ``ix_{ds}_shard``) and DELETEs the
+        yielded ids in batches.
+
+        Concurrency: rows are deleted only after they've been yielded, so the
+        consumer's write to parquet is durable before the journal row is
+        removed. Concurrent writers may insert into shards we haven't visited
+        yet; those rows can be picked up by the current flush call. This is
+        safe (yield → write → delete is preserved per row) but means the total
+        flushed count is non-deterministic under load.
         """
-        q = select(self.table).order_by(self.table.c.order_key)
-
         # Use separate connections for read (streaming) and write (delete).
-        # PostgreSQL server-side cursors (stream_results) apply to the
-        # entire DBAPI connection, so DELETE on the same connection fails.
+        # PostgreSQL server-side cursors (stream_results) apply to the entire
+        # DBAPI connection, so DELETE on the same connection would fail.
         with self.engine.connect() as read_conn, self.engine.connect() as write_conn:
             write_tx = write_conn.begin()
             try:
-                cursor = read_conn.execution_options(stream_results=True).execute(q)
-
-                while rows := cursor.fetchmany(10_000):
-                    flushed: list[str] = []
-                    for row in rows:
-                        flushed.append(row.id)
-                        yield JournalRow(
-                            row.id,
-                            row.order_key,
-                            row.data,
-                            row.deleted_at,
+                shards = sorted(
+                    [
+                        r.shard
+                        for r in read_conn.execute(
+                            select(self.table.c.shard).distinct()
                         )
-                    write_conn.execute(
-                        delete(self.table).where(self.table.c.id.in_(flushed))
-                    )
+                    ]
+                )
 
-                cursor.close()
+                for shard in shards:
+                    cursor = read_conn.execution_options(stream_results=True).execute(
+                        select(self.table).where(self.table.c.shard == shard)
+                    )
+                    while rows := cursor.fetchmany(10_000):
+                        flushed: list[str] = []
+                        for row in rows:
+                            flushed.append(row.id)
+                            yield JournalRow(
+                                row.id,
+                                row.shard,
+                                row.data,
+                                row.deleted_at,
+                            )
+                        write_conn.execute(
+                            delete(self.table).where(self.table.c.id.in_(flushed))
+                        )
+                    cursor.close()
+
                 write_tx.commit()
             except BaseException:
                 write_tx.rollback()
