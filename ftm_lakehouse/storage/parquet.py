@@ -20,6 +20,7 @@ from typing import Iterator
 
 import duckdb
 import pyarrow as pa
+import pyarrow.compute as pc
 from anystore.interface.lock import Lock
 from anystore.io.write import smart_write_csv
 from anystore.logging import get_logger
@@ -177,12 +178,14 @@ class ParquetStore(LakehouseApiMixin):
         return self.view().stats()
 
     @no_api
-    def append(self, batch: pa.Table, bucket: str) -> None:
-        """Append a sorted batch of statements to one partition.
+    def append(self, batch: pa.Table) -> None:
+        """Append a sorted batch of statements.
 
-        The batch should already be scoped to a single ``(shard, bucket,
-        origin)`` triple; this method sorts it by
-        ``(entity_id, id, last_seen DESC)`` and appends one parquet file.
+        The batch should be scoped to a single ``shard`` for write efficiency
+        (one parquet file per ``(shard, bucket, origin)`` partition). The
+        method sorts by ``(bucket, origin, entity_id, id, last_seen DESC)``
+        then splits by ``bucket`` so each ``write_deltalake`` call uses the
+        bucket-appropriate ``writer_properties`` (small vs. large profile).
         Duplicates land as separate rows and are reaped by ``merge``.
         """
         if len(batch) == 0:
@@ -190,20 +193,26 @@ class ParquetStore(LakehouseApiMixin):
 
         batch = batch.sort_by(
             [
+                ("bucket", "ascending"),
+                ("origin", "ascending"),
                 ("entity_id", "ascending"),
                 ("id", "ascending"),
                 ("last_seen", "descending"),
             ]
         )
         mode = "append" if self.exists else "overwrite"
-        write_deltalake(
-            str(self.uri),
-            batch,
-            partition_by=PARTITIONS,
-            mode=mode,
-            writer_properties=writer_for_bucket(bucket),
-            storage_options=storage_options(),
-        )
+        for bucket in pc.unique(batch["bucket"]).to_pylist():
+            sub = batch.filter(pc.equal(batch["bucket"], bucket))
+            write_deltalake(
+                str(self.uri),
+                sub,
+                partition_by=PARTITIONS,
+                mode=mode,
+                writer_properties=writer_for_bucket(bucket),
+                storage_options=storage_options(),
+            )
+            # After the first sub-batch, the table exists for subsequent buckets.
+            mode = "append"
 
     @no_api
     def merge(self, grace_period_days: int | None = None) -> None:

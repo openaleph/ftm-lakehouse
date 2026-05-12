@@ -49,7 +49,7 @@ def _flush(store: ParquetStore, rows: list[dict]) -> int:
     total = 0
     for (_shard, bucket, _origin), partition_rows in sorted(by_partition.items()):
         table = pa.Table.from_pylist(partition_rows, schema=SHARDED_SCHEMA)
-        store.append(table, bucket=bucket)
+        store.append(table)
         total += len(table)
     return total
 
