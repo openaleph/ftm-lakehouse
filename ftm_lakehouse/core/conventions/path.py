@@ -32,7 +32,7 @@ Dataset Layout
             queue/{tenant}/                 # task queues
 
             archive/                        # content-addressed file storage
-                ab/cd/ef/{checksum}/        # SHA1 split into segments
+                ab/cd/ef/{checksum}/        # SHA256 split into segments
                     blob                    # file blob (stored once)
                     {file_id}.json          # metadata (one per source path)
                     {origin}.txt            # extracted text (one per engine)
@@ -153,7 +153,7 @@ def archive_prefix(checksum: str) -> str:
     Layout: archive/5a/6a/cf/5a6acf229ba576d9a40b09292595658bbb74ef56/
 
     Args:
-        checksum: SHA1 checksum of file
+        checksum: SHA256 checksum of file
     """
     return f"{ARCHIVE}/{make_checksum_key(checksum)}"
 
@@ -165,7 +165,7 @@ def archive_blob(checksum: str) -> str:
     Layout: archive/5a/6a/cf/5a6acf229ba576d9a40b09292595658bbb74ef56/blob
 
     Args:
-        checksum: SHA1 checksum of file
+        checksum: SHA256 checksum of file
     """
     return f"{archive_prefix(checksum)}/{ARCHIVE_BLOB}"
 
@@ -180,7 +180,7 @@ def archive_meta(checksum: str, file_id: str) -> str:
     Layout: archive/5a/6a/cf/.../file-abc123.json
 
     Args:
-        checksum: SHA1 checksum of file
+        checksum: SHA256 checksum of file
         file_id: The File.id (hash of source path + checksum)
     """
     return f"{archive_prefix(checksum)}/{file_id}.json"
@@ -196,7 +196,7 @@ def archive_txt(checksum: str, origin: str) -> str:
     Layout: archive/5a/6a/cf/.../{origin}.txt
 
     Args:
-        checksum: SHA1 checksum of file
+        checksum: SHA256 checksum of file
         origin: The extraction origin/engine name
     """
     return f"{archive_prefix(checksum)}/{origin}.txt"
@@ -211,7 +211,7 @@ MAPPING = "mapping.yml"
 
 def mapping(content_hash: str) -> str:
     """
-    Get the mapping.yml path for the given file SHA1.
+    Get the mapping.yml path for the given file SHA256.
 
     Layout: mappings/{content_hash}/mapping.yml
     """
