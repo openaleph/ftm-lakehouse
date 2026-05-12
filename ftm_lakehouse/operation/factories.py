@@ -47,11 +47,6 @@ from ftm_lakehouse.operation.maintenance import (
 )
 from ftm_lakehouse.operation.make import MakeJob, MakeOperation
 from ftm_lakehouse.operation.mapping import MappingJob, MappingOperation
-from ftm_lakehouse.operation.recreate import (
-    RecreateJob,
-    RecreateOperation,
-    RecreateSource,
-)
 
 
 def export_statements(dataset: Dataset, force: bool = False) -> ExportStatementsJob:
@@ -174,30 +169,6 @@ def run_mapping(
     """
     job = MappingJob.make(dataset=dataset.name, content_hash=content_hash)
     return MappingOperation.from_job(job, dataset).run(force=force)
-
-
-def recreate(
-    dataset: Dataset, source: RecreateSource = RecreateSource.AUTO
-) -> RecreateJob:
-    """
-    Recreate a corrupted dataset by rebuilding the parquet store from exports.
-
-    This operation repairs corrupted lakehouse datasets by clearing the
-    statement store (parquet), then re-importing from the most
-    recent export file (entities.ftm.json or statements.csv).
-
-    Warning: This operation is destructive - it will delete all existing
-    statement data before re-importing from exports.
-
-    Args:
-        dataset: The dataset to recreate
-        source: Source for recreation (AUTO selects based on timestamps)
-
-    Returns:
-        The completed job result
-    """
-    job = RecreateJob.make(dataset=dataset.name, source=source)
-    return RecreateOperation.from_job(job, dataset).run()
 
 
 def make(dataset: Dataset, force: bool = False) -> MakeJob:

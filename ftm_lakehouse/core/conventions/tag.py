@@ -43,9 +43,6 @@ STATISTICS = "exports/statistics"
 OP_CRAWL = "operations/crawl/last_run"
 """Last crawl (import files) execution"""
 
-OP_RECREATE = "operations/recreate/last_run"
-"""Last recreate (repair dataset) execution"""
-
 OP_DOWNLOAD_ARCHIVE = "operations/download_archive/last_run"
 """Last download archive execution"""
 

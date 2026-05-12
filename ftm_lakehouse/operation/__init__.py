@@ -32,7 +32,6 @@ from ftm_lakehouse.operation.factories import (
     export_statistics,
     make,
     merge,
-    recreate,
     run_mapping,
     vacuum,
 )
@@ -70,7 +69,6 @@ __all__ = [
     "export_statistics",
     "make",
     "merge",
-    "recreate",
     "run_mapping",
     "vacuum",
 ]

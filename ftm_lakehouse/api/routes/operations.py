@@ -35,7 +35,6 @@ from ftm_lakehouse.operation.maintenance import (
 )
 from ftm_lakehouse.operation.make import MakeJob, MakeOperation
 from ftm_lakehouse.operation.mapping import MappingJob, MappingOperation
-from ftm_lakehouse.operation.recreate import RecreateJob, RecreateOperation
 
 router = APIRouter()
 
@@ -51,7 +50,6 @@ OPERATIONS: dict[str, tuple[type[DatasetJobModel], type[DatasetJobOperation]]] =
     "ExportDocumentsJob": (ExportDocumentsJob, ExportDocumentsOperation),
     "ExportIndexJob": (ExportIndexJob, ExportIndexOperation),
     "MappingJob": (MappingJob, MappingOperation),
-    "RecreateJob": (RecreateJob, RecreateOperation),
     "DownloadArchiveJob": (DownloadArchiveJob, DownloadArchiveOperation),
     "MakeJob": (MakeJob, MakeOperation),
 }

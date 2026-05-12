@@ -32,13 +32,6 @@ def cli_make(
         Optional[bool],
         typer.Option(help="Re-compute full exports pipeline even if up-to-date."),
     ] = False,
-    recreate: Annotated[
-        Optional[bool],
-        typer.Option(
-            "--recreate",
-            help="Recreate statement store from exports (repair corrupted datasets)",
-        ),
-    ] = False,
 ):
     """Make or update a dataset.
 
@@ -49,8 +42,6 @@ def cli_make(
         if config:
             dataset_config = DatasetModel.from_yaml_uri(config)
             dataset.update_model(**dataset_config.model_dump())
-        if recreate:
-            op.recreate(dataset)
         if full:
             op.make(dataset, force=bool(force))
         else:
