@@ -177,6 +177,15 @@ class ParquetStore(LakehouseApiMixin):
         """Compute statistics from the statement store."""
         return self.view().stats()
 
+    def _write_lock(self) -> Lock:
+        """Dataset-wide write fence.
+
+        All Delta writers (``append``, ``merge``, ``compact``, ``vacuum``)
+        acquire this lock so they can't race on the same partition. The lock
+        lives at ``{dataset_root}/.LOCK`` per ``path.LOCK``.
+        """
+        return Lock(self._store, key=path.LOCK)
+
     @no_api
     def append(self, batch: pa.Table) -> None:
         """Append a sorted batch of statements.
@@ -187,6 +196,9 @@ class ParquetStore(LakehouseApiMixin):
         then splits by ``bucket`` so each ``write_deltalake`` call uses the
         bucket-appropriate ``writer_properties`` (small vs. large profile).
         Duplicates land as separate rows and are reaped by ``merge``.
+
+        Held under the dataset write fence so concurrent ``merge`` / ``compact``
+        / ``vacuum`` can't tombstone an in-flight append.
         """
         if len(batch) == 0:
             return
@@ -200,19 +212,20 @@ class ParquetStore(LakehouseApiMixin):
                 ("last_seen", "descending"),
             ]
         )
-        mode = "append" if self.exists else "overwrite"
-        for bucket in pc.unique(batch["bucket"]).to_pylist():
-            sub = batch.filter(pc.equal(batch["bucket"], bucket))
-            write_deltalake(
-                str(self.uri),
-                sub,
-                partition_by=PARTITIONS,
-                mode=mode,
-                writer_properties=writer_for_bucket(bucket),
-                storage_options=storage_options(),
-            )
-            # After the first sub-batch, the table exists for subsequent buckets.
-            mode = "append"
+        with self._write_lock():
+            mode = "append" if self.exists else "overwrite"
+            for bucket in pc.unique(batch["bucket"]).to_pylist():
+                sub = batch.filter(pc.equal(batch["bucket"], bucket))
+                write_deltalake(
+                    str(self.uri),
+                    sub,
+                    partition_by=PARTITIONS,
+                    mode=mode,
+                    writer_properties=writer_for_bucket(bucket),
+                    storage_options=storage_options(),
+                )
+                # After the first sub-batch, the table exists for subsequent buckets.
+                mode = "append"
 
     @no_api
     def merge(self, grace_period_days: int | None = None) -> None:
@@ -221,8 +234,8 @@ class ParquetStore(LakehouseApiMixin):
         For each ``(shard, bucket, origin)`` partition, runs the merge query
         (keep latest row per ``id`` by ``last_seen DESC``; fold ``first_seen``
         to the min; drop tombstones older than the grace cutoff) and atomically
-        overwrites that partition via ``partition_filters``. Held under
-        ``Lock(path.lock("merge"))`` for the whole dataset.
+        overwrites that partition via ``partition_filters``. Held under the
+        dataset write fence (``path.LOCK``).
 
         Args:
             grace_period_days: Override ``settings.grace_period_days``. Pass
@@ -236,7 +249,7 @@ class ParquetStore(LakehouseApiMixin):
             else self.settings.grace_period_days
         )
         grace_cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        with Lock(self._store, key=path.lock("merge")):
+        with self._write_lock():
             con = self._duckdb
             for shard, bucket, origin in self._list_partitions():
                 merge_select = build_merge_query(shard, bucket, origin, grace_cutoff)
@@ -261,12 +274,12 @@ class ParquetStore(LakehouseApiMixin):
 
         Cheap maintenance — Delta's ``OPTIMIZE compact`` only rewrites small
         files into larger ones; it does not collapse duplicate rows or drop
-        tombstones (use ``merge`` for that). Held under
-        ``Lock(path.lock("compact"))`` for the whole dataset.
+        tombstones (use ``merge`` for that). Held under the dataset write
+        fence (``path.LOCK``).
         """
         if not self.exists:
             return
-        with Lock(self._store, key=path.lock("compact")):
+        with self._write_lock():
             for shard, bucket, origin in self._list_partitions():
                 self.deltatable.optimize.compact(
                     partition_filters=[
@@ -283,11 +296,11 @@ class ParquetStore(LakehouseApiMixin):
 
         Tombstoned files (replaced by ``merge`` / ``compact``) become orphans
         on disk; vacuum prunes them once they're past ``retention_hours``.
-        Held under ``Lock(path.lock("vacuum"))``.
+        Held under the dataset write fence (``path.LOCK``).
         """
         if not self.exists:
             return
-        with Lock(self._store, key=path.lock("vacuum")):
+        with self._write_lock():
             self.deltatable.vacuum(
                 retention_hours=retention_hours,
                 dry_run=False,

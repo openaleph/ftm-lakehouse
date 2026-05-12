@@ -176,10 +176,7 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
                 # Tombstones bump last_seen to the delete timestamp so they
                 # win the ``ROW_NUMBER() OVER (... ORDER BY last_seen DESC)``
                 # tiebreak in merge() against the live row they replace.
-                if journal_row.deleted_at is not None:
-                    row["last_seen"] = journal_row.deleted_at
-                else:
-                    row["last_seen"] = row.get("last_seen") or now
+                row["last_seen"] = row["deleted_at"] or row.get("last_seen", now)
                 row["shard"] = journal_row.shard
                 buffer.append(row)
 
