@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     zfs_socket: str | None = None
     zfs_owner: str | None = None
 
-    entity_shards: int = 8
+    entity_shards: int = 0
     grace_period_days: int = 30
 
     public_url_prefix: str | None = None
