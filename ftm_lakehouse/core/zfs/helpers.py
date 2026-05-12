@@ -35,14 +35,12 @@ class DatasetConfig:
 
 ARCHIVE = DatasetConfig(
     recordsize="128K",
-    compression="zstd",
-    sync="disabled",
+    compression="zstd-9",
 )
 
 STATEMENTS = DatasetConfig(
     recordsize="1M",
-    compression="lz4",
-    sync="standard",
+    compression="zstd",
 )
 
 PARENT_PROPS = {
