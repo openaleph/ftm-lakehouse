@@ -228,13 +228,27 @@ ENTITIES_JSON = "entities.ftm.json"
 STATEMENTS = f"{ENTITIES}/statements"
 """Base path for storing statement data (partitioned by shard, bucket, origin)"""
 
-SHARD_PREFIX_LEN = 2
-"""Number of hex characters for entity-hash shard key (256 shards)"""
+
+def shard_hex_width(shards: int) -> int:
+    """Hex width required to represent `shards-1` (zero-padded).
+
+    Examples: 1→1, 8→1, 16→1, 32→2, 256→2, 4096→3.
+    """
+    if shards <= 1:
+        return 1
+    return max(1, ((shards - 1).bit_length() + 3) // 4)
 
 
-def entity_shard(entity_id: str) -> str:
-    """2-char hex prefix of entity_id hash (SHA1)."""
-    return hash_data(entity_id)[:SHARD_PREFIX_LEN]
+def entity_shard(entity_id: str, shards: int) -> str:
+    """Hex shard key for an entity id under a uniform shard count.
+
+    Uses the first 8 hex chars of the entity_id hash, taken mod ``shards``,
+    then zero-padded to ``shard_hex_width(shards)``.
+    """
+    if shards <= 1:
+        return "0"
+    bucket = int(hash_data(entity_id)[:8], 16) % shards
+    return f"{bucket:0{shard_hex_width(shards)}x}"
 
 
 def statement_origin(origin: str) -> str:
