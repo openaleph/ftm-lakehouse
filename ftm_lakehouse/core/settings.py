@@ -31,7 +31,6 @@ class Settings(BaseSettings):
     grace_period_days: int = 30
 
     public_url_prefix: str | None = None
-    archive_url_expire: int = 900  # seconds (15 minutes)
 
     @property
     def api_mode(self) -> bool:
@@ -65,12 +64,6 @@ class ApiSettings(BaseSettings):
         env_file=".env",
         extra="ignore",
     )
-
-    secret_key: str = "change-for-production"
-    access_token_expire: int = 5  # minutes
-    access_token_algorithm: str = "HS256"
-    auth_enabled: bool = True  # if disabled, trust reverse proxy!
-    auth_required: bool = True
 
     title: str = "FollowTheMoney Data Lakehouse Api"
     description: str = get_api_doc()

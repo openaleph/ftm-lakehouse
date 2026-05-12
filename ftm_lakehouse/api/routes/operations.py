@@ -5,7 +5,7 @@ import asyncio
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from ftm_lakehouse.api.helpers import Dataset
+from ftm_lakehouse.api.dependencies import Dataset
 from ftm_lakehouse.model import DatasetJobModel
 from ftm_lakehouse.operation.base import DatasetJobOperation
 from ftm_lakehouse.operation.crawl import CrawlJob, CrawlOperation

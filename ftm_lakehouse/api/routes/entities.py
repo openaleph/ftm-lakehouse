@@ -8,8 +8,9 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from ftmq.model.stats import DatasetStats
 from ftmq.query import Query
 
-from ftm_lakehouse.api.helpers import NDJSON_CONTENT_TYPE, Dataset
+from ftm_lakehouse.api.dependencies import Dataset
 
+NDJSON_CONTENT_TYPE = "application/x-ndjson"
 BODY = Body()
 EMBED = Body(embed=True)
 """Use for single-parameter endpoints so FastAPI expects ``{"<name>": value}``

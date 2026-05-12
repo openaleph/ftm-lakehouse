@@ -5,7 +5,7 @@ import asyncio
 from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
-from ftm_lakehouse.api.helpers import Journal
+from ftm_lakehouse.api.dependencies import Journal
 from ftm_lakehouse.helpers.statements import unpack_statement
 from ftm_lakehouse.storage.journal.api import (
     JSONL_CONTENT_TYPE,

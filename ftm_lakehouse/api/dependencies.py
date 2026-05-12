@@ -8,8 +8,6 @@ from ftm_lakehouse.dataset import Dataset as _Dataset
 from ftm_lakehouse.storage.journal import BaseJournalStore
 from ftm_lakehouse.storage.journal import get_journal as _get_journal
 
-NDJSON_CONTENT_TYPE = "application/x-ndjson"
-
 
 def get_dataset(dataset: str, request: Request) -> _Dataset:
     """Resolve a Dataset from the lakehouse via app state."""
