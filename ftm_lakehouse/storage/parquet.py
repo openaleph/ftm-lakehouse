@@ -295,12 +295,12 @@ class ParquetStore(LakehouseApiMixin):
             )
 
     @no_api
-    def export_csv(self, uri: Uri, q: Select | None = None) -> None:
+    def export_csv(self, key: str, q: Select | None = None) -> None:
         """Export statements to a sorted CSV file."""
         if not self.exists:
             return
         items = self._query_statement_data(q)
-        with self._store.open(uri, "w") as f:
+        with self._store.open(key, "w") as f:
             smart_write_csv(f, items)
 
     @no_api

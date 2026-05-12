@@ -8,6 +8,9 @@ from ftmq.types import StatementEntities, Statements
 from ftmq.util import ensure_entity
 
 from ftm_lakehouse.core.api import LakehouseApiMixin, require_api
+from ftm_lakehouse.core.settings import Settings
+
+settings = Settings()
 
 
 class ApiEntityRepository(LakehouseApiMixin):
@@ -24,6 +27,15 @@ class ApiEntityRepository(LakehouseApiMixin):
         url = self._make_url("flush")
         res = self._api.make_request(url, "POST")
         return int(res.text)
+
+    @require_api
+    def _api_merge(self, grace_period_days: int | None = None) -> None:
+        url = self._make_url("merge")
+        if grace_period_days is None:
+            grace_period_days = settings.grace_period_days
+        self._api.make_request(
+            url, "POST", json={"grace_period_days": grace_period_days}
+        )
 
     @require_api
     def _api_query(

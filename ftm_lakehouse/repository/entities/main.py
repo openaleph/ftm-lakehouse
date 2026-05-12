@@ -4,49 +4,36 @@ import csv
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from itertools import islice
-from typing import Any, Generator, Iterable, Iterator, cast
+from typing import Generator, Iterable, Iterator, cast
 
-import duckdb
 import orjson
 import pyarrow as pa
 from anystore.io import smart_open, smart_write_json
 from anystore.store import get_store
 from anystore.types import SDict, Uri
 from anystore.util import Took, mask_uri
-from deltalake import write_deltalake
 from followthemoney import EntityProxy, Statement, StatementEntity
 from ftmq.io import smart_read_proxies
 from ftmq.model.stats import DatasetStats
 from ftmq.query import Query
-from ftmq.store.lake import ARROW_SCHEMA, TARGET_SIZE, WRITER
-from ftmq.store.lake import pack_statement as lake_pack_statement
-from ftmq.store.lake import storage_options
+from ftmq.store.lake import pack_statement
 from ftmq.types import StatementEntities, Statements, ValueEntities
 from sqlalchemy import select
 
 from ftm_lakehouse.core.api import api_delegate, no_api
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.core.settings import Settings
-from ftm_lakehouse.helpers.statements import unpack_statement, unpack_tombstone_row
-from ftm_lakehouse.logic.entities.aggregate import aggregate_unsafe
-from ftm_lakehouse.logic.parquet import (
-    QUERY_IN_BATCH_SIZE,
-    STATEMENTS,
-    TRANSLOG,
-    make_dedup_connection,
-)
+from ftm_lakehouse.helpers.statements import unpack_statement
+from ftm_lakehouse.logic.entities.aggregate import EntityPayload, aggregate_unsafe
+from ftm_lakehouse.logic.parquet import QUERY_IN_BATCH_SIZE
+from ftm_lakehouse.model.statement import SHARDED_SCHEMA
 from ftm_lakehouse.repository.base import BaseRepository
 from ftm_lakehouse.repository.diff import ParquetDiffMixin
 from ftm_lakehouse.repository.entities.api import ApiEntityRepository
 from ftm_lakehouse.storage.journal import get_journal
 from ftm_lakehouse.storage.journal.base import BaseJournalWriter
 from ftm_lakehouse.storage.journal.sql import SqlJournalStore
-from ftm_lakehouse.storage.parquet import (
-    PARTITIONS,
-    TRANSLOG_SCHEMA,
-    TRANSLOG_TS,
-    ParquetStore,
-)
+from ftm_lakehouse.storage.parquet import ParquetStore
 from ftm_lakehouse.util import make_envelope
 
 settings = Settings()
@@ -83,10 +70,12 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         self,
         dataset: str,
         uri: Uri,
+        shards: int | None = None,
     ) -> None:
         super().__init__(dataset, uri)
+        self.shards = shards if shards is not None else settings.entity_shards
         self._journal = get_journal(dataset)
-        self._statements = ParquetStore(uri, dataset)
+        self._statements = ParquetStore(uri, dataset, self.shards)
         self._store = get_store(self._store_uri)
 
     @contextmanager
@@ -101,7 +90,7 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
                 writer.add_entity(entity)
         """
         with self._tags.touch(tag.JOURNAL_UPDATED):
-            writer = self._journal.writer(origin)
+            writer = self._journal.writer(self.shards, origin)
             try:
                 yield writer
             except BaseException:
@@ -135,13 +124,12 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         """
         Flush statements from journal to parquet store.
 
-        Uses dedup logic:
-        - New statements (not in main table): append to main + insert into translog
-        - Duplicate statements (already in main): update translog last_seen only
-        - Tombstones (deleted_at set): update translog deleted_at only
+        Groups journal rows by ``(shard, bucket, origin)`` and appends one
+        sorted parquet file per partition. Duplicates and tombstones land as
+        new rows; call ``merge`` afterwards to collapse them.
 
         Returns:
-            Number of new statements flushed to the main table
+            Number of statements appended
         """
         if self._journal.count() == 0:
             self.log.debug("Journal is empty", journal=mask_uri(self._journal.uri))
@@ -159,138 +147,57 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         ):
             self.log.info("Flushing journal ...", journal=mask_uri(self._journal.uri))
 
-            con = None
-            if self._statements.exists:
-                con = make_dedup_connection(self._statements._store.deltatable)
+            now = datetime.now(timezone.utc)
+            total = 0
+            current_shard: str | None = None
+            buffer: list[dict] = []
 
-            total_new = 0
-            current_bucket: str | None = None
-            current_origin: str | None = None
-            current_batch: list[dict] = []
+            def _flush_buffer() -> None:
+                nonlocal total
+                if not buffer:
+                    return
+                batch = pa.Table.from_pylist(buffer, schema=SHARDED_SCHEMA)
+                self._statements.append(batch)
+                total += len(batch)
+                buffer.clear()
 
-            for _, bucket, origin, _, data, deleted_at in self._journal.flush():
-                # Write batch when partition changes
-                if bucket != current_bucket or origin != current_origin:
-                    if current_batch:
-                        total_new += self._write_flush_batch(current_batch, con)
-                    current_batch = []
-                    current_bucket = bucket
-                    current_origin = origin
+            # The journal yields rows already ordered by ``shard``; stream
+            # per shard so memory is bounded to one shard's worth at a time.
+            # ``ParquetStore.append`` splits each per-shard batch by bucket.
+            for journal_row in self._journal.flush():
+                if current_shard is not None and current_shard != journal_row.shard:
+                    _flush_buffer()
+                current_shard = journal_row.shard
 
-                if deleted_at is not None:
-                    row = unpack_tombstone_row(data)
-                    row["_deleted_at"] = deleted_at
+                stmt = unpack_statement(journal_row.data)
+                row = pack_statement(stmt)
+                row["first_seen"] = row.get("first_seen") or now
+                row["deleted_at"] = journal_row.deleted_at
+                # Tombstones bump last_seen to the delete timestamp so they
+                # win the ``ROW_NUMBER() OVER (... ORDER BY last_seen DESC)``
+                # tiebreak in merge() against the live row they replace.
+                if journal_row.deleted_at is not None:
+                    row["last_seen"] = journal_row.deleted_at
                 else:
-                    stmt = unpack_statement(data)
-                    row = lake_pack_statement(stmt)
-                current_batch.append(row)
+                    row["last_seen"] = row.get("last_seen") or now
+                row["shard"] = journal_row.shard
+                buffer.append(row)
 
-            # Write final batch
-            if current_batch:
-                total_new += self._write_flush_batch(current_batch, con)
+            _flush_buffer()
 
             self.log.info(
                 "Flushed statements from journal to lake",
-                count=total_new,
+                count=total,
                 took=t.took,
                 journal=mask_uri(self._journal.uri),
             )
 
-            return total_new
+            return total
 
-    @no_api
-    def _write_flush_batch(
-        self, batch: list[dict], con: duckdb.DuckDBPyConnection | None
-    ) -> int:
-        """Write a partition batch with three-way split.
-
-        1. Tombstones → translog mark_deleted only
-        2. New rows (anti-join with existing IDs) → write main table + translog upsert
-        3. Duplicate rows (semi-join) → translog upsert only (updates last_seen)
-
-        Returns:
-            Number of new rows written to main table
-        """
-        now = datetime.now(timezone.utc)
-
-        # Split tombstones from live rows
-        tombstones = [r for r in batch if r.get("_deleted_at") is not None]
-        live = [r for r in batch if r.get("_deleted_at") is None]
-
-        # Handle tombstones → translog only
-        if tombstones:
-            tomb_ids = [r["id"] for r in tombstones]
-            tomb_deleted_at = [r["_deleted_at"] for r in tombstones]
-            tomb_table = pa.table(
-                {
-                    "id": pa.array(tomb_ids, type=pa.string()),
-                    "deleted_at": pa.array(tomb_deleted_at, type=TRANSLOG_TS),
-                }
-            )
-            self._statements._translog.mark_deleted(tomb_table)
-
-        if not live:
-            return 0
-
-        live_ids = [r["id"] for r in live]
-        live_first_seen = [r.get("first_seen") or now for r in live]
-        live_last_seen = [r.get("last_seen") or now for r in live]
-
-        if con is not None:
-            # Determine which are new vs duplicates
-            batch_ids_table = pa.table({"id": pa.array(live_ids, type=pa.string())})
-            con.register("batch_ids", batch_ids_table)
-
-            new_ids_result = con.execute(
-                "SELECT b.id FROM batch_ids b "
-                "LEFT JOIN existing_ids e ON b.id = e.id "
-                "WHERE e.id IS NULL"
-            ).fetchall()
-            new_id_set = {r[0] for r in new_ids_result}
-            con.unregister("batch_ids")
-
-            new_rows = [r for r in live if r["id"] in new_id_set]
-        else:
-            # First flush — all rows are new
-            new_rows = live
-
-        # Upsert all live rows into translog (new + dupes)
-        translog_table = pa.table(
-            {
-                "id": pa.array(live_ids, type=pa.string()),
-                "first_seen": pa.array(live_first_seen, type=TRANSLOG_TS),
-                "last_seen": pa.array(live_last_seen, type=TRANSLOG_TS),
-                "deleted_at": pa.array([None] * len(live_ids), type=TRANSLOG_TS),
-            },
-            schema=TRANSLOG_SCHEMA,
-        )
-        self._statements._translog.upsert(translog_table)
-
-        # Write only new rows to main table
-        if new_rows:
-            table = pa.Table.from_pylist(new_rows, schema=ARROW_SCHEMA)
-            write_deltalake(
-                str(self._statements.uri),
-                table,
-                partition_by=PARTITIONS,
-                mode="append",
-                schema_mode="merge",
-                writer_properties=WRITER,
-                target_file_size=TARGET_SIZE,
-                storage_options=storage_options(),
-                configuration={"delta.enableChangeDataFeed": "true"},
-            )
-
-            # Update dedup connection for subsequent batches in the same flush
-            if con is not None:
-                new_ids_arr = pa.table(
-                    {"id": pa.array([r["id"] for r in new_rows], type=pa.string())}
-                )
-                con.register("_new_batch", new_ids_arr)
-                con.execute("INSERT INTO existing_ids SELECT id FROM _new_batch")
-                con.unregister("_new_batch")
-
-        return len(new_rows)
+    @api_delegate("_api_merge")
+    def merge(self, grace_period_days: int | None = None) -> None:
+        """Collapse duplicates and reap expired tombstones from parquet store"""
+        self._statements.merge(grace_period_days)
 
     @api_delegate("_api_query")
     def query(
@@ -360,7 +267,7 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
 
         When ``statements_csv_uri`` is provided (e.g. from ``make --full``
         where statements.csv was just exported), reads the already-sorted CSV
-        instead of re-scanning the full parquet + translog join.
+        instead of re-scanning the parquet store.
 
         Args:
             output_uri: Destination URI for the entities.ftm.json file
@@ -371,17 +278,17 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         if statements_csv_uri is not None:
             rows = self._stream_statements_csv(statements_csv_uri)
         else:
-            rows = self._statements.query_raw()
+            rows = self._statements._query_statement_data()
 
         with smart_open(output_uri, mode="wb") as fh:
             for entity in rows:
                 fh.write(orjson.dumps(entity, option=orjson.OPT_APPEND_NEWLINE))
 
-    def _stream_statements_csv(self, csv_uri: str) -> Iterator[dict[str, Any]]:
+    def _stream_statements_csv(self, csv_uri: str) -> Iterator[EntityPayload]:
         """Stream entity dicts from an already-sorted statements CSV.
 
-        The CSV is already sorted by canonical_id and has translog timestamps
-        baked in, so no DuckDB join or sort is needed — just a sequential read
+        The CSV is already sorted by canonical_id and has timestamps
+        baked in, so no DuckDB sort is needed — just a sequential read
         through aggregate_unsafe().
         """
         with smart_open(csv_uri, mode="r") as fh:
@@ -404,7 +311,7 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         stmts = self._collect_entity_statements(entity_id)
         if not stmts:
             return 0
-        with self._journal.writer() as w:
+        with self._journal.writer(self.shards) as w:
             for stmt in stmts:
                 w.add_statement(stmt, deleted_at=now)
         self._tags.set(tag.JOURNAL_UPDATED)
@@ -418,56 +325,37 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         """
         with self._tags.touch(tag.JOURNAL_UPDATED):
             now = datetime.now(timezone.utc)
-            with self._journal.writer() as w:
+            with self._journal.writer(self.shards) as w:
                 w.add_statement(stmt, deleted_at=now)
 
     @no_api
     def _collect_entity_statements(self, entity_id: str) -> list[Statement]:
         """Read all statements for an entity from parquet + journal.
 
-        Uses translog join when available to filter already-deleted statements.
+        Uses shard-partitioned query for efficient single-entity lookup.
         """
         stmts_by_id: dict[str, Statement] = {}
         journal = cast(SqlJournalStore, self._journal)
 
-        # Read from parquet (with translog filtering if available)
-        if self._statements.exists:
-            dt = self._statements._store.deltatable
-            translog = self._statements._translog
+        # Read from parquet store (uses shard partition for pruning)
+        for stmt in self._statements.get_statements(entity_id):
+            if stmt.id:
+                stmts_by_id[stmt.id] = stmt
 
-            if translog.exists:
-                translog_dt = translog.deltatable
-                con = duckdb.connect()
-                con.register(STATEMENTS, dt.to_pyarrow_dataset())
-                con.register(TRANSLOG, translog_dt.to_pyarrow_dataset())
-                result = con.sql(
-                    f"SELECT {STATEMENTS}.* FROM {STATEMENTS} "
-                    f"JOIN {TRANSLOG} sc ON {STATEMENTS}.id = sc.id "
-                    "WHERE sc.deleted_at IS NULL "
-                    f"AND {STATEMENTS}.entity_id = '{entity_id}'"
-                )
-            else:
-                rel = duckdb.arrow(dt.to_pyarrow_dataset())
-                result = rel.query(
-                    "arrow",
-                    f"SELECT * FROM arrow WHERE entity_id = '{entity_id}'",
-                )
-
-            for row in result.fetchall():
-                row_dict = dict(zip(result.columns, row))
-                stmt = Statement.from_dict(row_dict)
-                if stmt.id:
-                    stmts_by_id[stmt.id] = stmt
-
-        # Read from journal (may override parquet entries)
+        # Read from journal (may override parquet entries). Use the shard
+        # index for an index-assisted scan, then filter by canonical_id in
+        # the unpacked statement.
+        shard = path.entity_shard(entity_id, self.shards)
         q = (
             select(journal.table)
-            .where(journal.table.c.canonical_id == entity_id)
+            .where(journal.table.c.shard == shard)
             .where(journal.table.c.deleted_at.is_(None))
         )
         with journal.engine.connect() as conn:
             for row in conn.execute(q):
                 stmt = unpack_statement(row.data)
+                if stmt.entity_id != entity_id:
+                    continue
                 if stmt.id:
                     stmts_by_id[stmt.id] = stmt
 
@@ -490,12 +378,12 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
     _diff_base_path = path.DIFFS_ENTITIES
 
     @no_api
-    def _get_changed_ids_from_translog(self, since: datetime) -> set[str]:
+    def _get_changed_ids(self, since: datetime) -> Iterator[str]:
         """Get entity IDs with statements added since the given timestamp."""
         return self._statements.get_changed_entity_ids(since)
 
     @no_api
-    def _write_diff(self, entity_ids: set[str], ts: datetime, **kwargs) -> str:
+    def _write_diff(self, entity_ids: Iterator[str], ts: datetime, **kwargs) -> str:
         """Write entities as line-based JSON with operation envelopes."""
         key = path.entities_diff(ts)
         with self._store.open(key, "wb") as o:
@@ -503,15 +391,19 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         return self._store.to_uri(key)
 
     @no_api
-    def _get_delta_entities(self, entity_ids: set[str]) -> Generator[SDict, None, None]:
+    def _get_delta_entities(
+        self, entity_ids: Iterator[str]
+    ) -> Generator[SDict, None, None]:
+        original_ids: set[str] = set()
         seen_ids: set[str] = set()
         it = iter(entity_ids)
-        while batch := list(islice(it, QUERY_IN_BATCH_SIZE)):
+        while batch := set(islice(it, QUERY_IN_BATCH_SIZE)):
+            original_ids.update(batch)
             for entity in self.query(entity_ids=batch, flush_first=False):
                 if entity.id:
                     seen_ids.add(entity.id)
                 yield make_envelope(entity.to_dict())
-        for entity_id in entity_ids - seen_ids:
+        for entity_id in original_ids - seen_ids:
             yield make_envelope({"id": entity_id}, op="DEL")
 
     @no_api

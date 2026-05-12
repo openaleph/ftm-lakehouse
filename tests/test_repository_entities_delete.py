@@ -1,18 +1,19 @@
-"""Integration tests for soft delete operations via translog metadata table.
+"""Soft delete: tombstones flow through journal → parquet (append) → merge.
 
-Deletes are written through the journal WAL. On flush, tombstones are routed
-to the translog table (mark_deleted). TranslogAwareLakeStore joins main + translog
-for all queries, filtering out deleted rows automatically.
+The query view filters ``deleted_at IS NOT NULL`` *per-row*, so an entity is
+hidden as soon as a tombstone row for ALL its statements lands in parquet.
+``merge()`` later drops the tombstones physically once they're past the grace
+cutoff.
 """
 
 from pathlib import Path
 from typing import Generator
 
-import duckdb
 import pytest
 from followthemoney import EntityProxy
 
 from ftm_lakehouse.api.main import archive_router, entities_router, journal_router
+from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.repository.entities import EntityRepository
 from tests.conftest import make_test_api
 from tests.shared import JANE, JOHN
@@ -35,11 +36,6 @@ def _populate(repo: EntityRepository) -> None:
     repo.flush()
 
 
-# ---------------------------------------------------------------------------
-# Parameterized fixture for tests that use only the public API
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture(params=["local", "api"])
 def repo(
     request, tmp_path
@@ -54,59 +50,48 @@ def repo(
             yield r, tmp_path / DATASET
 
 
-# ---------------------------------------------------------------------------
-# Parameterized tests (local + API)
-# ---------------------------------------------------------------------------
+def test_delete_entity_filters_from_query_after_merge(repo):
+    """delete + flush + merge → entity disappears from queries.
 
-
-def test_delete_entity_filters_from_query(repo):
-    """After delete + flush (no compact), deleted entity is excluded from queries."""
+    In append-only mode the live row and tombstone coexist after flush; the
+    query view's ``deleted_at IS NULL`` filter still picks the live row.
+    Merge collapses the (live, tombstone) pair to the tombstone, which the
+    view then filters out.
+    """
     repo, _ = repo
     _populate(repo)
+    assert {e.id for e in repo.query()} == {"jane", "john"}
 
-    # Verify both entities exist
-    entities = list(repo.query(flush_first=False))
-    assert {e.id for e in entities} == {"jane", "john"}
-
-    # Delete jane — writes tombstones to journal
     count = repo.delete_entity("jane")
     assert count > 0
-
-    # Flush to parquet (tombstones are routed to translog)
     repo.flush()
+    repo.merge()
 
-    # Query should exclude jane without compact
-    entities = list(repo.query(flush_first=False))
-    entity_ids = {e.id for e in entities}
-    assert "jane" not in entity_ids
-    assert "john" in entity_ids
+    assert {e.id for e in repo.query()} == {"john"}
 
 
-def test_delete_entity_filters_from_stats(repo):
-    """Stats reflect live data after flush (no compact needed)."""
+def test_delete_entity_filters_from_stats_after_merge(repo):
     repo, _ = repo
     _populate(repo)
-
-    stats_before = repo.get_statistics()
-    assert stats_before.entity_count == 2
+    assert repo.get_statistics().entity_count == 2
 
     repo.delete_entity("jane")
     repo.flush()
+    repo.merge()
 
-    stats_after = repo.get_statistics()
-    assert stats_after.entity_count == 1
+    assert repo.get_statistics().entity_count == 1
 
 
-def test_delete_and_readd(repo):
-    """Delete then re-add: entity should be alive after flush."""
+def test_delete_then_readd_via_merge(repo):
+    """Delete, then merge; re-add lands fresh."""
     repo, _ = repo
     _populate(repo)
 
-    # Delete jane
     repo.delete_entity("jane")
     repo.flush()
+    repo.merge()
+    assert {e.id for e in repo.query()} == {"john"}
 
-    # Re-add jane
     jane = EntityProxy.from_dict(
         {
             "id": "jane",
@@ -118,15 +103,11 @@ def test_delete_and_readd(repo):
         writer.add_entity(jane)
     repo.flush()
 
-    # Jane should be alive — translog upsert clears deleted_at via new insert
-    entities = list(repo.query(flush_first=False))
-    entity_ids = {e.id for e in entities}
-    assert "jane" in entity_ids
-    assert "john" in entity_ids
+    assert {e.id for e in repo.query()} == {"jane", "john"}
 
 
 def test_delete_entity_in_journal_only(repo):
-    """Add to journal, delete before flush — nothing visible in parquet."""
+    """Add + delete inside the same journal window: nothing surfaces in parquet."""
     repo, _ = repo
 
     jane = EntityProxy.from_dict(
@@ -138,56 +119,45 @@ def test_delete_entity_in_journal_only(repo):
     )
     with repo.writer() as writer:
         writer.add_entity(jane)
-
-    # Delete before flush — UPSERT overwrites with deleted_at=now
     repo.delete_entity("jane")
     repo.flush()
 
-    # Should be empty or only contain tombstones (filtered out)
-    entities = list(repo.query(flush_first=False))
-    assert len(entities) == 0
+    assert list(repo.query()) == []
 
 
 def test_delete_nonexistent_entity(repo):
-    """Deleting a non-existent entity returns 0."""
     repo, _ = repo
     _populate(repo)
-
-    count = repo.delete_entity("nonexistent")
-    assert count == 0
+    assert repo.delete_entity("nonexistent") == 0
 
 
 def test_delete_statement(repo):
-    """Delete a single statement via journal tombstone."""
+    """Tombstoning a single statement removes it from the live view (after merge)."""
     repo, _ = repo
     _populate(repo)
 
-    stmts = list(repo.query_statements())
-    jane_stmts = [s for s in stmts if s.entity_id == "jane"]
-    assert len(jane_stmts) > 0
+    jane_stmts = [s for s in repo.query_statements() if s.entity_id == "jane"]
+    assert jane_stmts
 
-    # Delete one statement
     target = jane_stmts[0]
     repo.delete_statement(target)
-
     repo.flush()
+    repo.merge()
 
-    # That specific statement should be gone
-    stmts_after = list(repo.query_statements())
-    stmt_ids = {s.id for s in stmts_after}
+    stmt_ids = {s.id for s in repo.query_statements()}
     assert target.id not in stmt_ids
 
 
 def test_delete_preserves_others(repo):
-    """Only the targeted entity is deleted, others preserved."""
     repo, _ = repo
     _populate(repo)
 
     repo.delete_entity("jane")
     repo.flush()
+    repo.merge()
 
-    # John should still have all statements
     stmts = list(repo.query_statements())
+    assert stmts
     assert all(s.entity_id == "john" for s in stmts)
     assert len(stmts) > 0
 
@@ -198,16 +168,17 @@ def test_delete_preserves_others(repo):
 
 
 def test_delete_entity_filters_from_export_csv(tmp_path):
-    """CSV export excludes deleted entities after flush (no compact needed)."""
+    """CSV export excludes deleted entities after flush + merge."""
     repo = _make_local_repo(tmp_path)
     _populate(repo)
 
     repo.delete_entity("jane")
     repo.flush()
+    repo.merge()
 
-    csv_path = str(tmp_path / "export.csv")
-    repo._statements.export_csv(csv_path)
+    repo._statements.export_csv(path.EXPORTS_STATEMENTS)
 
+    csv_path = str(tmp_path / path.EXPORTS_STATEMENTS)
     with open(csv_path) as f:
         lines = f.readlines()
 
@@ -217,55 +188,37 @@ def test_delete_entity_filters_from_export_csv(tmp_path):
         assert "john" in line
 
 
-def test_delete_then_compact_cleans_main_and_translog(tmp_path):
-    """Compact applies translog to main table: removes deleted rows, cleans translog."""
+def test_delete_then_merge_cleans_main_table(tmp_path):
+    """merge() (with grace=0) physically removes deleted rows from the table."""
     repo = _make_local_repo(tmp_path)
     _populate(repo)
 
     repo.delete_entity("jane")
     repo.flush()
-
-    repo._statements.compact()
+    repo.merge(0)  # immediate delte
 
     # Main table should no longer contain jane's rows
-    from deltalake import DeltaTable
-
-    dt = DeltaTable(str(repo._statements.uri))
+    dt = repo._statements.deltatable
     raw = dt.to_pyarrow_table()
     entity_ids = set(raw.column("entity_id").to_pylist())
     assert "jane" not in entity_ids
     assert "john" in entity_ids
 
-    # Translog should not contain jane's entries
-    translog_dt = repo._statements._translog.deltatable
-    rel = duckdb.arrow(translog_dt.to_pyarrow_dataset())
-    rows = rel.query("sc", "SELECT id FROM sc WHERE deleted_at IS NOT NULL").fetchall()
-    assert len(rows) == 0
+    deleted_at = raw.column("deleted_at").to_pylist()
+    assert all(d is None for d in deleted_at)
 
-    # Queries still work
-    entities = list(repo.query(flush_first=False))
-    assert len(entities) == 1
-    assert entities[0].id == "john"
+    assert {e.id for e in repo.query()} == {"john"}
 
 
-def test_translog_has_deletion_entries(tmp_path):
-    """After delete + flush, translog contains deleted_at entries."""
+def test_deleted_at_appended_after_flush(tmp_path):
+    """After delete + flush (no merge), tombstone rows exist alongside live rows."""
     repo = _make_local_repo(tmp_path)
     _populate(repo)
 
     repo.delete_entity("jane")
     repo.flush()
 
-    # Translog should exist and contain deleted_at entries for jane
-    assert repo._statements._translog.exists
-    translog_dt = repo._statements._translog.deltatable
-    rel = duckdb.arrow(translog_dt.to_pyarrow_dataset())
-    deleted = rel.query(
-        "sc", "SELECT id FROM sc WHERE deleted_at IS NOT NULL"
-    ).fetchall()
-    assert len(deleted) > 0
-
-    # Main table should NOT have deleted_at column
-    dt = repo._statements._store.deltatable
-    main_cols = {f.name for f in dt.schema().to_arrow()}
-    assert "deleted_at" not in main_cols
+    dt = repo._statements.deltatable
+    raw = dt.to_pyarrow_table()
+    deleted_rows = [r for r in raw.to_pylist() if r.get("deleted_at") is not None]
+    assert deleted_rows
