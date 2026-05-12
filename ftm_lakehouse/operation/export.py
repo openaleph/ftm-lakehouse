@@ -95,9 +95,8 @@ class ExportStatementsOperation(BaseExportOperation[ExportStatementsJob]):
 
     def handle(self, run: JobRun, *args, **kwargs) -> None:
         if self.ensure_flush():
-            output_uri = self.entities._store.to_uri(path.EXPORTS_STATEMENTS)
             self.entities._store.ensure_parent(path.EXPORTS_STATEMENTS)
-            self.entities._statements.export_csv(output_uri)
+            self.entities._statements.export_csv(path.EXPORTS_STATEMENTS)
             run.job.done = 1
 
 
