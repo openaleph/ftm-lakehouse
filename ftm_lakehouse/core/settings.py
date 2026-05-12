@@ -1,5 +1,3 @@
-import tempfile
-
 from anystore.exceptions import DoesNotExist
 from anystore.io import smart_read
 from anystore.settings import BaseSettings
@@ -29,10 +27,8 @@ class Settings(BaseSettings):
     zfs_socket: str | None = None
     zfs_owner: str | None = None
 
-    tmp_dir: str = tempfile.gettempdir()
-    duckdb_memory_limit: str | None = None
-
     entity_shards: int = 8
+    grace_period_days: int = 30
 
     public_url_prefix: str | None = None
     archive_url_expire: int = 900  # seconds (15 minutes)
