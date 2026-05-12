@@ -11,6 +11,7 @@ from followthemoney.statement import Statement
 
 from ftm_lakehouse.api.routes.journal import router
 from ftm_lakehouse.core.api import get_api
+from ftm_lakehouse.core.conventions.path import entity_shard
 from ftm_lakehouse.helpers.statements import unpack_statement
 from ftm_lakehouse.storage.journal import ApiJournalStore, JournalRows, SqlJournalStore
 from ftm_lakehouse.storage.journal import get_journal as _get_journal_factory
@@ -39,7 +40,7 @@ def make_statement(
 
 def collect_statements(items: JournalRows) -> list[Statement]:
     """Collect all statements from flush items."""
-    return [unpack_statement(stmt) for _, _, _, _, stmt, _ in items]
+    return [unpack_statement(row.data) for row in items]
 
 
 def _make_sql_journal() -> SqlJournalStore:
@@ -176,8 +177,8 @@ def test_storage_journal_statement_fields(journal):
     assert collect_statements(journal.flush()) == []
 
 
-def test_storage_journal_flush_yields_bucket_origin(journal):
-    """Test that flush yields (id, bucket, origin, canonical_id, data) tuples."""
+def test_storage_journal_flush_yields_shard(journal):
+    """Test that flush yields (id, shard, data, deleted_at) tuples."""
     with journal.writer() as w:
         w.add_statement(
             Statement(
@@ -213,15 +214,16 @@ def test_storage_journal_flush_yields_bucket_origin(journal):
     items = list(journal.flush())
     assert len(items) == 3
 
-    for row_id, bucket, origin, canonical_id, data, deleted_at in items:
-        assert bucket == "thing"  # Person is a Thing
-        assert origin in ("source_a", "source_b")
-        stmt = unpack_statement(data)
-        assert stmt.origin == origin
+    for row in items:
+        # default shards = 8 (single hex char)
+        assert len(row.shard) == 1
+        stmt = unpack_statement(row.data)
+        assert row.shard == entity_shard(stmt.entity_id, 8)
+        assert stmt.origin in ("source_a", "source_b")
 
 
 def test_storage_journal_flush_sorted_order(journal):
-    """Test that flush yields statements in sorted order (bucket, origin, canonical_id)."""
+    """Test that flush yields statements sorted by shard."""
     with journal.writer() as w:
         for origin in ["z_origin", "a_origin", "m_origin"]:
             for i in range(3):
@@ -236,8 +238,8 @@ def test_storage_journal_flush_sorted_order(journal):
                 w.add_statement(stmt)
 
     items = list(journal.flush())
-    origins = [origin for _, _, origin, _, _, _ in items]
-    assert origins == sorted(origins)
+    shards = [row.shard for row in items]
+    assert shards == sorted(shards)
 
 
 def test_storage_journal_rollback_on_consumer_error(request, journal):
@@ -251,7 +253,7 @@ def test_storage_journal_rollback_on_consumer_error(request, journal):
 
     # Try to consume but raise error
     try:
-        for _id, _bucket, _origin, _canonical_id, _data, _deleted_at in journal.flush():
+        for _ in journal.flush():
             raise ValueError("Simulated error")
     except ValueError:
         pass
@@ -335,25 +337,28 @@ def concurrent_journal(request, tmp_path):
 
 
 def test_storage_journal_flush_concurrent_write(concurrent_journal):
-    """Test that rows written during flush are not deleted.
+    """Test that concurrent writes during flush are never silently lost.
 
-    Simulates a concurrent writer inserting rows while flush() is yielding.
-    The new rows must survive the flush DELETE since they were never yielded.
+    Per-shard flush may pick up rows inserted into not-yet-processed shards
+    during the same call, so the exact split between "this flush" and "next
+    flush" is non-deterministic. The contract is weaker: every row inserted
+    is eventually yielded exactly once, never deleted without being yielded
+    first, and the journal ends up empty after two flushes.
     """
     journal = concurrent_journal
 
-    # Write initial rows
     with journal.writer() as w:
         for i in range(5):
             w.add_statement(make_statement(f"initial_{i}", "name", f"Initial {i}"))
 
     assert journal.count() == 5
+    initial_ids = {f"initial_{i}" for i in range(5)}
+    concurrent_ids = {f"concurrent_{i}" for i in range(3)}
 
-    # Start flush, inject new rows mid-iteration, then finish
-    flushed_ids = []
+    flushed_entity_ids: set[str] = set()
     injected = False
-    for row_id, bucket, origin, canonical_id, data, deleted_at in journal.flush():
-        flushed_ids.append(row_id)
+    for row in journal.flush():
+        flushed_entity_ids.add(unpack_statement(row.data).entity_id)
 
         # After first row, inject new rows via a separate writer
         if not injected:
@@ -364,17 +369,15 @@ def test_storage_journal_flush_concurrent_write(concurrent_journal):
                     )
             injected = True
 
-    # All 5 initial rows were yielded
-    assert len(flushed_ids) == 5
+    # All initial rows must be in this flush; concurrent rows may or may not be.
+    assert initial_ids <= flushed_entity_ids
+    assert flushed_entity_ids <= initial_ids | concurrent_ids
+    assert journal.count() == 5 + 3 - len(flushed_entity_ids)
 
-    # The 3 rows written during flush must still be in the journal
-    assert journal.count() == 3
-
-    # Flush the remaining rows — should get exactly the concurrent ones
     remaining = collect_statements(journal.flush())
-    assert len(remaining) == 3
     remaining_ids = {s.entity_id for s in remaining}
-    assert remaining_ids == {"concurrent_0", "concurrent_1", "concurrent_2"}
 
-    # Journal is now empty
+    # The union of both flushes covers every inserted row exactly once.
+    assert flushed_entity_ids | remaining_ids == initial_ids | concurrent_ids
+    assert flushed_entity_ids.isdisjoint(remaining_ids)
     assert journal.count() == 0

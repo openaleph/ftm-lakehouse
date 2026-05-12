@@ -37,9 +37,16 @@ from ftm_lakehouse.operation.export import (
     ExportStatisticsJob,
     ExportStatisticsOperation,
 )
+from ftm_lakehouse.operation.maintenance import (
+    CompactJob,
+    CompactOperation,
+    MergeJob,
+    MergeOperation,
+    VacuumJob,
+    VacuumOperation,
+)
 from ftm_lakehouse.operation.make import MakeJob, MakeOperation
 from ftm_lakehouse.operation.mapping import MappingJob, MappingOperation
-from ftm_lakehouse.operation.optimize import OptimizeJob, OptimizeOperation
 from ftm_lakehouse.operation.recreate import (
     RecreateJob,
     RecreateOperation,
@@ -129,39 +136,24 @@ def export_index(dataset: Dataset, force: bool = False) -> ExportIndexJob:
     )
 
 
-def optimize(
-    dataset: Dataset,
-    vacuum: bool = False,
-    vacuum_keep_hours: int = 0,
-    bucket: str | None = None,
-    origin: str | None = None,
-    force: bool = False,
-    compact: bool = False,
-) -> OptimizeJob:
-    """
-    Run optimize operation on the parquet statement store.
+def compact(dataset: Dataset, force: bool = False) -> CompactJob:
+    """Bin-pack small parquet files in the statement store."""
+    job = CompactJob.make(dataset=dataset.name)
+    return CompactOperation.from_job(job, dataset).run(force=force)
 
-    Args:
-        dataset: The dataset to optimize
-        vacuum: Delete stale files after optimization
-        vacuum_keep_hours: Keep files newer than this many hours
-        bucket: Scope optimization to a specific bucket
-        origin: Scope optimization to a specific origin
-        force: Force optimization even if up-to-date
-        compact: Dedupe statements and clear out delete tombstones
 
-    Returns:
-        The completed job result
-    """
-    job = OptimizeJob.make(
-        dataset=dataset.name,
-        vacuum=vacuum,
-        vacuum_keep_hours=vacuum_keep_hours,
-        bucket=bucket,
-        origin=origin,
-        compact=compact,
-    )
-    return OptimizeOperation.from_job(job, dataset).run(force=force)
+def merge(dataset: Dataset, force: bool = False) -> MergeJob:
+    """Collapse duplicates and reap expired tombstones, partition by partition."""
+    job = MergeJob.make(dataset=dataset.name)
+    return MergeOperation.from_job(job, dataset).run(force=force)
+
+
+def vacuum(
+    dataset: Dataset, retention_hours: int = 0, force: bool = False
+) -> VacuumJob:
+    """Delete obsolete parquet files no longer referenced by the Delta log."""
+    job = VacuumJob.make(dataset=dataset.name, retention_hours=retention_hours)
+    return VacuumOperation.from_job(job, dataset).run(force=force)
 
 
 def run_mapping(

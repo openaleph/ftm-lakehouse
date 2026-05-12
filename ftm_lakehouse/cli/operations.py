@@ -2,7 +2,8 @@
 
 Provides commands for building, exporting, optimizing, and crawling
 datasets: ``make``, ``export-statements``, ``export-entities``,
-``export-statistics``, ``export-documents``, ``optimize``, and ``crawl``.
+``export-statistics``, ``export-documents``, ``compact``, ``merge``,
+``vacuum``, and ``crawl``.
 """
 
 from typing import Annotated, Optional
@@ -90,22 +91,57 @@ def cli_export_documents():
         console.print("Exported documents.csv")
 
 
-@cli.command("optimize")
-def cli_optimize(
-    vacuum: Annotated[
-        Optional[bool], typer.Option(help="Delete staled files after optimization")
-    ] = True,
-    compact: Annotated[
-        Optional[bool],
-        typer.Option(help="Dedupe statements and clear out deletion tombstones"),
+@cli.command("compact")
+def cli_compact(
+    force: Annotated[
+        Optional[bool], typer.Option(help="Run regardless of freshness state.")
     ] = False,
 ):
-    """Optimize a dataset's statement store.
+    """Bin-pack small parquet files (cheap maintenance).
 
-    Optionally vacuum stale files or compact (dedupe + tombstone cleanup).
+    Holds ``locks/lakehouse/compact`` for the duration. Does not collapse
+    duplicate rows or drop tombstones — use ``merge`` for that.
     """
     with DatasetContext() as dataset:
-        res = op.optimize(dataset, vacuum=bool(vacuum), compact=bool(compact))
+        res = op.compact(dataset, force=bool(force))
+        console.print(res)
+
+
+@cli.command("merge")
+def cli_merge(
+    force: Annotated[
+        Optional[bool], typer.Option(help="Run regardless of freshness state.")
+    ] = False,
+):
+    """Collapse duplicates and reap expired tombstones per partition.
+
+    Expensive — overwrites each ``(shard, bucket, origin)`` partition with a
+    deduplicated view. Tombstones older than ``LAKEHOUSE_GRACE_PERIOD_DAYS``
+    are dropped. Holds ``locks/lakehouse/merge`` for the duration.
+    """
+    with DatasetContext() as dataset:
+        res = op.merge(dataset, force=bool(force))
+        console.print(res)
+
+
+@cli.command("vacuum")
+def cli_vacuum(
+    retention_hours: Annotated[
+        Optional[int],
+        typer.Option(help="Retain files newer than this many hours."),
+    ] = 0,
+    force: Annotated[
+        Optional[bool], typer.Option(help="Run regardless of freshness state.")
+    ] = False,
+):
+    """Delete obsolete parquet files no longer referenced by the Delta log.
+
+    Holds ``locks/lakehouse/vacuum`` for the duration.
+    """
+    with DatasetContext() as dataset:
+        res = op.vacuum(
+            dataset, retention_hours=int(retention_hours or 0), force=bool(force)
+        )
         console.print(res)
 
 

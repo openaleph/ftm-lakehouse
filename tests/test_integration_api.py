@@ -31,18 +31,18 @@ def test_api(fixtures_path, tmp_catalog):
     client = TestClient(app)
 
     # unauthenticated requests are rejected
-    res = client.get(f"{DATASET}/archive", params={"keys": "true"})
+    res = client.get(f"{DATASET}/archive/")
     assert res.status_code == 401
 
     # authenticated: list keys
     auth = _auth_header()
-    res = client.get(f"{DATASET}/archive", params={"keys": "true"}, headers=auth)
+    res = client.get(f"{DATASET}/archive/", headers=auth)
     assert res.status_code == 200
     keys = res.text.strip().split("\n")
     assert len(keys) > 0
 
     # head for existing file
-    key = keys[0]
+    key = f"{DATASET}/archive/{keys[0]}"
     res = client.head(key, headers=auth)
     assert res.status_code == 200
     assert "Content-Length" in res.headers
@@ -90,11 +90,11 @@ def test_api_public_mode(fixtures_path, tmp_catalog):
 
     # discover a key with auth first
     auth = _auth_header()
-    res = client.get(f"{DATASET}/archive", params={"keys": "true"}, headers=auth)
+    res = client.get(f"{DATASET}/archive/", headers=auth)
     assert res.status_code == 200
     keys = res.text.strip().split("\n")
     assert len(keys) > 0
-    key = keys[0]
+    key = f"{DATASET}/archive/{keys[0]}"
 
     with patch.object(settings, "auth_required", False):
         # write methods are rejected in public mode

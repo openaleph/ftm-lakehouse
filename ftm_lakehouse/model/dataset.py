@@ -24,6 +24,9 @@ class DatasetModel(Dataset):
     """Set storage for external lakehouse"""
     public_url_prefix: HttpUrlStr | None = None
     """Public url prefix for resources"""
+    shards: int = settings.entity_shards
+    """Number of entity-id hash shards for the parquet store. Set once at
+    dataset creation; changing it requires a full rewrite."""
 
     def get_public_prefix(self) -> str | None:
         if self.public_url_prefix:

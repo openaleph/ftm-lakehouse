@@ -33,7 +33,7 @@ def test_repository_entities(repo):
     # Initially empty (check tags before query which may trigger flush)
     assert not repo._tags.exists(tag.JOURNAL_UPDATED)
     assert not repo._tags.exists(tag.STATEMENTS_UPDATED)
-    assert list(repo.query(flush_first=False)) == []
+    assert list(repo.query()) == []
 
     jane = make_entity(JANE)
     john = make_entity(JOHN)
@@ -126,7 +126,7 @@ def test_repository_entities_multi_origin(repo):
 
 
 def test_repository_entities_export_diff(tmp_path):
-    """Test incremental diff export using translog-based change detection.
+    """Test incremental diff export using change detection.
 
     Initial diff copies entities.ftm.json regardless of Delta table version.
     Subsequent diffs capture incremental changes via translog timestamps.
@@ -153,8 +153,7 @@ def test_repository_entities_export_diff(tmp_path):
     assert repo.version == 1
 
     # Export entities.ftm.json (required for initial diff)
-    entities_json_path = tmp_path / path.ENTITIES_JSON
-    smart_write_proxies(str(entities_json_path), repo.query(flush_first=False))
+    smart_write_proxies(repo._store.open(path.ENTITIES_JSON, "wb"), repo.query())
 
     # Cross second boundary so initial entities are in an earlier second
     time.sleep(1.1)
@@ -163,11 +162,13 @@ def test_repository_entities_export_diff(tmp_path):
     diff_name_1 = repo.export_diff()
     assert diff_name_1 is not None
     assert diff_name_1.endswith("Z")  # timestamp format
-    diff_files = list((tmp_path / path.DIFFS_ENTITIES).glob("*.delta.json"))
+    diff_files = list(
+        repo._store.iterate_keys(prefix=path.DIFFS_ENTITIES, glob="*.delta.json")
+    )
     assert len(diff_files) == 1  # Initial diff file created
 
     # Verify initial diff contains both JANE and JOHN (full export)
-    with open(diff_files[0]) as f:
+    with repo._store.open(diff_files[0]) as f:
         lines = f.readlines()
     assert len(lines) == 2
     entities = {json.loads(line)["entity"]["id"] for line in lines}
@@ -186,25 +187,30 @@ def test_repository_entities_export_diff(tmp_path):
     assert diff_name_2 is not None
     assert diff_name_2 != diff_name_1
 
-    diff_files = list((tmp_path / path.DIFFS_ENTITIES).glob("*.delta.json"))
+    diff_files = list(
+        repo._store.iterate_keys(prefix=path.DIFFS_ENTITIES, glob="*.delta.json")
+    )
     assert len(diff_files) == 2
 
     # Find and verify the incremental diff contains only BOB
-    diff_files_sorted = sorted(diff_files, key=lambda p: p.name)
-    with open(diff_files_sorted[1]) as f:
+    diff_files_sorted = sorted(diff_files)
+    with repo._store.open(diff_files_sorted[1]) as f:
         lines = f.readlines()
     assert len(lines) == 1
     delta = json.loads(lines[0])
     assert delta["op"] == "ADD"
     assert delta["entity"]["id"] == "bob"
 
-    # Re-adding jane without changes doesn't create new diff
+    # Re-adding jane without changes doesn't create new diff after merge
     with repo.writer() as writer:
         writer.add_entity(make_entity(JANE))
     repo.flush()
+    repo.merge()
 
     assert repo.export_diff() is None
-    diff_files = list((tmp_path / path.DIFFS_ENTITIES).glob("*.delta.json"))
+    diff_files = list(
+        repo._store.iterate_keys(prefix=path.DIFFS_ENTITIES, glob="*.delta.json")
+    )
     assert len(diff_files) == 2
 
     # Updating Jane firstName creates diff
@@ -214,12 +220,14 @@ def test_repository_entities_export_diff(tmp_path):
 
     diff_name_3 = repo.export_diff()
     assert diff_name_3 is not None
-    diff_files = list((tmp_path / path.DIFFS_ENTITIES).glob("*.delta.json"))
+    diff_files = list(
+        repo._store.iterate_keys(prefix=path.DIFFS_ENTITIES, glob="*.delta.json")
+    )
     assert len(diff_files) == 3
 
     # Find and verify the incremental diff contains only JANE
-    diff_files_sorted = sorted(diff_files, key=lambda p: p.name)
-    with open(diff_files_sorted[2]) as f:
+    diff_files_sorted = sorted(diff_files)
+    with repo._store.open(diff_files_sorted[2]) as f:
         lines = f.readlines()
     assert len(lines) == 1
     delta = json.loads(lines[0])
@@ -241,15 +249,19 @@ def test_repository_entities_export_diff_delete(tmp_path):
 
     # Export entities.ftm.json (required for initial diff)
     entities_json_path = tmp_path / path.ENTITIES_JSON
-    smart_write_proxies(str(entities_json_path), repo.query(flush_first=False))
+    smart_write_proxies(str(entities_json_path), repo.query())
 
     # Initial diff
     diff_name_1 = repo.export_diff()
     assert diff_name_1 is not None
 
-    # Delete jane, flush tombstones to parquet
+    # Delete jane, flush tombstones to parquet, then merge with the default
+    # 7-day grace: live rows are collapsed away (so jane is invisible to
+    # queries) but tombstones survive (so the diff sees the deleted_at >=
+    # since signal and emits DEL).
     repo.delete_entity("jane")
     repo.flush()
+    repo.merge()
 
     # Incremental diff should contain a DEL for jane
     diff_name_2 = repo.export_diff()
@@ -291,7 +303,7 @@ def test_repository_entities_export_diff_no_changes(tmp_path):
 
     # Export entities.ftm.json for initial diff
     entities_json_path = tmp_path / path.ENTITIES_JSON
-    smart_write_proxies(str(entities_json_path), repo.query(flush_first=False))
+    smart_write_proxies(str(entities_json_path), repo.query())
 
     # Initial diff - copies entities.ftm.json
     diff_name_1 = repo.export_diff()

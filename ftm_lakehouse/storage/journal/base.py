@@ -1,12 +1,12 @@
 """JournalStore - SQL or http api statement buffer for write-ahead logging."""
 
 from datetime import datetime
-from typing import Generator, Generic, Self, TypeAlias, TypeVar, cast
+from typing import Generator, Generic, NamedTuple, Self, TypeAlias, TypeVar
 
 from anystore.logging import get_logger
 
 from ftm_lakehouse.core.settings import Settings
-from ftm_lakehouse.helpers.statements import pack_statement, pack_tombstone
+from ftm_lakehouse.helpers.statements import pack_statement
 from ftm_lakehouse.logic.entities.buffer import EntityBuffer
 
 settings = Settings()
@@ -14,9 +14,20 @@ log = get_logger(__name__)
 
 WRITE_BATCH_SIZE = 10_000
 
-JournalRow = tuple[
-    str, str, str, str, str, datetime | None
-]  # (id, bucket, origin, canonical_id, data, deleted_at)
+
+class JournalRow(NamedTuple):
+    """A single journal row — used for both SQL storage and wire format.
+
+    ``shard`` is the entity-id hash bucket the statement routes to in the
+    parquet store. PyArrow handles the final sort within each batch.
+    """
+
+    id: str
+    shard: str
+    data: str
+    deleted_at: datetime | None
+
+
 JournalRows: TypeAlias = Generator[JournalRow, None, None]
 
 
@@ -30,20 +41,18 @@ class BaseJournalWriter(EntityBuffer, Generic[S]):
     Not intended for direct use - use JournalStore.writer() instead.
     """
 
-    def __init__(self, store: S, origin: str | None = None) -> None:
-        super().__init__(store.dataset, origin)
+    def __init__(self, store: S, shards: int, origin: str | None = None) -> None:
+        super().__init__(store.dataset, shards, origin)
         self.store = store
 
     def _upsert_batch(self) -> None:
         raise NotImplementedError
 
     def flush_rows(self) -> JournalRows:
-        for bucket, origin, canonical_id, stmt, deleted_at in self.flush_buffer():
-            if deleted_at is not None:
-                data = pack_tombstone(stmt)
-            else:
-                data = pack_statement(stmt)
-            yield cast(str, stmt.id), bucket, origin, canonical_id, data, deleted_at
+        for shard, stmt, deleted_at in self.flush_buffer():
+            if stmt.id is None:  # won't happen
+                raise RuntimeError("No Statement ID!")
+            yield JournalRow(stmt.id, shard, pack_statement(stmt), deleted_at)
 
     def add_statement(self, *args, **kwargs) -> None:
         super().add_statement(*args, **kwargs)
@@ -98,31 +107,28 @@ class BaseJournalStore(Generic[W]):
         self.dataset = dataset
         self.uri = uri or settings.resolved_journal_uri
 
-    def writer(self, origin: str | None = None) -> W:
+    def writer(self, shards: int | None = None, origin: str | None = None) -> W:
         """Get a bulk writer for adding rows."""
-        return self._writer_cls(self, origin=origin)
+        if shards is None:
+            shards = settings.entity_shards
+        return self._writer_cls(self, shards=shards, origin=origin)
 
     def iterate(self, *args, **kwargs) -> JournalRows:
-        """
-        Iterate all rows for this dataset, ordered for batch processing.
-
-        Rows are ordered by (bucket, origin, canonical_id) for efficient
-        partitioned writes to downstream storage.
+        """Iterate all rows for this dataset, ordered by ``shard``.
 
         Yields:
-            Tuples of (id, bucket, origin, canonical_id, data)
+            JournalRow(id, shard, data, deleted_at)
         """
         raise NotImplementedError
 
     def flush(self) -> JournalRows:
-        """
-        Iterate and delete all rows for this dataset atomically.
+        """Iterate and delete all rows for this dataset atomically.
 
         This is a destructive read - rows are deleted after being yielded.
         If the consumer raises an exception, the transaction is rolled back.
 
         Yields:
-            Tuples of (id, bucket, origin, canonical_id, data)
+            JournalRow(id, shard, data, deleted_at)
         """
         raise NotImplementedError
 

@@ -44,10 +44,11 @@ Dataset Layout
                         YYYY/MM/...
 
             entities/
-                statements/                 # statement store (partitioned)
-                    origin={origin}/
-                        *.parquet
-                translog/                   # translog metadata table (mutable)
+                statements/                 # statement store (shard-partitioned)
+                    shard={shard}/
+                        bucket={bucket}/
+                            origin={origin}/
+                                *.parquet
 
             entities.ftm.json               # aggregated entities export
 
@@ -73,6 +74,7 @@ Dataset Layout
 from datetime import datetime, timezone
 
 from anystore.util import ensure_uuid, join_relpaths
+from banal import hash_data
 
 from ftm_lakehouse.util import make_checksum_key
 
@@ -224,10 +226,29 @@ ENTITIES_JSON = "entities.ftm.json"
 
 
 STATEMENTS = f"{ENTITIES}/statements"
-"""Base path for storing statement data"""
+"""Base path for storing statement data (partitioned by shard, bucket, origin)"""
 
-TRANSLOG = f"{ENTITIES}/translog"
-"""Base path for translog metadata table"""
+
+def shard_hex_width(shards: int) -> int:
+    """Hex width required to represent `shards-1` (zero-padded).
+
+    Examples: 1→1, 8→1, 16→1, 32→2, 256→2, 4096→3.
+    """
+    if shards <= 1:
+        return 1
+    return max(1, ((shards - 1).bit_length() + 3) // 4)
+
+
+def entity_shard(entity_id: str, shards: int) -> str:
+    """Hex shard key for an entity id under a uniform shard count.
+
+    Uses the first 8 hex chars of the entity_id hash, taken mod ``shards``,
+    then zero-padded to ``shard_hex_width(shards)``.
+    """
+    if shards <= 1:
+        return "0"
+    bucket = int(hash_data(entity_id)[:8], 16) % shards
+    return f"{bucket:0{shard_hex_width(shards)}x}"
 
 
 def statement_origin(origin: str) -> str:

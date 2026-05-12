@@ -1,5 +1,7 @@
 """Entity API routes: flush, query, delete, stats, version."""
 
+from typing import Annotated, Optional
+
 import orjson
 from fastapi import APIRouter, Body
 from fastapi.responses import PlainTextResponse, StreamingResponse
@@ -9,6 +11,9 @@ from ftmq.query import Query
 from ftm_lakehouse.api.helpers import NDJSON_CONTENT_TYPE, Dataset
 
 BODY = Body()
+EMBED = Body(embed=True)
+"""Use for single-parameter endpoints so FastAPI expects ``{"<name>": value}``
+rather than the bare value as the entire body."""
 
 router = APIRouter()
 
@@ -18,6 +23,16 @@ def entities_flush(dataset: Dataset) -> PlainTextResponse:
     """Flush journal to parquet store, return count of new statements."""
     count = dataset.entities.flush()
     return PlainTextResponse(str(count))
+
+
+@router.post("/{dataset}/_api/entities/merge")
+def entities_merge(
+    dataset: Dataset,
+    grace_period_days: Annotated[Optional[int], EMBED] = None,
+) -> PlainTextResponse:
+    """Collapse duplicates and reap expired tombstones from parquet store"""
+    dataset.entities.merge(grace_period_days)
+    return PlainTextResponse("ok")
 
 
 @router.post("/{dataset}/_api/entities/query")
