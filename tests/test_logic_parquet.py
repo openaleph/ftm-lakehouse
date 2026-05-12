@@ -1,184 +1,223 @@
-"""Unit tests for ftm_lakehouse.logic.parquet — translog-aware query functions."""
+"""Tests for the DuckDB merge query in ``ftm_lakehouse.logic.parquet``."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-import duckdb
 import pyarrow as pa
-from deltalake import DeltaTable, write_deltalake
-from ftmq.query import Query
-from ftmq.store.lake import ARROW_SCHEMA, compile_query
+import pytest
 
-from ftm_lakehouse.logic.parquet import STATEMENTS, TRANSLOG, translog_aware_sql
-from ftm_lakehouse.storage.parquet import PARTITIONS, TRANSLOG_SCHEMA
+from ftm_lakehouse.logic.parquet import build_merge_query, make_duckdb
+from ftm_lakehouse.model.statement import SHARDED_SCHEMA, TABLE
 
 
-def _make_row(
-    entity_id: str,
-    prop: str,
-    value: str,
-    schema: str = "Person",
-    stmt_id: str | None = None,
-    origin: str = "default",
-    last_seen: datetime | None = None,
-) -> dict:
-    """Build a statement row dict matching ARROW_SCHEMA."""
-    ts = last_seen or datetime(2024, 1, 1, tzinfo=timezone.utc)
-    return {
-        "id": stmt_id or f"{entity_id}-{prop}-{value}",
-        "entity_id": entity_id,
-        "canonical_id": entity_id,
-        "dataset": "test",
-        "bucket": "thing",
-        "origin": origin,
-        "source": None,
-        "schema": schema,
-        "prop": prop,
-        "prop_type": "name",
-        "value": value,
-        "original_value": None,
-        "lang": None,
-        "external": False,
-        "first_seen": ts,
-        "last_seen": ts,
-    }
+def _table(rows: list[dict]) -> pa.Table:
+    cols: dict[str, list] = {f.name: [] for f in SHARDED_SCHEMA}
+    for r in rows:
+        for k in cols:
+            cols[k].append(r.get(k))
+    return pa.table(cols, schema=SHARDED_SCHEMA)
 
 
-def _write_rows(path: str, rows: list[dict], partition_by: list[str] | None = None):
-    """Write rows to a fresh DeltaTable at the given path."""
-    table = pa.Table.from_pylist(rows, schema=ARROW_SCHEMA)
-    write_deltalake(
-        path,
-        table,
-        partition_by=partition_by or PARTITIONS,
-        mode="append",
-        schema_mode="merge",
-        configuration={"delta.enableChangeDataFeed": "true"},
+@pytest.fixture
+def now() -> datetime:
+    return datetime(2026, 5, 12, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _run(
+    table: pa.Table, *, shard: str, bucket: str, origin: str, grace_cutoff: datetime
+):
+    con = make_duckdb()
+    con.register(TABLE.name, table)
+    q = build_merge_query(shard, bucket, origin, grace_cutoff)
+    sql = str(q.compile(compile_kwargs={"literal_binds": True}))
+    return con.execute(sql).to_arrow_table()
+
+
+def test_merge_collapses_duplicates(now):
+    """Two rows with the same id collapse to the row with latest last_seen."""
+    early = now - timedelta(hours=1)
+    table = _table(
+        [
+            {
+                "id": "s1",
+                "entity_id": "e1",
+                "shard": "0",
+                "bucket": "thing",
+                "origin": "ingest",
+                "schema": "Person",
+                "first_seen": early,
+                "last_seen": early,
+                "deleted_at": None,
+            },
+            {
+                "id": "s1",
+                "entity_id": "e1",
+                "shard": "0",
+                "bucket": "thing",
+                "origin": "ingest",
+                "schema": "Person",
+                "first_seen": now,
+                "last_seen": now,
+                "deleted_at": None,
+            },
+        ]
     )
-    return DeltaTable(path)
+    out = _run(table, shard="0", bucket="thing", origin="ingest", grace_cutoff=now)
+    assert out.num_rows == 1
+    row = out.to_pylist()[0]
+    # first_seen folded to the min across the id group; last_seen kept as max
+    assert row["first_seen"] == early
+    assert row["last_seen"] == now
 
 
-def _write_translog(path: str, rows: list[dict]):
-    """Write translog metadata rows."""
-    table = pa.Table.from_pylist(rows, schema=TRANSLOG_SCHEMA)
-    write_deltalake(path, table, mode="append", schema_mode="merge")
-    return DeltaTable(path)
+def test_merge_drops_old_tombstone(now):
+    """Tombstone older than the grace cutoff is dropped."""
+    old = now - timedelta(days=14)
+    table = _table(
+        [
+            {
+                "id": "s1",
+                "entity_id": "e1",
+                "shard": "0",
+                "bucket": "thing",
+                "origin": "ingest",
+                "schema": "Person",
+                "first_seen": old,
+                "last_seen": old,
+                "deleted_at": old,
+            }
+        ]
+    )
+    grace_cutoff = now - timedelta(days=7)
+    out = _run(
+        table, shard="0", bucket="thing", origin="ingest", grace_cutoff=grace_cutoff
+    )
+    assert out.num_rows == 0
 
 
-def _make_translog_row(
-    stmt_id: str,
-    first_seen: datetime | None = None,
-    last_seen: datetime | None = None,
-    deleted_at: datetime | None = None,
-) -> dict:
-    """Build a translog metadata row."""
-    ts = first_seen or datetime(2024, 1, 1, tzinfo=timezone.utc)
-    return {
-        "id": stmt_id,
-        "first_seen": ts,
-        "last_seen": last_seen or ts,
-        "deleted_at": deleted_at,
-    }
+def test_merge_keeps_recent_tombstone(now):
+    """Tombstone newer than the grace cutoff is kept."""
+    recent = now - timedelta(days=1)
+    table = _table(
+        [
+            {
+                "id": "s1",
+                "entity_id": "e1",
+                "shard": "0",
+                "bucket": "thing",
+                "origin": "ingest",
+                "schema": "Person",
+                "first_seen": recent,
+                "last_seen": recent,
+                "deleted_at": recent,
+            }
+        ]
+    )
+    grace_cutoff = now - timedelta(days=7)
+    out = _run(
+        table, shard="0", bucket="thing", origin="ingest", grace_cutoff=grace_cutoff
+    )
+    assert out.num_rows == 1
 
 
-def test_translog_aware_sql_filters_deleted(tmp_path):
-    """Deleted rows (deleted_at set in translog) are excluded from queries."""
-    main_uri = str(tmp_path / "main")
-    translog_uri = str(tmp_path / "translog")
-
-    rows = [
-        _make_row("jane", "name", "Jane Doe"),
-        _make_row("john", "name", "John Smith"),
-    ]
-    dt = _write_rows(main_uri, rows)
-
-    # Translog: jane is deleted, john is live
-    translog_rows = [
-        _make_translog_row(
-            "jane-name-Jane Doe", deleted_at=datetime(2025, 1, 1, tzinfo=timezone.utc)
-        ),
-        _make_translog_row("john-name-John Smith"),
-    ]
-    translog_dt = _write_translog(translog_uri, translog_rows)
-
-    compiled = compile_query(Query().sql.statements)
-
-    sql = translog_aware_sql(compiled, dt)
-
-    con = duckdb.connect()
-    con.register(STATEMENTS, dt.to_pyarrow_dataset())
-    con.register(TRANSLOG, translog_dt.to_pyarrow_dataset())
-    result = con.execute(sql).fetchall()
-
-    entity_ids = {r[1] for r in result}  # entity_id is second column
-    assert "jane" not in entity_ids
-    assert "john" in entity_ids
-
-
-def test_translog_aware_sql_uses_translog_timestamps(tmp_path):
-    """Translog first_seen/last_seen overrides main table values."""
-    main_uri = str(tmp_path / "main")
-    translog_uri = str(tmp_path / "translog")
-
-    main_ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
-    rows = [_make_row("jane", "name", "Jane Doe", last_seen=main_ts)]
-    dt = _write_rows(main_uri, rows)
-
-    translog_ts = datetime(2025, 6, 15, tzinfo=timezone.utc)
-    translog_rows = [
-        _make_translog_row(
-            "jane-name-Jane Doe", first_seen=main_ts, last_seen=translog_ts
-        ),
-    ]
-    translog_dt = _write_translog(translog_uri, translog_rows)
-
-    compiled = compile_query(Query().sql.statements)
-
-    sql = translog_aware_sql(compiled, dt)
-
-    con = duckdb.connect()
-    con.register(STATEMENTS, dt.to_pyarrow_dataset())
-    con.register(TRANSLOG, translog_dt.to_pyarrow_dataset())
-    result = con.execute(sql)
-    rows_out = result.fetchall()
-    cols = [desc[0] for desc in result.description]
-
-    assert len(rows_out) == 1
-    row_dict = dict(zip(cols, rows_out[0]))
-    # last_seen should come from translog (tz-aware UTC)
-    result_ts = row_dict["last_seen"]
-    if result_ts.tzinfo is not None:
-        result_ts = result_ts.astimezone(timezone.utc)
-    assert result_ts == translog_ts
+def test_merge_filters_to_partition(now):
+    """Rows outside the target partition are not selected."""
+    table = _table(
+        [
+            {
+                "id": "s1",
+                "entity_id": "e1",
+                "shard": "0",
+                "bucket": "thing",
+                "origin": "ingest",
+                "schema": "Person",
+                "first_seen": now,
+                "last_seen": now,
+                "deleted_at": None,
+            },
+            {
+                "id": "s2",
+                "entity_id": "e2",
+                "shard": "1",
+                "bucket": "thing",
+                "origin": "ingest",
+                "schema": "Person",
+                "first_seen": now,
+                "last_seen": now,
+                "deleted_at": None,
+            },
+        ]
+    )
+    out = _run(table, shard="0", bucket="thing", origin="ingest", grace_cutoff=now)
+    assert out.num_rows == 1
+    assert out.to_pylist()[0]["id"] == "s1"
 
 
-def test_translog_aware_sql_no_deletes(tmp_path):
-    """All rows visible when translog has no deletions."""
-    main_uri = str(tmp_path / "main")
-    translog_uri = str(tmp_path / "translog")
+def test_merge_query_composable_with_where(now):
+    """Consumers can add `.where()` to narrow further (e.g. a single entity)."""
+    table = _table(
+        [
+            {
+                "id": "s1",
+                "entity_id": "alice",
+                "shard": "0",
+                "bucket": "thing",
+                "origin": "ingest",
+                "schema": "Person",
+                "first_seen": now,
+                "last_seen": now,
+                "deleted_at": None,
+            },
+            {
+                "id": "s2",
+                "entity_id": "bob",
+                "shard": "0",
+                "bucket": "thing",
+                "origin": "ingest",
+                "schema": "Person",
+                "first_seen": now,
+                "last_seen": now,
+                "deleted_at": None,
+            },
+        ]
+    )
+    con = make_duckdb()
+    con.register(TABLE.name, table)
+    q = build_merge_query("0", "thing", "ingest", now)
+    q = q.where(q.selected_columns.entity_id == "alice")
+    sql = str(q.compile(compile_kwargs={"literal_binds": True}))
+    out = con.execute(sql).to_arrow_table()
+    assert out.num_rows == 1
+    assert out.to_pylist()[0]["entity_id"] == "alice"
 
-    rows = [
-        _make_row("jane", "name", "Jane Doe"),
-        _make_row("jane", "firstName", "Jane"),
-        _make_row("john", "name", "John Smith"),
-    ]
-    dt = _write_rows(main_uri, rows)
 
-    translog_rows = [
-        _make_translog_row("jane-name-Jane Doe"),
-        _make_translog_row("jane-firstName-Jane"),
-        _make_translog_row("john-name-John Smith"),
-    ]
-    translog_dt = _write_translog(translog_uri, translog_rows)
-
-    compiled = compile_query(Query().sql.statements)
-
-    sql = translog_aware_sql(compiled, dt)
-
-    con = duckdb.connect()
-    con.register(STATEMENTS, dt.to_pyarrow_dataset())
-    con.register(TRANSLOG, translog_dt.to_pyarrow_dataset())
-    result = con.execute(sql).fetchall()
-
-    assert len(result) == 3
-    entity_ids = {r[1] for r in result}
-    assert entity_ids == {"jane", "john"}
+def test_merge_output_sorted(now):
+    """Output rows are sorted by (entity_id, id, last_seen DESC)."""
+    table = _table(
+        [
+            {
+                "id": "z",
+                "entity_id": "e2",
+                "shard": "0",
+                "bucket": "thing",
+                "origin": "ingest",
+                "schema": "Person",
+                "first_seen": now,
+                "last_seen": now,
+                "deleted_at": None,
+            },
+            {
+                "id": "a",
+                "entity_id": "e1",
+                "shard": "0",
+                "bucket": "thing",
+                "origin": "ingest",
+                "schema": "Person",
+                "first_seen": now,
+                "last_seen": now,
+                "deleted_at": None,
+            },
+        ]
+    )
+    out = _run(table, shard="0", bucket="thing", origin="ingest", grace_cutoff=now)
+    rows = out.to_pylist()
+    assert [r["entity_id"] for r in rows] == ["e1", "e2"]
