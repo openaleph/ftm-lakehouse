@@ -116,9 +116,8 @@ class ExportEntitiesOperation(BaseExportOperation[ExportEntitiesJob]):
 
     def handle(self, run: JobRun[ExportEntitiesJob], *args, **kwargs) -> None:
         if self.ensure_flush():
-            output_uri = self.entities._store.to_uri(path.ENTITIES_JSON)
             csv_uri = self._get_fresh_statements_csv()
-            self.entities.export_entities(output_uri, statements_csv_uri=csv_uri)
+            self.entities.export_entities(statements_csv_uri=csv_uri)
             if run.job.make_diff:
                 self.entities.export_diff()
             run.job.done = 1

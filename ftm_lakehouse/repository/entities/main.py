@@ -1,6 +1,5 @@
 """EntityRepository - entity/statement operations using JournalStore + ParquetStore."""
 
-import csv
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from itertools import islice
@@ -8,7 +7,8 @@ from typing import Generator, Iterable, Iterator, cast
 
 import orjson
 import pyarrow as pa
-from anystore.io import smart_open, smart_write_json
+from anystore.io import smart_write_json
+from anystore.io.read import smart_stream_csv
 from anystore.store import get_store
 from anystore.types import SDict, Uri
 from anystore.util import Took, mask_uri
@@ -24,7 +24,7 @@ from ftm_lakehouse.core.api import api_delegate, no_api
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.helpers.statements import unpack_statement
-from ftm_lakehouse.logic.entities.aggregate import EntityPayload, aggregate_unsafe
+from ftm_lakehouse.logic.entities.aggregate import aggregate_unsafe
 from ftm_lakehouse.logic.parquet import QUERY_IN_BATCH_SIZE
 from ftm_lakehouse.model.statement import SHARDED_SCHEMA
 from ftm_lakehouse.repository.base import BaseRepository
@@ -249,13 +249,11 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         not directly from the parquet store.
         """
         if self._store.exists(path.ENTITIES_JSON):
-            uri = self._store.to_uri(path.ENTITIES_JSON)
-            yield from smart_read_proxies(uri)
+            with self._store.open(path.ENTITIES_JSON) as fh:
+                yield from smart_read_proxies(fh)
 
     @no_api
-    def export_entities(
-        self, output_uri: str, statements_csv_uri: str | None = None
-    ) -> None:
+    def export_entities(self, statements_csv_uri: str | None = None) -> None:
         """
         Export entities to a JSON lines file without FtM object construction.
 
@@ -267,29 +265,20 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         instead of re-scanning the parquet store.
 
         Args:
-            output_uri: Destination URI for the entities.ftm.json file
             statements_csv_uri: Optional path to a fresh, sorted statements.csv
         """
         self._store.ensure_parent(path.ENTITIES_JSON)
 
         if statements_csv_uri is not None:
-            rows = self._stream_statements_csv(statements_csv_uri)
+            rows = smart_stream_csv(statements_csv_uri)
         else:
             rows = self._statements._query_statement_data()
 
-        with smart_open(output_uri, mode="wb") as fh:
-            for entity in rows:
-                fh.write(orjson.dumps(entity, option=orjson.OPT_APPEND_NEWLINE))
+        entities = aggregate_unsafe(rows, self.dataset)
+        entities = (e.to_dict() for e in entities)
 
-    def _stream_statements_csv(self, csv_uri: str) -> Iterator[EntityPayload]:
-        """Stream entity dicts from an already-sorted statements CSV.
-
-        The CSV is already sorted by canonical_id and has timestamps
-        baked in, so no DuckDB sort is needed — just a sequential read
-        through aggregate_unsafe().
-        """
-        with smart_open(csv_uri, mode="r") as fh:
-            yield from aggregate_unsafe(csv.DictReader(fh))
+        with self._store.open(path.ENTITIES_JSON, "wb") as fh:
+            smart_write_json(fh, entities)
 
     @api_delegate("_api_delete_entity")
     def delete_entity(self, entity_id: str) -> int:

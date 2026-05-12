@@ -1,5 +1,4 @@
 import csv
-from pathlib import Path
 from typing import Generator
 
 import pytest
@@ -20,7 +19,7 @@ from ftm_lakehouse.operation import (
     export_entities,
     export_statements,
     export_statistics,
-    optimize,
+    merge,
 )
 from tests.conftest import make_test_api
 from tests.shared import JANE, JANE_FIRSTNAME
@@ -43,7 +42,7 @@ def test_entities(dataset):
     entities = dataset.entities
 
     # Initially empty
-    assert len([e for e in entities.query(flush_first=False)]) == 0
+    assert len([e for e in entities.query()]) == 0
 
     jane = make_entity(JANE)
     jane_fragment = make_entity(JANE_FIRSTNAME)
@@ -92,8 +91,8 @@ def test_entities(dataset):
     origins = set(s.origin for s in stmts)
     assert origins == {"update", "default"}
 
-    # Optimize
-    optimize(dataset, vacuum=True)
+    # Merge
+    merge(dataset)
 
     # Statistics
     export_statistics(dataset)
