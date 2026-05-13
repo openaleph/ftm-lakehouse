@@ -1,4 +1,10 @@
-"""ZFS CLI commands: socket agent and manual dataset creation."""
+"""ZFS CLI commands: socket agent and manual dataset creation.
+
+Sub-typer group:
+
+    ftm-lakehouse zfs agent    # start the socket agent (host-side)
+    ftm-lakehouse zfs init <ds>  # create datasets for one dataset
+"""
 
 import os
 import signal
@@ -9,15 +15,18 @@ from typing import Annotated, Optional
 import typer
 from anystore.logging import get_logger
 
-from ftm_lakehouse.cli import cli, console
+from ftm_lakehouse.cli import cli, console, settings
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.core.zfs.agent import handle_connection
 from ftm_lakehouse.core.zfs.helpers import ensure_zfs_dataset
 
 log = get_logger(__name__)
 
+zfs = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=settings.debug)
+cli.add_typer(zfs, name="zfs", help="ZFS dataset management for the lakehouse")
 
-@cli.command("zfs-agent")
+
+@zfs.command("agent")
 def cli_zfs_agent(
     socket_path: Annotated[
         Optional[str],
@@ -58,7 +67,7 @@ def cli_zfs_agent(
     zfs_pool = pool or settings.zfs_pool
     if not zfs_pool:
         console.print(
-            "[red]No pool specified. " "Use --pool or set LAKEHOUSE_ZFS_POOL.[/red]"
+            "[red]No pool specified. Use --pool or set LAKEHOUSE_ZFS_POOL.[/red]"
         )
         raise typer.Exit(code=1)
 
@@ -92,7 +101,7 @@ def cli_zfs_agent(
             os.unlink(sock_path)
 
 
-@cli.command("zfs-init")
+@zfs.command("init")
 def cli_zfs_init(
     dataset: Annotated[str, typer.Argument(help="Dataset name to initialize")],
     pool: Annotated[

@@ -1,34 +1,63 @@
 """Entity read/write commands for the CLI.
 
-Provides ``write-entities`` (bulk ingest from FtM JSON, bypassing the
-journal) and ``stream-entities`` (export to FtM JSON).
+Sub-typer group:
+
+    ftm-lakehouse entities iterate   # parquet -> FtM JSON (live read)
+    ftm-lakehouse entities stream    # entities.ftm.json -> stdout (frozen export)
+    ftm-lakehouse entities import    # FtM JSON -> parquet (bypasses journal)
 """
 
 from datetime import datetime, timezone
 from typing import Annotated, Optional
 
+import typer
 from anystore.io import logged_items
 from ftmq.io import smart_read_proxies, smart_write_proxies
-from typer import Option
 
-from ftm_lakehouse.cli import DatasetContext, cli
+from ftm_lakehouse.cli import DatasetContext, cli, settings
 from ftm_lakehouse.logic.entities.buffer import EntityBuffer
 
 BULK_ORIGIN = "bulk"
 BULK_SIZE = 1_000_000
 
 
-@cli.command("write-entities")
-def cli_write_entities(
-    in_uri: Annotated[str, Option("-i")] = "-",
-    origin: Annotated[str, Option(help="Data origin")] = BULK_ORIGIN,
+entities = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=settings.debug)
+cli.add_typer(entities, name="entities", help="Read and write FtM entities")
+
+
+@entities.command("iterate")
+def cli_entities_iterate(
+    out_uri: Annotated[str, typer.Option("-o")] = "-",
+):
+    """Iterate entities from the parquet store as FtM JSON lines.
+
+    Live read — reflects current state of the parquet table (post-flush,
+    post-merge). For the frozen pre-exported view use ``stream``.
+    """
+    with DatasetContext() as dataset:
+        smart_write_proxies(out_uri, dataset.entities.query())
+
+
+@entities.command("stream")
+def cli_entities_stream(
+    out_uri: Annotated[str, typer.Option("-o")] = "-",
+):
+    """Stream FtM entities from the pre-exported ``entities.ftm.json``."""
+    with DatasetContext() as dataset:
+        smart_write_proxies(out_uri, dataset.entities.stream())
+
+
+@entities.command("import")
+def cli_entities_import(
+    in_uri: Annotated[str, typer.Option("-i")] = "-",
+    origin: Annotated[str, typer.Option(help="Data origin")] = BULK_ORIGIN,
     bulk_size: Annotated[
         int,
-        Option(help="Number of statements buffered before flush to parquet."),
+        typer.Option(help="Number of statements buffered before flush to parquet."),
     ] = BULK_SIZE,
     last_seen: Annotated[
         Optional[datetime],
-        Option(help="Default last_seen timestamp if entity payload has none"),
+        typer.Option(help="Default last_seen timestamp if entity payload has none"),
     ] = None,
 ):
     """Bulk-import FtM entities straight into the parquet store.
@@ -56,12 +85,3 @@ def cli_write_entities(
 
         if buffer:
             repo.write_statements(buffer.flush_buffer(), now=now)
-
-
-@cli.command("stream-entities")
-def cli_stream_entities(
-    out_uri: Annotated[str, Option("-o")] = "-",
-):
-    """Stream FtM entities from ``entities.ftm.json`` to an output sink."""
-    with DatasetContext() as dataset:
-        smart_write_proxies(out_uri, dataset.entities.stream())

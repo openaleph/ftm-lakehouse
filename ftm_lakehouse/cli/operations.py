@@ -1,9 +1,19 @@
 """Dataset operation commands for the CLI.
 
-Provides commands for building, exporting, optimizing, and crawling
-datasets: ``make``, ``export-statements``, ``export-entities``,
-``export-statistics``, ``export-documents``, ``compact``, ``merge``,
-``vacuum``, and ``crawl``.
+``make`` stays at the top level as a frequently-used shortcut:
+
+    ftm-lakehouse make --full
+
+Everything else groups under ``operations``:
+
+    ftm-lakehouse operations export-statements
+    ftm-lakehouse operations export-entities
+    ftm-lakehouse operations export-statistics
+    ftm-lakehouse operations export-documents
+    ftm-lakehouse operations compact
+    ftm-lakehouse operations merge
+    ftm-lakehouse operations vacuum
+    ftm-lakehouse operations crawl <uri>
 """
 
 from typing import Annotated, Optional
@@ -11,9 +21,17 @@ from typing import Annotated, Optional
 import typer
 
 from ftm_lakehouse import operation as op
-from ftm_lakehouse.cli import DatasetContext, cli, console, write_obj
+from ftm_lakehouse.cli import DatasetContext, cli, console, settings, write_obj
 from ftm_lakehouse.model.dataset import DatasetModel
 from ftm_lakehouse.operation.crawl import HandleExistingMode
+
+operations = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=settings.debug)
+cli.add_typer(operations, name="operations", help="Dataset pipeline operations")
+
+
+# ---------------------------------------------------------------------------
+# Top-level shortcut: ``make``
+# ---------------------------------------------------------------------------
 
 
 @cli.command("make")
@@ -50,7 +68,12 @@ def cli_make(
         console.print(dataset.index)
 
 
-@cli.command("export-statements")
+# ---------------------------------------------------------------------------
+# Exports
+# ---------------------------------------------------------------------------
+
+
+@operations.command("export-statements")
 def cli_export_statements():
     """Export the statement store to a sorted ``statements.csv``."""
     with DatasetContext() as dataset:
@@ -58,7 +81,7 @@ def cli_export_statements():
         console.print("Exported statements.csv")
 
 
-@cli.command("export-entities")
+@operations.command("export-entities")
 def cli_export_entities():
     """Export the statement store to ``entities.ftm.json``."""
     with DatasetContext() as dataset:
@@ -66,7 +89,7 @@ def cli_export_entities():
         console.print("Exported entities.ftm.json")
 
 
-@cli.command("export-statistics")
+@operations.command("export-statistics")
 def cli_export_statistics():
     """Export statement store statistics to ``statistics.json``."""
     with DatasetContext() as dataset:
@@ -74,7 +97,7 @@ def cli_export_statistics():
         console.print("Exported statistics.json")
 
 
-@cli.command("export-documents")
+@operations.command("export-documents")
 def cli_export_documents():
     """Export document metadata to ``documents.csv``."""
     with DatasetContext() as dataset:
@@ -82,7 +105,12 @@ def cli_export_documents():
         console.print("Exported documents.csv")
 
 
-@cli.command("compact")
+# ---------------------------------------------------------------------------
+# Async maintenance ops on the parquet statement store
+# ---------------------------------------------------------------------------
+
+
+@operations.command("compact")
 def cli_compact(
     force: Annotated[
         Optional[bool], typer.Option(help="Run regardless of freshness state.")
@@ -90,15 +118,15 @@ def cli_compact(
 ):
     """Bin-pack small parquet files (cheap maintenance).
 
-    Holds ``locks/lakehouse/compact`` for the duration. Does not collapse
-    duplicate rows or drop tombstones — use ``merge`` for that.
+    Does not collapse duplicate rows or drop tombstones — use ``merge`` for
+    that. Held under the dataset write fence.
     """
     with DatasetContext() as dataset:
         res = op.compact(dataset, force=bool(force))
         console.print(res)
 
 
-@cli.command("merge")
+@operations.command("merge")
 def cli_merge(
     force: Annotated[
         Optional[bool], typer.Option(help="Run regardless of freshness state.")
@@ -108,14 +136,14 @@ def cli_merge(
 
     Expensive — overwrites each ``(shard, bucket, origin)`` partition with a
     deduplicated view. Tombstones older than ``LAKEHOUSE_GRACE_PERIOD_DAYS``
-    are dropped. Holds ``locks/lakehouse/merge`` for the duration.
+    are dropped.
     """
     with DatasetContext() as dataset:
         res = op.merge(dataset, force=bool(force))
         console.print(res)
 
 
-@cli.command("vacuum")
+@operations.command("vacuum")
 def cli_vacuum(
     retention_hours: Annotated[
         Optional[int],
@@ -125,10 +153,7 @@ def cli_vacuum(
         Optional[bool], typer.Option(help="Run regardless of freshness state.")
     ] = False,
 ):
-    """Delete obsolete parquet files no longer referenced by the Delta log.
-
-    Holds ``locks/lakehouse/vacuum`` for the duration.
-    """
+    """Delete obsolete parquet files no longer referenced by the Delta log."""
     with DatasetContext() as dataset:
         res = op.vacuum(
             dataset, retention_hours=int(retention_hours or 0), force=bool(force)
@@ -136,7 +161,12 @@ def cli_vacuum(
         console.print(res)
 
 
-@cli.command("crawl")
+# ---------------------------------------------------------------------------
+# Crawl
+# ---------------------------------------------------------------------------
+
+
+@operations.command("crawl")
 def cli_crawl(
     uri: str,
     out_uri: Annotated[

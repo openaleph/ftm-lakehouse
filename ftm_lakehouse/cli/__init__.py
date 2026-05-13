@@ -74,7 +74,9 @@ class DatasetContext(ErrorHandler):
         return STATE["dataset"]
 
 
-SKIP_CATALOG_COMMANDS = {"zfs-agent", "zfs-init"}
+# Sub-typer group names whose commands don't need a catalog set up. The
+# top-level callback dispatches on the group name (``ctx.invoked_subcommand``).
+SKIP_CATALOG_COMMANDS = {"zfs"}
 
 
 @cli.callback(invoke_without_command=True)
@@ -136,11 +138,12 @@ def cli_datasets(
         smart_write_models(out_uri, datasets)
 
 
-# Import submodules so their commands get registered on `cli`.
+# Import submodules so their sub-typers and commands get registered on `cli`.
 from ftm_lakehouse.cli import (  # noqa: E402, F401
     archive,
     entities,
     mappings,
     operations,
+    statements,
     zfs,
 )
