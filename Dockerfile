@@ -1,4 +1,4 @@
-FROM python:3.13-slim as deps
+FROM python:3.13-slim AS deps
 # Multi-stage build:
 #   1. ``deps``  – system + python dependencies from a committed
 #                  ``requirements.txt``. Cached unless the requirements
