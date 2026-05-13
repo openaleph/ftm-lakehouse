@@ -187,6 +187,28 @@ class ParquetStore(LakehouseApiMixin):
         return Lock(self._store, key=path.LOCK)
 
     @no_api
+    def unlock(self) -> bool:
+        """Forcibly release the dataset write fence.
+
+        Operator escape hatch for the case where a writer process died
+        with the lock held (or an attacker held it on purpose). The lock
+        is just a file at ``{dataset_root}/.LOCK``; this method deletes
+        it.
+
+        **Use sparingly** – breaking a lock that's still held by a live
+        writer can corrupt a write in flight. Confirm no process is
+        actively writing before running.
+
+        Returns:
+            ``True`` if a lock was released, ``False`` if no lock was
+            held.
+        """
+        if not self._store.exists(path.LOCK):
+            return False
+        self._store.delete(path.LOCK)
+        return True
+
+    @no_api
     def append(self, batch: pa.Table) -> None:
         """Append a sorted batch of statements.
 

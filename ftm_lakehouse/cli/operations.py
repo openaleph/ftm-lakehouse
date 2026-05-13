@@ -161,6 +161,24 @@ def cli_vacuum(
         console.print(res)
 
 
+@operations.command("unlock")
+def cli_unlock():
+    """Forcibly release the dataset write fence.
+
+    Use when a previous writer (flush / merge / compact / vacuum / append)
+    died with the lock held and subsequent writes hang trying to acquire
+    it. The lock is just a file at ``<dataset>/.LOCK``.
+
+    **Confirm no process is actively writing** before running – breaking
+    a held lock can corrupt an in-flight write. No-op if no lock is held.
+    """
+    with DatasetContext() as dataset:
+        if dataset.entities.unlock():
+            console.print("[green]Lock released.[/green]")
+        else:
+            console.print("[yellow]No lock held.[/yellow]")
+
+
 # ---------------------------------------------------------------------------
 # Crawl
 # ---------------------------------------------------------------------------

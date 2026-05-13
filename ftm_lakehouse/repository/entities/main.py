@@ -241,6 +241,19 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         """Collapse duplicates and reap expired tombstones from parquet store"""
         self._statements.merge(grace_period_days)
 
+    @no_api
+    def unlock(self) -> bool:
+        """Forcibly release the dataset write fence.
+
+        Delegates to :meth:`ParquetStore.unlock`. Use as an operator
+        escape hatch when a writer died with the lock held; do not
+        invoke while a legitimate writer is still running.
+
+        Returns:
+            ``True`` if a lock was released, ``False`` otherwise.
+        """
+        return self._statements.unlock()
+
     @api_delegate("_api_query")
     def query(
         self,
