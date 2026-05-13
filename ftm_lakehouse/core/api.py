@@ -18,8 +18,9 @@ USER_AGENT = f"ftm-lakehouse/{__version__}"
 
 _default_headers: dict[str, str] = {"User-Agent": USER_AGENT}
 _settings = Settings()
-if _settings.api_key:
+if _settings.api_key and _settings.api_secret:
     _default_headers["X-Api-Key"] = _settings.api_key
+    _default_headers["X-Api-Secret"] = _settings.api_secret
 
 # Set default headers for all ApiFileSystem (anystore+http[s]) instances
 _fsspec_client_kwargs = {"headers": _default_headers}

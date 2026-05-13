@@ -20,7 +20,7 @@ from sqlalchemy.dialects.postgresql import insert as psql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection, Engine, Transaction, create_engine
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.pool import NullPool, StaticPool
 
 from ftm_lakehouse.storage.journal.base import (
     BaseJournalStore,
@@ -171,7 +171,17 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
                 poolclass=StaticPool,
             )
         else:
-            self.engine = create_engine(self.uri, hide_parameters=True)
+            # NullPool: connections opened on demand, closed after use.
+            # The ``get_journal`` factory is unbounded ``@cache`` (one
+            # engine per dataset name) so a default QueuePool of 5+10
+            # idle connections per engine multiplies fast under many
+            # distinct datasets across multiple workers. NullPool keeps
+            # the concurrent connection count bounded by request load
+            # rather than by cached engine count – important to stay
+            # under postgres ``max_connections``.
+            self.engine = create_engine(
+                self.uri, hide_parameters=True, poolclass=NullPool
+            )
 
         self.metadata = MetaData()
         self.table = make_journal_table(self.metadata, dataset)

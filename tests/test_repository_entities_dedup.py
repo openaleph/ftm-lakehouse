@@ -12,7 +12,7 @@ from followthemoney import EntityProxy
 from ftm_lakehouse.api.main import archive_router, entities_router, journal_router
 from ftm_lakehouse.logic.parquet import make_duckdb
 from ftm_lakehouse.repository.entities import EntityRepository
-from tests.conftest import make_test_api
+from tests.conftest import make_docker_repo, make_test_api
 from tests.shared import JANE, JOHN
 
 DATASET = "test"
@@ -28,18 +28,20 @@ def _row_count(path: str) -> int:
     return con.execute(f"SELECT COUNT(*) FROM delta_scan('{path}')").fetchone()[0]
 
 
-@pytest.fixture(params=["local", "api"])
+@pytest.fixture(params=["local", "api", "docker"])
 def repo(
     request, tmp_path
 ) -> Generator[tuple[EntityRepository, Path | None], None, None]:
     if request.param == "local":
         yield _make_local_repo(tmp_path), tmp_path
-    else:
+    elif request.param == "api":
         routers = [entities_router, journal_router, archive_router]
         with make_test_api(tmp_path, routers) as base_url:
             dataset_url = f"{base_url}/{DATASET}"
             r = EntityRepository(DATASET, uri=dataset_url)
             yield r, tmp_path / DATASET
+    else:
+        yield make_docker_repo()
 
 
 def test_flush_appends_duplicates(repo):

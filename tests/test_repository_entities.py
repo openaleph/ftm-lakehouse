@@ -9,22 +9,27 @@ from ftmq.util import make_entity
 from ftm_lakehouse.api.main import archive_router, entities_router, journal_router
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.repository import EntityRepository
-from tests.conftest import make_test_api
+from tests.conftest import make_docker_repo, make_test_api
 from tests.shared import BOB, JANE, JANE_FIRSTNAME, JOHN
 
 
-@pytest.fixture(params=["local", "api"])
+@pytest.fixture(params=["local", "api", "docker"])
 def repo(
     request, tmp_path
 ) -> Generator[tuple[EntityRepository, Path | None], None, None]:
     if request.param == "local":
         yield EntityRepository("test", tmp_path), tmp_path
-    else:
+    elif request.param == "api":
         routers = [entities_router, journal_router, archive_router]
         with make_test_api(tmp_path, routers) as base_url:
             dataset_url = f"{base_url}/test"
             repo = EntityRepository("test", uri=dataset_url)
             yield repo, tmp_path / "test"
+    else:
+        # docker: real nginx + lakehouse UDS; data lives at
+        # ``./data/{dataset}`` on the host via the bind mount, so tests
+        # that assert on the on-disk layout still work.
+        yield make_docker_repo()
 
 
 def test_repository_entities(repo):

@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     uri: str = "data"
     journal_uri: str = "sqlite:///:memory:"
     api_key: str | None = None
+    api_secret: str | None = None
     on_zfs: bool = False
     zfs_pool: str | None = None
     zfs_socket: str | None = None

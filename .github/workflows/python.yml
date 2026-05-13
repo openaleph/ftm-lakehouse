@@ -20,6 +20,12 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
 
+    # The docker-compose stack the test target boots provides its own
+    # postgres for the lakehouse journal. A second postgres service is
+    # exposed here on the host so the PSQL variant of test_storage_journal
+    # (driven by ``PYTEST_POSTGRESQL_URI``) has a database to talk to –
+    # it lives on a different network from the compose stack, so the two
+    # don't collide.
     services:
       postgres:
         image: postgres:16
@@ -66,7 +72,14 @@ jobs:
       run: poetry run pre-commit run
     - name: Lint with flake8
       run: make lint
-    - name: Test with pytest
+    - name: Generate requirements.txt for the docker build
+      run: poetry export --without-hashes --extras api -f requirements.txt -o requirements.txt
+    - name: Test with pytest (includes docker compose stack via make test)
+      # ``make test`` runs ``make start`` (``docker compose up --build -d
+      # --wait``) and then ``LAKEHOUSE_TEST_MODE=docker pytest``, so the
+      # ``[docker]`` variants of the parametrized fixtures hit the real
+      # nginx + lakehouse UDS + putfs UDS stack alongside the local /
+      # api variants.
       run: make test
       env:
         PYTEST_POSTGRESQL_URI: postgresql://lakehouse:lakehouse@localhost:5432/lakehouse

@@ -86,7 +86,13 @@ AWS_SECRET_ACCESS_KEY = "ftm-lakehouse"
 AWS_ACCESS_KEY_ID = "ftm-lakehouse"
 FSSPEC_S3_ENDPOINT_URL = "http://localhost:8888"
 FTM_FRAGMENTS_URI = "sqlite:///:memory:"
-LAKEHOUSE_URI = "tests/fixtures/lake"
-LAKEHOUSE_JOURNAL_URI = "sqlite:///:memory:"
+# ``skip_if_set = true`` makes these defaults the CLI can override
+# (``make test``'s docker run exports ``LAKEHOUSE_URI=http://...`` so
+# the docker fixture variants pick ``ApiJournalStore`` via the global
+# ``Settings.api_mode``).
+LAKEHOUSE_URI = {value = "tests/fixtures/lake", skip_if_set = true}
+LAKEHOUSE_JOURNAL_URI = {value = "sqlite:///:memory:", skip_if_set = true}
 LAKEHOUSE_PUBLIC_URL_PREFIX = "https://data.example.org/{{ dataset }}"
 LAKEHOUSE_ENTITY_SHARDS = 8
+LAKEHOUSE_API_KEY = "test-key"
+LAKEHOUSE_API_SECRET = "test-secret"
