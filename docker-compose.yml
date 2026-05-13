@@ -5,34 +5,83 @@ services:
       POSTGRES_USER: lakehouse
       POSTGRES_PASSWORD: lakehouse
       POSTGRES_DATABASE: lakehouse
-    ports:
-      - 5432:5432
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lakehouse"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
 
-  api:
+  # Lakehouse Granian API on a Unix socket. Handles all structured
+  # `/{dataset}/_api/...` traffic – journal, entities, operations, etc.
+  # Blob storage is delegated to PutFS (below); reads are served from
+  # disk by nginx so the lakehouse never sits in the blob-read hot path.
+  lakehouse:
     build: .
-    command: >-
-      granian --interface asgi --host 0.0.0.0 --port 5000
-      --workers 4
-      --runtime-mode mt
-      --loop uvloop
-      --backpressure 16
-      --http 1
-      --no-ws
-      --log --log-level warning
-      ftm_lakehouse.api:app
+    command: ["granian", "ftm_lakehouse.api:app"]
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       LAKEHOUSE_URI: /data
       LAKEHOUSE_JOURNAL_URI: postgresql://lakehouse:lakehouse@postgres/lakehouse
-      LAKEHOUSE_API_AUTH_ENABLED: 0
+      GRANIAN_INTERFACE: asgi
+      GRANIAN_UDS: /run/lakehouse/lakehouse.sock
+      GRANIAN_UDS_PERMISSIONS: "0666"
+      GRANIAN_WORKERS: "4"
+      GRANIAN_RUNTIME_MODE: mt
+      GRANIAN_LOOP: uvloop
+      GRANIAN_BACKPRESSURE: "16"
+      GRANIAN_HTTP: "1"
+      GRANIAN_NO_WS: "true"
     volumes:
       - ./data:/data
+      - lakehouse_run:/run/lakehouse
+    healthcheck:
+      # Granian has bound its UDS once the socket file exists.
+      test: ["CMD-SHELL", "test -S /run/lakehouse/lakehouse.sock"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
 
+  # PutFS handles raw blob storage (PUT / DELETE / listing for archive
+  # blobs). Reads (GET / HEAD) are served from disk by nginx for max
+  # throughput. See https://putf.sh/deployment/docker-compose/
+  putfs:
+    image: ghcr.io/dataresearchcenter/putfs
+    environment:
+      PUTFS_ROOT: /data
+    volumes:
+      - ./data:/data
+      - putfs_run:/run/putfs
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /run/putfs/putfs.sock"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  # Single nginx fronting both services with a shared api-key gate.
+  # Routing:
+  #   /_/dl/...          → presigned download (HMAC inside the location)
+  #   /{ds}/_api/...     → lakehouse (UDS)
+  #   trailing slash     → PutFS (listing)
+  #   GET / HEAD other   → static from /data
+  #   PUT / DELETE other → PutFS (UDS)
   nginx:
     image: nginx:alpine
+    depends_on:
+      lakehouse:
+        condition: service_healthy
+      putfs:
+        condition: service_healthy
     ports:
-      - 8000:80
+      - 127.0.0.1:8000:80
     volumes:
       - ./data:/data:ro
+      - ./contrib:/contrib:ro
+      - putfs_run:/run/putfs:ro
+      - lakehouse_run:/run/lakehouse:ro
     configs:
       - source: nginx_conf
         target: /etc/nginx/nginx.conf
@@ -41,23 +90,78 @@ configs:
   nginx_conf:
     content: |
       worker_processes auto;
-      events {}
+      worker_rlimit_nofile 65535;
+      events {
+        worker_connections 4096;
+      }
       http {
         include mime.types;
-        upstream api {
-          server api:5000;
+        default_type application/octet-stream;
+        sendfile on;
+        tcp_nopush on;
+        tcp_nodelay on;
+        reset_timedout_connection on;
+        log_not_found off;
+        # access_log off;
+
+        upstream putfs {
+          server unix:/run/putfs/putfs.sock;
+          keepalive 64;
+          keepalive_requests 10000;
+          keepalive_time 1h;
         }
+
+        upstream lakehouse {
+          server unix:/run/lakehouse/lakehouse.sock;
+          keepalive 64;
+          keepalive_requests 10000;
+          keepalive_time 1h;
+        }
+
+        # API-key + per-key scope maps. Edit contrib/keys/auth.nginx.conf
+        # to add real keys; the shipped example is a placeholder.
+        include /contrib/keys/*.nginx.conf;
+
+        # Upstream HTTP/1.1 keepalive, streamed bodies, generous timeouts.
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        client_max_body_size 0;
+        proxy_request_buffering off;
+        proxy_buffering off;
+        client_body_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_read_timeout 300s;
+
         server {
           listen 80;
+
+          # Single 403 for every failure mode (missing key, wrong scope,
+          # forged token, etc.) – attackers cannot tell the cases apart.
+          if ($$deny) { return 403; }
+
+          # Lakehouse API surface – everything under /{dataset}/_api/.
+          # Matched before the trailing-slash and root locations.
+          location ~ ^/[^/]+/_api/ {
+            proxy_pass http://lakehouse;
+          }
+
+          # Listing requests (trailing slash) → PutFS API.
+          location ~ /$ {
+            proxy_pass http://putfs$$request_uri;
+          }
+
+          # GET / HEAD: serve blobs from disk. PUT / DELETE / etc.: PutFS.
           location / {
+            limit_except GET HEAD {
+              proxy_pass http://putfs$$request_uri;
+            }
             root /data;
-            try_files $uri @api;
-          }
-          location @api {
-            proxy_pass http://api;
-          }
-          location ~* /_api(/|$$) {
-            proxy_pass http://api;
+            try_files $$uri =404;
           }
         }
       }
+
+volumes:
+  postgres_data:
+  putfs_run:
+  lakehouse_run:
