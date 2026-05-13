@@ -99,5 +99,7 @@ API-only settings use the `LAKEHOUSE_API_` prefix:
 | `LAKEHOUSE_API_TITLE` | OpenAPI title | `FollowTheMoney Data Lakehouse Api` |
 | `LAKEHOUSE_API_ALLOWED_ORIGINS` | CORS allow-list | `["http://localhost:3000"]` |
 | `LAKEHOUSE_API_STATIC_HEADERS` | Extra headers added to every response | `{}` |
+| `LAKEHOUSE_API_MAX_ENTITY_IDS` | Maximum length of an `entity_ids` list in a query body (caps the SQL `IN (…)` clause that DuckDB has to build). | `10_000` |
+| `LAKEHOUSE_API_MAX_FILTER_KEYS` | Maximum number of top-level keys (ftmq filter kwargs plus `entity_ids` / `flush_first`) accepted in a single query body. | `20` |
 
 Storage URI, journal URI, shard count, etc. use the regular `LAKEHOUSE_` settings – see [Configuration](configuration.md).
