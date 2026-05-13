@@ -29,6 +29,7 @@ class Settings(BaseSettings):
 
     entity_shards: int = 0
     grace_period_days: int = 30
+    max_buffer_rows: int = 1_000_000
 
     public_url_prefix: str | None = None
 

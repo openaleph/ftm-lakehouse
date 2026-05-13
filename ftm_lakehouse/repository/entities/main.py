@@ -38,6 +38,13 @@ from ftm_lakehouse.util import make_envelope
 
 settings = Settings()
 
+WRITE_SHARD_BATCH = 100_000
+"""Maximum rows accumulated per shard before an interim parquet write.
+
+Prevents one giant shard from buffering arbitrarily many statements in memory
+before :meth:`EntityRepository.write_statements` emits.
+"""
+
 
 class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
     """
@@ -181,6 +188,11 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         BY last_seen DESC)`` tiebreak against the live row in
         :meth:`ParquetStore.merge`.
 
+        Memory is bounded by :data:`WRITE_SHARD_BATCH`: within a single
+        shard, the in-memory accumulator is emitted to parquet every
+        ``WRITE_SHARD_BATCH`` rows so a pathologically large shard cannot
+        OOM the writer.
+
         Args:
             statements: Shard-sorted stream of :class:`StatementRow`.
             now: Default timestamp for missing ``first_seen`` /
@@ -207,6 +219,8 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
 
         for row in statements:
             if current_shard is not None and current_shard != row.shard:
+                _emit()
+            elif len(buffer) >= WRITE_SHARD_BATCH:
                 _emit()
             current_shard = row.shard
 

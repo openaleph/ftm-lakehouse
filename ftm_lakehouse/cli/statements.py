@@ -21,8 +21,9 @@ from anystore.io import (
 from followthemoney import Statement
 
 from ftm_lakehouse.cli import DatasetContext, cli, settings
-from ftm_lakehouse.cli.entities import BULK_ORIGIN, BULK_SIZE
+from ftm_lakehouse.cli.entities import BULK_ORIGIN
 from ftm_lakehouse.core.conventions import path
+from ftm_lakehouse.exceptions import BufferFullError
 from ftm_lakehouse.logic.entities.buffer import EntityBuffer
 
 statements = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=settings.debug)
@@ -63,7 +64,7 @@ def cli_statements_import(
     bulk_size: Annotated[
         int,
         typer.Option(help="Number of statements buffered before flush to parquet."),
-    ] = BULK_SIZE,
+    ] = settings.max_buffer_rows,
     last_seen: Annotated[
         Optional[datetime],
         typer.Option(help="Default last_seen timestamp if row has none"),
@@ -88,7 +89,14 @@ def cli_statements_import(
             logger=dataset._log,
         ):
             stmt = Statement.from_dict(row)
-            buffer.add_statement(stmt)
+            try:
+                buffer.add_statement(stmt)
+            except BufferFullError:
+                # Buffer hit its cap before we got to the bulk_size check
+                # (e.g. bulk_size > LAKEHOUSE_MAX_BUFFER_ROWS). Drain and
+                # retry so the statement isn't dropped.
+                repo.write_statements(buffer.flush_buffer(), now=now)
+                buffer.add_statement(stmt)
             if len(buffer) >= bulk_size:
                 repo.write_statements(buffer.flush_buffer(), now=now)
 

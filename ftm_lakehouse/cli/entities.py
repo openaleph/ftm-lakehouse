@@ -15,10 +15,10 @@ from anystore.io import logged_items
 from ftmq.io import smart_read_proxies, smart_write_proxies
 
 from ftm_lakehouse.cli import DatasetContext, cli, settings
+from ftm_lakehouse.exceptions import BufferFullError
 from ftm_lakehouse.logic.entities.buffer import EntityBuffer
 
 BULK_ORIGIN = "bulk"
-BULK_SIZE = 1_000_000
 
 
 entities = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=settings.debug)
@@ -54,7 +54,7 @@ def cli_entities_import(
     bulk_size: Annotated[
         int,
         typer.Option(help="Number of statements buffered before flush to parquet."),
-    ] = BULK_SIZE,
+    ] = settings.max_buffer_rows,
     last_seen: Annotated[
         Optional[datetime],
         typer.Option(help="Default last_seen timestamp if entity payload has none"),
@@ -79,7 +79,14 @@ def cli_entities_import(
             item_name="Entity",
             logger=dataset._log,
         ):
-            buffer.add_entity(proxy)
+            try:
+                buffer.add_entity(proxy)
+            except BufferFullError:
+                # Buffer hit its cap before we got to the bulk_size check
+                # (e.g. bulk_size > LAKEHOUSE_MAX_BUFFER_ROWS). Drain and
+                # retry the failed add so the entity isn't dropped.
+                repo.write_statements(buffer.flush_buffer(), now=now)
+                buffer.add_entity(proxy)
             if len(buffer) >= bulk_size:
                 repo.write_statements(buffer.flush_buffer(), now=now)
 
