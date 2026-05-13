@@ -10,3 +10,12 @@ class BufferFullError(RuntimeError):
     :attr:`Settings.max_buffer_rows`). Catch this, call ``flush_buffer()``
     + ``write_statements`` (or whatever drains the buffer), then retry.
     """
+
+
+class MalformedStatementError(ValueError):
+    """Raised by ``unpack_statement`` when a packed statement string has
+    too few fields to decode.
+
+    The journal flush loop catches this, logs the offending row, and
+    skips it so one bad row can't crash a whole flush.
+    """

@@ -23,6 +23,7 @@ from sqlalchemy import select
 from ftm_lakehouse.core.api import api_delegate, no_api
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.core.settings import Settings
+from ftm_lakehouse.exceptions import MalformedStatementError
 from ftm_lakehouse.helpers.statements import unpack_statement
 from ftm_lakehouse.logic.entities.aggregate import aggregate_unsafe
 from ftm_lakehouse.logic.parquet import QUERY_IN_BATCH_SIZE
@@ -397,7 +398,16 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         )
         with journal.engine.connect() as conn:
             for row in conn.execute(q):
-                stmt = unpack_statement(row.data)
+                try:
+                    stmt = unpack_statement(row.data)
+                except MalformedStatementError as exc:
+                    self.log.warning(
+                        "Skipping malformed journal row in entity collect",
+                        row_id=row.id,
+                        shard=row.shard,
+                        error=str(exc),
+                    )
+                    continue
                 if stmt.entity_id != entity_id:
                     continue
                 if stmt.id:

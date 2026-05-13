@@ -5,8 +5,19 @@ from datetime import datetime, timezone
 from followthemoney import Statement
 from ftmq.store.base import DEFAULT_ORIGIN
 
+from ftm_lakehouse.exceptions import MalformedStatementError
+
 UNIT_SEP = "\x1f"
 """Field separator used to pack a Statement into the journal ``data`` column."""
+
+UNPACK_MIN_FIELDS = 13
+"""Minimum field count :func:`unpack_statement` requires.
+
+:func:`pack_statement` currently emits 14 fields (trailing ``prop_type``);
+``unpack_statement`` only reads the first 13, so extra trailing fields
+are tolerated for forward compatibility – but anything shorter is a
+malformed row and rejected.
+"""
 
 
 def _to_iso(value: datetime | str | None) -> str:
@@ -49,10 +60,20 @@ def pack_statement(stmt: Statement) -> str:
 
 
 def unpack_statement(data: str) -> Statement:
-    """
-    Unpack a unit-separator delimited string back into a Statement.
+    """Unpack a unit-separator delimited string back into a Statement.
+
+    Raises:
+        MalformedStatementError: If ``data`` has fewer than
+            :data:`UNPACK_MIN_FIELDS` separator-delimited fields. The
+            journal flush loop catches this and logs+skips the row so
+            one bad row can't abort an entire flush.
     """
     parts = data.split(UNIT_SEP)
+    if len(parts) < UNPACK_MIN_FIELDS:
+        raise MalformedStatementError(
+            f"Packed statement has {len(parts)} fields; "
+            f"expected at least {UNPACK_MIN_FIELDS}"
+        )
     return Statement(
         id=parts[0] or None,
         entity_id=parts[1],  # required

@@ -6,6 +6,7 @@ from typing import Generator, Generic, NamedTuple, Self, TypeAlias, TypeVar
 from anystore.logging import get_logger
 
 from ftm_lakehouse.core.settings import Settings
+from ftm_lakehouse.exceptions import MalformedStatementError
 from ftm_lakehouse.helpers.statements import pack_statement, unpack_statement
 from ftm_lakehouse.logic.entities.buffer import EntityBuffer
 from ftm_lakehouse.model.statement import StatementRow, StatementRows
@@ -147,14 +148,26 @@ class BaseJournalStore(Generic[W]):
 
         Thin wrapper over :meth:`flush` for consumers (notably
         :meth:`EntityRepository.flush`) that want ``Statement`` objects
-        instead of the packed wire format.
+        instead of the packed wire format. Malformed rows (failed
+        :func:`unpack_statement`) are logged and skipped so one corrupt
+        row can't abort the whole flush.
 
         Yields:
             :class:`StatementRow` ``(shard, stmt, deleted_at)`` produced by
             unpacking each :class:`JournalRow`.
         """
         for r in self.flush():
-            yield StatementRow(r.shard, unpack_statement(r.data), r.deleted_at)
+            try:
+                stmt = unpack_statement(r.data)
+            except MalformedStatementError as exc:
+                log.warning(
+                    "Skipping malformed journal row",
+                    row_id=r.id,
+                    shard=r.shard,
+                    error=str(exc),
+                )
+                continue
+            yield StatementRow(r.shard, stmt, r.deleted_at)
 
     def count(self) -> int:
         """Count rows for this dataset."""

@@ -8,11 +8,18 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from followthemoney.statement import Statement
+from sqlalchemy import insert
 
 from ftm_lakehouse.api.routes.journal import router
 from ftm_lakehouse.core.api import get_api
 from ftm_lakehouse.core.conventions.path import entity_shard
-from ftm_lakehouse.helpers.statements import unpack_statement
+from ftm_lakehouse.exceptions import MalformedStatementError
+from ftm_lakehouse.helpers.statements import (
+    UNIT_SEP,
+    UNPACK_MIN_FIELDS,
+    pack_statement,
+    unpack_statement,
+)
 from ftm_lakehouse.storage.journal import ApiJournalStore, JournalRows, SqlJournalStore
 from ftm_lakehouse.storage.journal import get_journal as _get_journal_factory
 from ftm_lakehouse.storage.journal.base import BaseJournalStore
@@ -380,4 +387,73 @@ def test_storage_journal_flush_concurrent_write(concurrent_journal):
     # The union of both flushes covers every inserted row exactly once.
     assert flushed_entity_ids | remaining_ids == initial_ids | concurrent_ids
     assert flushed_entity_ids.isdisjoint(remaining_ids)
+    assert journal.count() == 0
+
+
+# ---------------------------------------------------------------------------
+# Malformed-statement robustness
+#
+# ``unpack_statement`` raises :class:`MalformedStatementError` on a too-short
+# packed payload, and ``BaseJournalStore.flush_statements`` catches+logs+skips
+# so one corrupt row can't abort a whole flush.
+# ---------------------------------------------------------------------------
+
+
+def test_unpack_rejects_short_payload() -> None:
+    truncated = UNIT_SEP.join(["a"] * (UNPACK_MIN_FIELDS - 1))
+    with pytest.raises(MalformedStatementError):
+        unpack_statement(truncated)
+
+
+def test_unpack_accepts_canonical_pack_output() -> None:
+    stmt = make_statement("jane", "name", "Jane Doe")
+    out = unpack_statement(pack_statement(stmt))
+    assert out.entity_id == "jane"
+    assert out.value == "Jane Doe"
+
+
+def test_unpack_tolerates_extra_trailing_fields() -> None:
+    """``pack_statement`` emits 14 fields (trailing ``prop_type``);
+    ``unpack_statement`` only reads the first 13. Extra trailing fields
+    must not trip the validator."""
+    canonical = pack_statement(make_statement("x", "name", "v"))
+    parts = canonical.split(UNIT_SEP)
+    assert len(parts) >= UNPACK_MIN_FIELDS
+    unpack_statement(canonical)
+
+
+def test_storage_journal_flush_skips_malformed_rows(request, journal):
+    """A truncated ``data`` payload in the journal doesn't crash flush.
+
+    The malformed row is logged and skipped; good rows on either side are
+    yielded normally. Direct row-injection requires SQL access so this is
+    SQL-only – the API journal goes through the wire format and can't
+    produce a malformed row from the client side."""
+    param = request.node.callspec.params["journal"]
+    if param == "api":
+        pytest.skip("Malformed-row injection requires direct SQL access")
+
+    with journal.writer() as w:
+        w.add_statement(make_statement("good_1", "name", "Good One"))
+        w.add_statement(make_statement("good_2", "name", "Good Two"))
+
+    # Inject a bad row directly into the underlying SQL table.
+    with journal.engine.begin() as conn:
+        conn.execute(
+            insert(journal.table).values(
+                id="bad-1",
+                shard="0",
+                data=UNIT_SEP.join("abc"),  # < UNPACK_MIN_FIELDS after split
+                deleted_at=None,
+            )
+        )
+
+    assert journal.count() == 3
+
+    flushed = list(journal.flush_statements())
+
+    # Two good rows survive; the malformed row was skipped.
+    assert len(flushed) == 2
+    assert {row.stmt.entity_id for row in flushed} == {"good_1", "good_2"}
+    # Flush remains destructive: nothing left in the journal.
     assert journal.count() == 0
