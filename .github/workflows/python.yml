@@ -72,8 +72,6 @@ jobs:
       run: poetry run pre-commit run
     - name: Lint with flake8
       run: make lint
-    - name: Generate requirements.txt for the docker build
-      run: poetry export --without-hashes --extras api -f requirements.txt -o requirements.txt
     - name: Test with pytest (includes docker compose stack via make test)
       # ``make test`` runs ``make start`` (``docker compose up --build -d
       # --wait``) and then ``LAKEHOUSE_TEST_MODE=docker pytest``, so the
