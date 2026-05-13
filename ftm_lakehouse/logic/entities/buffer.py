@@ -92,4 +92,4 @@ class EntityBuffer:
         return self._buffer_size
 
     def __bool__(self) -> bool:
-        return bool(len(self))
+        return self._buffer_size > 0
