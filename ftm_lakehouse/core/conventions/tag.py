@@ -19,8 +19,14 @@ JOURNAL_FLUSHED = "journal/last_flushed"
 JOURNAL_FLUSHING = "journal/flushing"
 """Lock key for journal flushing operation"""
 
-STORE_OPTIMIZED = "statements/store_optimized"
-"""Statement store was optimized and compacted"""
+STATEMENTS_COMPACTED = "statements/last_compacted"
+"""Statement store files were bin-packed (cheap maintenance)"""
+
+STATEMENTS_MERGED = "statements/last_merged"
+"""Statement store partitions were merged (dedup, tombstone reap)"""
+
+STATEMENTS_VACUUMED = "statements/last_vacuumed"
+"""Obsolete parquet files were removed from disk"""
 
 ARCHIVE_UPDATED = "archive/last_updated"
 """Archive last updated (file added or removed)"""
@@ -36,9 +42,6 @@ STATISTICS = "exports/statistics"
 
 OP_CRAWL = "operations/crawl/last_run"
 """Last crawl (import files) execution"""
-
-OP_RECREATE = "operations/recreate/last_run"
-"""Last recreate (repair dataset) execution"""
 
 OP_DOWNLOAD_ARCHIVE = "operations/download_archive/last_run"
 """Last download archive execution"""
@@ -58,7 +61,6 @@ def mapping_tag(content_hash: str) -> str:
 
 DEFAULT_ORIGIN = "default"
 """Default origin identifier"""
-
 
 CRAWL_ORIGIN = "crawl"
 """Default origin identifier for crawled files."""

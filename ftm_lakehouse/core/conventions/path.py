@@ -32,7 +32,7 @@ Dataset Layout
             queue/{tenant}/                 # task queues
 
             archive/                        # content-addressed file storage
-                ab/cd/ef/{checksum}/        # SHA1 split into segments
+                ab/cd/ef/{checksum}/        # SHA256 split into segments
                     blob                    # file blob (stored once)
                     {file_id}.json          # metadata (one per source path)
                     {origin}.txt            # extracted text (one per engine)
@@ -44,10 +44,11 @@ Dataset Layout
                         YYYY/MM/...
 
             entities/
-                statements/                 # statement store (partitioned)
-                    origin={origin}/
-                        *.parquet
-                translog/                   # translog metadata table (mutable)
+                statements/                 # statement store (shard-partitioned)
+                    shard={shard}/
+                        bucket={bucket}/
+                            origin={origin}/
+                                *.parquet
 
             entities.ftm.json               # aggregated entities export
 
@@ -73,8 +74,9 @@ Dataset Layout
 from datetime import datetime, timezone
 
 from anystore.util import ensure_uuid, join_relpaths
+from banal import hash_data
 
-from ftm_lakehouse.util import make_checksum_key
+from ftm_lakehouse.util import make_checksum_key, safe_name, validate_origin
 
 TENANT = "lakehouse"
 """Default tenant name"""
@@ -151,7 +153,7 @@ def archive_prefix(checksum: str) -> str:
     Layout: archive/5a/6a/cf/5a6acf229ba576d9a40b09292595658bbb74ef56/
 
     Args:
-        checksum: SHA1 checksum of file
+        checksum: SHA256 checksum of file
     """
     return f"{ARCHIVE}/{make_checksum_key(checksum)}"
 
@@ -163,7 +165,7 @@ def archive_blob(checksum: str) -> str:
     Layout: archive/5a/6a/cf/5a6acf229ba576d9a40b09292595658bbb74ef56/blob
 
     Args:
-        checksum: SHA1 checksum of file
+        checksum: SHA256 checksum of file
     """
     return f"{archive_prefix(checksum)}/{ARCHIVE_BLOB}"
 
@@ -178,9 +180,13 @@ def archive_meta(checksum: str, file_id: str) -> str:
     Layout: archive/5a/6a/cf/.../file-abc123.json
 
     Args:
-        checksum: SHA1 checksum of file
+        checksum: SHA256 checksum of file
         file_id: The File.id (hash of source path + checksum)
+
+    Raises:
+        ValueError: If ``checksum`` or ``file_id`` is malformed.
     """
+    safe_name(file_id, "file_id")
     return f"{archive_prefix(checksum)}/{file_id}.json"
 
 
@@ -194,9 +200,13 @@ def archive_txt(checksum: str, origin: str) -> str:
     Layout: archive/5a/6a/cf/.../{origin}.txt
 
     Args:
-        checksum: SHA1 checksum of file
+        checksum: SHA256 checksum of file
         origin: The extraction origin/engine name
+
+    Raises:
+        ValueError: If ``checksum`` or ``origin`` is malformed.
     """
+    validate_origin(origin)
     return f"{archive_prefix(checksum)}/{origin}.txt"
 
 
@@ -209,7 +219,7 @@ MAPPING = "mapping.yml"
 
 def mapping(content_hash: str) -> str:
     """
-    Get the mapping.yml path for the given file SHA1.
+    Get the mapping.yml path for the given file SHA256.
 
     Layout: mappings/{content_hash}/mapping.yml
     """
@@ -224,10 +234,29 @@ ENTITIES_JSON = "entities.ftm.json"
 
 
 STATEMENTS = f"{ENTITIES}/statements"
-"""Base path for storing statement data"""
+"""Base path for storing statement data (partitioned by shard, bucket, origin)"""
 
-TRANSLOG = f"{ENTITIES}/translog"
-"""Base path for translog metadata table"""
+
+def shard_hex_width(shards: int) -> int:
+    """Hex width required to represent `shards-1` (zero-padded).
+
+    Examples: 1→1, 8→1, 16→1, 32→2, 256→2, 4096→3.
+    """
+    if shards <= 1:
+        return 1
+    return max(1, ((shards - 1).bit_length() + 3) // 4)
+
+
+def entity_shard(entity_id: str, shards: int) -> str:
+    """Hex shard key for an entity id under a uniform shard count.
+
+    Uses the first 8 hex chars of the entity_id hash, taken mod ``shards``,
+    then zero-padded to ``shard_hex_width(shards)``.
+    """
+    if shards <= 1:
+        return "0"
+    bucket = int(hash_data(entity_id)[:8], 16) % shards
+    return f"{bucket:0{shard_hex_width(shards)}x}"
 
 
 def statement_origin(origin: str) -> str:
@@ -236,7 +265,11 @@ def statement_origin(origin: str) -> str:
 
     Args:
         origin: The origin, or phase, or stage
+
+    Raises:
+        ValueError: If ``origin`` is malformed.
     """
+    validate_origin(origin)
     return f"{STATEMENTS}/origin={origin}"
 
 

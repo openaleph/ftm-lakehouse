@@ -20,11 +20,12 @@ from sqlalchemy.dialects.postgresql import insert as psql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection, Engine, Transaction, create_engine
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.pool import NullPool, StaticPool
 
 from ftm_lakehouse.storage.journal.base import (
     BaseJournalStore,
     BaseJournalWriter,
+    JournalRow,
     JournalRows,
 )
 
@@ -34,18 +35,20 @@ DEADLOCK_BASE_DELAY = 1  # seconds
 
 
 def make_journal_table(metadata: MetaData, dataset: str) -> Table:
-    """Create the journal table schema."""
+    """Create the journal table schema.
+
+    Rows are flushed in ``shard`` order so a per-shard batch can be built
+    cheaply; the final sort by (entity_id, id, last_seen DESC) happens in
+    PyArrow before each parquet append.
+    """
     return Table(
         f"journal_{dataset}",
         metadata,
         Column("id", String(255), primary_key=True),
-        Column("bucket", String(50), nullable=False),
-        Column("origin", String(255), nullable=False),
-        Column("canonical_id", String(255), nullable=False),
+        Column("shard", String(8), nullable=False),
         Column("data", Text, nullable=False),
         Column("deleted_at", DateTime(timezone=True), nullable=True),
-        # Covering index for flush ORDER BY — includes id for DELETE lookups
-        Index(f"ix_{dataset}_sort", "bucket", "origin", "canonical_id", "id"),
+        Index(f"ix_{dataset}_shard", "shard"),
     )
 
 
@@ -58,16 +61,21 @@ def _is_deadlock(exc: OperationalError) -> bool:
 class SqlJournalWriter(BaseJournalWriter["SqlJournalStore"]):
     """SQL-backed bulk writer with batched upserts."""
 
-    def __init__(self, store: "SqlJournalStore", origin: str | None = None) -> None:
-        super().__init__(store, origin)
+    def __init__(
+        self,
+        store: "SqlJournalStore",
+        shards: int,
+        origin: str | None = None,
+    ) -> None:
+        super().__init__(store, shards=shards, origin=origin)
         self.conn: Connection = store.engine.connect()
         self.tx: Transaction | None = None
 
     def _upsert_batch(self) -> None:
-        if not self.batch:
+        if not self._buffer_size:
             return
 
-        rows = list(self.batch.values())
+        rows = list(self.flush_rows())
         dialect = self.store.engine.dialect.name
         table = self.store.table
 
@@ -78,16 +86,14 @@ class SqlJournalWriter(BaseJournalWriter["SqlJournalStore"]):
             sqlite_stmt = sqlite_istmt.on_conflict_do_update(
                 index_elements=["id"],
                 set_={
-                    "bucket": sqlite_istmt.excluded.bucket,
-                    "origin": sqlite_istmt.excluded.origin,
-                    "canonical_id": sqlite_istmt.excluded.canonical_id,
+                    "shard": sqlite_istmt.excluded.shard,
                     "data": sqlite_istmt.excluded.data,
                     "deleted_at": sqlite_istmt.excluded.deleted_at,
                 },
             )
             self.conn.execute(sqlite_stmt)
         elif dialect in ("postgresql", "postgres"):
-            # Autocommit per batch with deadlock retry — keeps transactions
+            # Autocommit per batch with deadlock retry – keeps transactions
             # short to minimize lock contention from concurrent writers.
             attempt = 0
             while True:
@@ -97,9 +103,7 @@ class SqlJournalWriter(BaseJournalWriter["SqlJournalStore"]):
                     psql_stmt = psql_istmt.on_conflict_do_update(
                         index_elements=["id"],
                         set_={
-                            "bucket": psql_istmt.excluded.bucket,
-                            "origin": psql_istmt.excluded.origin,
-                            "canonical_id": psql_istmt.excluded.canonical_id,
+                            "shard": psql_istmt.excluded.shard,
                             "data": psql_istmt.excluded.data,
                             "deleted_at": psql_istmt.excluded.deleted_at,
                         },
@@ -167,70 +171,104 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
                 poolclass=StaticPool,
             )
         else:
-            self.engine = create_engine(self.uri, hide_parameters=True)
+            # NullPool: connections opened on demand, closed after use.
+            # The ``get_journal`` factory is unbounded ``@cache`` (one
+            # engine per dataset name) so a default QueuePool of 5+10
+            # idle connections per engine multiplies fast under many
+            # distinct datasets across multiple workers. NullPool keeps
+            # the concurrent connection count bounded by request load
+            # rather than by cached engine count – important to stay
+            # under postgres ``max_connections``.
+            self.engine = create_engine(
+                self.uri, hide_parameters=True, poolclass=NullPool
+            )
 
         self.metadata = MetaData()
         self.table = make_journal_table(self.metadata, dataset)
         self.metadata.create_all(self.engine, tables=[self.table], checkfirst=True)
 
     def iterate(self, *args, **kwargs) -> JournalRows:
-        """Iterate all rows ordered for batch processing."""
-        q = select(self.table).order_by(
-            self.table.c.bucket,
-            self.table.c.origin,
-            self.table.c.canonical_id,
-        )
+        """Iterate all rows ordered by shard for batch processing.
+
+        If the consumer abandons the generator mid-stream
+        (e.g. ``break``, HTTP client disconnect → ``GeneratorExit``),
+        the ``try / finally`` closes the streaming cursor promptly and
+        the surrounding ``with`` releases the connection. No transaction
+        to roll back here – ``iterate`` is read-only.
+        """
+        q = select(self.table).order_by(self.table.c.shard)
 
         with self.engine.connect() as conn:
             cursor = conn.execution_options(stream_results=True).execute(q)
-            while rows := cursor.fetchmany(10_000):
-                for row in rows:
-                    yield (
-                        row.id,
-                        row.bucket,
-                        row.origin,
-                        row.canonical_id,
-                        row.data,
-                        row.deleted_at,
-                    )
-
-    def flush(self) -> JournalRows:
-        """Iterate and delete yielded rows.
-
-        Only deletes rows that were actually yielded, so rows written by
-        concurrent writers during the flush are preserved.
-        """
-        q = select(self.table).order_by(
-            self.table.c.bucket,
-            self.table.c.origin,
-            self.table.c.canonical_id,
-        )
-
-        # Use separate connections for read (streaming) and write (delete).
-        # PostgreSQL server-side cursors (stream_results) apply to the
-        # entire DBAPI connection, so DELETE on the same connection fails.
-        with self.engine.connect() as read_conn, self.engine.connect() as write_conn:
-            write_tx = write_conn.begin()
             try:
-                cursor = read_conn.execution_options(stream_results=True).execute(q)
-
                 while rows := cursor.fetchmany(10_000):
-                    flushed: list[str] = []
                     for row in rows:
-                        flushed.append(row.id)
-                        yield (
+                        yield JournalRow(
                             row.id,
-                            row.bucket,
-                            row.origin,
-                            row.canonical_id,
+                            row.shard,
                             row.data,
                             row.deleted_at,
                         )
-                    write_conn.execute(
-                        delete(self.table).where(self.table.c.id.in_(flushed))
-                    )
-
+            finally:
                 cursor.close()
+
+    def flush(self) -> JournalRows:
+        """Iterate and delete yielded rows, one shard at a time.
+
+        Reads the distinct shard values currently in the table (cheap – bounded
+        by ``Settings.entity_shards``), then for each shard streams rows with
+        ``WHERE shard = ?`` (index seek via ``ix_{ds}_shard``) and DELETEs the
+        yielded ids in batches.
+
+        Concurrency: rows are deleted only after they've been yielded, so the
+        consumer's write to parquet is durable before the journal row is
+        removed. Concurrent writers may insert into shards we haven't visited
+        yet; those rows can be picked up by the current flush call. This is
+        safe (yield → write → delete is preserved per row) but means the total
+        flushed count is non-deterministic under load.
+
+        Abandonment: if the consumer drops the generator mid-stream
+        (HTTP client disconnect → ``GeneratorExit``, exception in body,
+        ``break``), the ``try / except BaseException: rollback; raise``
+        wrapper rolls the write transaction back so no DELETE persists
+        for rows the consumer never received.
+        """
+        # Use separate connections for read (streaming) and write (delete).
+        # PostgreSQL server-side cursors (stream_results) apply to the entire
+        # DBAPI connection, so DELETE on the same connection would fail.
+        with self.engine.connect() as read_conn, self.engine.connect() as write_conn:
+            write_tx = write_conn.begin()
+            try:
+                shards = sorted(
+                    [
+                        r.shard
+                        for r in read_conn.execute(
+                            select(self.table.c.shard).distinct()
+                        )
+                    ]
+                )
+
+                for shard in shards:
+                    cursor = read_conn.execution_options(stream_results=True).execute(
+                        select(self.table).where(self.table.c.shard == shard)
+                    )
+                    try:
+                        while rows := cursor.fetchmany(10_000):
+                            flushed: list[str] = []
+                            for row in rows:
+                                flushed.append(row.id)
+                                yield JournalRow(
+                                    row.id,
+                                    row.shard,
+                                    row.data,
+                                    row.deleted_at,
+                                )
+                            write_conn.execute(
+                                delete(self.table).where(self.table.c.id.in_(flushed))
+                            )
+                    finally:
+                        cursor.close()
+
                 write_tx.commit()
             except BaseException:
                 write_tx.rollback()

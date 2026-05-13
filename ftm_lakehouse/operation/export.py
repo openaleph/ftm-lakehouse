@@ -95,9 +95,8 @@ class ExportStatementsOperation(BaseExportOperation[ExportStatementsJob]):
 
     def handle(self, run: JobRun, *args, **kwargs) -> None:
         if self.ensure_flush():
-            output_uri = self.entities._store.to_uri(path.EXPORTS_STATEMENTS)
             self.entities._store.ensure_parent(path.EXPORTS_STATEMENTS)
-            self.entities._statements.export_csv(output_uri)
+            self.entities._statements.export_csv(path.EXPORTS_STATEMENTS)
             run.job.done = 1
 
 
@@ -106,10 +105,19 @@ class ExportEntitiesOperation(BaseExportOperation[ExportEntitiesJob]):
     flushed first. Skips if the last export is newer then last statements
     update."""
 
+    def _get_fresh_statements_csv(self) -> str | None:
+        """Return statements.csv URI if it's at least as fresh as the store."""
+        store = self.entities._store
+        if not store.exists(path.EXPORTS_STATEMENTS):
+            return None
+        if self.tags.is_latest(tag.EXPORTS_STATEMENTS, [tag.STATEMENTS_UPDATED]):
+            return store.to_uri(path.EXPORTS_STATEMENTS)
+        return None
+
     def handle(self, run: JobRun[ExportEntitiesJob], *args, **kwargs) -> None:
         if self.ensure_flush():
-            output_uri = self.entities._store.to_uri(path.ENTITIES_JSON)
-            self.entities.export_entities(output_uri)
+            csv_uri = self._get_fresh_statements_csv()
+            self.entities.export_entities(statements_csv_uri=csv_uri)
             if run.job.make_diff:
                 self.entities.export_diff()
             run.job.done = 1

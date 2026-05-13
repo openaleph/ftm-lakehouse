@@ -2,12 +2,11 @@ from anystore.api.routes import router as archive_router
 from anystore.exceptions import DoesNotExist
 from anystore.logging import get_logger
 from anystore.store import get_store
-from fastapi import Depends, FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from followthemoney.dataset.util import dataset_name_check
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
-from ftm_lakehouse.api.auth import ensure_auth
 from ftm_lakehouse.api.routes.entities import router as entities_router
 from ftm_lakehouse.api.routes.journal import router as journal_router
 from ftm_lakehouse.api.routes.operations import router as operations_router
@@ -52,23 +51,28 @@ class StaticHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
-async def _not_found_handler(_request: Request, exc: Exception) -> JSONResponse:
+async def _not_found_handler(_: Request, exc: Exception) -> JSONResponse:
     return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+
+async def _bad_request_handler(_: Request, exc: Exception) -> JSONResponse:
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 
 def get_app(lake_uri: str | None = None) -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url="/")
     app.state.store = get_store(lake_uri or settings.uri)
     app.state.lake = get_lakehouse(lake_uri or settings.uri)
-    app.include_router(entities_router, dependencies=[Depends(ensure_auth)])
-    app.include_router(journal_router, dependencies=[Depends(ensure_auth)])
-    app.include_router(operations_router, dependencies=[Depends(ensure_auth)])
-    app.include_router(archive_router, dependencies=[Depends(ensure_auth)])
+    app.include_router(entities_router)
+    app.include_router(journal_router)
+    app.include_router(operations_router)
+    app.include_router(archive_router)
     app.add_middleware(StaticHeadersMiddleware)
     if settings.on_zfs and settings.zfs_pool:
         app.add_middleware(ZfsEnsureMiddleware)
     app.add_exception_handler(DoesNotExist, _not_found_handler)
     app.add_exception_handler(FileNotFoundError, _not_found_handler)
+    app.add_exception_handler(ValueError, _bad_request_handler)
     return app
 
 

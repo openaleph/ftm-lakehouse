@@ -5,7 +5,7 @@ import asyncio
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from ftm_lakehouse.api.helpers import Dataset
+from ftm_lakehouse.api.dependencies import Dataset
 from ftm_lakehouse.model import DatasetJobModel
 from ftm_lakehouse.operation.base import DatasetJobOperation
 from ftm_lakehouse.operation.crawl import CrawlJob, CrawlOperation
@@ -25,24 +25,31 @@ from ftm_lakehouse.operation.export import (
     ExportStatisticsJob,
     ExportStatisticsOperation,
 )
+from ftm_lakehouse.operation.maintenance import (
+    CompactJob,
+    CompactOperation,
+    MergeJob,
+    MergeOperation,
+    VacuumJob,
+    VacuumOperation,
+)
 from ftm_lakehouse.operation.make import MakeJob, MakeOperation
 from ftm_lakehouse.operation.mapping import MappingJob, MappingOperation
-from ftm_lakehouse.operation.optimize import OptimizeJob, OptimizeOperation
-from ftm_lakehouse.operation.recreate import RecreateJob, RecreateOperation
 
 router = APIRouter()
 
 
 OPERATIONS: dict[str, tuple[type[DatasetJobModel], type[DatasetJobOperation]]] = {
     "CrawlJob": (CrawlJob, CrawlOperation),
-    "OptimizeJob": (OptimizeJob, OptimizeOperation),
+    "CompactJob": (CompactJob, CompactOperation),
+    "MergeJob": (MergeJob, MergeOperation),
+    "VacuumJob": (VacuumJob, VacuumOperation),
     "ExportStatementsJob": (ExportStatementsJob, ExportStatementsOperation),
     "ExportEntitiesJob": (ExportEntitiesJob, ExportEntitiesOperation),
     "ExportStatisticsJob": (ExportStatisticsJob, ExportStatisticsOperation),
     "ExportDocumentsJob": (ExportDocumentsJob, ExportDocumentsOperation),
     "ExportIndexJob": (ExportIndexJob, ExportIndexOperation),
     "MappingJob": (MappingJob, MappingOperation),
-    "RecreateJob": (RecreateJob, RecreateOperation),
     "DownloadArchiveJob": (DownloadArchiveJob, DownloadArchiveOperation),
     "MakeJob": (MakeJob, MakeOperation),
 }
@@ -55,7 +62,7 @@ async def run_operation(
     """Run a job operation on the given dataset.
 
     The request body must be a serialized DatasetJobModel with a `name` field
-    identifying the job type (e.g. "OptimizeJob", "CrawlJob").
+    identifying the job type (e.g. "CompactJob", "CrawlJob").
     """
     body = await request.json()
     name = body.pop("name", None)

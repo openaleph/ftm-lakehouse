@@ -36,21 +36,32 @@ from ftm_lakehouse.operation import (
 )
 from ftm_lakehouse.operation.crawl import crawl
 from ftm_lakehouse.operation.mapping import MappingJob, MappingOperation
-from tests.conftest import make_test_api
+from tests.conftest import (
+    LAKEHOUSE_TEST_URL,
+    docker_data_path,
+    make_docker_dataset_name,
+    make_test_api,
+    skip_unless_docker_mode,
+)
 
 DATASET = "test"
 
 
-@pytest.fixture(params=["local", "api"])
-def dataset(request, tmp_path) -> Generator[tuple[Dataset, Path], None, None]:
+@pytest.fixture(params=["local", "api", "docker"])
+def dataset(request, tmp_path) -> Generator[tuple[Dataset, Path | None], None, None]:
     if request.param == "local":
         lake = get_lakehouse(tmp_path)
         yield lake.get_dataset(DATASET), tmp_path / DATASET
-    else:
+    elif request.param == "api":
         routers = [entities_router, journal_router, operations_router, archive_router]
         with make_test_api(tmp_path, routers) as base_url:
             lake = get_lakehouse(base_url)
             yield lake.get_dataset(DATASET), tmp_path / DATASET
+    else:
+        skip_unless_docker_mode()
+        name = make_docker_dataset_name()
+        lake = get_lakehouse(LAKEHOUSE_TEST_URL)
+        yield lake.get_dataset(name), docker_data_path(name)
 
 
 def count_versions(dataset: Dataset, filename: str) -> int:
@@ -103,7 +114,7 @@ def test_e2e_workflows_initial_crawl_and_make(dataset, fixtures_path):
     assert count_versions(dataset, "exports/statistics.json") >= 1
 
 
-def test_e2e_workflows_make_skips_when_up_to_date(dataset, fixtures_path):
+def test_e2e_workflows_make_skips_when_up_to_date(dataset, fixtures_path, request):
     """Test that make() skips processing when nothing has changed.
 
     Note: The freshness checks use START timestamps intentionally.
@@ -112,6 +123,11 @@ def test_e2e_workflows_make_skips_when_up_to_date(dataset, fixtures_path):
     2. Second run: sees T1 < T2, runs again, no new dependency updates
     3. Third run: properly skips because T2 (from run 2) > T2 (dependencies unchanged)
     """
+    if "docker" in request.node.name:
+        pytest.skip(
+            "freshness ordering across nginx + UDS round-trips is too loose "
+            "for the 100ms timing window this test uses"
+        )
     dataset, _ = dataset
 
     # Initial crawl and make

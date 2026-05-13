@@ -1,6 +1,6 @@
 [project]
 name = "ftm-lakehouse"
-version = "0.2.0"
+version = "0.3.0"
 description = "Data standard, storage and retrieval for structured and unstructured FollowTheMoney data"
 authors = [
     { name = "Data and Research Center", email = "hi@dataresearchcenter.org" },
@@ -21,19 +21,19 @@ classifiers = [
 ]
 requires-python = ">=3.11,<3.14"
 dependencies = [
-    "ftmq[lake] (>=4.5.4,<5.0.0)",
+    "ftmq[lake] (>=4.8.1,<5.0.0)",
     "jinja2 (>=3.1.5,<4.0.0)",
-    "followthemoney (>=4.5.3,<5.0.0)",
-    "anystore (>=1.1.0,<2.0.0)",
+    "followthemoney (>=4.7.0,<5.0.0)",
+    "anystore (>=1.1.9,<2.0.0)",
     "httpx (>=0.28.1,<0.29.0)",
 ]
 
 [project.optional-dependencies]
 api = [
-    "fastapi (>=0.128.0,<0.129.0)",
-    "granian (>=2.7.0,<3.0.0)",
-    "uvloop (>=0.21.0)",
-    "pyjwt (>=2.11.0,<3.0.0)",
+    "fastapi (>=0.135.2,<0.136.0)",
+    "granian (>=2.7.2,<3.0.0)",
+    "uvloop (>=0.22.1,<0.23.0)",
+    "pyjwt (>=2.12.1,<3.0.0)",
 ]
 
 [project.scripts]
@@ -51,7 +51,7 @@ pytest-cov = ">=4.1,<8.0"
 pytest-env = "^1.1.1"
 black = ">=23.11,<27.0"
 isort = "^8.0.0"
-mypy = "^1.19.1"
+mypy = "^2.1.0"
 pre-commit = "^4.5.1"
 flake8 = ">=6.1,<8.0"
 ipdb = "^0.13.13"
@@ -60,16 +60,13 @@ moto = { extras = ["server"], version = "^5.1.4" }
 pytest-asyncio = ">=0.23.8,<1.4.0"
 rangehttpserver = "^1.4.0"
 httpx = ">=0.27.2,<0.29.0"
-mkdocs-material = "^9.7.2"
-mkdocs-click = "^0.9.0"
-mkdocs-autorefs = "^1.2.0"
 mkdocstrings-python = "^2.0.1"
-mkdocs-typer2 = "^0.2.0"
 redis = "^7.2.0"
 sqlalchemy = "^2.0.46"
-uvicorn = "^0.41.0"
+uvicorn = "^0.46.0"
 granian = {extras = ["reload"], version = "^2.7.1"}
 griffe = "<3"
+zensical = "^0.0.41"
 
 [build-system]
 requires = ["poetry-core"]
@@ -80,12 +77,22 @@ filterwarnings = [
     "ignore:unclosed database:ResourceWarning",
 ]
 
+[tool.poetry.requires-plugins]
+poetry-plugin-export = ">=1.8"
+
 [tool.pytest_env]
 DEBUG = 1
 AWS_SECRET_ACCESS_KEY = "ftm-lakehouse"
 AWS_ACCESS_KEY_ID = "ftm-lakehouse"
 FSSPEC_S3_ENDPOINT_URL = "http://localhost:8888"
 FTM_FRAGMENTS_URI = "sqlite:///:memory:"
-LAKEHOUSE_URI = "tests/fixtures/lake"
-LAKEHOUSE_JOURNAL_URI = "sqlite:///:memory:"
+# ``skip_if_set = true`` makes these defaults the CLI can override
+# (``make test``'s docker run exports ``LAKEHOUSE_URI=http://...`` so
+# the docker fixture variants pick ``ApiJournalStore`` via the global
+# ``Settings.api_mode``).
+LAKEHOUSE_URI = {value = "tests/fixtures/lake", skip_if_set = true}
+LAKEHOUSE_JOURNAL_URI = {value = "sqlite:///:memory:", skip_if_set = true}
 LAKEHOUSE_PUBLIC_URL_PREFIX = "https://data.example.org/{{ dataset }}"
+LAKEHOUSE_ENTITY_SHARDS = 8
+LAKEHOUSE_API_KEY = "test-key"
+LAKEHOUSE_API_SECRET = "test-secret"

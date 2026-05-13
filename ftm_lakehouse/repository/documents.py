@@ -3,7 +3,7 @@ clients, including diffs"""
 
 from datetime import datetime
 from itertools import chain, islice
-from typing import Generator
+from typing import Generator, Iterator
 
 from anystore.io import smart_stream_csv_models, smart_write_csv, smart_write_models
 from anystore.logic.constants import CHUNK_SIZE_LARGE
@@ -40,10 +40,10 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
             print(document.uri)  # use uri to download
     """
 
-    def __init__(self, dataset: str, uri: Uri) -> None:
+    def __init__(self, dataset: str, uri: Uri, shards: int | None = None) -> None:
         super().__init__(dataset, uri)
-        self._statements = ParquetStore(uri, dataset)
-        self._storage = get_store(uri, serialization_mode="raw")
+        self._statements = ParquetStore(uri, dataset, shards)
+        self._storage = get_store(self._store_uri, serialization_mode="raw")
 
     @property
     def csv_uri(self) -> Uri:
@@ -62,7 +62,8 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
 
         # First pass: collect caption and parent for each folder
         folders: dict[str, tuple[str, str | None]] = {}
-        for d in self._statements.query_raw(q):
+        for d in self._statements._query_data(q):
+            d = d.to_dict()
             props = d.get("properties", {})
             file_names = props.get("fileName", [])
             parents = props.get("parent", [])
@@ -94,7 +95,8 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
             .order_by("contentHash")
             .sql.statements
         )
-        for d in self._statements.query_raw(q):
+        for d in self._statements._query_data(q):
+            d = d.to_dict()
             if d.get("schema") == "Folder":
                 continue
             document = Document.from_entity_dict(d)
@@ -125,7 +127,7 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
 
     _diff_base_path = path.DIFFS_DOCUMENTS
 
-    def _get_changed_ids_from_translog(self, since: datetime) -> set[str]:
+    def _get_changed_ids(self, since: datetime) -> Iterator[str]:
         """Get Document entity IDs with contentHash changes since the given timestamp."""
         schemata = [
             s.name
@@ -133,10 +135,10 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
             if s.is_a("Document") and s.name != "Folder"
         ]
         return self._statements.get_changed_entity_ids(
-            since, schema_in=schemata, prop="contentHash"
+            since, schemata=schemata, prop="contentHash"
         )
 
-    def _write_diff(self, entity_ids: set[str], ts: datetime, **kwargs) -> str:
+    def _write_diff(self, entity_ids: Iterator[str], ts: datetime, **kwargs) -> str:
         """Write documents as CSV with op column."""
         key = path.documents_diff(ts)
         with self._storage.open(key, "w") as o:
@@ -147,15 +149,17 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
         return self._storage.to_uri(key)
 
     def _get_delta_documents(
-        self, entity_ids: set[str], public_url_prefix: str | None = None
+        self, entity_ids: Iterator[str], public_url_prefix: str | None = None
     ) -> Generator[dict, None, None]:
+        original_ids: set[str] = set()
         seen_ids: set[str] = set()
         it = iter(entity_ids)
-        while batch := list(islice(it, QUERY_IN_BATCH_SIZE)):
+        while batch := set(islice(it, QUERY_IN_BATCH_SIZE)):
+            original_ids.update(batch)
             for doc in self.collect(public_url_prefix, entity_id__in=batch):
                 seen_ids.add(doc.id)
                 yield {"op": "ADD", **doc.model_dump(by_alias=True, mode="json")}
-        for entity_id in entity_ids - seen_ids:
+        for entity_id in original_ids - seen_ids:
             yield {"op": "DEL", "id": entity_id}
 
     def _write_initial_diff(self, ts: datetime, **kwargs) -> None:

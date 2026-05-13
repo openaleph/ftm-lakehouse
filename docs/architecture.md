@@ -62,7 +62,7 @@ flowchart TD
 
 ## Layer 1: Model
 
-Pure data structures with no dependencies. Pydantic models for serialization.
+Pure data structures with no dependencies. Pydantic models and lightweight typed primitives.
 
 ```
 model/
@@ -71,13 +71,17 @@ model/
   job.py         # JobModel, DatasetJobModel - job execution tracking
   crud.py        # Crud, CrudAction, CrudResource - queue action payloads
   dataset.py     # CatalogModel, DatasetModel - catalog/dataset metadata
+  statement.py   # SHARDED_SCHEMA (pyarrow) + TABLE (SQLAlchemy) +
+                 # StatementRow (NamedTuple) – schema for the parquet
+                 # statement store and shared currency between buffer
+                 # and writer.
 ```
 
 **Principles:**
 
 - No behavior beyond validation
 - No storage awareness
-- No external dependencies (except pydantic, anystore.model)
+- No external dependencies (except pydantic, pyarrow, sqlalchemy, anystore.model)
 
 See [Model Reference](reference/model.md) for API details.
 
@@ -87,39 +91,47 @@ Single-purpose storage interfaces. Each store does ONE thing.
 
 ```
 storage/
-  parquet.py     # ParquetStore, TranslogStore - Delta Lake statement + metadata
-  journal.py     # JournalStore - SQL statement buffer (write-ahead log)
-  tags.py        # TagStore - key-value freshness tracking
-  queue.py       # QueueStore - CRUD action queue
-  versions.py    # VersionStore - timestamped snapshots
+  parquet.py         # ParquetStore - Delta Lake statement store
+                     #   .append (sorted per-shard write)
+                     #   .merge (per-partition dedup + tombstone reap)
+                     #   .compact (file bin-pack)
+                     #   .vacuum (delete obsolete files)
+  journal/
+    base.py          # BaseJournalStore + JournalRow
+                     # .flush()             – yields raw JournalRow
+                     # .flush_statements()  – yields StatementRow (unpacked)
+    sql.py           # SqlJournalStore (sqlite / psql)
+    api.py           # ApiJournalStore (HTTP forwarding)
+  tags.py            # TagStore – key-value freshness tracking
+  queue.py           # QueueStore – CRUD action queue
+  versions.py        # VersionStore – timestamped snapshots
 ```
 
-Blob, file metadata, and text storage are handled directly by repositories
-using `anystore.Store` instances via `get_store()`, eliminating a layer of
-indirection.
+Blob, file metadata, and text storage are handled directly by repositories using `anystore.Store` instances via `get_store()`, eliminating a layer of indirection.
 
-### Translog pattern
+### Sharded append-only pattern
 
-The main parquet table stores immutable FtM statements using the upstream `ARROW_SCHEMA` (no `deleted_at` column). A lightweight **translog Delta table** tracks mutable per-statement metadata:
+The parquet statement store is partitioned by `(shard, bucket, origin)`:
 
-| Column | Type | Purpose |
-|--------|------|---------|
-| `id` | string | Statement ID (primary key) |
-| `first_seen` | timestamp[us, tz=UTC] | When the statement was first written |
-| `last_seen` | timestamp[us, tz=UTC] | When the statement was last seen (updated on re-add) |
-| `deleted_at` | timestamp[us, tz=UTC] | Soft-delete marker (NULL = live) |
+- `shard` – `hash(entity_id) % LAKEHOUSE_ENTITY_SHARDS`, hex-padded
+- `bucket` – coarse FtM schema group (thing / interval / document / page / pages / mention)
+- `origin` – caller-supplied source tag
 
-All queries join main + translog, filtering `deleted_at IS NULL` and using translog timestamps. This separates immutable data (statements) from mutable metadata (timestamps, deletes) and avoids writing tombstone rows into the main table.
+Each row carries `first_seen`, `last_seen`, and `deleted_at` directly in the parquet schema (no separate translog). The default query view filters `deleted_at IS NULL` per row.
 
-During flush, the journal is split three ways:
+Writes are **append-only**: `append` sorts a per-shard batch and writes one parquet file per `(shard, bucket, origin)` partition. Duplicates and tombstones land as additional rows.
 
-- **New statements** → append to main table + insert into translog
-- **Duplicate statements** → update translog `last_seen` only (main table untouched)
-- **Tombstones** → update translog `deleted_at` only (main table untouched)
+Three async maintenance ops collapse the redundancy, each acquiring the dataset-wide `.LOCK` so they don't race with each other or with appends:
+
+| Op | Cost | What it does |
+|----|------|--------------|
+| `compact()` | cheap | Delta `OPTIMIZE compact` per partition – bin-packs small files |
+| `merge()` | expensive | Per-partition rewrite: keep latest row per id (`ROW_NUMBER`), fold `first_seen` to min, drop tombstones past grace |
+| `vacuum()` | cheap | Delta `VACUUM` – delete files no longer referenced in the Delta log |
 
 **Principles:**
 
-- Each store is independent - no cross-store awareness
+- Each store is independent – no cross-store awareness
 - Operates on a single storage URI
 - Returns/accepts model objects
 - No business logic
@@ -157,11 +169,15 @@ Multi-step workflows that coordinate across repositories. This is where "action 
 
 ```
 operation/
-  base.py        # DatasetJobOperation - base class with freshness checks
-  export.py      # ExportStatementsOperation, ExportEntitiesOperation, etc.
-  crawl.py       # CrawlOperation - source → files → entities
-  mapping.py     # MappingOperation - config → entities → journal
-  optimize.py    # OptimizeOperation - compact Delta Lake parquet files
+  base.py          # DatasetJobOperation - base class with freshness checks
+  export.py        # ExportStatementsOperation, ExportEntitiesOperation, etc.
+  crawl.py         # CrawlOperation - source → files → entities
+  mapping.py       # MappingOperation - config → entities → journal
+  maintenance.py   # CompactOperation, MergeOperation, VacuumOperation
+                   # (three independent ops on the parquet statement store)
+  make.py          # MakeOperation - flush + all exports + index
+  recreate.py      # RecreateOperation - rebuild from exports
+  download.py      # DownloadArchiveOperation
 ```
 
 **Principles:**
@@ -244,9 +260,20 @@ ftm_lakehouse/
 ├── lake.py                  # get_lakehouse(), get_dataset(), ensure_dataset()
 ├── catalog.py               # Catalog class
 ├── dataset.py               # Dataset class
-├── cli.py                   # CLI entry point (typer-based)
 ├── util.py                  # General utilities
 ├── exceptions.py
+│
+├── cli/                     # Typer-based CLI (sub-typer groups)
+│   ├── __init__.py          # Main app + ls/datasets + DatasetContext
+│   ├── archive.py           # `archive` group
+│   ├── entities.py          # `entities` group (iterate/stream/import)
+│   ├── statements.py        # `statements` group (iterate/stream/import)
+│   ├── mappings.py          # `mappings` group
+│   ├── operations.py        # `operations` group + top-level `make`
+│   └── zfs.py               # `zfs` group (agent/init)
+│
+├── adapters/                # ftmq-compatible adapters on top of EntityRepository
+│   └── fragments.py         # Drop-in for ftmq.store.fragments
 │
 ├── model/
 │   ├── __init__.py          # Exports all models
@@ -258,8 +285,11 @@ ftm_lakehouse/
 │
 ├── storage/
 │   ├── __init__.py          # Exports all stores
-│   ├── parquet.py           # ParquetStore, TranslogStore
-│   ├── journal.py           # JournalStore, JournalWriter
+│   ├── parquet.py           # ParquetStore (append / merge / compact / vacuum)
+│   ├── journal/
+│   │   ├── base.py          # BaseJournalStore + JournalRow + flush_statements
+│   │   ├── sql.py           # SqlJournalStore
+│   │   └── api.py           # ApiJournalStore (HTTP forwarding)
 │   ├── tags.py              # TagStore
 │   ├── queue.py             # QueueStore
 │   └── versions.py          # VersionStore
@@ -279,7 +309,10 @@ ftm_lakehouse/
 │   ├── export.py            # Export operations
 │   ├── crawl.py             # CrawlOperation
 │   ├── mapping.py           # MappingOperation
-│   └── optimize.py          # OptimizeOperation
+│   ├── maintenance.py       # CompactOperation / MergeOperation / VacuumOperation
+│   ├── make.py              # MakeOperation
+│   ├── recreate.py          # RecreateOperation
+│   └── download.py          # DownloadArchiveOperation
 │
 ├── helpers/
 │   ├── file.py              # File utilities

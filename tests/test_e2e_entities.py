@@ -1,5 +1,4 @@
 import csv
-from pathlib import Path
 from typing import Generator
 
 import pytest
@@ -20,22 +19,33 @@ from ftm_lakehouse.operation import (
     export_entities,
     export_statements,
     export_statistics,
-    optimize,
+    merge,
 )
-from tests.conftest import make_test_api
+from tests.conftest import (
+    LAKEHOUSE_TEST_URL,
+    make_docker_dataset_name,
+    make_test_api,
+    skip_unless_docker_mode,
+)
 from tests.shared import JANE, JANE_FIRSTNAME
 
 
-@pytest.fixture(params=["local", "api"])
+@pytest.fixture(params=["local", "api", "docker"])
 def dataset(request, tmp_path) -> Generator[Dataset, None, None]:
     if request.param == "local":
         lake = get_lakehouse(tmp_path)
         yield lake.get_dataset("test")
-    else:
+    elif request.param == "api":
         routers = [entities_router, journal_router, operations_router, archive_router]
         with make_test_api(tmp_path, routers) as base_url:
             lake = get_lakehouse(base_url)
             yield lake.get_dataset("test")
+    else:
+        # docker: real nginx fronting the lakehouse Granian UDS. Unique
+        # dataset name keeps concurrent / repeated runs isolated.
+        skip_unless_docker_mode()
+        lake = get_lakehouse(LAKEHOUSE_TEST_URL)
+        yield lake.get_dataset(make_docker_dataset_name())
 
 
 def test_entities(dataset):
@@ -43,7 +53,7 @@ def test_entities(dataset):
     entities = dataset.entities
 
     # Initially empty
-    assert len([e for e in entities.query(flush_first=False)]) == 0
+    assert len([e for e in entities.query()]) == 0
 
     jane = make_entity(JANE)
     jane_fragment = make_entity(JANE_FIRSTNAME)
@@ -92,8 +102,8 @@ def test_entities(dataset):
     origins = set(s.origin for s in stmts)
     assert origins == {"update", "default"}
 
-    # Optimize
-    optimize(dataset, vacuum=True)
+    # Merge
+    merge(dataset)
 
     # Statistics
     export_statistics(dataset)

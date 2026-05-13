@@ -108,30 +108,34 @@ for entity in dataset.entities.stream():
 ftm-lakehouse -d my_dataset make
 ```
 
-### Crawl Documents
-
-```bash
-# Crawl from a local directory
-ftm-lakehouse -d my_dataset crawl /path/to/documents
-
-# Crawl from HTTP source
-ftm-lakehouse -d my_dataset crawl https://example.com/files/
-```
-
 ### Import Entities
 
 ```bash
-cat entities.ftm.json | ftm-lakehouse -d my_dataset write-entities
+# Bulk-import an FtM JSON file (bypasses the journal, writes directly to parquet)
+cat entities.ftm.json | ftm-lakehouse -d my_dataset entities import
 ```
 
 ### Export Data
 
 ```bash
-# Generate all exports
-ftm-lakehouse -d my_dataset make --exports
+# Run the full pipeline: flush journal + all exports + index
+ftm-lakehouse -d my_dataset make --full
 
-# Stream entities
-ftm-lakehouse -d my_dataset stream-entities
+# Stream pre-exported entities to stdout
+ftm-lakehouse -d my_dataset entities stream
+
+# Live read of the parquet store (no export file required)
+ftm-lakehouse -d my_dataset entities iterate
+```
+
+### Crawl Documents
+
+```bash
+# Crawl from a local directory
+ftm-lakehouse -d my_dataset operations crawl /path/to/documents
+
+# Crawl from an HTTP source
+ftm-lakehouse -d my_dataset operations crawl https://example.com/files/
 ```
 
 ### Work with Archive
@@ -145,6 +149,16 @@ ftm-lakehouse -d my_dataset archive head <checksum>
 
 # Retrieve file content
 ftm-lakehouse -d my_dataset archive get <checksum> -o output.pdf
+```
+
+### Maintenance
+
+The parquet statement store is append-only on the hot path. Deduplication and tombstone reaping happen via async maintenance ops:
+
+```bash
+ftm-lakehouse -d my_dataset operations compact   # bin-pack small files
+ftm-lakehouse -d my_dataset operations merge     # collapse duplicates / drop tombstones past grace
+ftm-lakehouse -d my_dataset operations vacuum    # delete obsolete parquet files
 ```
 
 ## Configuration

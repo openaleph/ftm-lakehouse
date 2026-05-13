@@ -94,10 +94,8 @@ class DatasetJobOperation(LakehouseApiMixin, Generic[DJ]):
     def handle(self, run: JobRun, *args, **kwargs) -> None:
         raise NotImplementedError
 
-    @api_delegate("_api_run")
-    def run(self, force: bool | None = False, *args, **kwargs) -> DJ:
-        """Execute the handle function, force to run it regardless of freshness
-        dependencies"""
+    def _run_local(self, force: bool | None = False, *args, **kwargs) -> DJ:
+        """Core run logic – orchestration + handle()."""
         target = self.get_target()
         dependencies = self.get_dependencies()
 
@@ -133,6 +131,12 @@ class DatasetJobOperation(LakehouseApiMixin, Generic[DJ]):
         if result is not None:
             return result
         raise RuntimeError("Result is `None`")
+
+    @api_delegate("_api_run")
+    def run(self, force: bool | None = False, *args, **kwargs) -> DJ:
+        """Execute the handle function, force to run it regardless of freshness
+        dependencies"""
+        return self._run_local(force, *args, **kwargs)
 
     @require_api
     def _api_run(self, force: bool | None = False, *args, **kwargs) -> DJ:

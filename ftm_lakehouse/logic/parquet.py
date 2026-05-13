@@ -1,210 +1,142 @@
-"""Pure functions for Delta Lake parquet operations with translog-based metadata.
+"""Pure functions for Delta Lake parquet operations.
 
-Provides stateless operations on DeltaTable/DuckDB/PyArrow for:
-- Translog-aware querying (join main table + translog for accurate timestamps and soft deletes)
-- Compaction (apply translog to main table, remove deleted translog entries)
-- Deleted entity ID retrieval
-- Changed entity ID detection via translog timestamps
+DuckDB helpers to register a Delta table as a SQL view and to compose merge
+queries via SQLAlchemy. Shard partitioning bounds the size of each query's
+input, so disk-spill plumbing (custom ``temp_directory``, ``memory_limit``)
+is not needed and relies on DuckDB defaults (see how this goes...)
 """
 
 from datetime import datetime
-from typing import Generator
 
 import duckdb
-import pyarrow as pa
 from deltalake import DeltaTable
-from ftmq.store.lake import Row, compile_query
+from sqlalchemy import Select, func, or_, select
+
+from ftm_lakehouse.core.settings import Settings
+from ftm_lakehouse.model.statement import TABLE
 
 QUERY_IN_BATCH_SIZE = 5_000
-TRANSLOG = "translog"
-STATEMENTS = "statements"
 
 
-def translog_aware_sql(compiled_query: str, dt: DeltaTable) -> str:
-    """Wrap a compiled SQL query with a CTE that joins the translog.
+def make_duckdb() -> duckdb.DuckDBPyConnection:
+    """Create a DuckDB connection with the configured memory ceiling,
+    spill directory, and auto-loaded extensions.
 
-    The CTE joins the main statements table with the translog to:
-    - Use translog's first_seen/last_seen instead of main table's
-    - Filter out rows where translog.deleted_at IS NOT NULL
+    Per-query memory is bounded by :attr:`Settings.duckdb_memory_limit`
+    (env: ``LAKEHOUSE_DUCKDB_MEMORY_LIMIT``, default ``4GB``); queries
+    exceeding the limit spill to
+    :attr:`Settings.duckdb_temp_directory`
+    (env: ``LAKEHOUSE_DUCKDB_TEMP_DIRECTORY``) when set, otherwise to
+    the OS temp directory DuckDB picks by default.
 
-    Note: compile_query() from ftmq hardcodes ``FROM arrow as statement``.
-    The CTE reads from {STATEMENTS}/{TRANSLOG} and the rewrite swaps
-    ``arrow`` for ``__live`` so the compiled query hits the CTE result.
+    ``autoinstall_known_extensions`` + ``autoload_known_extensions`` let
+    DuckDB lazy-resolve the Delta extension on the first ``delta_scan``
+    call instead of every :func:`register_view` running an explicit
+    ``INSTALL delta`` / ``LOAD delta``. ``INSTALL`` is idempotent and
+    cached on disk by DuckDB; ``LOAD`` runs at most once per connection.
     """
-    all_cols = [f.name for f in dt.schema().to_arrow()]
-    main_cols = [
-        f"{STATEMENTS}.{c}" for c in all_cols if c not in ("first_seen", "last_seen")
-    ]
-    select_cols = ", ".join(main_cols + ["sc.first_seen", "sc.last_seen"])
-
-    cte = f"""WITH __live AS (
-    SELECT {select_cols}
-    FROM {STATEMENTS}
-    JOIN {TRANSLOG} sc ON {STATEMENTS}.id = sc.id
-    WHERE sc.deleted_at IS NULL
-)
-"""
-    # compile_query() hardcodes "FROM arrow as statement"
-    rewritten = compiled_query.replace(
-        "FROM arrow as statement", "FROM __live as statement"
-    )
-    return cte + rewritten
+    settings = Settings()
+    config: dict[str, str] = {
+        "memory_limit": settings.duckdb_memory_limit,
+        "autoinstall_known_extensions": "true",
+        "autoload_known_extensions": "true",
+    }
+    if settings.duckdb_temp_directory:
+        config["temp_directory"] = settings.duckdb_temp_directory
+    return duckdb.connect(":memory:", config=config)
 
 
-def stream_duckdb_translog(
-    q, dt: DeltaTable, translog_dt: DeltaTable
-) -> Generator[Row, None, None]:
-    """Like stream_duckdb but joins with translog for accurate timestamps and soft deletes."""
-    con = duckdb.connect()
-    con.register(STATEMENTS, dt.to_pyarrow_dataset())
-    con.register(TRANSLOG, translog_dt.to_pyarrow_dataset())
-    compiled = compile_query(q)
-    sql = translog_aware_sql(compiled, dt)
-    rel = con.sql(sql)
-    columns = rel.columns
-    while rows := rel.fetchmany(100_000):
-        for row in rows:
-            yield Row(dict(zip(columns, row)))
-
-
-def query_duckdb_translog(
-    q, dt: DeltaTable, translog_dt: DeltaTable
-) -> tuple[duckdb.DuckDBPyRelation, duckdb.DuckDBPyConnection]:
-    """Like query_duckdb but joins with translog for accurate timestamps and soft deletes.
-
-    Returns (relation, connection) tuple. Caller must hold the connection reference
-    to prevent GC from closing it while the relation is still in use.
-    """
-    con = duckdb.connect()
-    con.register(STATEMENTS, dt.to_pyarrow_dataset())
-    con.register(TRANSLOG, translog_dt.to_pyarrow_dataset())
-    compiled = compile_query(q)
-    sql = translog_aware_sql(compiled, dt)
-    return con.sql(sql), con
-
-
-def compact_with_translog(
-    dt: DeltaTable, translog_dt: DeltaTable
-) -> pa.RecordBatchReader:
-    """Join main table with translog, returning only live rows with accurate timestamps.
-
-    Args:
-        dt: Main statement DeltaTable
-        translog_dt: Translog metadata DeltaTable
-
-    Returns:
-        RecordBatchReader of live rows with translog timestamps applied
-    """
-    all_cols = [f.name for f in dt.schema().to_arrow()]
-    main_cols = [
-        f"{STATEMENTS}.{c}" for c in all_cols if c not in ("first_seen", "last_seen")
-    ]
-    select_cols = ", ".join(main_cols + ["sc.first_seen", "sc.last_seen"])
-
-    con = duckdb.connect()
-    con.register(STATEMENTS, dt.to_pyarrow_dataset())
-    con.register(TRANSLOG, translog_dt.to_pyarrow_dataset())
-    return con.sql(
-        f"SELECT {select_cols} FROM {STATEMENTS} "
-        f"JOIN {TRANSLOG} sc ON {STATEMENTS}.id = sc.id "
-        "WHERE sc.deleted_at IS NULL"
-    ).fetch_arrow_reader()
-
-
-def get_deleted_entity_ids(dt: DeltaTable, translog_dt: DeltaTable) -> set[str]:
-    """Get entity IDs that have been soft-deleted via translog.
-
-    Args:
-        dt: Main statement DeltaTable
-        translog_dt: Translog metadata DeltaTable
-
-    Returns:
-        Set of entity_id strings with at least one deleted statement
-    """
-    con = duckdb.connect()
-    con.register(STATEMENTS, dt.to_pyarrow_dataset())
-    con.register(TRANSLOG, translog_dt.to_pyarrow_dataset())
-    result = con.execute(
-        f"SELECT DISTINCT {STATEMENTS}.entity_id FROM {STATEMENTS} "
-        f"JOIN {TRANSLOG} sc ON {STATEMENTS}.id = sc.id "
-        "WHERE sc.deleted_at IS NOT NULL"
-    )
-    return {r[0] for r in result.fetchall()}
-
-
-def filter_live_translog(translog_dt: DeltaTable) -> pa.RecordBatchReader:
-    """Return only live (non-deleted) translog rows.
-
-    Args:
-        translog_dt: Translog metadata DeltaTable
-
-    Returns:
-        RecordBatchReader of translog rows where deleted_at IS NULL
-    """
-    rel = duckdb.arrow(translog_dt.to_pyarrow_dataset())
-    return rel.query(
-        TRANSLOG, f"SELECT * FROM {TRANSLOG} WHERE deleted_at IS NULL"
-    ).fetch_arrow_reader()
-
-
-def get_changed_entity_ids(
+def register_view(
+    con: duckdb.DuckDBPyConnection,
     dt: DeltaTable,
-    translog_dt: DeltaTable,
-    since: datetime,
-    schema_in: list[str] | None = None,
-    prop: str | None = None,
-) -> set[str]:
-    """Get entity IDs with statements added since a timestamp.
+    name: str = TABLE.name,
+) -> None:
+    """Register a DeltaTable as a DuckDB view via ``delta_scan``.
 
-    Joins the main table with the translog to find entities whose statements
-    have a first_seen at or after the given timestamp (truncated to seconds).
+    The Delta extension exposes partition values as columns and uses Delta's
+    column statistics for file skipping on filtered queries, so per-partition
+    queries (``WHERE shard = ? AND bucket = ? AND origin = ?``) prune to one
+    partition's files automatically.
 
-    FtM serialization truncates timestamps to second precision, so ``since``
-    is floored to whole seconds and the comparison uses ``>=``.  This may
-    re-export entities from the same second as the previous diff — a harmless
-    false positive since diffs are idempotent.
+    The Delta extension is auto-installed and auto-loaded on first
+    ``delta_scan`` use thanks to the connection-level flags set in
+    :func:`make_duckdb`, so this function does not run an explicit
+    ``INSTALL`` / ``LOAD``.
+
+    DuckDB's ``delta_scan`` does not accept prepared parameters for its URI
+    argument, so the URI is interpolated as a SQL string literal. Single
+    quotes are doubled to prevent injection if a future code path lets a
+    dataset name (and thus the URI) carry a quote – primary validation is
+    in :func:`ftm_lakehouse.util.validate_dataset_name`.
+    """
+    table_uri = dt.table_uri.replace("'", "''")
+    con.sql(f"CREATE OR REPLACE VIEW {name} AS SELECT * FROM delta_scan('{table_uri}')")
+
+
+def build_merge_query(
+    shard: str,
+    bucket: str,
+    origin: str,
+    grace_cutoff: datetime,
+) -> Select:
+    """SQLAlchemy ``Select`` that collapses one partition.
+
+    The returned query:
+
+    - filters the source view to one ``(shard, bucket, origin)`` partition;
+    - computes ``MIN(first_seen) OVER (PARTITION BY id)`` so the surviving
+      row carries the earliest ``first_seen`` for that statement id;
+    - keeps the row with the latest ``last_seen`` per id via
+      ``ROW_NUMBER() OVER (PARTITION BY id ORDER BY last_seen DESC) = 1``;
+    - drops tombstones whose ``deleted_at`` is older than ``grace_cutoff``;
+    - orders by ``(entity_id, id, last_seen DESC)`` so the rewritten parquet
+      file is ready for future merges without re-sort.
+
+    Consumers can compose further filters via ``.where(...)`` on the
+    returned Select (e.g.
+    ``query.where(query.selected_columns.entity_id == entity_id)`` for a
+    single-entity merge). Compile to executable DuckDB SQL with
+    ``str(query.compile(compile_kwargs={"literal_binds": True}))``.
 
     Args:
-        dt: Main statement DeltaTable
-        translog_dt: Translog metadata DeltaTable
-        since: Only include entities with statements added at or after this time
-        schema_in: Optional list of schema names to filter by
-        prop: Optional property name to filter by
+        shard: Target shard value (hex-padded).
+        bucket: Target bucket (``thing`` / ``interval`` / ``document`` /
+            ``page`` / ``pages`` / ``mention``).
+        origin: Target origin tag.
+        grace_cutoff: Tombstones with ``deleted_at <= grace_cutoff`` are
+            dropped. Typically ``now - LAKEHOUSE_GRACE_PERIOD_DAYS``.
 
     Returns:
-        Set of entity_id strings with changed statements
+        A SQLAlchemy :class:`~sqlalchemy.sql.expression.Select` that
+        compiles to DuckDB SQL.
     """
-    # Truncate to seconds — FtM timestamps have second precision only
-    since_truncated = since.replace(microsecond=0)
-
-    con = duckdb.connect()
-    con.register(STATEMENTS, dt.to_pyarrow_dataset())
-    con.register(TRANSLOG, translog_dt.to_pyarrow_dataset())
-
-    sql = (
-        f"SELECT DISTINCT {STATEMENTS}.entity_id FROM {STATEMENTS} "
-        f"JOIN {TRANSLOG} sc ON {STATEMENTS}.id = sc.id "
-        "WHERE sc.first_seen >= $since"
+    inner_cols = [c for c in TABLE.columns if c.name != "first_seen"]
+    inner = (
+        select(
+            *inner_cols,
+            func.min(TABLE.c.first_seen)
+            .over(partition_by=TABLE.c.id)
+            .label("first_seen"),
+            func.row_number()
+            .over(partition_by=TABLE.c.id, order_by=TABLE.c.last_seen.desc())
+            .label("rn"),
+        )
+        .where(
+            TABLE.c.shard == shard,
+            TABLE.c.bucket == bucket,
+            TABLE.c.origin == origin,
+        )
+        .subquery("merge_src")
     )
-    params: dict = {"since": since_truncated}
-    if schema_in:
-        placeholders = ",".join(f"'{s}'" for s in schema_in)
-        sql += f" AND {STATEMENTS}.schema IN ({placeholders})"
-    if prop:
-        sql += f" AND {STATEMENTS}.prop = '{prop}'"
 
-    result = con.execute(sql, params)
-    return {r[0] for r in result.fetchall()}
-
-
-def make_dedup_connection(dt: DeltaTable) -> duckdb.DuckDBPyConnection | None:
-    """Create a DuckDB connection with a temp table of existing statement IDs.
-
-    Returns None if the main parquet table doesn't exist yet (first flush).
-    """
-    con = duckdb.connect()
-    con.register(STATEMENTS, dt.to_pyarrow_dataset())
-    con.execute(
-        f"CREATE TEMP TABLE existing_ids AS SELECT DISTINCT id FROM {STATEMENTS}"
+    return (
+        select(*[c for c in inner.c if c.name != "rn"])
+        .where(
+            inner.c.rn == 1,
+            or_(
+                inner.c.deleted_at.is_(None),
+                inner.c.deleted_at > grace_cutoff,
+            ),
+        )
+        .order_by(inner.c.entity_id, inner.c.id, inner.c.last_seen.desc())
     )
-    return con

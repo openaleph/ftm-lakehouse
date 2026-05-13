@@ -1,25 +1,19 @@
 """Journal API routes: bulk write, iterate, flush, count, clear."""
 
 import asyncio
-import json
 
 from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
-from ftm_lakehouse.api.helpers import Journal
-from ftm_lakehouse.storage.journal import JournalRow
+from ftm_lakehouse.api.dependencies import Journal
+from ftm_lakehouse.helpers.statements import unpack_statement
 from ftm_lakehouse.storage.journal.api import (
     JSONL_CONTENT_TYPE,
-    _to_iso,
     deserialize_row,
+    serialize_row,
 )
 
 router = APIRouter()
-
-
-def _serialize_row(row: JournalRow) -> bytes:
-    parts = list(row[:5]) + [_to_iso(row[5])]
-    return json.dumps(parts, ensure_ascii=False).encode() + b"\n"
 
 
 @router.post("/{dataset}/_api/journal/bulk")
@@ -33,8 +27,11 @@ async def journal_bulk(journal: Journal, request: Request) -> PlainTextResponse:
             for line in body.split(b"\n"):
                 if not line:
                     continue
+                # FIXME this is a bit inefficient as the writer will re-pack the
+                # statement again for the journal.
                 row = deserialize_row(line.decode())
-                writer.add(*row)
+                stmt = unpack_statement(row.data)
+                writer.add_statement(stmt, row.deleted_at)
                 count += 1
         return count
 
@@ -48,7 +45,7 @@ def journal_iterate(journal: Journal) -> StreamingResponse:
 
     def generate():
         for row in journal.iterate():
-            yield _serialize_row(row)
+            yield serialize_row(row) + b"\n"
 
     return StreamingResponse(generate(), media_type=JSONL_CONTENT_TYPE)
 
@@ -59,7 +56,7 @@ def journal_flush(journal: Journal) -> StreamingResponse:
 
     def generate():
         for row in journal.flush():
-            yield _serialize_row(row)
+            yield serialize_row(row) + b"\n"
 
     return StreamingResponse(generate(), media_type=JSONL_CONTENT_TYPE)
 

@@ -68,7 +68,7 @@ class JobRepository(BaseRepository, Generic[J]):
     def __init__(self, dataset: str, uri: Uri, model: type[J]) -> None:
         super().__init__(dataset, uri)
         self.job_type = model.__name__
-        self._store = get_store(uri, model=model)
+        self._store = get_store(self._store_uri, model=model)
 
     def put(self, job: JobModel) -> None:
         """Store a job run."""

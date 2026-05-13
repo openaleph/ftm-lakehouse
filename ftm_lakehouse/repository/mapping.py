@@ -20,7 +20,7 @@ class MappingRepository(BaseRepository):
     Combines FileStore (current configs) and VersionStore (snapshots)
     to provide versioned mapping configuration storage.
 
-    Each mapping is identified by a content_hash (SHA1 of the source CSV file).
+    Each mapping is identified by a content_hash (SHA256 of the source CSV file).
 
     Example:
         ```python
@@ -52,7 +52,7 @@ class MappingRepository(BaseRepository):
         Get a mapping configuration by content hash.
 
         Args:
-            content_hash: SHA1 checksum of the source CSV file
+            content_hash: SHA256 checksum of the source CSV file
 
         Returns:
             DatasetMapping if exists, None otherwise

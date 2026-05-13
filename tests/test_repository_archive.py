@@ -10,10 +10,16 @@ from ftm_lakehouse.api.main import archive_router
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.repository.archive import ArchiveRepository
 from ftm_lakehouse.util import make_checksum_key
-from tests.conftest import make_test_api
+from tests.conftest import (
+    LAKEHOUSE_TEST_URL,
+    docker_data_path,
+    make_docker_dataset_name,
+    make_test_api,
+    skip_unless_docker_mode,
+)
 
 
-@pytest.fixture(params=["local", "api", "s3"])
+@pytest.fixture(params=["local", "api", "s3", "docker"])
 def repo(
     request, tmp_path
 ) -> Generator[tuple[ArchiveRepository, Path | None], None, None]:
@@ -22,11 +28,17 @@ def repo(
     elif request.param == "api":
         with make_test_api(tmp_path, [archive_router]) as base_url:
             yield ArchiveRepository("test", f"{base_url}/test"), tmp_path / "test"
-    else:  # s3
+    elif request.param == "s3":
         moto_server = request.getfixturevalue("moto_server")
         with mock_aws():
             moto_server.create_bucket(Bucket="lakehouse")
             yield ArchiveRepository("test", "s3://lakehouse/test"), None
+    else:  # docker
+        skip_unless_docker_mode()
+        name = make_docker_dataset_name()
+        yield ArchiveRepository(name, f"{LAKEHOUSE_TEST_URL}/{name}"), docker_data_path(
+            name
+        )
 
 
 def test_repository_archive(repo, fixtures_path):

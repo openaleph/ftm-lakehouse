@@ -8,10 +8,18 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from followthemoney.statement import Statement
+from sqlalchemy import insert
 
 from ftm_lakehouse.api.routes.journal import router
 from ftm_lakehouse.core.api import get_api
-from ftm_lakehouse.helpers.statements import unpack_statement
+from ftm_lakehouse.core.conventions.path import entity_shard
+from ftm_lakehouse.exceptions import MalformedStatementError
+from ftm_lakehouse.helpers.statements import (
+    UNIT_SEP,
+    UNPACK_MIN_FIELDS,
+    pack_statement,
+    unpack_statement,
+)
 from ftm_lakehouse.storage.journal import ApiJournalStore, JournalRows, SqlJournalStore
 from ftm_lakehouse.storage.journal import get_journal as _get_journal_factory
 from ftm_lakehouse.storage.journal.base import BaseJournalStore
@@ -39,7 +47,7 @@ def make_statement(
 
 def collect_statements(items: JournalRows) -> list[Statement]:
     """Collect all statements from flush items."""
-    return [unpack_statement(stmt) for _, _, _, _, stmt, _ in items]
+    return [unpack_statement(row.data) for row in items]
 
 
 def _make_sql_journal() -> SqlJournalStore:
@@ -176,8 +184,8 @@ def test_storage_journal_statement_fields(journal):
     assert collect_statements(journal.flush()) == []
 
 
-def test_storage_journal_flush_yields_bucket_origin(journal):
-    """Test that flush yields (id, bucket, origin, canonical_id, data) tuples."""
+def test_storage_journal_flush_yields_shard(journal):
+    """Test that flush yields (id, shard, data, deleted_at) tuples."""
     with journal.writer() as w:
         w.add_statement(
             Statement(
@@ -213,15 +221,16 @@ def test_storage_journal_flush_yields_bucket_origin(journal):
     items = list(journal.flush())
     assert len(items) == 3
 
-    for row_id, bucket, origin, canonical_id, data, deleted_at in items:
-        assert bucket == "thing"  # Person is a Thing
-        assert origin in ("source_a", "source_b")
-        stmt = unpack_statement(data)
-        assert stmt.origin == origin
+    for row in items:
+        # default shards = 8 (single hex char)
+        assert len(row.shard) == 1
+        stmt = unpack_statement(row.data)
+        assert row.shard == entity_shard(stmt.entity_id, 8)
+        assert stmt.origin in ("source_a", "source_b")
 
 
 def test_storage_journal_flush_sorted_order(journal):
-    """Test that flush yields statements in sorted order (bucket, origin, canonical_id)."""
+    """Test that flush yields statements sorted by shard."""
     with journal.writer() as w:
         for origin in ["z_origin", "a_origin", "m_origin"]:
             for i in range(3):
@@ -236,8 +245,8 @@ def test_storage_journal_flush_sorted_order(journal):
                 w.add_statement(stmt)
 
     items = list(journal.flush())
-    origins = [origin for _, _, origin, _, _, _ in items]
-    assert origins == sorted(origins)
+    shards = [row.shard for row in items]
+    assert shards == sorted(shards)
 
 
 def test_storage_journal_rollback_on_consumer_error(request, journal):
@@ -251,7 +260,7 @@ def test_storage_journal_rollback_on_consumer_error(request, journal):
 
     # Try to consume but raise error
     try:
-        for _id, _bucket, _origin, _canonical_id, _data, _deleted_at in journal.flush():
+        for _ in journal.flush():
             raise ValueError("Simulated error")
     except ValueError:
         pass
@@ -260,6 +269,33 @@ def test_storage_journal_rollback_on_consumer_error(request, journal):
     flushed = collect_statements(journal.flush())
     assert len(flushed) == 5
     assert collect_statements(journal.flush()) == []
+
+
+def test_storage_journal_rollback_on_consumer_abandon(request, journal):
+    """If the flush generator is abandoned mid-stream (HTTP client
+    disconnect → ``GeneratorExit``), the write transaction rolls back
+    and yielded rows remain in the journal for the next flush."""
+    param = request.node.callspec.params["journal"]
+    if param == "api":
+        pytest.skip("API rollback is server-side only; client-side abandon is a no-op")
+
+    with journal.writer() as w:
+        for i in range(5):
+            w.add_statement(make_statement(f"e{i}", "name", f"Name {i}"))
+
+    gen = journal.flush()
+    first = next(gen)
+    assert first is not None
+    # Simulate the consumer abandoning the iterator (e.g. ASGI client
+    # disconnect). Python sends GeneratorExit into the generator at the
+    # current yield; flush's try/except BaseException rolls back.
+    gen.close()
+
+    # All five rows still present – DELETE was rolled back.
+    assert journal.count() == 5
+    flushed = collect_statements(journal.flush())
+    assert len(flushed) == 5
+    assert journal.count() == 0
 
 
 def test_storage_journal_upsert_duplicate_statements(journal):
@@ -335,25 +371,28 @@ def concurrent_journal(request, tmp_path):
 
 
 def test_storage_journal_flush_concurrent_write(concurrent_journal):
-    """Test that rows written during flush are not deleted.
+    """Test that concurrent writes during flush are never silently lost.
 
-    Simulates a concurrent writer inserting rows while flush() is yielding.
-    The new rows must survive the flush DELETE since they were never yielded.
+    Per-shard flush may pick up rows inserted into not-yet-processed shards
+    during the same call, so the exact split between "this flush" and "next
+    flush" is non-deterministic. The contract is weaker: every row inserted
+    is eventually yielded exactly once, never deleted without being yielded
+    first, and the journal ends up empty after two flushes.
     """
     journal = concurrent_journal
 
-    # Write initial rows
     with journal.writer() as w:
         for i in range(5):
             w.add_statement(make_statement(f"initial_{i}", "name", f"Initial {i}"))
 
     assert journal.count() == 5
+    initial_ids = {f"initial_{i}" for i in range(5)}
+    concurrent_ids = {f"concurrent_{i}" for i in range(3)}
 
-    # Start flush, inject new rows mid-iteration, then finish
-    flushed_ids = []
+    flushed_entity_ids: set[str] = set()
     injected = False
-    for row_id, bucket, origin, canonical_id, data, deleted_at in journal.flush():
-        flushed_ids.append(row_id)
+    for row in journal.flush():
+        flushed_entity_ids.add(unpack_statement(row.data).entity_id)
 
         # After first row, inject new rows via a separate writer
         if not injected:
@@ -364,17 +403,84 @@ def test_storage_journal_flush_concurrent_write(concurrent_journal):
                     )
             injected = True
 
-    # All 5 initial rows were yielded
-    assert len(flushed_ids) == 5
+    # All initial rows must be in this flush; concurrent rows may or may not be.
+    assert initial_ids <= flushed_entity_ids
+    assert flushed_entity_ids <= initial_ids | concurrent_ids
+    assert journal.count() == 5 + 3 - len(flushed_entity_ids)
 
-    # The 3 rows written during flush must still be in the journal
+    remaining = collect_statements(journal.flush())
+    remaining_ids = {s.entity_id for s in remaining}
+
+    # The union of both flushes covers every inserted row exactly once.
+    assert flushed_entity_ids | remaining_ids == initial_ids | concurrent_ids
+    assert flushed_entity_ids.isdisjoint(remaining_ids)
+    assert journal.count() == 0
+
+
+# ---------------------------------------------------------------------------
+# Malformed-statement robustness
+#
+# ``unpack_statement`` raises :class:`MalformedStatementError` on a too-short
+# packed payload, and ``BaseJournalStore.flush_statements`` catches+logs+skips
+# so one corrupt row can't abort a whole flush.
+# ---------------------------------------------------------------------------
+
+
+def test_unpack_rejects_short_payload() -> None:
+    truncated = UNIT_SEP.join(["a"] * (UNPACK_MIN_FIELDS - 1))
+    with pytest.raises(MalformedStatementError):
+        unpack_statement(truncated)
+
+
+def test_unpack_accepts_canonical_pack_output() -> None:
+    stmt = make_statement("jane", "name", "Jane Doe")
+    out = unpack_statement(pack_statement(stmt))
+    assert out.entity_id == "jane"
+    assert out.value == "Jane Doe"
+
+
+def test_unpack_tolerates_extra_trailing_fields() -> None:
+    """``pack_statement`` emits 14 fields (trailing ``prop_type``);
+    ``unpack_statement`` only reads the first 13. Extra trailing fields
+    must not trip the validator."""
+    canonical = pack_statement(make_statement("x", "name", "v"))
+    parts = canonical.split(UNIT_SEP)
+    assert len(parts) >= UNPACK_MIN_FIELDS
+    unpack_statement(canonical)
+
+
+def test_storage_journal_flush_skips_malformed_rows(request, journal):
+    """A truncated ``data`` payload in the journal doesn't crash flush.
+
+    The malformed row is logged and skipped; good rows on either side are
+    yielded normally. Direct row-injection requires SQL access so this is
+    SQL-only – the API journal goes through the wire format and can't
+    produce a malformed row from the client side."""
+    param = request.node.callspec.params["journal"]
+    if param == "api":
+        pytest.skip("Malformed-row injection requires direct SQL access")
+
+    with journal.writer() as w:
+        w.add_statement(make_statement("good_1", "name", "Good One"))
+        w.add_statement(make_statement("good_2", "name", "Good Two"))
+
+    # Inject a bad row directly into the underlying SQL table.
+    with journal.engine.begin() as conn:
+        conn.execute(
+            insert(journal.table).values(
+                id="bad-1",
+                shard="0",
+                data=UNIT_SEP.join("abc"),  # < UNPACK_MIN_FIELDS after split
+                deleted_at=None,
+            )
+        )
+
     assert journal.count() == 3
 
-    # Flush the remaining rows — should get exactly the concurrent ones
-    remaining = collect_statements(journal.flush())
-    assert len(remaining) == 3
-    remaining_ids = {s.entity_id for s in remaining}
-    assert remaining_ids == {"concurrent_0", "concurrent_1", "concurrent_2"}
+    flushed = list(journal.flush_statements())
 
-    # Journal is now empty
+    # Two good rows survive; the malformed row was skipped.
+    assert len(flushed) == 2
+    assert {row.stmt.entity_id for row in flushed} == {"good_1", "good_2"}
+    # Flush remains destructive: nothing left in the journal.
     assert journal.count() == 0

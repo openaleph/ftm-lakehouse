@@ -1,12 +1,11 @@
 from anystore.exceptions import DoesNotExist
 from anystore.io import smart_read
 from anystore.settings import BaseSettings
-from anystore.types import HttpUrlStr
 from pydantic_settings import SettingsConfigDict
 
 CHECKSUM_ALGORITHM = "sha256"  # never change this! ;)
 
-__version__ = "0.0.2"
+__version__ = "0.3.0"
 
 
 class Settings(BaseSettings):
@@ -20,15 +19,23 @@ class Settings(BaseSettings):
     )
 
     uri: str = "data"
-    journal_uri: str = "sqlite:///data/journal.db"
+    journal_uri: str = "sqlite:///:memory:"
     api_key: str | None = None
+    api_secret: str | None = None
     on_zfs: bool = False
     zfs_pool: str | None = None
     zfs_socket: str | None = None
     zfs_owner: str | None = None
+    zfs_allowed_uid: int | None = None
+
+    entity_shards: int = 0
+    grace_period_days: int = 30
+    max_buffer_rows: int = 1_000_000
+
+    duckdb_memory_limit: str = "4GB"
+    duckdb_temp_directory: str | None = None
 
     public_url_prefix: str | None = None
-    archive_url_expire: int = 900  # seconds (15 minutes)
 
     @property
     def api_mode(self) -> bool:
@@ -63,16 +70,15 @@ class ApiSettings(BaseSettings):
         extra="ignore",
     )
 
-    secret_key: str = "change-for-production"
-    access_token_expire: int = 5  # minutes
-    access_token_algorithm: str = "HS256"
-    auth_enabled: bool = True  # if disabled, trust reverse proxy!
-    auth_required: bool = True
-
     title: str = "FollowTheMoney Data Lakehouse Api"
     description: str = get_api_doc()
     contact: ApiContactSettings | None = None
 
-    allowed_origins: list[HttpUrlStr] = ["http://localhost:3000"]
-
     static_headers: dict[str, str] = {}
+
+    # DoS limits at the API boundary.
+    max_entity_ids: int = 10_000
+    """Maximum number of ``entity_ids`` accepted in a single query body."""
+
+    max_filter_keys: int = 20
+    """Maximum number of ftmq filter keys accepted in a single query body."""

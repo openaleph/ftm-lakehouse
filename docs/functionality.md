@@ -1,152 +1,128 @@
 # Core functionality
 
-This section describes the different actions clients (or tenants) can do with the _lakehouse_ and how data altering affects other dependencies under the hood. Applications like [OpenAleph](https://openaleph.org), [investigraph](https://docs.investigraph.dev/) or [memorious](https://docs.investigraph.dev/lib/memorious/) (and your own applications or extensions) are called _Tenants_ in this section. The _lakehouse_ itself is its own tenant, too.
+This section describes the actions that clients (or _tenants_) can perform against the lakehouse and the side effects each action triggers under the hood. Applications like [OpenAleph](https://openaleph.org), [investigraph](https://docs.investigraph.dev/) or [memorious](https://docs.investigraph.dev/lib/memorious/) (and your own applications or extensions) are tenants in this sense. The lakehouse itself is its own tenant, too.
 
 !!! warning
     `ftm-lakehouse` is currently in an early R&D phase. The functionality, dependency chains and path conventions described here may not be in line with the current implementation, and the specification is subject to change. [Read the discussion here](https://aleph.discourse.group/t/rfc-followthemoney-data-lake-specification/276)
 
-
-
 ## Public interfaces
 
-Tenants can read and write from and to:
+Tenants can read and write:
 
-- Source files (blob storage and its metadata)
-- Entities
-- Statements (which form entities)
+- **Source files** (blob storage + metadata)
+- **Entities** (FtM)
+- **Statements** (the grain entities are stored at)
 
-Tenants can add items individually or in bulk mode (for efficiency). Tenants should not know what side effects an action triggers.
+Add items individually or in bulk. Bulk adders are either journal-backed (crash-safe, deduped within a window) or direct-to-parquet (skip the journal for one-shot loads).
 
-As well, tenants can stream exported `entities.ftm.json` or `statements.csv`.
+Tenants can also stream the pre-exported `entities.ftm.json` or `statements.csv` files.
 
 ---
 
 ## Source files
 
-A _source file_ is the combination of a raw data blob and its metadata stored alongside it. From the tenant's perspective, a file is identified by a path or URI, not by its checksum. Multiple file paths can reference the same blob, creating multiple metadata entries for a single blob.
+A _source file_ is the combination of a raw data blob and its metadata. A file is identified by a path or URI from the tenant's perspective, not by its checksum. Multiple file paths can reference the same blob, creating multiple metadata entries for one blob.
 
 ### Add a file
 
-**Input:** URI pointing to a local or remote source (must be accessible). Optionally: pre-computed checksum, additional metadata.
+**Input:** URI pointing to a local or remote source. Optionally: pre-computed checksum and metadata.
 
 **Process:**
 
-1. Compute checksum (or use provided one)
-2. Store blob at `archive/{ch[0:2]}/{ch[2:4]}/{ch[4:6]}/{checksum}/data` (skip if exists)
-3. Create File metadata object with checksum, path, mimetype, size
-4. Store metadata at `archive/{ch[0:2]}/{ch[2:4]}/{ch[4:6]}/{checksum}/{file_id}.json`
+1. Compute checksum (or use the provided one).
+2. Store the blob at `archive/{ch[0:2]}/{ch[2:4]}/{ch[4:6]}/{checksum}/data` (skip if exists).
+3. Create a `File` metadata object with checksum, path, mimetype, size.
+4. Store metadata at `archive/{ch[0:2]}/{ch[2:4]}/{ch[4:6]}/{checksum}/{file_id}.json`.
 
 **Side effects:**
 
-- Sets `archive/last_updated` tag
+- Sets `archive/last_updated` tag.
 
-**Optional follow-up:** Tenant can request entity creation from the file. If yes, a Document/Pages entity is created from the File metadata and its statements are added to the journal.
+**Optional follow-up:** create a `Document` / `Pages` entity from the file metadata; its statements are added to the journal.
 
 ### Get a file
 
-**Input:** Checksum
-
-**Output:** File metadata object, or FileNotFoundError
-
-Tenants can then open or stream the blob content.
+**Input:** Checksum. **Output:** `File` metadata, or `FileNotFoundError`.
 
 ### Delete a file
 
-**By file_id:** Removes only that specific metadata JSON file.
-
-!!! note
-    Currently, blob deletion is not implemented. Only the metadata is deleted.
+**By file_id:** removes only that metadata JSON. Blob deletion is not implemented; only metadata is removed.
 
 ---
 
 ## Entities and statements
 
-Entities are composed of statements. All write operations go through the journal first.
+Entities are composed of statements. There are two write paths:
 
-### Add entity
+1. **Journal-backed** (`writer()` / `add` / `add_many` / `delete_entity` / `delete_statement`) – buffered in a SQL journal, drained to parquet by `flush()`. Crash-safe; deduped within the journal window.
+2. **Direct-to-parquet** (`write_statements`) – accepts a shard-sorted stream of `StatementRow` (as produced by `EntityBuffer.flush_buffer()` or `JournalStore.flush_statements()`) and appends per-shard parquet batches. Used by the CLI's `entities import` / `statements import` for one-shot bulk loads.
 
-**Input:** EntityProxy object, origin identifier
+### Add entity / add statements (journal)
 
-**Process:**
+**Input:** `EntityProxy` or `Statement`, origin identifier.
 
-1. Convert entity to statements
-2. Write statements to journal (SQL buffer)
+**Process:** convert to statements, write to the journal.
 
-**Side effects:**
+**Side effects:** sets `journal/last_updated` tag.
 
-- Sets `journal/last_updated` tag
+### Bulk write (journal)
 
-### Add statements directly
+```python
+with dataset.entities.writer(origin="import") as writer:
+    for entity in entities:
+        writer.add_entity(entity)
+```
 
-Same as add entity - statements are written to the journal.
+Context-manager commits on exit. Sets `journal/last_updated` tag once.
 
-### Bulk add
+### Bulk import (direct)
 
-**Process:**
+```python
+from ftm_lakehouse.logic.entities.buffer import EntityBuffer
+buffer = EntityBuffer(dataset.name, dataset.model.shards, origin)
+for proxy in entities:
+    buffer.add_entity(proxy)
+    if len(buffer) >= bulk_size:
+        repo.write_statements(buffer.flush_buffer(), now=now)
+if buffer:
+    repo.write_statements(buffer.flush_buffer(), now=now)
+```
 
-1. Open bulk writer with origin
-2. Add multiple entities/statements
-3. On context exit: commit transaction
-
-**Side effects:**
-
-- Sets `journal/last_updated` tag (once, on exit)
+Bypasses the journal entirely. Suitable for one-shot loads of large pre-built `entities.ftm.json` files.
 
 ### Delete entity
 
-**Input:** entity_id
+**Input:** `entity_id`.
 
-**Process:**
+**Process:** collect statements for the entity from parquet + journal, then write tombstone rows (with `deleted_at` timestamp) back to the journal.
 
-1. Collect all statements for the entity from parquet + journal
-2. Write tombstone rows to the journal (with `deleted_at` timestamp)
+**Side effects:** sets `journal/last_updated`.
 
-**Side effects:**
-
-- Sets `journal/last_updated` tag
-
-On flush, tombstones are routed to the translog table, marking the statements as deleted. All subsequent queries exclude these statements automatically.
+On flush, tombstones land as **new rows** in parquet alongside the live rows (append-only writes). `merge` later collapses each `(live, tombstone)` pair to the tombstone (which has a later `last_seen`), then drops the tombstone if `deleted_at < now - grace_period`. Until `merge` runs, the live row is still visible to queries (the view filter is `deleted_at IS NULL` per-row).
 
 ### Delete statement
 
-**Input:** Statement object
-
-**Process:**
-
-1. Write a single tombstone row to the journal
-
-**Side effects:**
-
-- Sets `journal/last_updated` tag
+Single-statement tombstone via the journal. Same flow as delete-entity, scoped to one row.
 
 ---
 
 ## Query entities
 
-### From statement store (query)
+### From the statement store (`query`)
 
-**Input:** Optional filters: entity_ids, origin, and any ftmq Query filters
+**Input:** optional `entity_ids`, `origin`, plus any `ftmq.Query` filters.
 
-**Process:**
+**Process:** run a SQLAlchemy `Select` over the Delta table via DuckDB (`delta_scan`). Results are streamed and aggregated into `StatementEntity` objects on the fly.
 
-1. Flush journal to parquet (by default, can be disabled)
-2. Query Delta Lake parquet store via DuckDB
+**Output:** generator of `StatementEntity`.
 
-**Output:** Generator of StatementEntity objects
+### From the pre-exported JSON (`stream`)
 
-### From exported JSON (stream)
-
-**Input:** None
-
-**Output:** Generator of entities from `entities.ftm.json`
-
-Requires prior export. Does not auto-flush.
+**Output:** generator of entities read from `entities.ftm.json`. Faster than `query` for full-dataset iteration but requires a prior export.
 
 ### Get single entity
 
-**Input:** entity_id, optional origin
-
-**Output:** StatementEntity or None
+`get(entity_id)`. Internally prunes to the entity's shard partition for efficient single-entity lookup.
 
 ---
 
@@ -156,29 +132,17 @@ CSV-to-entity transformation configurations.
 
 ### Store mapping config
 
-**Input:** DatasetMapping object (contains content_hash, queries)
+**Input:** `DatasetMapping` (carries `content_hash` and queries).
 
-**Process:**
-
-1. Serialize to YAML
-2. Store versioned snapshot
-3. Store current config at `mappings/{content_hash}/mapping.yml`
+**Process:** serialise to YAML; store versioned snapshot; store current config at `mappings/{content_hash}/mapping.yml`.
 
 ### Process mapping
 
-**Input:** content_hash of source CSV
+**Input:** content_hash of a source CSV.
 
-**Process:**
+**Process:** load mapping config; open source CSV from the archive; generate entities via ftm-mapping; write entities to the journal with origin `mapping:{content_hash}`.
 
-1. Load mapping config
-2. Open source CSV from archive
-3. Generate entities via ftm-mapping
-4. Write entities to journal with origin `mapping:{content_hash}`
-
-**Side effects:**
-
-- Sets `journal/last_updated` tag
-- Sets `mappings/{content_hash}/last_processed` tag
+**Side effects:** sets `journal/last_updated` and `mappings/{content_hash}/last_processed`.
 
 ---
 
@@ -186,176 +150,100 @@ CSV-to-entity transformation configurations.
 
 Key-value store for freshness tracking and tenant-specific runtime data.
 
-### Tenant usage
-
-Tenants identify themselves (usually by app name) to get a namespace. Tags are tenant-exclusive. To notify other tenants (especially the lakehouse), use the queue.
-
 ### Core tags
 
 | Tag | Set by | Meaning |
 |-----|--------|---------|
 | `journal/last_updated` | Statement writes | Journal has uncommitted data |
-| `journal/last_flushed` | Flush operation | Journal was flushed (even if empty) |
-| `statements/last_updated` | Flush operation | Parquet store was updated (when data was flushed) |
-| `statements/store_optimized` | Optimize operation | Delta Lake files were compacted |
+| `journal/last_flushed` | Flush operation | Journal was flushed |
+| `statements/last_updated` | Flush operation | Parquet store was updated |
+| `statements/last_compacted` | Compact operation | Parquet files were bin-packed |
+| `statements/last_merged` | Merge operation | Per-partition dedup + tombstone reaping ran |
+| `statements/last_vacuumed` | Vacuum operation | Obsolete parquet files were deleted |
 | `archive/last_updated` | File archive | New file was archived |
-| `exports/statements` | Export operation | statements.csv was regenerated |
-| `exports/entities_json` | Export operation | entities.ftm.json was regenerated |
-| `exports/statistics` | Export operation | statistics.json was regenerated |
-| `operations/crawl/last_run` | Crawl operation | Last crawl execution timestamp |
-| `mappings/{hash}/last_processed` | Mapping operation | Last mapping execution for specific CSV |
+| `exports/statements` | Export operation | `statements.csv` was regenerated |
+| `exports/entities_json` | Export operation | `entities.ftm.json` was regenerated |
+| `exports/statistics` | Export operation | `statistics.json` was regenerated |
+| `operations/crawl/last_run` | Crawl operation | Last crawl execution |
+| `mappings/{hash}/last_processed` | Mapping operation | Last mapping execution for a specific CSV |
 
 ### Freshness check
 
-`is_latest(key, dependencies)` returns True if `key` timestamp > all `dependencies` timestamps.
-
-Used to skip unnecessary recomputation. Export operations also check `journal/last_updated` to ensure unflushed data is processed.
+`is_latest(key, dependencies)` returns `True` if the `key` timestamp is newer than all `dependencies` timestamps. Used to skip unnecessary recomputation in export operations.
 
 ---
 
 ## Queue
 
 !!! note "Future feature"
-    The queue infrastructure exists but is not actively used in current operations. Direct repository calls are used instead.
-
-CRUD action queue for async processing and cross-tenant notifications.
-
-### Purpose
-
-- Notify the lakehouse to perform actions
-- Decouple write operations from expensive computations
-- Enable async/background processing
-
-### Actions
-
-| Action | Resource | Effect |
-|--------|----------|--------|
-| UPSERT | entity | Add/update entity in store |
-| DELETE | entity | Remove entity from store |
-| UPSERT | file | Archive file |
-| DELETE | file | Remove file from archive |
-
-### Processing
-
-Queue items are ordered by UUID7 (time-based). Consumers pop items and execute corresponding operations.
+    The queue infrastructure exists but isn't actively used in current operations. Direct repository calls are used instead.
 
 ---
 
 ## Internal operations
 
-These are triggered by the lakehouse, not directly by tenants.
+### Flush (journal → parquet)
 
-### Flush (journal → parquet + translog)
-
-**Trigger:** Explicit call or automatic before query/export via `ensure_flush()`
+**Trigger:** explicit call.
 
 **Process:**
 
-1. Read statements from journal ordered by (bucket, origin, canonical_id)
-2. Build a temp table of existing statement IDs from the main parquet table
-3. For each batch, split into three categories:
-    - **New statements** (not in main table): append to main parquet + insert into translog
-    - **Duplicate statements** (already in main table): update translog `last_seen` only
-    - **Tombstones** (deleted_at set): update translog `deleted_at` only
-4. Clear flushed entries from journal
+1. Iterate the journal via `flush_statements()` – yields `StatementRow` ordered by shard.
+2. For each shard, accumulate rows into a `pa.Table` matching `SHARDED_SCHEMA`, then call `ParquetStore.append(batch)`, which splits by bucket and writes one parquet file per `(shard, bucket, origin)` partition.
+3. Tombstones (rows with `deleted_at`) get their `last_seen` bumped to the delete timestamp so they win the merge tiebreak against the live row they replace.
 
-**Returns:** Number of new statements written to the main table (duplicates and tombstones return 0)
+**Side effects:** sets `journal/last_flushed`, `statements/last_updated`.
 
-**Side effects:**
+**Returns:** number of statements written.
 
-- Always sets `journal/last_flushed` tag
-- Sets `statements/last_updated` tag (only if data was flushed)
+### Compact (cheap bin-pack)
 
-### Compact (apply translog to main table)
+**Trigger:** explicit call.
 
-**Trigger:** Explicit call
+**Process:** for each `(shard, bucket, origin)` partition, run Delta's `OPTIMIZE compact` to merge small files into larger ones. Does not change row contents.
 
-**Process:**
+**Side effects:** sets `statements/last_compacted`. Held under the dataset write fence.
 
-1. Join main table with translog, keeping only live rows (`deleted_at IS NULL`)
-2. Overwrite main table with the result (accurate `first_seen`/`last_seen` from translog, deleted rows removed)
-3. Remove deleted entries from translog
+### Merge (expensive per-partition rewrite)
 
-After compact, the main table is self-contained. This is a destructive operation — it rewrites the main table.
+**Trigger:** explicit call.
 
-!!! note
-    Compaction is optional. The translog join handles filtering automatically during queries. Compact when you want to reclaim space or produce a standalone table.
+**Process:** for each `(shard, bucket, origin)` partition, run a DuckDB streaming query that:
 
-### Optimize (compact parquet files)
+- keeps the row with the latest `last_seen` per `id` (`ROW_NUMBER`),
+- folds `first_seen` to the minimum across the id-group (`MIN(first_seen) OVER`),
+- drops tombstones whose `deleted_at` is older than the grace cutoff,
+- writes the result back via `write_deltalake(mode="overwrite", predicate=…)` scoped to that partition.
 
-**Trigger:** Explicit call
+**Side effects:** sets `statements/last_merged`. Held under the dataset write fence.
 
-**Process:**
+### Vacuum
 
-1. Compact small parquet files in Delta Lake
-2. Optionally vacuum old file versions
+**Trigger:** explicit call.
 
-**Side effects:**
+**Process:** Delta `VACUUM` – deletes parquet files no longer referenced in the Delta log (those tombstoned by `merge` / `compact`).
 
-- Sets `statements/store_optimized` tag
+**Side effects:** sets `statements/last_vacuumed`. Held under the dataset write fence.
 
 ### Export statements (parquet → CSV)
 
-**Trigger:** Part of make() or explicit call
+**Freshness check:** skip if `exports/statements` newer than `statements/last_updated` and `journal/last_updated`.
 
-**Freshness check:** Skip if `exports/statements` > (`statements/last_updated`, `journal/last_updated`)
+**Process:** stream statements from the parquet store via DuckDB; write sorted CSV to `exports/statements.csv`.
 
-**Auto-flush:** Calls `ensure_flush()` to flush journal if `journal/last_flushed` < `journal/last_updated`
-
-**Process:**
-
-1. Query all statements via DuckDB
-2. Write sorted, deduplicated CSV to `exports/statements.csv`
-
-**Side effects:**
-
-- Sets `exports/statements` tag
+**Side effects:** sets `exports/statements`.
 
 ### Export entities (parquet → JSON)
 
-**Trigger:** Part of make() or explicit call
-
-**Freshness check:** Skip if `exports/entities_json` > (`statements/last_updated`, `journal/last_updated`)
-
-**Auto-flush:** Calls `ensure_flush()` to flush journal if needed
-
-**Process:**
-
-1. Query parquet store
-2. Aggregate statements into entities
-3. Write to `entities.ftm.json`
-
-**Side effects:**
-
-- Sets `exports/entities_json` tag
+Same shape as export-statements but aggregates statements into entities and writes `entities.ftm.json`. Sets `exports/entities_json`.
 
 ### Export statistics
 
-**Trigger:** Part of make() or explicit call
-
-**Freshness check:** Skip if `exports/statistics` > (`statements/last_updated`, `journal/last_updated`)
-
-**Auto-flush:** Calls `ensure_flush()` to flush journal if needed
-
-**Process:**
-
-1. Compute entity counts, schema distribution from parquet store
-2. Write versioned `exports/statistics.json`
-
-**Side effects:**
-
-- Sets `exports/statistics` tag
+Computes entity counts and schema distribution; writes versioned `exports/statistics.json`. Sets `exports/statistics`.
 
 ### Export index
 
-**Trigger:** Explicit call by tenant
-
-**Process:**
-
-1. Ensure flush if needed
-2. Optionally export statements.csv, entities.ftm.json, statistics.json
-3. Create index.json with dataset metadata and resource links
-4. Store versioned copy
+Ensures flush, optionally runs the other exports, writes `index.json` with dataset metadata and resource links, stores a versioned copy.
 
 ---
 
@@ -363,25 +251,11 @@ After compact, the main table is self-contained. This is a destructive operation
 
 Batch file ingestion from a source location.
 
-**Input:** Source URI, optional filters (prefix, glob, exclude patterns)
+**Input:** source URI, optional filters (prefix, glob, exclude patterns).
 
-**Process:**
+**Process:** iterate matching files; per file archive the blob, create a `Document` entity, write it to the journal.
 
-1. Create CrawlJob record
-2. Iterate source files matching filters
-3. For each file:
-   - Skip if exists and skip_existing=True
-   - Archive file (sets `archive/last_updated`)
-   - Create Document entity
-   - Write to journal (sets `journal/last_updated`)
-4. Update job statistics
-
-**Side effects:**
-
-- Sets `archive/last_updated` tag (per file)
-- Sets `journal/last_updated` tag (per file)
-- Sets `operations/crawl/last_run` tag
-- Creates job run record
+**Side effects:** sets `archive/last_updated`, `journal/last_updated`, `operations/crawl/last_run`. Creates a job run record.
 
 ---
 
@@ -395,8 +269,12 @@ flowchart TD
     AR --> |"create Document"| B
 
     B --> |"flush()"| C[(Parquet Store)]
-    B --> |"flush()"| SC[(Translog)]
-    SC --> |"timestamps + deletes"| C
+    A3[Tenant bulk imports] --> |"EntityBuffer + write_statements"| C
+
+    C --> |"merge()"| C
+    C --> |"compact()"| C
+    C --> |"vacuum()"| C
+
     C --> |"export_statements()"| D[statements.csv]
     C --> |"export_entities()"| E[entities.ftm.json]
     C --> |"export_statistics()"| F[statistics.json]
@@ -405,22 +283,18 @@ flowchart TD
     B -.-> T1[journal/last_updated]
     B -.-> T1b[journal/last_flushed]
     C -.-> T2[statements/last_updated]
+    C -.-> T2a[statements/last_compacted]
+    C -.-> T2b[statements/last_merged]
+    C -.-> T2c[statements/last_vacuumed]
     D -.-> T3[exports/statements]
     E -.-> T4[exports/entities_json]
     F -.-> T5[exports/statistics]
 
     classDef tag fill:#f9f,stroke:#333,stroke-width:1px
     classDef storage fill:#69b,stroke:#333,stroke-width:2px,color:#fff
-    class T0,T1,T1b,T2,T3,T4,T5 tag
-    class B,C,SC,AR storage
+    class T0,T1,T1b,T2,T2a,T2b,T2c,T3,T4,T5 tag
+    class B,C,AR storage
 ```
-
-Each export operation:
-
-1. Checks freshness against `statements/last_updated` AND `journal/last_updated`
-2. Calls `ensure_flush()` which flushes journal if `journal/last_flushed` < `journal/last_updated`
-3. Executes the export
-4. Sets its own tag
 
 ---
 
@@ -434,9 +308,9 @@ lakehouse/
 │   └── YYYY/MM/{timestamp}/
 │
 └── {dataset}/
-    ├── config.yml                # Dataset configuration
+    ├── config.yml                # Dataset configuration (incl. `shards: N`)
     ├── index.json                # Dataset index with statistics
-    ├── .LOCK                     # Dataset-wide lock
+    ├── .LOCK                     # Dataset-wide write fence
     │
     ├── archive/                  # Content-addressed file storage
     │   └── {ch[0:2]}/{ch[2:4]}/{ch[4:6]}/{checksum}/
@@ -445,38 +319,30 @@ lakehouse/
     │       └── {origin}.txt      # Extracted text (one per engine)
     │
     ├── entities/
-    │   ├── statements/           # Delta Lake parquet store (immutable FtM data)
-    │   │   └── origin={origin}/
-    │   │       └── *.parquet
-    │   └── translog/              # Translog metadata table (mutable)
-    │       └── *.parquet         # Tracks first_seen, last_seen, deleted_at per statement
+    │   └── statements/           # Delta Lake parquet store
+    │       ├── _delta_log/
+    │       └── shard={hex}/bucket={bucket}/origin={origin}/*.parquet
     │
     ├── entities.ftm.json         # Aggregated entities export
     │
     ├── mappings/                 # Mapping configurations
     │   └── {content_hash}/
     │       ├── mapping.yml
-    │       └── versions/         # Versioned mapping snapshots
+    │       └── versions/
     │
     ├── exports/
     │   ├── statements.csv        # Sorted statements export
     │   ├── statistics.json       # Entity counts, facets
+    │   ├── documents.csv         # Document metadata
     │   └── graph.cypher          # Neo4j export (optional)
     │
     ├── versions/                 # Versioned dataset snapshots
     │   └── YYYY/MM/{timestamp}/
-    │       └── {filename}
-    │
-    ├── locks/{tenant}/           # Operation-specific locks
     │
     ├── tags/{tenant}/            # Freshness tags (workflow state)
-    │   └── {key}
     │
     ├── queue/{tenant}/           # CRUD action queue (future)
-    │   └── {uuid7}.json
     │
     └── jobs/
-        └── runs/                 # Job run records
-            └── {job_type}/
-                └── {timestamp}.json
+        └── runs/{job_type}/{timestamp}.json
 ```

@@ -32,35 +32,26 @@ def _to_iso(value: str | datetime | None) -> str:
     return value.isoformat()
 
 
-def serialize_row(row: dict[str, str | datetime | None]) -> bytes:
-    parts = [
-        row["id"],
-        row["bucket"],
-        row["origin"],
-        row["canonical_id"],
-        row["data"],
-        _to_iso(row["deleted_at"]),
-    ]
-    return orjson.dumps(parts)
+def serialize_row(row: JournalRow) -> bytes:
+    return orjson.dumps([row.id, row.shard, row.data, _to_iso(row.deleted_at)])
 
 
-def serialize_rows(rows: list[dict]) -> bytes:
-    """Serialize journal row dicts as JSONL."""
+def serialize_rows(rows: JournalRows) -> bytes:
+    """Serialize journal rows as JSONL."""
     return b"\n".join(map(serialize_row, rows))
 
 
 def deserialize_row(line: str) -> JournalRow:
     """Deserialize a JSONL line into a JournalRow."""
-    id, bucket, origin, canonical_id, data, deleted_at = orjson.loads(line)
-    return id, bucket, origin, canonical_id, data, _from_iso(deleted_at)
+    id, shard, data, deleted_at = orjson.loads(line)
+    return JournalRow(id, shard, data, _from_iso(deleted_at))
 
 
 class ApiJournalWriter(BaseJournalWriter["ApiJournalStore"]):
     def _upsert_batch(self) -> None:
-        if not self.batch:
+        if not self._buffer_size:
             return
-        payload = serialize_rows(list(self.batch.values()))
-        self.batch = {}
+        payload = serialize_rows(self.flush_rows())
         url = self.store._make_url("bulk")
         self.store._api.make_request(
             url,

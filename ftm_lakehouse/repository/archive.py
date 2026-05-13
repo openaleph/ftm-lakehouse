@@ -236,7 +236,13 @@ class ArchiveRepository(BaseRepository):
         self._files.delete(file.meta_path)
 
     def put_txt(self, checksum: str, text: str, origin: str = DEFAULT_ORIGIN) -> None:
-        """Store extracted text for a file."""
+        """Store extracted text for a file.
+
+        Raises:
+            ValueError: If ``checksum`` is not a valid SHA256 hex digest or
+                ``origin`` is not a safe path component
+                (see :func:`ftm_lakehouse.util.validate_origin`).
+        """
         origin = origin or DEFAULT_ORIGIN
         key = path.archive_txt(checksum, origin)
         self._txts.put(key, text)

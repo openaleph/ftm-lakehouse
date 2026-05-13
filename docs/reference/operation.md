@@ -109,18 +109,50 @@ Process CSV-to-entity mapping configurations.
         heading_level: 3
         show_root_heading: true
 
-## OptimizeOperation
+## Maintenance Operations
 
-Compact Delta Lake parquet files and optionally apply translog to main table.
+Three independent async operations on the parquet statement store. All three acquire the dataset-wide write fence (`.LOCK`).
 
-::: ftm_lakehouse.operation.optimize.OptimizeJob
+### CompactOperation
+
+Bin-pack small parquet files within each `(shard, bucket, origin)` partition (Delta `OPTIMIZE compact`). Cheap; does not change row contents.
+
+::: ftm_lakehouse.operation.maintenance.CompactJob
     options:
-        heading_level: 3
+        heading_level: 4
         show_root_heading: true
 
-::: ftm_lakehouse.operation.OptimizeOperation
+::: ftm_lakehouse.operation.CompactOperation
     options:
-        heading_level: 3
+        heading_level: 4
+        show_root_heading: true
+
+### MergeOperation
+
+Per-partition rewrite that collapses duplicates (latest `last_seen` per id), folds `first_seen` to the min, and drops tombstones older than the grace cutoff (`LAKEHOUSE_GRACE_PERIOD_DAYS`).
+
+::: ftm_lakehouse.operation.maintenance.MergeJob
+    options:
+        heading_level: 4
+        show_root_heading: true
+
+::: ftm_lakehouse.operation.MergeOperation
+    options:
+        heading_level: 4
+        show_root_heading: true
+
+### VacuumOperation
+
+Delete obsolete parquet files no longer referenced by the Delta log.
+
+::: ftm_lakehouse.operation.maintenance.VacuumJob
+    options:
+        heading_level: 4
+        show_root_heading: true
+
+::: ftm_lakehouse.operation.VacuumOperation
+    options:
+        heading_level: 4
         show_root_heading: true
 
 ## MakeOperation
@@ -133,20 +165,6 @@ Full workflow: flush journal + all exports.
         show_root_heading: true
 
 ::: ftm_lakehouse.operation.MakeOperation
-    options:
-        heading_level: 3
-        show_root_heading: true
-
-## RecreateOperation
-
-Repair corrupted datasets from exported files.
-
-::: ftm_lakehouse.operation.recreate.RecreateJob
-    options:
-        heading_level: 3
-        show_root_heading: true
-
-::: ftm_lakehouse.operation.recreate.RecreateOperation
     options:
         heading_level: 3
         show_root_heading: true

@@ -35,14 +35,15 @@ class DatasetConfig:
 
 ARCHIVE = DatasetConfig(
     recordsize="128K",
-    compression="zstd",
-    sync="disabled",
+    compression="zstd-9",
 )
 
 STATEMENTS = DatasetConfig(
     recordsize="1M",
-    compression="lz4",
-    sync="standard",
+    # Parquet already compresses (ftmq WRITER_SMALL/WRITER_LARGE use ZSTD).
+    # ZFS-level compression on top burns CPU per block and almost never
+    # shrinks anything further on high-entropy parquet output.
+    compression="off",
 )
 
 PARENT_PROPS = {

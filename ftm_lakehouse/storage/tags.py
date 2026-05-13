@@ -6,7 +6,7 @@ from typing import Iterable, Literal
 from anystore.interface.tags import Tags as AnyTags
 from anystore.store import Store, get_store
 from anystore.types import Uri
-from anystore.util import join_uri
+from anystore.util import join_uri, mask_uri
 
 from ftm_lakehouse.core.conventions import path
 
@@ -58,4 +58,4 @@ class TagStore(AnyTags):
         return ts
 
     def __repr__(self) -> str:
-        return f"<{self.__class__.__name__}({self.store.uri})>"
+        return f"<{self.__class__.__name__}({mask_uri(self.store.uri)})>"

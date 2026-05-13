@@ -8,7 +8,7 @@ This specification defines a data lake structure for use with [OpenAleph](https:
 ## Core concepts
 
 - `Datasets` are logical units of source data, often representing a data origin, such as an official register or publication, or a leak of documents.
-- `Data catalogs` are index files that help make indiviudal datasets more easily discoverable.
+- `Data catalogs` are index files that help make individual datasets more easily discoverable.
 - `Entity files` are data files in which individual [FollowTheMoney](https://followthemoney.tech) entities are stored in a ready-to-index form, ie. they've been aggregated from fragments or statements. An indexer may need to add authorization information and apply denormalisations as needed.
 - `Archive objects` are files that represent source or intermediate document formats used in document forensics. They're referenced from FtM entities via their SHA1 content checksum.
 

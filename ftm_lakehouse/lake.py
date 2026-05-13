@@ -22,18 +22,19 @@ mappings = lake.get_mappings("my_data")
 ```
 """
 
+from functools import lru_cache
 from typing import Any
 
-from anystore.functools import weakref_cache as cache
 from anystore.logging import get_logger
 from anystore.types import Uri
-from anystore.util import ensure_uri
+from anystore.util import ensure_uri, mask_uri
 
 from ftm_lakehouse.catalog import Catalog
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.dataset import DM, Dataset
 from ftm_lakehouse.model import DatasetModel
 from ftm_lakehouse.repository.factories import (
+    LRU_MAX,
     get_archive,
     get_entities,
     get_mappings,
@@ -42,7 +43,7 @@ from ftm_lakehouse.repository.factories import (
 log = get_logger(__name__)
 
 
-@cache
+@lru_cache(maxsize=LRU_MAX)
 def get_lakehouse(
     uri: Uri | None = None,
     model_class: type[DM] = DatasetModel,
@@ -59,7 +60,7 @@ def get_lakehouse(
     """
     settings = Settings()
     storage_uri = ensure_uri(uri or settings.uri)
-    log.info("Loading catalog", uri=storage_uri)
+    log.info("Loading catalog", uri=mask_uri(storage_uri))
     return Catalog(uri=storage_uri, model_class=model_class)
 
 

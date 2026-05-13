@@ -7,6 +7,7 @@ import httpx
 from anystore.logic.uri import join_uri
 from anystore.store.resource import UriResource
 from anystore.types import Uri
+from anystore.util import mask_uri
 from fsspec.config import conf as fsspec_conf
 
 from ftm_lakehouse.core.settings import Settings, __version__
@@ -17,8 +18,9 @@ USER_AGENT = f"ftm-lakehouse/{__version__}"
 
 _default_headers: dict[str, str] = {"User-Agent": USER_AGENT}
 _settings = Settings()
-if _settings.api_key:
+if _settings.api_key and _settings.api_secret:
     _default_headers["X-Api-Key"] = _settings.api_key
+    _default_headers["X-Api-Secret"] = _settings.api_secret
 
 # Set default headers for all ApiFileSystem (anystore+http[s]) instances
 _fsspec_client_kwargs = {"headers": _default_headers}
@@ -41,7 +43,7 @@ class LakehouseApi(UriResource):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         if not self.is_http:
-            raise RuntimeError(f"Lakehouse api uri is not http: `{self.uri}`")
+            raise RuntimeError(f"Lakehouse api uri is not http: `{mask_uri(self.uri)}`")
         self.client = httpx.Client(
             timeout=httpx.Timeout(timeout=3600.0 * 6),
             headers=_default_headers,

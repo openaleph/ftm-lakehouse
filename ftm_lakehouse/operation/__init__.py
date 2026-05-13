@@ -23,6 +23,7 @@ from ftm_lakehouse.operation.export import (
     ExportStatisticsOperation,
 )
 from ftm_lakehouse.operation.factories import (
+    compact,
     download_archive,
     export_documents,
     export_entities,
@@ -30,16 +31,21 @@ from ftm_lakehouse.operation.factories import (
     export_statements,
     export_statistics,
     make,
-    optimize,
-    recreate,
+    merge,
     run_mapping,
+    vacuum,
+)
+from ftm_lakehouse.operation.maintenance import (
+    CompactOperation,
+    MergeOperation,
+    VacuumOperation,
 )
 from ftm_lakehouse.operation.make import MakeJob, MakeOperation
 from ftm_lakehouse.operation.mapping import MappingOperation
-from ftm_lakehouse.operation.optimize import OptimizeOperation
 
 __all__ = [
     # Operations
+    "CompactOperation",
     "CrawlOperation",
     "DownloadArchiveOperation",
     "ExportDocumentsOperation",
@@ -50,8 +56,10 @@ __all__ = [
     "MakeJob",
     "MakeOperation",
     "MappingOperation",
-    "OptimizeOperation",
+    "MergeOperation",
+    "VacuumOperation",
     # Factory functions
+    "compact",
     "crawl",
     "download_archive",
     "export_documents",
@@ -60,7 +68,7 @@ __all__ = [
     "export_statements",
     "export_statistics",
     "make",
-    "optimize",
-    "recreate",
+    "merge",
     "run_mapping",
+    "vacuum",
 ]

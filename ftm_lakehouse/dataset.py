@@ -148,12 +148,12 @@ class Dataset(Generic[DM]):
     @cached_property
     def entities(self) -> EntityRepository:
         """Entity/statement operations."""
-        return EntityRepository(self.name, self.uri)
+        return EntityRepository(self.name, self.uri, shards=self.model.shards)
 
     @cached_property
     def documents(self) -> DocumentRepository:
         """Document metadata operations."""
-        return DocumentRepository(self.name, self.uri)
+        return DocumentRepository(self.name, self.uri, shards=self.model.shards)
 
     @cached_property
     def mappings(self) -> MappingRepository:

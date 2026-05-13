@@ -46,18 +46,25 @@ A statement represents a single fact: one property value for one entity from one
 This statement-based storage model makes it possible to merge data from multiple sources while preserving full provenance, perform incremental updates without reprocessing entire datasets, and use standard file-based tools (sorting, filtering) rather than requiring database infrastructure.
 
 ```python
-from ftm_lakehouse import lake
+from ftm_lakehouse import get_dataset, ensure_dataset
 
-# Write entities
-lake.write_entities("my_dataset", entities, origin="import")
+dataset = ensure_dataset("my_dataset")
 
-# Read an entity
-entity = lake.get_entity("my_dataset", "entity-id-123")
+# Write entities through the journal (buffered, then flushed to parquet)
+with dataset.entities.writer(origin="import") as writer:
+    for entity in entities:
+        writer.add_entity(entity)
+dataset.entities.flush()
 
-# Query entities
-for entity in lake.iterate_entities("my_dataset", origin="crawl"):
+# Read back
+entity = dataset.entities.get("entity-id-123")
+
+# Live query of the parquet store
+for entity in dataset.entities.query(origin="crawl"):
     process(entity)
 ```
+
+The parquet statement store is partitioned by `(shard, bucket, origin)` and written append-only on the hot path. Three async maintenance ops collapse the redundancy – `compact` (file bin-pack), `merge` (per-partition dedup + tombstone reaping), `vacuum` (drop obsolete files) – all coordinated by a dataset-wide write fence.
 
 ### Archive
 
