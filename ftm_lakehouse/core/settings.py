@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     zfs_pool: str | None = None
     zfs_socket: str | None = None
     zfs_owner: str | None = None
+    zfs_allowed_uid: int | None = None
 
     entity_shards: int = 0
     grace_period_days: int = 30

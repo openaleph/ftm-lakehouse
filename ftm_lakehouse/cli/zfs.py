@@ -48,6 +48,18 @@ def cli_zfs_agent(
             help="uid:gid to chown new mountpoints to (or set LAKEHOUSE_ZFS_OWNER)",
         ),
     ] = None,
+    allowed_uid: Annotated[
+        Optional[int],
+        typer.Option(
+            "--allowed-uid",
+            help=(
+                "Only accept connections from this UID (checked via "
+                "SO_PEERCRED). Defaults to the agent's own UID, i.e. only "
+                "the user running the agent can call it. Override to "
+                "grant a different client UID (e.g. the container user)."
+            ),
+        ),
+    ] = None,
 ):
     """Start a ZFS socket agent for container-based deployments.
 
@@ -71,15 +83,32 @@ def cli_zfs_agent(
         )
         raise typer.Exit(code=1)
 
+    if allowed_uid is None:
+        allowed_uid = (
+            settings.zfs_allowed_uid
+            if settings.zfs_allowed_uid is not None
+            else os.getuid()
+        )
+
     if os.path.exists(sock_path):
         os.unlink(sock_path)
 
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(sock_path)
-    os.chmod(sock_path, 0o666)
+    # Socket is owner-only; peer-credential check below provides the
+    # authoritative auth, but we tighten the filesystem ACL as a first
+    # line of defence (and so other-readable / world-writable sockets
+    # don't get silently created in shared deployments).
+    os.chmod(sock_path, 0o600)
     server.listen(5)
 
-    log.info("zfs-agent listening", socket=sock_path, pool=zfs_pool, owner=zfs_owner)
+    log.info(
+        "zfs-agent listening",
+        socket=sock_path,
+        pool=zfs_pool,
+        owner=zfs_owner,
+        allowed_uid=allowed_uid,
+    )
 
     def _shutdown(_signum, _frame):
         log.info("Shutting down zfs-agent")
@@ -94,7 +123,7 @@ def cli_zfs_agent(
     try:
         while True:
             conn, _ = server.accept()
-            handle_connection(conn, zfs_pool, zfs_owner)
+            handle_connection(conn, zfs_pool, zfs_owner, allowed_uid)
     finally:
         server.close()
         if os.path.exists(sock_path):

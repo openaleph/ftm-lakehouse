@@ -1,3 +1,4 @@
+import os
 import socket
 import threading
 from unittest.mock import patch
@@ -6,6 +7,7 @@ import orjson
 import pytest
 
 from ftm_lakehouse.core.zfs.agent import (
+    get_peer_uid,
     handle_connection,
     handle_request,
     validate_dataset,
@@ -166,6 +168,74 @@ class TestHandleConnection:
             response = orjson.loads(client.makefile().readline())
             assert response["ok"] is False
             assert "invalid JSON" in response["error"]
+        finally:
+            client.close()
+
+
+class TestPeerAuth:
+    """SO_PEERCRED-based peer authentication on the ZFS socket."""
+
+    def test_get_peer_uid_returns_current_uid(self):
+        """A socketpair has both ends in this process, so the reported
+        peer UID is ours."""
+        a, b = _make_socketpair()
+        try:
+            assert get_peer_uid(a) == os.getuid()
+            assert get_peer_uid(b) == os.getuid()
+        finally:
+            a.close()
+            b.close()
+
+    @patch("ftm_lakehouse.core.zfs.agent.zfs_create_local")
+    def test_handle_connection_accepts_matching_uid(self, _mock_create):
+        client, server_conn = _make_socketpair()
+        try:
+            request = orjson.dumps({"action": "create", "dataset": "tank/ds"})
+            client.sendall(request + b"\n")
+            client.shutdown(socket.SHUT_WR)
+
+            handle_connection(server_conn, None, allowed_uid=os.getuid())
+
+            response = orjson.loads(client.makefile().readline())
+            assert response["ok"] is True
+        finally:
+            client.close()
+
+    @patch("ftm_lakehouse.core.zfs.agent.zfs_create_local")
+    def test_handle_connection_rejects_mismatched_uid(self, mock_create):
+        """A UID different from the connecting process is rejected
+        without ever reaching ``zfs_create_local``."""
+        client, server_conn = _make_socketpair()
+        try:
+            request = orjson.dumps({"action": "create", "dataset": "tank/ds"})
+            client.sendall(request + b"\n")
+            client.shutdown(socket.SHUT_WR)
+
+            # Pick a UID that is definitely not ours.
+            wrong_uid = os.getuid() + 99999
+            handle_connection(server_conn, None, allowed_uid=wrong_uid)
+
+            response = orjson.loads(client.makefile().readline())
+            assert response["ok"] is False
+            assert "unauthorized peer uid" in response["error"]
+            mock_create.assert_not_called()
+        finally:
+            client.close()
+
+    @patch("ftm_lakehouse.core.zfs.agent.zfs_create_local")
+    def test_handle_connection_skips_auth_when_unset(self, _mock_create):
+        """``allowed_uid=None`` disables the check (back-compat for the
+        existing socket-integration tests and for non-Linux fall-back)."""
+        client, server_conn = _make_socketpair()
+        try:
+            request = orjson.dumps({"action": "create", "dataset": "tank/ds"})
+            client.sendall(request + b"\n")
+            client.shutdown(socket.SHUT_WR)
+
+            handle_connection(server_conn, None, allowed_uid=None)
+
+            response = orjson.loads(client.makefile().readline())
+            assert response["ok"] is True
         finally:
             client.close()
 

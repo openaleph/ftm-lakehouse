@@ -2,6 +2,7 @@
 
 import re
 import socket
+import struct
 
 import orjson
 from anystore.logging import get_logger
@@ -13,6 +14,24 @@ log = get_logger(__name__)
 
 
 _ZFS_COMPONENT_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+
+# Linux SO_PEERCRED returns a ``struct ucred`` { pid_t pid; uid_t uid; gid_t gid; }
+# – three 32-bit ints in native byte order.
+_SO_PEERCRED = 17  # socket.SO_PEERCRED on Linux
+_UCRED_FMT = "iII"
+
+
+def get_peer_uid(conn: socket.socket) -> int:
+    """Return the UID of the peer process at the other end of ``conn``.
+
+    Uses Linux's ``SO_PEERCRED`` on the Unix-domain socket. Raises
+    ``OSError`` if the platform doesn't support it (e.g. macOS uses
+    ``LOCAL_PEERCRED`` with a different layout – the agent is Linux-only
+    per the deployment docs, so we don't bother shimming).
+    """
+    buf = conn.getsockopt(socket.SOL_SOCKET, _SO_PEERCRED, struct.calcsize(_UCRED_FMT))
+    _pid, uid, _gid = struct.unpack(_UCRED_FMT, buf)
+    return uid
 
 
 def validate_dataset(dataset: str, allowed_pool: str | None) -> str | None:
@@ -75,10 +94,41 @@ def handle_request(
 
 
 def handle_connection(
-    conn: socket.socket, allowed_pool: str | None, owner: str | None = None
+    conn: socket.socket,
+    allowed_pool: str | None,
+    owner: str | None = None,
+    allowed_uid: int | None = None,
 ) -> None:
-    """Read one JSON line from a connection, process it, write the response."""
+    """Read one JSON line from a connection, process it, write the response.
+
+    When ``allowed_uid`` is set, the connecting process's UID (via
+    ``SO_PEERCRED``) is checked first. Any other UID is rejected without
+    touching ``zfs create``. ``None`` disables the check – useful in
+    unit tests where the agent's caller is by definition the test process.
+    """
     try:
+        if allowed_uid is not None:
+            try:
+                peer_uid = get_peer_uid(conn)
+            except OSError as e:
+                log.warning("SO_PEERCRED unavailable; rejecting peer", error=str(e))
+                conn.sendall(
+                    orjson.dumps({"ok": False, "error": "peer auth failed"}) + b"\n"
+                )
+                return
+            if peer_uid != allowed_uid:
+                log.warning(
+                    "Rejected ZFS agent peer",
+                    peer_uid=peer_uid,
+                    allowed_uid=allowed_uid,
+                )
+                conn.sendall(
+                    orjson.dumps(
+                        {"ok": False, "error": f"unauthorized peer uid {peer_uid}"}
+                    )
+                    + b"\n"
+                )
+                return
         line = conn.makefile().readline()
         if not line:
             log.debug("Empty request, closing connection")
