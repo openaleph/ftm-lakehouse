@@ -1,7 +1,6 @@
 from anystore.exceptions import DoesNotExist
 from anystore.io import smart_read
 from anystore.settings import BaseSettings
-from anystore.types import HttpUrlStr
 from pydantic_settings import SettingsConfigDict
 
 CHECKSUM_ALGORITHM = "sha256"  # never change this! ;)
@@ -72,8 +71,6 @@ class ApiSettings(BaseSettings):
     title: str = "FollowTheMoney Data Lakehouse Api"
     description: str = get_api_doc()
     contact: ApiContactSettings | None = None
-
-    allowed_origins: list[HttpUrlStr] = ["http://localhost:3000"]
 
     static_headers: dict[str, str] = {}
 
