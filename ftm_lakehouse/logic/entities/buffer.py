@@ -1,5 +1,4 @@
 from datetime import datetime
-from typing import Generator, TypeAlias
 
 from followthemoney import EntityProxy, Statement, StatementEntity
 from followthemoney.namespace import Namespace
@@ -7,15 +6,10 @@ from ftmq.store.base import DEFAULT_ORIGIN
 from ftmq.util import ensure_entity
 
 from ftm_lakehouse.core.conventions.path import entity_shard
+from ftm_lakehouse.model.statement import StatementRow, StatementRows
 
 # Entities are never namespaced in ftm-lakehouse
 namespace = Namespace()
-
-# (shard, stmt, deleted_at)
-StatementData: TypeAlias = tuple[str, Statement, datetime | None]
-
-# {stmt_id: (shard, stmt, deleted_at)}
-Buffer: TypeAlias = dict[str, tuple[str, Statement, datetime | None]]
 
 
 class EntityBuffer:
@@ -25,7 +19,7 @@ class EntityBuffer:
         self.dataset: str = dataset
         self.shards: int = shards
         self.origin: str = origin or DEFAULT_ORIGIN
-        self._buffer: Buffer = {}
+        self._buffer: dict[str, StatementRow] = {}
         self._buffer_size: int = 0
 
     def add_statement(
@@ -58,11 +52,8 @@ class EntityBuffer:
             origin=origin,
         )
 
-        if not stmt.id:
-            raise RuntimeError("Missing statement ID!")
-
         shard = entity_shard(stmt.entity_id, self.shards)
-        self._buffer[stmt.id] = (shard, stmt, deleted_at)
+        self._buffer[stmt.id] = StatementRow(shard, stmt, deleted_at)
         self._buffer_size += 1
 
     def add_entity(self, e: EntityProxy, origin: str | None = None) -> None:
@@ -70,13 +61,19 @@ class EntityBuffer:
         entity = ensure_entity(e, StatementEntity, self.dataset)
         for stmt in entity.statements:
             stmt.origin = origin or self.origin or stmt.origin
+            stmt.first_seen = stmt.first_seen or entity.first_seen or entity.last_change
+            stmt.last_seen = stmt.last_seen or entity.last_seen or entity.last_change
             self.add_statement(stmt)
 
-    def flush_buffer(self) -> Generator[StatementData, None, None]:
-        """Yield (shard, stmt, deleted_at) sorted by shard."""
-        for shard, stmt, deleted_at in sorted(
-            self._buffer.values(), key=lambda v: v[0]
-        ):
-            yield shard, stmt, deleted_at
+    def flush_buffer(self) -> StatementRows:
+        """Yield buffered ``StatementRow``s sorted by shard, then clear."""
+        for row in sorted(self._buffer.values(), key=lambda r: r.shard):
+            yield row
         self._buffer = {}
         self._buffer_size = 0
+
+    def __len__(self) -> int:
+        return self._buffer_size
+
+    def __bool__(self) -> bool:
+        return bool(len(self))

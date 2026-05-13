@@ -1,43 +1,61 @@
 """Entity read/write commands for the CLI.
 
-Provides ``write-entities`` (bulk ingest from FtM JSON) and
-``stream-entities`` (export to FtM JSON).
+Provides ``write-entities`` (bulk ingest from FtM JSON, bypassing the
+journal) and ``stream-entities`` (export to FtM JSON).
 """
 
-from typing import Annotated
+from datetime import datetime, timezone
+from typing import Annotated, Optional
 
 from anystore.io import logged_items
 from ftmq.io import smart_read_proxies, smart_write_proxies
 from typer import Option
 
 from ftm_lakehouse.cli import DatasetContext, cli
+from ftm_lakehouse.logic.entities.buffer import EntityBuffer
 
 BULK_ORIGIN = "bulk"
+BULK_SIZE = 1_000_000
 
 
 @cli.command("write-entities")
 def cli_write_entities(
     in_uri: Annotated[str, Option("-i")] = "-",
-    journal: Annotated[bool, Option(help="Write into journal")] = True,
-    flush: Annotated[
-        bool, Option(help="Flush journal to parquet after writing")
-    ] = True,
-    origin: Annotated[str, Option(..., help="Data origin")] = BULK_ORIGIN,
+    origin: Annotated[str, Option(help="Data origin")] = BULK_ORIGIN,
+    bulk_size: Annotated[
+        int,
+        Option(help="Number of statements buffered before flush to parquet."),
+    ] = BULK_SIZE,
+    last_seen: Annotated[
+        Optional[datetime],
+        Option(help="Default last_seen timestamp if entity payload has none"),
+    ] = None,
 ):
-    """Write FtM entities from an input source into the journal or directly into
-    deltalake (--no-journal)."""
+    """Bulk-import FtM entities straight into the parquet store.
+
+    Bypasses the journal — statements go through an in-memory ``EntityBuffer``
+    that pre-sorts by shard, then ``EntityRepository.write_statements`` packs
+    them per-shard into the parquet store. Intended for one-shot loads of
+    large ``entities.ftm.json`` files where journal write-amplification would
+    be wasteful.
+    """
     with DatasetContext() as dataset:
-        with dataset.entities.writer(origin=origin) as writer:
-            for proxy in logged_items(
-                smart_read_proxies(in_uri),
-                "Write",
-                item_name="Entity",
-                logger=dataset._log,
-                journal=dataset.entities._journal.uri,
-            ):
-                writer.add_entity(proxy)
-        if flush:
-            dataset.entities.flush()
+        repo = dataset.entities
+        buffer = EntityBuffer(dataset.name, dataset.model.shards, origin)
+        now = last_seen or datetime.now(timezone.utc)
+
+        for proxy in logged_items(
+            smart_read_proxies(in_uri),
+            "Write",
+            item_name="Entity",
+            logger=dataset._log,
+        ):
+            buffer.add_entity(proxy)
+            if len(buffer) >= bulk_size:
+                repo.write_statements(buffer.flush_buffer(), now=now)
+
+        if buffer:
+            repo.write_statements(buffer.flush_buffer(), now=now)
 
 
 @cli.command("stream-entities")

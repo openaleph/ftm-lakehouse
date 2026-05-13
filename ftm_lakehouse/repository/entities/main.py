@@ -26,7 +26,7 @@ from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.helpers.statements import unpack_statement
 from ftm_lakehouse.logic.entities.aggregate import aggregate_unsafe
 from ftm_lakehouse.logic.parquet import QUERY_IN_BATCH_SIZE
-from ftm_lakehouse.model.statement import SHARDED_SCHEMA
+from ftm_lakehouse.model.statement import SHARDED_SCHEMA, StatementRow
 from ftm_lakehouse.repository.base import BaseRepository
 from ftm_lakehouse.repository.diff import ParquetDiffMixin
 from ftm_lakehouse.repository.entities.api import ApiEntityRepository
@@ -115,9 +115,6 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         with self.writer(origin) as writer:
             for entity in entities:
                 writer.add_entity(entity)
-        # keep journal not too full
-        if self._journal.count() >= 1_000_000:
-            self.flush()
 
     @api_delegate("_api_flush")
     def flush(self) -> int:
@@ -148,39 +145,7 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
             self.log.info("Flushing journal ...", journal=mask_uri(self._journal.uri))
 
             now = datetime.now(timezone.utc)
-            total = 0
-            current_shard: str | None = None
-            buffer: list[dict] = []
-
-            def _flush_buffer() -> None:
-                nonlocal total
-                if not buffer:
-                    return
-                batch = pa.Table.from_pylist(buffer, schema=SHARDED_SCHEMA)
-                self._statements.append(batch)
-                total += len(batch)
-                buffer.clear()
-
-            # The journal yields rows already ordered by ``shard``; stream
-            # per shard so memory is bounded to one shard's worth at a time.
-            # ``ParquetStore.append`` splits each per-shard batch by bucket.
-            for journal_row in self._journal.flush():
-                if current_shard is not None and current_shard != journal_row.shard:
-                    _flush_buffer()
-                current_shard = journal_row.shard
-
-                stmt = unpack_statement(journal_row.data)
-                row = pack_statement(stmt)
-                row["first_seen"] = row.get("first_seen") or now
-                row["deleted_at"] = journal_row.deleted_at
-                # Tombstones bump last_seen to the delete timestamp so they
-                # win the ``ROW_NUMBER() OVER (... ORDER BY last_seen DESC)``
-                # tiebreak in merge() against the live row they replace.
-                row["last_seen"] = row["deleted_at"] or row.get("last_seen", now)
-                row["shard"] = journal_row.shard
-                buffer.append(row)
-
-            _flush_buffer()
+            total = self.write_statements(self._journal.flush_statements(), now=now)
 
             self.log.info(
                 "Flushed statements from journal to lake",
@@ -190,6 +155,70 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
             )
 
             return total
+
+    @no_api
+    def write_statements(
+        self,
+        statements: Iterable[StatementRow],
+        now: datetime | None = None,
+    ) -> int:
+        """Pack and append a shard-sorted stream of statements to the parquet store.
+
+        Input is an iterable of :class:`StatementRow` already ordered by
+        shard — exactly what ``EntityBuffer.flush_buffer()`` and (via
+        ``unpack_statement`` adaptation) ``JournalStore.flush()`` produce.
+        Consecutive rows for the same shard accumulate into one per-shard
+        batch; ``ParquetStore.append`` then splits each batch by bucket and
+        writes one parquet file per partition.
+
+        This is the shared core of:
+        - ``EntityRepository.flush()`` (drains the journal)
+        - bare bulk-import paths in the CLI that bypass the journal entirely
+
+        Tombstones (rows with ``deleted_at`` set) get their ``last_seen``
+        bumped to ``deleted_at`` so they win the ``ROW_NUMBER() OVER (... ORDER
+        BY last_seen DESC)`` tiebreak against the live row in ``merge()``.
+
+        Args:
+            statements: Shard-sorted stream of :class:`StatementRow`.
+            now: Default timestamp for missing ``first_seen`` / ``last_seen``.
+                Defaults to the current UTC time.
+
+        Returns:
+            Number of statements written.
+        """
+        if now is None:
+            now = datetime.now(timezone.utc)
+
+        total = 0
+        current_shard: str | None = None
+        buffer: list[dict] = []
+
+        def _emit() -> None:
+            nonlocal total
+            if not buffer:
+                return
+            batch = pa.Table.from_pylist(buffer, schema=SHARDED_SCHEMA)
+            self._statements.append(batch)
+            total += len(batch)
+            buffer.clear()
+
+        for row in statements:
+            if current_shard is not None and current_shard != row.shard:
+                _emit()
+            current_shard = row.shard
+
+            data = pack_statement(row.stmt)
+            data["first_seen"] = data.get("first_seen") or now
+            data["deleted_at"] = row.deleted_at
+            # Tombstones bump last_seen to the delete timestamp so they win
+            # the ROW_NUMBER ORDER BY last_seen DESC tiebreak in merge().
+            data["last_seen"] = row.deleted_at or data.get("last_seen") or now
+            data["shard"] = row.shard
+            buffer.append(data)
+
+        _emit()
+        return total
 
     @api_delegate("_api_merge")
     def merge(self, grace_period_days: int | None = None) -> None:

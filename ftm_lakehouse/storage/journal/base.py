@@ -6,8 +6,9 @@ from typing import Generator, Generic, NamedTuple, Self, TypeAlias, TypeVar
 from anystore.logging import get_logger
 
 from ftm_lakehouse.core.settings import Settings
-from ftm_lakehouse.helpers.statements import pack_statement
+from ftm_lakehouse.helpers.statements import pack_statement, unpack_statement
 from ftm_lakehouse.logic.entities.buffer import EntityBuffer
+from ftm_lakehouse.model.statement import StatementRow, StatementRows
 
 settings = Settings()
 log = get_logger(__name__)
@@ -49,10 +50,13 @@ class BaseJournalWriter(EntityBuffer, Generic[S]):
         raise NotImplementedError
 
     def flush_rows(self) -> JournalRows:
-        for shard, stmt, deleted_at in self.flush_buffer():
-            if stmt.id is None:  # won't happen
-                raise RuntimeError("No Statement ID!")
-            yield JournalRow(stmt.id, shard, pack_statement(stmt), deleted_at)
+        for row in self.flush_buffer():
+            yield JournalRow(
+                row.stmt.id,
+                row.shard,
+                pack_statement(row.stmt),
+                row.deleted_at,
+            )
 
     def add_statement(self, *args, **kwargs) -> None:
         super().add_statement(*args, **kwargs)
@@ -127,10 +131,22 @@ class BaseJournalStore(Generic[W]):
         This is a destructive read - rows are deleted after being yielded.
         If the consumer raises an exception, the transaction is rolled back.
 
-        Yields:
-            JournalRow(id, shard, data, deleted_at)
+        Yields raw :class:`JournalRow` (``data`` still packed). The
+        HTTP-forwarding API uses this to stream JSONL without
+        unpack-then-repack overhead; the parquet write path uses
+        :meth:`flush_statements` instead.
         """
         raise NotImplementedError
+
+    def flush_statements(self) -> StatementRows:
+        """Destructively iterate as :class:`StatementRow` (data unpacked).
+
+        Thin wrapper over :meth:`flush` for consumers (notably
+        ``EntityRepository.flush``) that want :class:`Statement` objects
+        instead of the packed wire format.
+        """
+        for r in self.flush():
+            yield StatementRow(r.shard, unpack_statement(r.data), r.deleted_at)
 
     def count(self) -> int:
         """Count rows for this dataset."""

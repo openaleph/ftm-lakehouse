@@ -9,7 +9,11 @@ ftmq's ``ARROW_SCHEMA`` (all statement columns), with ``deleted_at`` appended
 as a tombstone marker.
 """
 
+from datetime import datetime
+from typing import Generator, NamedTuple, TypeAlias
+
 import pyarrow as pa
+from followthemoney import Statement
 from ftmq.store.lake import ARROW_SCHEMA
 from nomenklatura import settings as nks
 from sqlalchemy import Boolean, DateTime, TableClause, column, table
@@ -59,3 +63,20 @@ def _sharded_table() -> TableClause:
 
 # singleton
 TABLE = _sharded_table()
+
+
+class StatementRow(NamedTuple):
+    """In-memory statement row passed between the buffer and the parquet writer.
+
+    Shared currency for both flush paths:
+    - ``EntityBuffer.flush_buffer()`` (the bulk-write / direct-to-parquet path)
+    - the journal flush path in ``EntityRepository.flush()``, which adapts
+      each ``JournalRow`` into a ``StatementRow`` via ``unpack_statement``.
+    """
+
+    shard: str
+    stmt: Statement
+    deleted_at: datetime | None = None
+
+
+StatementRows: TypeAlias = Generator[StatementRow, None, None]
