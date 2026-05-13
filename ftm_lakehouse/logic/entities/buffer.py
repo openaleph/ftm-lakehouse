@@ -68,12 +68,12 @@ class EntityBuffer:
         self._buffer_size += 1
 
     def add_entity(self, e: EntityProxy, origin: str | None = None) -> None:
-        entity = namespace.apply(e)
-        entity = ensure_entity(e, StatementEntity, self.dataset)
-        for stmt in entity.statements:
+        e = namespace.apply(e)
+        e = ensure_entity(e, StatementEntity, self.dataset)
+        for stmt in e.statements:
             stmt.origin = origin or self.origin or stmt.origin
-            stmt.first_seen = stmt.first_seen or entity.first_seen or entity.last_change
-            stmt.last_seen = stmt.last_seen or entity.last_seen or entity.last_change
+            stmt.first_seen = stmt.first_seen or e.first_seen or e.last_change
+            stmt.last_seen = stmt.last_seen or e.last_seen or e.last_change
             self.add_statement(stmt)
 
     def flush_buffer(self) -> StatementRows:
