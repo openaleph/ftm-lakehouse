@@ -19,8 +19,8 @@ QUERY_IN_BATCH_SIZE = 5_000
 
 
 def make_duckdb() -> duckdb.DuckDBPyConnection:
-    """Create a DuckDB connection with the configured memory ceiling and
-    spill directory.
+    """Create a DuckDB connection with the configured memory ceiling,
+    spill directory, and auto-loaded extensions.
 
     Per-query memory is bounded by :attr:`Settings.duckdb_memory_limit`
     (env: ``LAKEHOUSE_DUCKDB_MEMORY_LIMIT``, default ``4GB``); queries
@@ -28,9 +28,19 @@ def make_duckdb() -> duckdb.DuckDBPyConnection:
     :attr:`Settings.duckdb_temp_directory`
     (env: ``LAKEHOUSE_DUCKDB_TEMP_DIRECTORY``) when set, otherwise to
     the OS temp directory DuckDB picks by default.
+
+    ``autoinstall_known_extensions`` + ``autoload_known_extensions`` let
+    DuckDB lazy-resolve the Delta extension on the first ``delta_scan``
+    call instead of every :func:`register_view` running an explicit
+    ``INSTALL delta`` / ``LOAD delta``. ``INSTALL`` is idempotent and
+    cached on disk by DuckDB; ``LOAD`` runs at most once per connection.
     """
     settings = Settings()
-    config: dict[str, str] = {"memory_limit": settings.duckdb_memory_limit}
+    config: dict[str, str] = {
+        "memory_limit": settings.duckdb_memory_limit,
+        "autoinstall_known_extensions": "true",
+        "autoload_known_extensions": "true",
+    }
     if settings.duckdb_temp_directory:
         config["temp_directory"] = settings.duckdb_temp_directory
     return duckdb.connect(":memory:", config=config)
@@ -48,18 +58,19 @@ def register_view(
     queries (``WHERE shard = ? AND bucket = ? AND origin = ?``) prune to one
     partition's files automatically.
 
+    The Delta extension is auto-installed and auto-loaded on first
+    ``delta_scan`` use thanks to the connection-level flags set in
+    :func:`make_duckdb`, so this function does not run an explicit
+    ``INSTALL`` / ``LOAD``.
+
     DuckDB's ``delta_scan`` does not accept prepared parameters for its URI
     argument, so the URI is interpolated as a SQL string literal. Single
     quotes are doubled to prevent injection if a future code path lets a
     dataset name (and thus the URI) carry a quote – primary validation is
     in :func:`ftm_lakehouse.util.validate_dataset_name`.
     """
-    con.execute("INSTALL delta")
-    con.execute("LOAD delta")
     table_uri = dt.table_uri.replace("'", "''")
-    con.sql(
-        f"CREATE OR REPLACE VIEW {name} AS " f"SELECT * FROM delta_scan('{table_uri}')"
-    )
+    con.sql(f"CREATE OR REPLACE VIEW {name} AS SELECT * FROM delta_scan('{table_uri}')")
 
 
 def build_merge_query(
