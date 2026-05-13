@@ -1,11 +1,10 @@
+FROM python:3.14-slim as deps
 # Multi-stage build:
 #   1. ``deps``  – system + python dependencies from a committed
 #                  ``requirements.txt``. Cached unless the requirements
 #                  file changes.
 #   2. ``app``   – install the application on top of ``deps``. Source
 #                  edits only invalidate this stage.
-
-FROM python:3.13-slim AS deps
 
 RUN apt-get update && apt-get install -y git pkg-config libicu-dev build-essential && rm -rf /var/lib/apt/lists/*
 
