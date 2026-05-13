@@ -33,12 +33,18 @@ def register_view(
     column statistics for file skipping on filtered queries, so per-partition
     queries (``WHERE shard = ? AND bucket = ? AND origin = ?``) prune to one
     partition's files automatically.
+
+    DuckDB's ``delta_scan`` does not accept prepared parameters for its URI
+    argument, so the URI is interpolated as a SQL string literal. Single
+    quotes are doubled to prevent injection if a future code path lets a
+    dataset name (and thus the URI) carry a quote – primary validation is
+    in :func:`ftm_lakehouse.util.validate_dataset_name`.
     """
     con.execute("INSTALL delta")
     con.execute("LOAD delta")
+    table_uri = dt.table_uri.replace("'", "''")
     con.sql(
-        f"CREATE OR REPLACE VIEW {name} AS "
-        f"SELECT * FROM delta_scan('{dt.table_uri}')"
+        f"CREATE OR REPLACE VIEW {name} AS " f"SELECT * FROM delta_scan('{table_uri}')"
     )
 
 

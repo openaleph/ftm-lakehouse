@@ -7,6 +7,7 @@ from ftmq.util import ensure_entity
 
 from ftm_lakehouse.core.conventions.path import entity_shard
 from ftm_lakehouse.model.statement import StatementRow, StatementRows
+from ftm_lakehouse.util import validate_origin
 
 # Entities are never namespaced in ftm-lakehouse
 namespace = Namespace()
@@ -25,7 +26,7 @@ class EntityBuffer:
     def __init__(self, dataset: str, shards: int, origin: str | None = None) -> None:
         self.dataset: str = dataset
         self.shards: int = shards
-        self.origin: str = origin or DEFAULT_ORIGIN
+        self.origin: str = validate_origin(origin or DEFAULT_ORIGIN)
         self._buffer: dict[str, StatementRow] = {}
         self._buffer_size: int = 0
 
@@ -39,12 +40,16 @@ class EntityBuffer:
                 are required; otherwise the call is a no-op.
             deleted_at: Tombstone marker. When set, the statement is queued
                 as a delete in the parquet store.
+
+        Raises:
+            ValueError: If ``stmt.origin`` is set but not a safe origin
+                name (see :func:`ftm_lakehouse.util.validate_origin`).
         """
         if stmt.entity_id is None or stmt.id is None:
             return
 
         canonical_id = stmt.canonical_id or stmt.entity_id
-        origin = stmt.origin or self.origin
+        origin = validate_origin(stmt.origin or self.origin)
 
         # Create new Statement with correct values (Statement is immutable)
         stmt = Statement(
@@ -68,6 +73,8 @@ class EntityBuffer:
         self._buffer_size += 1
 
     def add_entity(self, e: EntityProxy, origin: str | None = None) -> None:
+        if origin is not None:
+            validate_origin(origin)
         e = namespace.apply(e)
         e = ensure_entity(e, StatementEntity, self.dataset)
         for stmt in e.statements:

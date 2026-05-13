@@ -55,6 +55,10 @@ async def _not_found_handler(_: Request, exc: Exception) -> JSONResponse:
     return JSONResponse(status_code=404, content={"detail": str(exc)})
 
 
+async def _bad_request_handler(_: Request, exc: Exception) -> JSONResponse:
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
 def get_app(lake_uri: str | None = None) -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url="/")
     app.state.store = get_store(lake_uri or settings.uri)
@@ -68,6 +72,7 @@ def get_app(lake_uri: str | None = None) -> FastAPI:
         app.add_middleware(ZfsEnsureMiddleware)
     app.add_exception_handler(DoesNotExist, _not_found_handler)
     app.add_exception_handler(FileNotFoundError, _not_found_handler)
+    app.add_exception_handler(ValueError, _bad_request_handler)
     return app
 
 

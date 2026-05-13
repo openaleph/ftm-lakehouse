@@ -15,6 +15,7 @@ from ftm_lakehouse.model import CatalogModel, DatasetModel
 from ftm_lakehouse.model.dataset import DM
 from ftm_lakehouse.storage import TagStore
 from ftm_lakehouse.storage.versions import VersionStore
+from ftm_lakehouse.util import validate_dataset_name
 
 if TYPE_CHECKING:
     from ftm_lakehouse.dataset import Dataset
@@ -108,14 +109,19 @@ class Catalog(Generic[DM]):
         Get a Dataset instance by name.
 
         Args:
-            name: Dataset name
+            name: Dataset name. Validated against
+                :func:`ftm_lakehouse.util.validate_dataset_name`.
             **data: Additional config data (auto-saved to config.yml if dataset exists)
 
         Returns:
             Dataset instance
+
+        Raises:
+            ValueError: If ``name`` is not a valid dataset name.
         """
         from ftm_lakehouse.dataset import Dataset
 
+        validate_dataset_name(name)
         dataset_uri = join_uri(self.uri, name)
         dataset = Dataset(
             name=name,

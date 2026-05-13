@@ -76,7 +76,7 @@ from datetime import datetime, timezone
 from anystore.util import ensure_uuid, join_relpaths
 from banal import hash_data
 
-from ftm_lakehouse.util import make_checksum_key
+from ftm_lakehouse.util import make_checksum_key, safe_name, validate_origin
 
 TENANT = "lakehouse"
 """Default tenant name"""
@@ -182,7 +182,11 @@ def archive_meta(checksum: str, file_id: str) -> str:
     Args:
         checksum: SHA256 checksum of file
         file_id: The File.id (hash of source path + checksum)
+
+    Raises:
+        ValueError: If ``checksum`` or ``file_id`` is malformed.
     """
+    safe_name(file_id, "file_id")
     return f"{archive_prefix(checksum)}/{file_id}.json"
 
 
@@ -198,7 +202,11 @@ def archive_txt(checksum: str, origin: str) -> str:
     Args:
         checksum: SHA256 checksum of file
         origin: The extraction origin/engine name
+
+    Raises:
+        ValueError: If ``checksum`` or ``origin`` is malformed.
     """
+    validate_origin(origin)
     return f"{archive_prefix(checksum)}/{origin}.txt"
 
 
@@ -257,7 +265,11 @@ def statement_origin(origin: str) -> str:
 
     Args:
         origin: The origin, or phase, or stage
+
+    Raises:
+        ValueError: If ``origin`` is malformed.
     """
+    validate_origin(origin)
     return f"{STATEMENTS}/origin={origin}"
 
 
