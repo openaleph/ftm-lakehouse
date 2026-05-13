@@ -62,7 +62,7 @@ extra:
     - icon: lucide/globe
       link: https://dataresearchcenter.org
     - icon: simple/github
-      link: https://github.com/dataresearchcenter/anystore
+      link: https://github.com/openaleph/ftm-lakehouse
     - icon: fontawesome/brands/linkedin
       link: https://www.linkedin.com/company/dataresearchcenter/
 markdown_extensions:
