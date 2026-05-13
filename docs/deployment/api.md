@@ -2,13 +2,25 @@
 
 `ftm-lakehouse` ships a FastAPI app that exposes the storage layer, the journal, the entity / statement read+write paths, and dataset job execution over HTTP. It carries **no authentication, authorization, or rate-limiting logic** – those are deployment concerns and belong in front of the app, not inside it.
 
-!!! info "Use nginx for file serving"
-    Although the api exposes `HEAD` / `GET` endpoints, for production use it is recommended to use a static file server like nginx. This approach is currently researched and developed in [PutFS](https://putf.sh)
+!!! info "Use reverse proxy in production"
 
-!!! info "Authentication is a reverse-proxy concern"
+    ### File serving
+
+    Although the api exposes `HEAD` / `GET` endpoints, for production use it is recommended to use a static file server like nginx. One approach for that is currently researched and developed in [PutFS](https://putf.sh).
+
+    ### Authentication
+
     The API is intentionally unprotected at the application layer. Run it behind a reverse proxy (Caddy / nginx / Traefik / a sidecar service) that handles authentication, authorization, and rate-limiting before forwarding to the lakehouse.
 
     [PutFS auth model](https://putf.sh/reference/auth/) is a good reference for how an operator can wire path-prefix + HTTP-method scoped tokens at the proxy layer.
+
+    ### Request timeouts
+
+    The API does not enforce a per-request wall-clock timeout. Configure ``proxy_read_timeout`` (nginx), ``timeouts`` (Caddy), or the equivalent in your proxy to bound how long a request can occupy a connection.
+
+    ### Request body size
+
+    The API does not cap request body size. Configure ``client_max_body_size`` (nginx), ``request_body`` (Caddy), or the equivalent in your proxy. Endpoints that semantically constrain content shape (e.g. ``entities/query`` capping ``entity_ids`` length) still validate after the body is parsed.
 
 ## Running the API
 

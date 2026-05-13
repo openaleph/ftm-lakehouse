@@ -3,18 +3,14 @@
 from typing import Annotated, Optional
 
 import orjson
-from fastapi import APIRouter, Body
+from fastapi import APIRouter
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from ftmq.model.stats import DatasetStats
 from ftmq.query import Query
 
-from ftm_lakehouse.api.dependencies import Dataset
+from ftm_lakehouse.api.dependencies import EMBED, Dataset, QueryBody
 
 NDJSON_CONTENT_TYPE = "application/x-ndjson"
-BODY = Body()
-EMBED = Body(embed=True)
-"""Use for single-parameter endpoints so FastAPI expects ``{"<name>": value}``
-rather than the bare value as the entire body."""
 
 router = APIRouter()
 
@@ -37,16 +33,14 @@ def entities_merge(
 
 
 @router.post("/{dataset}/_api/entities/query")
-def entities_query(dataset: Dataset, body: dict = BODY) -> StreamingResponse:
+def entities_query(dataset: Dataset, body: QueryBody) -> StreamingResponse:
     """Query entities from parquet store, streamed as NDJSON."""
-    entity_ids = body.pop("entity_ids", None) or None
-    flush_first = body.pop("flush_first", False)
 
     def generate():
         for entity in dataset.entities.query(
-            entity_ids=entity_ids,
-            flush_first=flush_first,
-            **body,
+            entity_ids=body.entity_ids,
+            flush_first=body.flush_first,
+            **body.filter_kwargs(),
         ):
             yield orjson.dumps(entity.to_dict(), option=orjson.OPT_APPEND_NEWLINE)
 
@@ -74,9 +68,9 @@ def entities_version(dataset: Dataset) -> PlainTextResponse:
 
 
 @router.post("/{dataset}/_api/entities/statements/query")
-def statements_query(dataset: Dataset, body: dict = BODY) -> StreamingResponse:
+def statements_query(dataset: Dataset, body: QueryBody) -> StreamingResponse:
     """Query statements from parquet store, streamed as NDJSON."""
-    query = Query().where(**body)
+    query = Query().where(**body.filter_kwargs())
     sql = query.sql.statements
 
     def generate():

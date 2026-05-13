@@ -73,3 +73,10 @@ class ApiSettings(BaseSettings):
     allowed_origins: list[HttpUrlStr] = ["http://localhost:3000"]
 
     static_headers: dict[str, str] = {}
+
+    # DoS limits at the API boundary.
+    max_entity_ids: int = 10_000
+    """Maximum number of ``entity_ids`` accepted in a single query body."""
+
+    max_filter_keys: int = 20
+    """Maximum number of ftmq filter keys accepted in a single query body."""
