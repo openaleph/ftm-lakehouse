@@ -52,7 +52,7 @@ class Catalog(Generic[DM]):
         self._log = get_logger(__name__, catalog=mask_uri(uri))
 
     def __repr__(self) -> str:
-        return f"Catalog({self.uri!r})"
+        return f"Catalog({mask_uri(self.uri)!r})"
 
     # -------------------------------------------------------------------------
     # Storage primitives

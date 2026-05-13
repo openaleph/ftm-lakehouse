@@ -27,7 +27,7 @@ from typing import Any
 
 from anystore.logging import get_logger
 from anystore.types import Uri
-from anystore.util import ensure_uri
+from anystore.util import ensure_uri, mask_uri
 
 from ftm_lakehouse.catalog import Catalog
 from ftm_lakehouse.core.settings import Settings
@@ -60,7 +60,7 @@ def get_lakehouse(
     """
     settings = Settings()
     storage_uri = ensure_uri(uri or settings.uri)
-    log.info("Loading catalog", uri=storage_uri)
+    log.info("Loading catalog", uri=mask_uri(storage_uri))
     return Catalog(uri=storage_uri, model_class=model_class)
 
 

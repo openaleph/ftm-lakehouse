@@ -7,6 +7,7 @@ import httpx
 from anystore.logic.uri import join_uri
 from anystore.store.resource import UriResource
 from anystore.types import Uri
+from anystore.util import mask_uri
 from fsspec.config import conf as fsspec_conf
 
 from ftm_lakehouse.core.settings import Settings, __version__
@@ -41,7 +42,7 @@ class LakehouseApi(UriResource):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         if not self.is_http:
-            raise RuntimeError(f"Lakehouse api uri is not http: `{self.uri}`")
+            raise RuntimeError(f"Lakehouse api uri is not http: `{mask_uri(self.uri)}`")
         self.client = httpx.Client(
             timeout=httpx.Timeout(timeout=3600.0 * 6),
             headers=_default_headers,
