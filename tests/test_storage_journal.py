@@ -271,6 +271,33 @@ def test_storage_journal_rollback_on_consumer_error(request, journal):
     assert collect_statements(journal.flush()) == []
 
 
+def test_storage_journal_rollback_on_consumer_abandon(request, journal):
+    """If the flush generator is abandoned mid-stream (HTTP client
+    disconnect → ``GeneratorExit``), the write transaction rolls back
+    and yielded rows remain in the journal for the next flush."""
+    param = request.node.callspec.params["journal"]
+    if param == "api":
+        pytest.skip("API rollback is server-side only; client-side abandon is a no-op")
+
+    with journal.writer() as w:
+        for i in range(5):
+            w.add_statement(make_statement(f"e{i}", "name", f"Name {i}"))
+
+    gen = journal.flush()
+    first = next(gen)
+    assert first is not None
+    # Simulate the consumer abandoning the iterator (e.g. ASGI client
+    # disconnect). Python sends GeneratorExit into the generator at the
+    # current yield; flush's try/except BaseException rolls back.
+    gen.close()
+
+    # All five rows still present – DELETE was rolled back.
+    assert journal.count() == 5
+    flushed = collect_statements(journal.flush())
+    assert len(flushed) == 5
+    assert journal.count() == 0
+
+
 def test_storage_journal_upsert_duplicate_statements(journal):
     """Test that duplicate statements are upserted (updated, not duplicated)."""
     stmt = Statement(

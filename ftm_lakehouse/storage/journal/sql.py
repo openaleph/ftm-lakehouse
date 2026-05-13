@@ -178,19 +178,29 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
         self.metadata.create_all(self.engine, tables=[self.table], checkfirst=True)
 
     def iterate(self, *args, **kwargs) -> JournalRows:
-        """Iterate all rows ordered by shard for batch processing."""
+        """Iterate all rows ordered by shard for batch processing.
+
+        If the consumer abandons the generator mid-stream
+        (e.g. ``break``, HTTP client disconnect → ``GeneratorExit``),
+        the ``try / finally`` closes the streaming cursor promptly and
+        the surrounding ``with`` releases the connection. No transaction
+        to roll back here – ``iterate`` is read-only.
+        """
         q = select(self.table).order_by(self.table.c.shard)
 
         with self.engine.connect() as conn:
             cursor = conn.execution_options(stream_results=True).execute(q)
-            while rows := cursor.fetchmany(10_000):
-                for row in rows:
-                    yield JournalRow(
-                        row.id,
-                        row.shard,
-                        row.data,
-                        row.deleted_at,
-                    )
+            try:
+                while rows := cursor.fetchmany(10_000):
+                    for row in rows:
+                        yield JournalRow(
+                            row.id,
+                            row.shard,
+                            row.data,
+                            row.deleted_at,
+                        )
+            finally:
+                cursor.close()
 
     def flush(self) -> JournalRows:
         """Iterate and delete yielded rows, one shard at a time.
@@ -206,6 +216,12 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
         yet; those rows can be picked up by the current flush call. This is
         safe (yield → write → delete is preserved per row) but means the total
         flushed count is non-deterministic under load.
+
+        Abandonment: if the consumer drops the generator mid-stream
+        (HTTP client disconnect → ``GeneratorExit``, exception in body,
+        ``break``), the ``try / except BaseException: rollback; raise``
+        wrapper rolls the write transaction back so no DELETE persists
+        for rows the consumer never received.
         """
         # Use separate connections for read (streaming) and write (delete).
         # PostgreSQL server-side cursors (stream_results) apply to the entire
@@ -226,20 +242,22 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
                     cursor = read_conn.execution_options(stream_results=True).execute(
                         select(self.table).where(self.table.c.shard == shard)
                     )
-                    while rows := cursor.fetchmany(10_000):
-                        flushed: list[str] = []
-                        for row in rows:
-                            flushed.append(row.id)
-                            yield JournalRow(
-                                row.id,
-                                row.shard,
-                                row.data,
-                                row.deleted_at,
+                    try:
+                        while rows := cursor.fetchmany(10_000):
+                            flushed: list[str] = []
+                            for row in rows:
+                                flushed.append(row.id)
+                                yield JournalRow(
+                                    row.id,
+                                    row.shard,
+                                    row.data,
+                                    row.deleted_at,
+                                )
+                            write_conn.execute(
+                                delete(self.table).where(self.table.c.id.in_(flushed))
                             )
-                        write_conn.execute(
-                            delete(self.table).where(self.table.c.id.in_(flushed))
-                        )
-                    cursor.close()
+                    finally:
+                        cursor.close()
 
                 write_tx.commit()
             except BaseException:
