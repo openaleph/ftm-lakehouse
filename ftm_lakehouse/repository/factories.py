@@ -2,9 +2,15 @@
 Factory functions for the repositories that fall back to the default configured
 settings. Useful for override runtime config uri during testing as well as for
 public convenience.
+
+All factories are LRU-cached at :data:`LRU_MAX` entries: generous enough to
+cover any realistic multi-tenant dataset count in a single process, but
+bounded so an attacker that probes many distinct dataset names cannot
+permanently retain a repository (and its SQLAlchemy engine / DuckDB
+connection) per probe.
 """
 
-from functools import cache
+from functools import lru_cache
 
 from anystore.types import Uri
 
@@ -18,8 +24,11 @@ from ftm_lakehouse.repository.mapping import MappingRepository
 from ftm_lakehouse.storage.tags import TagStore
 from ftm_lakehouse.storage.versions import VersionStore
 
+LRU_MAX = 1024
+"""Maximum number of distinct ``(dataset, uri, …)`` keys retained per factory."""
 
-@cache
+
+@lru_cache(maxsize=LRU_MAX)
 def get_archive(dataset: str, uri: Uri | None = None) -> ArchiveRepository:
     """
     Get the archive repository for a dataset.
@@ -36,7 +45,7 @@ def get_archive(dataset: str, uri: Uri | None = None) -> ArchiveRepository:
     return ArchiveRepository(dataset, uri)
 
 
-@cache
+@lru_cache(maxsize=LRU_MAX)
 def get_entities(dataset: str, uri: Uri | None = None) -> EntityRepository:
     """
     Get the entity repository for a dataset.
@@ -53,7 +62,7 @@ def get_entities(dataset: str, uri: Uri | None = None) -> EntityRepository:
     return EntityRepository(dataset, uri)
 
 
-@cache
+@lru_cache(maxsize=LRU_MAX)
 def get_documents(dataset: str, uri: Uri | None = None) -> DocumentRepository:
     """
     Get the document repository for a dataset.
@@ -70,7 +79,7 @@ def get_documents(dataset: str, uri: Uri | None = None) -> DocumentRepository:
     return DocumentRepository(dataset, uri)
 
 
-@cache
+@lru_cache(maxsize=LRU_MAX)
 def get_mappings(dataset: str, uri: Uri | None = None) -> MappingRepository:
     """
     Get the mappings repository for a dataset.
@@ -87,7 +96,7 @@ def get_mappings(dataset: str, uri: Uri | None = None) -> MappingRepository:
     return MappingRepository(dataset, uri)
 
 
-@cache
+@lru_cache(maxsize=LRU_MAX)
 def get_jobs(dataset: str, model: type[J], uri: Uri | None = None) -> JobRepository[J]:
     """
     Get the job repository for a dataset.
@@ -105,7 +114,7 @@ def get_jobs(dataset: str, model: type[J], uri: Uri | None = None) -> JobReposit
     return JobRepository(dataset, uri, model)
 
 
-@cache
+@lru_cache(maxsize=LRU_MAX)
 def get_versions(dataset: str, uri: Uri | None = None) -> VersionStore:
     """
     Get the version store for a dataset.
@@ -123,7 +132,7 @@ def get_versions(dataset: str, uri: Uri | None = None) -> VersionStore:
     return VersionStore(uri)
 
 
-@cache
+@lru_cache(maxsize=LRU_MAX)
 def get_tags(
     dataset: str, uri: Uri | None = None, tenant: str | None = None
 ) -> TagStore:
