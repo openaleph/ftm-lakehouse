@@ -10,6 +10,8 @@
 |----------|-------------|---------|
 | `LAKEHOUSE_URI` | Base path to lakehouse storage | `./data` |
 | `LAKEHOUSE_JOURNAL_URI` | SQLAlchemy URI for statement journal | `sqlite:///:memory:` |
+| `LAKEHOUSE_ENTITY_SHARDS` | Uniform shard count per new dataset (recorded in `config.yml`; immutable after first write – change requires full rewrite) | `8` |
+| `LAKEHOUSE_GRACE_PERIOD_DAYS` | Default tombstone grace period used by `operations merge` (rows with `deleted_at` older than this are physically dropped) | `30` |
 | `LAKEHOUSE_ON_ZFS` | Enable ZFS dataset creation for local storage | `false` |
 | `LAKEHOUSE_ZFS_POOL` | ZFS dataset path for the lakehouse root (e.g. `zpools/tank/lakehouse`) | (required when `ON_ZFS` is enabled) |
 | `LAKEHOUSE_ZFS_SOCKET` | Unix socket path for remote ZFS operations (see [ZFS Integration](zfs.md)) | (unset) |
@@ -144,8 +146,7 @@ export LAKEHOUSE_JOURNAL_URI=sqlite:///:memory:
 ```
 
 !!! warning
-    The in-memory journal is lost when the process exits.
-    Use a persistent database for production workloads.
+    The in-memory journal is lost when the process exits. Use a persistent database for production workloads.
 
 ## Python Configuration
 

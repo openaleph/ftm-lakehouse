@@ -88,7 +88,7 @@ class ParquetDiffMixin:
 
             state = self._get_diff_state()
 
-            # No prior state — create initial diff
+            # No prior state – create initial diff
             if state is None:
                 self._write_initial_diff(current_timestamp, **kwargs)
                 self._set_diff_state(current_timestamp, current_version)

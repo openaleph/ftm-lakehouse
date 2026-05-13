@@ -48,24 +48,36 @@ def build_merge_query(
     origin: str,
     grace_cutoff: datetime,
 ) -> Select:
-    """SQLAlchemy ``Select`` that collapses one ``(shard, bucket, origin)`` partition.
+    """SQLAlchemy ``Select`` that collapses one partition.
 
-    Returned query:
+    The returned query:
 
-    - filters the source view to one partition (``shard = ? AND bucket = ?
-      AND origin = ?``);
-    - computes ``MIN(first_seen) OVER (PARTITION BY id)`` so the surviving row
-      carries the earliest first_seen seen for that statement id;
-    - keeps the row with the latest ``last_seen`` per id via ``ROW_NUMBER()
-      OVER (PARTITION BY id ORDER BY last_seen DESC) = 1``;
+    - filters the source view to one ``(shard, bucket, origin)`` partition;
+    - computes ``MIN(first_seen) OVER (PARTITION BY id)`` so the surviving
+      row carries the earliest ``first_seen`` for that statement id;
+    - keeps the row with the latest ``last_seen`` per id via
+      ``ROW_NUMBER() OVER (PARTITION BY id ORDER BY last_seen DESC) = 1``;
     - drops tombstones whose ``deleted_at`` is older than ``grace_cutoff``;
     - orders by ``(entity_id, id, last_seen DESC)`` so the rewritten parquet
       file is ready for future merges without re-sort.
 
-    Consumers can compose further filters via ``.where(...)`` on the returned
-    Select (e.g. ``.where(query.selected_columns.entity_id == entity_id)``
-    for a single-entity merge). Compile to executable DuckDB SQL with
+    Consumers can compose further filters via ``.where(...)`` on the
+    returned Select (e.g.
+    ``query.where(query.selected_columns.entity_id == entity_id)`` for a
+    single-entity merge). Compile to executable DuckDB SQL with
     ``str(query.compile(compile_kwargs={"literal_binds": True}))``.
+
+    Args:
+        shard: Target shard value (hex-padded).
+        bucket: Target bucket (``thing`` / ``interval`` / ``document`` /
+            ``page`` / ``pages`` / ``mention``).
+        origin: Target origin tag.
+        grace_cutoff: Tombstones with ``deleted_at <= grace_cutoff`` are
+            dropped. Typically ``now - LAKEHOUSE_GRACE_PERIOD_DAYS``.
+
+    Returns:
+        A SQLAlchemy :class:`~sqlalchemy.sql.expression.Select` that
+        compiles to DuckDB SQL.
     """
     inner_cols = [c for c in TABLE.columns if c.name != "first_seen"]
     inner = (

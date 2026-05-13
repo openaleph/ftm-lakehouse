@@ -18,9 +18,9 @@ When a new dataset is created, `ftm-lakehouse` calls `zfs create` to set up chil
 
 | ZFS Dataset | recordsize | compression | sync | Purpose |
 |-------------|-----------|-------------|------|---------|
-| `{dataset}/` | (parent defaults) | (parent defaults) | (parent defaults) | Parent dataset with `atime=off`, `xattr=sa`, `dnodesize=auto` |
-| `{dataset}/archive` | 128K | zstd | disabled | Content-addressed file storage |
-| `{dataset}/entities/statements` | 1M | lz4 | standard | Delta Lake parquet (already snappy-compressed) |
+| `{dataset}/` | (parent defaults) | (parent defaults) | standard | Parent dataset with `atime=off`, `xattr=sa`, `dnodesize=auto` |
+| `{dataset}/archive` | 128K | `zstd-9` | standard | Content-addressed file storage (mixed-entropy blobs) |
+| `{dataset}/entities/statements` | 1M | `off` | standard | Delta Lake parquet – parquet handles compression internally (SNAPPY), ZFS-level compression on top burns CPU per block with no benefit |
 
 ## Mountpoint Ownership
 
@@ -32,7 +32,7 @@ export LAKEHOUSE_ZFS_OWNER=1000:1000
 
 When unset (the default), no `chown` is performed and mountpoints keep root ownership.
 
-- **Local mode**: `LAKEHOUSE_ZFS_OWNER` is read by `zfs_create()` directly. Set it wherever `ftm-lakehouse` or `zfs-init` runs.
+- **Local mode**: `LAKEHOUSE_ZFS_OWNER` is read by `zfs_create()` directly. Set it wherever `ftm-lakehouse` or `ftm-lakehouse zfs init` runs.
 - **Socket mode**: Ownership is controlled by the agent (host-side), not the client. Pass `--owner` to the agent or set `LAKEHOUSE_ZFS_OWNER` where the agent runs. The client does not send ownership information.
 
 ## Socket Agent Mode
@@ -48,7 +48,7 @@ flowchart LR
     end
 
     subgraph host["Host"]
-        agent["ftm-lakehouse zfs-agent"]
+        agent["ftm-lakehouse zfs agent"]
         zfs["zfs create ..."]
         agent --> zfs
     end
@@ -61,7 +61,7 @@ flowchart LR
 On the host:
 
 ```bash
-ftm-lakehouse zfs-agent --socket /run/zfs.sock --pool zpools/tank/lakehouse --owner 1000:1000
+ftm-lakehouse zfs agent --socket /run/zfs.sock --pool zpools/tank/lakehouse --owner 1000:1000
 ```
 
 | Option | Description |
@@ -95,7 +95,7 @@ When `LAKEHOUSE_ZFS_SOCKET` is set and `LAKEHOUSE_ON_ZFS` is enabled, `zfs_creat
 To manually create ZFS datasets for a dataset without starting the full application:
 
 ```bash
-ftm-lakehouse zfs-init my_dataset --pool zpools/tank/lakehouse
+ftm-lakehouse zfs init my_dataset --pool zpools/tank/lakehouse
 ```
 
 This creates the parent, archive, and statements ZFS datasets with tuned properties. The pool can also be set via `LAKEHOUSE_ZFS_POOL`.
@@ -107,7 +107,7 @@ The socket agent uses a JSON-lines protocol over Unix domain sockets. Each reque
 **Request:**
 
 ```json
-{"action": "create", "dataset": "tank/lakehouse/my_dataset/archive", "props": {"recordsize": "128K", "compression": "zstd"}}
+{"action": "create", "dataset": "tank/lakehouse/my_dataset/archive", "props": {"recordsize": "128K", "compression": "zstd-9"}}
 ```
 
 **Response (success):**

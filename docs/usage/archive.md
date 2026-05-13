@@ -4,7 +4,7 @@ The archive repository manages source documents and files metadata in `ftm-lakeh
 
 ## Overview
 
-The archive stores files using their SHA1 checksum as the key. This design enables:
+The archive stores files using their SHA256 checksum as the key. This design enables:
 
 - **Deduplication**: Identical files are stored only once (per dataset)
 - **Integrity**: Verify file contents via checksum
@@ -13,9 +13,9 @@ The archive stores files using their SHA1 checksum as the key. This design enabl
 
 
 !!! info "Blob vs. File object"
-    When referring to a _Blob_, this is the actual bytes content of a given source file, identified by it's SHA1 checksum.
+    When referring to a _Blob_, this is the actual bytes content of a given source file, identified by it's SHA256 checksum.
 
-    When referring to a _File_, this is the metadata [File][ftm_lakehouse.model.File] model. Multiple metadata files can exist for a single bytes blob.
+    When referring to a _File_, this is the metadata [File](../reference/model.md#ftm_lakehouse.model.file.File) model. Multiple metadata files can exist for a single bytes blob.
 
 
 ## Quick Start
@@ -113,8 +113,7 @@ with dataset.archive.local_path("<checksum>") as path:
 ```
 
 !!! warning
-    If the archive is local, this returns the actual file path.
-    Do not modify or delete the file at this path.
+    If the archive is local, this returns the actual file path. Do not modify or delete the file at this path.
 
 ## File Metadata
 

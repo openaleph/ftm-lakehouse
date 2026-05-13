@@ -35,7 +35,7 @@ def cli_statements_iterate(
 ):
     """Iterate statements from the parquet store as CSV rows.
 
-    Live read — reflects current state of the parquet table. For the frozen
+    Live read – reflects current state of the parquet table. For the frozen
     pre-exported view use ``stream``.
     """
     with DatasetContext() as dataset:

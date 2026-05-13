@@ -187,6 +187,55 @@ for dataset in catalog.list_datasets():
 dataset = catalog.create_dataset("new_dataset", title="New Dataset")
 ```
 
+## Maintenance
+
+The parquet statement store is **append-only** on the write path. Deduplication, `first_seen` folding, and tombstone reaping happen in three independent async operations that all run under a single dataset-wide write fence (`.LOCK`):
+
+```python
+# Bin-pack small parquet files (cheap, can be run often)
+dataset.entities.merge()  # via repo.merge()
+
+# Three primitives exposed on the lower-level ParquetStore:
+dataset.entities._statements.compact()  # cheap file bin-pack
+dataset.entities._statements.merge(grace_period_days=7)  # dedup + reap tombstones
+dataset.entities._statements.vacuum(retention_hours=0)   # delete obsolete files
+```
+
+CLI equivalents:
+
+```bash
+ftm-lakehouse -d my_dataset operations compact
+ftm-lakehouse -d my_dataset operations merge
+ftm-lakehouse -d my_dataset operations vacuum
+```
+
+Tombstones (from `delete_entity` / `delete_statement`) are kept for `LAKEHOUSE_GRACE_PERIOD_DAYS` (default 30) before `merge` drops them.
+
+## Bulk Import (bypassing the journal)
+
+For one-shot loads of large `entities.ftm.json` files where the journal's write-amplification is wasteful, you can stream entities through an in-memory shard buffer and write straight to parquet:
+
+```python
+from datetime import datetime, timezone
+from ftmq.io import smart_read_proxies
+from ftm_lakehouse.logic.entities.buffer import EntityBuffer
+
+dataset = ensure_dataset("my_dataset")
+repo = dataset.entities
+buffer = EntityBuffer(dataset.name, dataset.model.shards, origin="bulk")
+now = datetime.now(timezone.utc)
+
+for proxy in smart_read_proxies("entities.ftm.json"):
+    buffer.add_entity(proxy)
+    if len(buffer) >= 1_000_000:
+        repo.write_statements(buffer.flush_buffer(), now=now)
+
+if buffer:
+    repo.write_statements(buffer.flush_buffer(), now=now)
+```
+
+This is exactly what `ftm-lakehouse entities import` does.
+
 ## Configuration
 
 Configure via environment variables:
@@ -194,7 +243,9 @@ Configure via environment variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LAKEHOUSE_URI` | `data` | Base storage path |
-| `LAKEHOUSE_JOURNAL_URI` | `sqlite:///data/journal.db` | Journal database URI |
+| `LAKEHOUSE_JOURNAL_URI` | `sqlite:///:memory:` | Journal database URI |
+| `LAKEHOUSE_ENTITY_SHARDS` | `8` | Uniform shard count per new dataset |
+| `LAKEHOUSE_GRACE_PERIOD_DAYS` | `30` | Tombstone grace period used by `merge` |
 
 Or use S3-compatible storage:
 

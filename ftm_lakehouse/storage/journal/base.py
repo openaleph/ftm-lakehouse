@@ -17,7 +17,7 @@ WRITE_BATCH_SIZE = 10_000
 
 
 class JournalRow(NamedTuple):
-    """A single journal row — used for both SQL storage and wire format.
+    """A single journal row – used for both SQL storage and wire format.
 
     ``shard`` is the entity-id hash bucket the statement routes to in the
     parquet store. PyArrow handles the final sort within each batch.
@@ -126,15 +126,19 @@ class BaseJournalStore(Generic[W]):
         raise NotImplementedError
 
     def flush(self) -> JournalRows:
-        """Iterate and delete all rows for this dataset atomically.
+        """Destructively iterate journal rows in raw packed form.
 
-        This is a destructive read - rows are deleted after being yielded.
-        If the consumer raises an exception, the transaction is rolled back.
+        Rows are deleted after being yielded. If the consumer raises an
+        exception the transaction is rolled back.
 
-        Yields raw :class:`JournalRow` (``data`` still packed). The
-        HTTP-forwarding API uses this to stream JSONL without
+        The HTTP-forwarding journal API uses this to stream JSONL without
         unpack-then-repack overhead; the parquet write path uses
         :meth:`flush_statements` instead.
+
+        Yields:
+            :class:`JournalRow` ``(id, shard, data, deleted_at)`` – ``data``
+            is still packed (the unit-separator-delimited statement wire
+            format).
         """
         raise NotImplementedError
 
@@ -142,8 +146,12 @@ class BaseJournalStore(Generic[W]):
         """Destructively iterate as :class:`StatementRow` (data unpacked).
 
         Thin wrapper over :meth:`flush` for consumers (notably
-        ``EntityRepository.flush``) that want :class:`Statement` objects
+        :meth:`EntityRepository.flush`) that want ``Statement`` objects
         instead of the packed wire format.
+
+        Yields:
+            :class:`StatementRow` ``(shard, stmt, deleted_at)`` produced by
+            unpacking each :class:`JournalRow`.
         """
         for r in self.flush():
             yield StatementRow(r.shard, unpack_statement(r.data), r.deleted_at)

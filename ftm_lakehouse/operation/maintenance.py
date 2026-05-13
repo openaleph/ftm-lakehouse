@@ -3,10 +3,10 @@
 Three independent jobs, each acquiring the anystore Lock at
 ``path.lock(<op>)`` so concurrent invocations on the same dataset serialize:
 
-- ``CompactJob`` — bin-pack small parquet files (cheap, run often).
-- ``MergeJob`` — collapse duplicates / fold ``first_seen`` / reap tombstones
+- ``CompactJob`` – bin-pack small parquet files (cheap, run often).
+- ``MergeJob`` – collapse duplicates / fold ``first_seen`` / reap tombstones
   past the grace period (expensive, run sparingly).
-- ``VacuumJob`` — delete obsolete parquet files from disk (run daily).
+- ``VacuumJob`` – delete obsolete parquet files from disk (run daily).
 """
 
 from ftm_lakehouse.core.conventions import tag
@@ -30,7 +30,7 @@ class VacuumJob(DatasetJobModel):
 class CompactOperation(DatasetJobOperation[CompactJob]):
     """Bin-pack small parquet files (Delta OPTIMIZE compact).
 
-    Cheap maintenance — only rewrites small files into larger ones; does not
+    Cheap maintenance – only rewrites small files into larger ones; does not
     dedupe rows or drop tombstones (use ``MergeOperation`` for that).
     """
 

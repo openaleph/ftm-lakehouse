@@ -1,22 +1,21 @@
 # logic
 
-The logic module contains pure stateless transformation functions with no infrastructure dependencies. Functions here take inputs and produce outputs without side effects.
+The logic module contains pure, stateless transformation functions with no infrastructure dependencies. Functions here take inputs and produce outputs without side effects.
 
 ## Entity Aggregation
 
-Aggregate statement streams into FollowTheMoney entities:
+Aggregate a stream of statement dicts into FollowTheMoney entity dicts:
 
 ```python
-from ftm_lakehouse.logic import aggregate_statements
-from followthemoney.statement.serialize import read_csv_statements
+from ftm_lakehouse.logic import aggregate_unsafe
 
-with open("statements.csv") as f:
-    statements = read_csv_statements(f)
-    for entity in aggregate_statements(statements, "my_dataset"):
-        print(f"{entity.id}: {entity.caption}")
+for entity in aggregate_unsafe(statement_dicts, "my_dataset"):
+    print(f"{entity['id']}: {entity['caption']}")
 ```
 
-::: ftm_lakehouse.logic.aggregate_statements
+`aggregate_unsafe` assumes the input is pre-sorted by `canonical_id` – the parquet store guarantees this for its queries.
+
+::: ftm_lakehouse.logic.aggregate_unsafe
     options:
         heading_level: 3
         show_root_heading: true
@@ -44,84 +43,46 @@ for entity in map_entities(mapping, csv_path):
         heading_level: 3
         show_root_heading: true
 
-## Translog-Aware Parquet Operations
+## Parquet helpers
 
-Pure DuckDB/PyArrow functions that operate on the main statement table and translog metadata table. Used internally by `ParquetStore`, `TranslogStore`, and `TranslogAwareLakeStore`.
+DuckDB connection / view registration and the merge-query builder used by `ParquetStore`.
 
-::: ftm_lakehouse.logic.parquet.translog_aware_sql
+::: ftm_lakehouse.logic.parquet.make_duckdb
     options:
         heading_level: 3
         show_root_heading: true
 
-::: ftm_lakehouse.logic.parquet.stream_duckdb_translog
+::: ftm_lakehouse.logic.parquet.register_view
     options:
         heading_level: 3
         show_root_heading: true
 
-::: ftm_lakehouse.logic.parquet.query_duckdb_translog
+`register_view` uses `delta_scan` so the registered view resolves the current Delta log on every query – registering once per connection is enough; subsequent `write_deltalake` commits are picked up automatically.
+
+::: ftm_lakehouse.logic.parquet.build_merge_query
     options:
         heading_level: 3
         show_root_heading: true
 
-::: ftm_lakehouse.logic.parquet.compact_with_translog
-    options:
-        heading_level: 3
-        show_root_heading: true
-
-::: ftm_lakehouse.logic.parquet.get_deleted_entity_ids
-    options:
-        heading_level: 3
-        show_root_heading: true
-
-::: ftm_lakehouse.logic.parquet.filter_live_translog
-    options:
-        heading_level: 3
-        show_root_heading: true
-
-::: ftm_lakehouse.logic.parquet.get_changed_entity_ids
-    options:
-        heading_level: 3
-        show_root_heading: true
+Returns a SQLAlchemy `Select` that consumers can compose with additional `.where(...)` clauses before compiling to DuckDB SQL via `literal_binds=True`.
 
 ## Statement Serialization
 
-Pack and unpack statements for efficient storage:
+Pack and unpack statements for compact storage in the journal `data` column:
 
 ```python
 from ftm_lakehouse.logic import pack_statement, unpack_statement
-from followthemoney import Statement
 
-# Pack a statement to string
-packed = pack_statement(stmt)
-
-# Unpack back to Statement
-stmt = unpack_statement(packed)
+packed = pack_statement(stmt)     # unit-separator delimited string
+stmt   = unpack_statement(packed) # back to Statement
 ```
 
-### pack_statement
+::: ftm_lakehouse.helpers.statements.pack_statement
+    options:
+        heading_level: 3
+        show_root_heading: true
 
-```python
-def pack_statement(stmt: Statement) -> str
-```
-
-Pack a Statement into a null-byte joined string for compact storage.
-
-**Args:**
-
-- `stmt`: A FollowTheMoney Statement object
-
-**Returns:** Serialized string representation
-
-### unpack_statement
-
-```python
-def unpack_statement(data: str) -> Statement
-```
-
-Unpack a null-byte joined string back into a Statement.
-
-**Args:**
-
-- `data`: Serialized statement string from `pack_statement`
-
-**Returns:** Reconstructed Statement object
+::: ftm_lakehouse.helpers.statements.unpack_statement
+    options:
+        heading_level: 3
+        show_root_heading: true

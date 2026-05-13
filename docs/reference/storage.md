@@ -13,18 +13,9 @@ SQL statement buffer for write-ahead logging.
 
 ## ParquetStore
 
-Delta Lake parquet storage for statements. Uses a translog metadata table for tracking timestamps and soft deletes.
+Delta Lake parquet storage for statements, partitioned by ``(shard, bucket, origin)``. Writes are append-only; deduplication, ``first_seen`` folding, and tombstone reaping happen in three independent async ops (``compact`` / ``merge`` / ``vacuum``), all coordinated by a dataset-wide write fence.
 
 ::: ftm_lakehouse.storage.ParquetStore
-    options:
-        heading_level: 3
-        show_root_heading: true
-
-## TranslogStore
-
-Lightweight Delta table for per-statement metadata (`first_seen`, `last_seen`, `deleted_at`). Used internally by ParquetStore.
-
-::: ftm_lakehouse.storage.parquet.TranslogStore
     options:
         heading_level: 3
         show_root_heading: true

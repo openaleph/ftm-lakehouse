@@ -117,7 +117,7 @@ class EntityPayload:
 
     def to_dict(self) -> dict[str, Any]:
         compiled = self._build()
-        # Schema merging — pick the most specific schema
+        # Schema merging – pick the most specific schema
         schema = None
         for name in compiled["schemata"]:
             if schema is None:
@@ -128,7 +128,7 @@ class EntityPayload:
         if schema is None:
             return {}
 
-        # Caption — first caption property with values, or schema label
+        # Caption – first caption property with values, or schema label
         # (simplified: no pick_lang_name language detection)
         caption = schema.label
         for prop_name in schema.caption:

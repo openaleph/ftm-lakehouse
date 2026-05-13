@@ -95,7 +95,7 @@ class DatasetJobOperation(LakehouseApiMixin, Generic[DJ]):
         raise NotImplementedError
 
     def _run_local(self, force: bool | None = False, *args, **kwargs) -> DJ:
-        """Core run logic — orchestration + handle()."""
+        """Core run logic – orchestration + handle()."""
         target = self.get_target()
         dependencies = self.get_dependencies()
 

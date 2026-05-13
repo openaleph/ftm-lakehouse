@@ -13,7 +13,14 @@ namespace = Namespace()
 
 
 class EntityBuffer:
-    """Buffer statements keyed by statement ID, ordered by shard on flush."""
+    """In-memory shard-sorted statement buffer.
+
+    Keys statements by their statement id (deduplicating re-emissions in a
+    single batch), then yields them sorted by shard on
+    :meth:`flush_buffer` so the consumer (typically
+    :meth:`EntityRepository.write_statements`) can accumulate per-shard
+    parquet batches with bounded memory.
+    """
 
     def __init__(self, dataset: str, shards: int, origin: str | None = None) -> None:
         self.dataset: str = dataset
@@ -27,7 +34,11 @@ class EntityBuffer:
     ) -> None:
         """Add a statement to the buffer.
 
-        When deleted_at is set, the statement is marked as a tombstone.
+        Args:
+            stmt: The FtM ``Statement`` to buffer. ``entity_id`` and ``id``
+                are required; otherwise the call is a no-op.
+            deleted_at: Tombstone marker. When set, the statement is queued
+                as a delete in the parquet store.
         """
         if stmt.entity_id is None or stmt.id is None:
             return
@@ -66,7 +77,12 @@ class EntityBuffer:
             self.add_statement(stmt)
 
     def flush_buffer(self) -> StatementRows:
-        """Yield buffered ``StatementRow``s sorted by shard, then clear."""
+        """Yield buffered rows sorted by shard, then clear the buffer.
+
+        Yields:
+            :class:`StatementRow` sorted by ``shard`` so the consumer can
+            stream per-shard parquet batches with bounded memory.
+        """
         for row in sorted(self._buffer.values(), key=lambda r: r.shard):
             yield row
         self._buffer = {}

@@ -31,7 +31,7 @@ def cli_entities_iterate(
 ):
     """Iterate entities from the parquet store as FtM JSON lines.
 
-    Live read — reflects current state of the parquet table (post-flush,
+    Live read – reflects current state of the parquet table (post-flush,
     post-merge). For the frozen pre-exported view use ``stream``.
     """
     with DatasetContext() as dataset:
@@ -62,7 +62,7 @@ def cli_entities_import(
 ):
     """Bulk-import FtM entities straight into the parquet store.
 
-    Bypasses the journal — statements go through an in-memory ``EntityBuffer``
+    Bypasses the journal – statements go through an in-memory ``EntityBuffer``
     that pre-sorts by shard, then ``EntityRepository.write_statements`` packs
     them per-shard into the parquet store. Intended for one-shot loads of
     large ``entities.ftm.json`` files where journal write-amplification would

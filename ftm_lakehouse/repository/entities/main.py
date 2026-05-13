@@ -118,15 +118,15 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
 
     @api_delegate("_api_flush")
     def flush(self) -> int:
-        """
-        Flush statements from journal to parquet store.
+        """Drain the journal into the parquet statement store.
 
         Groups journal rows by ``(shard, bucket, origin)`` and appends one
-        sorted parquet file per partition. Duplicates and tombstones land as
-        new rows; call ``merge`` afterwards to collapse them.
+        sorted parquet file per partition via :meth:`write_statements`.
+        Duplicates and tombstones land as new rows; call :meth:`merge`
+        afterwards to collapse them.
 
         Returns:
-            Number of statements appended
+            Number of statements appended.
         """
         if self._journal.count() == 0:
             self.log.debug("Journal is empty", journal=mask_uri(self._journal.uri))
@@ -162,27 +162,29 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         statements: Iterable[StatementRow],
         now: datetime | None = None,
     ) -> int:
-        """Pack and append a shard-sorted stream of statements to the parquet store.
+        """Pack and append a shard-sorted stream of statements to parquet.
 
         Input is an iterable of :class:`StatementRow` already ordered by
-        shard — exactly what ``EntityBuffer.flush_buffer()`` and (via
-        ``unpack_statement`` adaptation) ``JournalStore.flush()`` produce.
-        Consecutive rows for the same shard accumulate into one per-shard
-        batch; ``ParquetStore.append`` then splits each batch by bucket and
+        shard – exactly what :meth:`EntityBuffer.flush_buffer` and
+        :meth:`JournalStore.flush_statements` produce. Consecutive rows for
+        the same shard accumulate into one per-shard batch;
+        :meth:`ParquetStore.append` then splits each batch by bucket and
         writes one parquet file per partition.
 
         This is the shared core of:
-        - ``EntityRepository.flush()`` (drains the journal)
-        - bare bulk-import paths in the CLI that bypass the journal entirely
+
+        - :meth:`flush` (drains the journal),
+        - bare bulk-import paths in the CLI that bypass the journal entirely.
 
         Tombstones (rows with ``deleted_at`` set) get their ``last_seen``
         bumped to ``deleted_at`` so they win the ``ROW_NUMBER() OVER (... ORDER
-        BY last_seen DESC)`` tiebreak against the live row in ``merge()``.
+        BY last_seen DESC)`` tiebreak against the live row in
+        :meth:`ParquetStore.merge`.
 
         Args:
             statements: Shard-sorted stream of :class:`StatementRow`.
-            now: Default timestamp for missing ``first_seen`` / ``last_seen``.
-                Defaults to the current UTC time.
+            now: Default timestamp for missing ``first_seen`` /
+                ``last_seen``. Defaults to the current UTC time.
 
         Returns:
             Number of statements written.

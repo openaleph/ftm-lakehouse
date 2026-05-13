@@ -70,6 +70,7 @@ sqlalchemy = "^2.0.46"
 uvicorn = "^0.42.0"
 granian = {extras = ["reload"], version = "^2.7.1"}
 griffe = "<3"
+zensical = "^0.0.41"
 
 [build-system]
 requires = ["poetry-core"]

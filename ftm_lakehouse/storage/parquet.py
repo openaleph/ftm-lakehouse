@@ -1,4 +1,4 @@
-"""ParquetStore — Delta Lake table with entity-hash shard partitioning.
+"""ParquetStore – Delta Lake table with entity-hash shard partitioning.
 
 Statements live in one Delta Lake table (per dataset) partitioned by
 ``(shard, bucket, origin)``. ``shard`` is the hex-padded entity_id hash bucket;
@@ -101,7 +101,7 @@ class ParquetStore(LakehouseApiMixin):
         """DuckDB connection with the Delta table registered as a view.
 
         ``register_view`` uses ``delta_scan`` so the view resolves the current
-        Delta log on every query — registering once per store is enough; the
+        Delta log on every query – registering once per store is enough; the
         view stays in sync with subsequent ``write_deltalake`` commits.
         """
         con = make_duckdb()
@@ -195,10 +195,15 @@ class ParquetStore(LakehouseApiMixin):
         method sorts by ``(bucket, origin, entity_id, id, last_seen DESC)``
         then splits by ``bucket`` so each ``write_deltalake`` call uses the
         bucket-appropriate ``writer_properties`` (small vs. large profile).
-        Duplicates land as separate rows and are reaped by ``merge``.
+        Duplicates land as separate rows and are reaped by :meth:`merge`.
 
-        Held under the dataset write fence so concurrent ``merge`` / ``compact``
-        / ``vacuum`` can't tombstone an in-flight append.
+        Held under the dataset write fence so concurrent :meth:`merge` /
+        :meth:`compact` / :meth:`vacuum` can't tombstone an in-flight append.
+
+        Args:
+            batch: PyArrow table with the columns of
+                :data:`ftm_lakehouse.model.statement.SHARDED_SCHEMA`. Rows
+                should already be scoped to a single shard.
         """
         if len(batch) == 0:
             return
@@ -272,9 +277,9 @@ class ParquetStore(LakehouseApiMixin):
     def compact(self) -> None:
         """Bin-pack small parquet files within each partition.
 
-        Cheap maintenance — Delta's ``OPTIMIZE compact`` only rewrites small
+        Cheap maintenance – Delta's ``OPTIMIZE compact`` only rewrites small
         files into larger ones; it does not collapse duplicate rows or drop
-        tombstones (use ``merge`` for that). Held under the dataset write
+        tombstones (use :meth:`merge` for that). Held under the dataset write
         fence (``path.LOCK``).
         """
         if not self.exists:
@@ -294,9 +299,14 @@ class ParquetStore(LakehouseApiMixin):
     def vacuum(self, retention_hours: int = 0) -> None:
         """Delete obsolete parquet files no longer referenced by the Delta log.
 
-        Tombstoned files (replaced by ``merge`` / ``compact``) become orphans
-        on disk; vacuum prunes them once they're past ``retention_hours``.
-        Held under the dataset write fence (``path.LOCK``).
+        Tombstoned files (replaced by :meth:`merge` / :meth:`compact`) become
+        orphans on disk; vacuum prunes them once they're past
+        ``retention_hours``. Held under the dataset write fence
+        (``path.LOCK``).
+
+        Args:
+            retention_hours: Keep files newer than this many hours. ``0``
+                drops every file the Delta log no longer references.
         """
         if not self.exists:
             return
@@ -326,7 +336,7 @@ class ParquetStore(LakehouseApiMixin):
         """Get entity IDs touched since a timestamp.
 
         Catches both *new* / *modified* statements (``first_seen >= since``)
-        and *deleted* ones (``deleted_at >= since``) — the latter so the diff
+        and *deleted* ones (``deleted_at >= since``) – the latter so the diff
         consumer can emit DEL ops for entities whose tombstone landed after
         the last diff state.
         """

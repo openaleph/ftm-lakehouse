@@ -118,7 +118,7 @@ def cli_compact(
 ):
     """Bin-pack small parquet files (cheap maintenance).
 
-    Does not collapse duplicate rows or drop tombstones — use ``merge`` for
+    Does not collapse duplicate rows or drop tombstones – use ``merge`` for
     that. Held under the dataset write fence.
     """
     with DatasetContext() as dataset:
@@ -134,7 +134,7 @@ def cli_merge(
 ):
     """Collapse duplicates and reap expired tombstones per partition.
 
-    Expensive — overwrites each ``(shard, bucket, origin)`` partition with a
+    Expensive – overwrites each ``(shard, bucket, origin)`` partition with a
     deduplicated view. Tombstones older than ``LAKEHOUSE_GRACE_PERIOD_DAYS``
     are dropped.
     """

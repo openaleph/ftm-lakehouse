@@ -93,7 +93,7 @@ class SqlJournalWriter(BaseJournalWriter["SqlJournalStore"]):
             )
             self.conn.execute(sqlite_stmt)
         elif dialect in ("postgresql", "postgres"):
-            # Autocommit per batch with deadlock retry — keeps transactions
+            # Autocommit per batch with deadlock retry – keeps transactions
             # short to minimize lock contention from concurrent writers.
             attempt = 0
             while True:
@@ -195,7 +195,7 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
     def flush(self) -> JournalRows:
         """Iterate and delete yielded rows, one shard at a time.
 
-        Reads the distinct shard values currently in the table (cheap — bounded
+        Reads the distinct shard values currently in the table (cheap – bounded
         by ``Settings.entity_shards``), then for each shard streams rows with
         ``WHERE shard = ?`` (index seek via ``ix_{ds}_shard``) and DELETEs the
         yielded ids in batches.
