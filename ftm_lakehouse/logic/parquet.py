@@ -12,14 +12,28 @@ import duckdb
 from deltalake import DeltaTable
 from sqlalchemy import Select, func, or_, select
 
+from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.model.statement import TABLE
 
 QUERY_IN_BATCH_SIZE = 5_000
 
 
 def make_duckdb() -> duckdb.DuckDBPyConnection:
-    """Create a default DuckDB connection."""
-    return duckdb.connect()
+    """Create a DuckDB connection with the configured memory ceiling and
+    spill directory.
+
+    Per-query memory is bounded by :attr:`Settings.duckdb_memory_limit`
+    (env: ``LAKEHOUSE_DUCKDB_MEMORY_LIMIT``, default ``4GB``); queries
+    exceeding the limit spill to
+    :attr:`Settings.duckdb_temp_directory`
+    (env: ``LAKEHOUSE_DUCKDB_TEMP_DIRECTORY``) when set, otherwise to
+    the OS temp directory DuckDB picks by default.
+    """
+    settings = Settings()
+    config: dict[str, str] = {"memory_limit": settings.duckdb_memory_limit}
+    if settings.duckdb_temp_directory:
+        config["temp_directory"] = settings.duckdb_temp_directory
+    return duckdb.connect(":memory:", config=config)
 
 
 def register_view(

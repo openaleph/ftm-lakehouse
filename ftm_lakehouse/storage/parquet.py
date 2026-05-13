@@ -14,6 +14,7 @@ Layout:
     entities/statements/shard={s}/bucket={b}/origin={o}/part-*.parquet
 """
 
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from functools import cached_property
 from typing import Iterator
@@ -103,10 +104,37 @@ class ParquetStore(LakehouseApiMixin):
         ``register_view`` uses ``delta_scan`` so the view resolves the current
         Delta log on every query – registering once per store is enough; the
         view stays in sync with subsequent ``write_deltalake`` commits.
+
+        DuckDB's :class:`~duckdb.DuckDBPyConnection` is *not* thread-safe;
+        callers must not query this connection directly. Use
+        :meth:`_cursor` to get a thread-isolated child connection that
+        shares the catalog, the loaded Delta extension, and the
+        registered view.
         """
         con = make_duckdb()
         register_view(con, self.deltatable)
         return con
+
+    @contextmanager
+    def _cursor(self) -> Iterator[duckdb.DuckDBPyConnection]:
+        """Yield a thread-isolated DuckDB cursor.
+
+        Per the DuckDB Python docs, ``DuckDBPyConnection.cursor()`` returns
+        a separate connection sharing the underlying database (catalog,
+        loaded extensions, registered views), which is the supported way
+        to run concurrent queries from multiple threads against one
+        ``ParquetStore``.
+
+        Use as ``with self._cursor() as cur:`` for any synchronous query
+        on the cached connection. Generators that need the cursor alive
+        for streaming results should pin it in their closure so it isn't
+        closed before consumption finishes.
+        """
+        cur = self._duckdb.cursor()
+        try:
+            yield cur
+        finally:
+            cur.close()
 
     @property
     def version(self) -> int | None:
@@ -277,23 +305,28 @@ class ParquetStore(LakehouseApiMixin):
         )
         grace_cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         with self._write_lock():
-            con = self._duckdb
             for shard, bucket, origin in self._list_partitions():
                 merge_select = build_merge_query(shard, bucket, origin, grace_cutoff)
                 sql = str(merge_select.compile(compile_kwargs={"literal_binds": True}))
-                reader = con.execute(sql).fetch_record_batch()
-                write_deltalake(
-                    str(self.uri),
-                    reader,
-                    mode="overwrite",
-                    partition_by=PARTITIONS,
-                    predicate=(
-                        f"shard = '{shard}' AND bucket = '{bucket}' "
-                        f"AND origin = '{origin}'"
-                    ),
-                    writer_properties=writer_for_bucket(bucket),
-                    storage_options=storage_options(),
-                )
+                with self._cursor() as cur:
+                    # ``to_arrow_reader`` yields a pyarrow RecordBatchReader
+                    # that DuckDB streams lazily from its execution
+                    # pipeline; ``write_deltalake`` consumes the reader
+                    # batch by batch, so the merge never materialises the
+                    # full partition in Python memory.
+                    reader = cur.execute(sql).to_arrow_reader()
+                    write_deltalake(
+                        str(self.uri),
+                        reader,
+                        mode="overwrite",
+                        partition_by=PARTITIONS,
+                        predicate=(
+                            f"shard = '{shard}' AND bucket = '{bucket}' "
+                            f"AND origin = '{origin}'"
+                        ),
+                        writer_properties=writer_for_bucket(bucket),
+                        storage_options=storage_options(),
+                    )
 
     @no_api
     def compact(self) -> None:
@@ -415,10 +448,11 @@ class ParquetStore(LakehouseApiMixin):
         """List all ``(shard, bucket, origin)`` triples currently in the table."""
         if not self.exists:
             return []
-        rows = self._duckdb.execute(
-            f"SELECT DISTINCT shard, bucket, origin FROM {TABLE.name} "
-            "ORDER BY shard, bucket, origin"
-        ).fetchall()
+        with self._cursor() as cur:
+            rows = cur.execute(
+                f"SELECT DISTINCT shard, bucket, origin FROM {TABLE.name} "
+                "ORDER BY shard, bucket, origin"
+            ).fetchall()
         return [(s, b, o) for s, b, o in rows]
 
     def _query_statement_data(self, q: Select | None = None) -> Iterator[StatementDict]:

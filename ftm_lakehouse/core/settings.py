@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     grace_period_days: int = 30
     max_buffer_rows: int = 1_000_000
 
+    duckdb_memory_limit: str = "4GB"
+    duckdb_temp_directory: str | None = None
+
     public_url_prefix: str | None = None
 
     @property
