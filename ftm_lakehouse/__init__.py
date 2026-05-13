@@ -11,7 +11,7 @@ from ftm_lakehouse.lake import (
     get_mappings,
 )
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "Catalog",
