@@ -46,23 +46,33 @@ _PA_TO_SA = {
 }
 
 
-def _sharded_table() -> TableClause:
-    """SQLAlchemy ``table()`` mirroring ``SHARDED_SCHEMA``.
+def _sharded_table(name: str) -> TableClause:
+    """SQLAlchemy ``table()`` named ``name``, mirroring ``SHARDED_SCHEMA``.
 
-    Use to compose queries (e.g. ``build_merge_query``) that compile to DuckDB
-    SQL via ``literal_binds`` and execute against a registered view named
-    ``name``. Column types are derived from the pyarrow schema so the two stay
-    in lockstep.
+    Use to compose queries that compile to DuckDB SQL via ``literal_binds``
+    and execute against a registered view of the same name. Column types
+    are derived from the pyarrow schema so the two stay in lockstep.
     """
     cols = []
     for field in SHARDED_SCHEMA:
         sa_type = _PA_TO_SA.get(field.type)
         cols.append(column(field.name, sa_type) if sa_type else column(field.name))
-    return table(nks.STATEMENT_TABLE, *cols)
+    return table(name, *cols)
 
 
-# singleton
-TABLE = _sharded_table()
+# Default view name (``"statement"``) – this is the one the LakeStore
+# connection registers as a *deduped* view in ftm_lakehouse, so read
+# code targeting ``TABLE`` automatically sees one row per statement id
+# with tombstones filtered.
+TABLE = _sharded_table(nks.STATEMENT_TABLE)
+
+# Raw view name (``"statement_raw"``) – registered alongside ``TABLE``
+# on the same LakeStore connection and surfaces the underlying Delta
+# rows unchanged. Targeted by paths that need tombstones and per-row
+# physical layout visible: :func:`build_merge_query` (grace-period
+# tombstone retention) and :meth:`get_changed_entity_ids` (diff
+# consumers emit DEL ops).
+TABLE_RAW = _sharded_table(f"{nks.STATEMENT_TABLE}_raw")
 
 
 class StatementRow(NamedTuple):

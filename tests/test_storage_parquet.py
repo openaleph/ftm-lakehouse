@@ -8,7 +8,7 @@ from followthemoney import Statement
 from ftmq.store.lake import pack_statement
 
 from ftm_lakehouse.core.conventions.path import entity_shard
-from ftm_lakehouse.model.statement import SHARDED_SCHEMA, TABLE
+from ftm_lakehouse.model.statement import SHARDED_SCHEMA, TABLE_RAW
 from ftm_lakehouse.storage.parquet import ParquetStore
 
 DATASET = "test"
@@ -55,7 +55,9 @@ def _flush(store: ParquetStore, rows: list[dict]) -> int:
 
 
 def _row_count(store: ParquetStore) -> int:
-    return store._duckdb.execute(f"SELECT COUNT(*) FROM {TABLE.name}").fetchone()[0]
+    """Physical row count from the raw view – bypasses dedupe-on-read."""
+    with store._lake.cursor() as cur:
+        return cur.execute(f"SELECT COUNT(*) FROM {TABLE_RAW.name}").fetchone()[0]
 
 
 def test_storage_parquet_query_statements(tmp_path):
@@ -115,12 +117,14 @@ def test_storage_parquet_merge_collapses_duplicates(tmp_path):
     assert stmt.last_seen == datetime(2021, 6, 1, tzinfo=timezone.utc)
 
 
-def test_storage_parquet_soft_delete_visible_until_merge(tmp_path):
-    """Tombstones coexist with live rows in append-only mode.
+def test_storage_parquet_soft_delete_hidden_without_merge(tmp_path):
+    """Dedupe-on-read hides a tombstoned statement before merge runs.
 
-    The query view filters ``deleted_at IS NULL`` per-row, but in append-only
-    mode the live row is still present alongside the tombstone — so the live
-    row remains visible to queries until ``merge()`` collapses the pair.
+    The live row and the tombstone coexist physically until ``merge()``
+    rewrites the partition, but the deduped ``statement`` view picks
+    the latest ``last_seen`` per id (the tombstone) and then filters
+    ``deleted_at IS NULL``, so the statement is invisible to queries
+    from the moment the tombstone lands.
     """
     store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
 
@@ -128,19 +132,22 @@ def test_storage_parquet_soft_delete_visible_until_merge(tmp_path):
     _flush(store, [_pack(stmt)])
     assert len(list(store.query_statements())) == 1
 
-    # Tombstone has a strictly LATER last_seen so merge picks it as the
-    # surviving row per id.
+    # Tombstone has a strictly LATER last_seen so ROW_NUMBER picks it
+    # as the surviving row per id; deleted_at IS NOT NULL then filters it.
     tomb = _pack(stmt, deleted_at=datetime(2025, 1, 1, tzinfo=timezone.utc))
     tomb["last_seen"] = datetime(2025, 1, 1, tzinfo=timezone.utc)
     _flush(store, [tomb])
 
-    # Live row still visible (tombstone is a separate, filtered-out row)
-    assert len(list(store.query_statements())) == 1
+    # Dedupe-on-read picks the tombstone and filters it – nothing visible.
+    assert list(store.query_statements()) == []
 
-    # Merge collapses the pair to the latest version (the tombstone); with
-    # grace=0 it then drops the tombstone entirely.
+    # Two physical rows still on disk until merge reaps them.
+    assert _row_count(store) == 2
+
+    # Merge with grace=0 drops both physical rows.
     store.merge(grace_period_days=0)
-    assert len(list(store.query_statements())) == 0
+    assert list(store.query_statements()) == []
+    assert _row_count(store) == 0
 
 
 def test_storage_parquet_get_statements_uses_shard(tmp_path):

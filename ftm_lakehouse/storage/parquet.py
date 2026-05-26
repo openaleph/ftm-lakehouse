@@ -6,20 +6,33 @@ the uniform shard count is set per dataset via ``DatasetModel.shards``.
 
 Writes are **append-only**: each flush sorts a per-partition batch by
 ``(entity_id, id, last_seen DESC)`` in memory and appends it as a new parquet
-file. Deduplication, ``first_seen`` merging, and tombstone reaping are deferred
-to the async ``merge`` operation. ``compact`` bin-packs small files; ``vacuum``
-removes obsolete Delta file versions.
+file. Read-time dedupe is baked into the underlying ``LakeStore`` connection
+via two registered views – :func:`~ftm_lakehouse.logic.parquet.dedupe_view_sql`
+produces the deduped ``statement`` view that every read targets, and
+:func:`~ftm_lakehouse.logic.parquet.raw_view_sql` produces ``statement_raw``
+for code paths that need tombstones and physical layout visible
+(:meth:`merge`, :meth:`get_changed_entity_ids`).
+
+Statement-level reads (:meth:`_query_statement_data` and everything that
+funnels through it) iterate ``(shard, bucket)`` partitions in Python and
+add ``WHERE shard = ? AND bucket = ?`` to each query so DuckDB's predicate
+pushdown drives the deduped view's parquet scan to one partition's files
+per iteration – the window function stays bounded to one parquet file's
+worth of rows. ``stats()`` and ``view()`` go through the un-iterated
+global view, which is fine because aggregations need a global view to
+combine correctly across partitions.
+
+``merge`` collapses physical duplicates and reaps tombstones past grace;
+``compact`` bin-packs small files; ``vacuum`` removes obsolete Delta file
+versions.
 
 Layout:
     entities/statements/shard={s}/bucket={b}/origin={o}/part-*.parquet
 """
 
-from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from functools import cached_property
 from typing import Iterator
 
-import duckdb
 import pyarrow as pa
 import pyarrow.compute as pc
 from anystore.interface.lock import Lock
@@ -38,12 +51,12 @@ from ftmq.store.lake import (
     LakeStore,
     setup_duckdb_storage,
     storage_options,
-    stream_duckdb,
     writer_for_bucket,
 )
 from ftmq.types import StatementEntities, Statements
 from ftmq.util import make_dataset
-from sqlalchemy import ColumnElement, Select, column, select
+from sqlalchemy import Select, column, or_, select
+from sqlalchemy.sql.elements import ColumnElement
 
 from ftm_lakehouse.core.api import LakehouseApiMixin, no_api
 from ftm_lakehouse.core.conventions import path
@@ -52,25 +65,32 @@ from ftm_lakehouse.logic.entities import aggregate_unsafe
 from ftm_lakehouse.logic.entities.aggregate import EntityPayload
 from ftm_lakehouse.logic.parquet import (
     build_merge_query,
-    make_duckdb,
-    register_view,
+    dedupe_view_sql,
+    duckdb_config,
+    raw_view_sql,
 )
-from ftm_lakehouse.model.statement import TABLE
+from ftm_lakehouse.model.statement import TABLE, TABLE_RAW
 
 PARTITIONS = ["shard", "bucket", "origin"]
 
-VIEW_FILTER = column("deleted_at").is_(None)
-"""SQLAlchemy filter appended to all queries via ftmq's view_filter mechanism."""
+# ftmq's ``view_filter`` is appended as a WHERE clause to every query the
+# LakeStore runs. Applied to the raw-view stats store so ``stats()`` sees
+# live rows only (tombstones stripped) without going through the dedupe
+# window – fast aggregations on a freshly-merged table.
+_LIVE_ROW_FILTER: ColumnElement = column("deleted_at").is_(None)
 
 
 class ParquetStore(LakehouseApiMixin):
     """Single Delta Lake table (per dataset) partitioned by ``(shard, bucket,
     origin)``.
 
-    Writes are append-only: ``append`` sorts a per-partition batch in memory
-    and writes one parquet file. Reads delegate to an ftmq ``LakeStore`` with
-    ``view_filter=deleted_at IS NULL`` (filters tombstones at query time;
-    merge drops them physically once past grace).
+    Writes are append-only: :meth:`append` sorts a per-partition batch in
+    memory and writes one parquet file. Reads dedupe on the fly via the
+    deduped ``statement`` view registered on the :class:`LakeStore`
+    connection; :meth:`_query_statement_data` iterates ``(shard, bucket)``
+    partitions so the window function stays bounded per iteration.
+    :meth:`merge`, :meth:`compact`, :meth:`vacuum` provide physical
+    cleanup but are no longer load-bearing for query correctness.
     """
 
     def __init__(self, uri: Uri, dataset: str, shards: int | None = None) -> None:
@@ -84,7 +104,28 @@ class ParquetStore(LakehouseApiMixin):
             uri=str(self.uri),
             dataset=self.dataset,
             partition_by=PARTITIONS,
-            view_filter=VIEW_FILTER,
+            view_sqls={
+                TABLE.name: dedupe_view_sql,
+                TABLE_RAW.name: raw_view_sql,
+            },
+            duckdb_config=duckdb_config(),
+        )
+        # Stats LakeStore registers the *raw* view as ``statement``.
+        # Aggregations bypass the deduped view's window function – a
+        # ~95× speedup on full-scan counts. ftmq's stats SQL uses
+        # ``count(canonical_id.distinct())`` and similar distinct-key
+        # aggregations, so physical duplicates from re-flushes don't
+        # inflate entity counts: same ``canonical_id`` across N
+        # physical rows still counts as one entity. The ``view_filter``
+        # strips tombstone rows so deletions still show up correctly
+        # post-flush, before merge has run.
+        self._lake_stats = LakeStore(
+            uri=str(self.uri),
+            dataset=self.dataset,
+            partition_by=PARTITIONS,
+            view_sqls={TABLE.name: raw_view_sql},
+            view_filter=_LIVE_ROW_FILTER,
+            duckdb_config=duckdb_config(),
         )
         self.log = get_logger(
             f"{self.dataset}.{self.__class__.__name__}",
@@ -96,45 +137,6 @@ class ParquetStore(LakehouseApiMixin):
     @property
     def deltatable(self) -> DeltaTable:
         return self._lake.deltatable
-
-    @cached_property
-    def _duckdb(self) -> duckdb.DuckDBPyConnection:
-        """DuckDB connection with the Delta table registered as a view.
-
-        ``register_view`` uses ``delta_scan`` so the view resolves the current
-        Delta log on every query – registering once per store is enough; the
-        view stays in sync with subsequent ``write_deltalake`` commits.
-
-        DuckDB's :class:`~duckdb.DuckDBPyConnection` is *not* thread-safe;
-        callers must not query this connection directly. Use
-        :meth:`_cursor` to get a thread-isolated child connection that
-        shares the catalog, the loaded Delta extension, and the
-        registered view.
-        """
-        con = make_duckdb()
-        register_view(con, self.deltatable)
-        return con
-
-    @contextmanager
-    def _cursor(self) -> Iterator[duckdb.DuckDBPyConnection]:
-        """Yield a thread-isolated DuckDB cursor.
-
-        Per the DuckDB Python docs, ``DuckDBPyConnection.cursor()`` returns
-        a separate connection sharing the underlying database (catalog,
-        loaded extensions, registered views), which is the supported way
-        to run concurrent queries from multiple threads against one
-        ``ParquetStore``.
-
-        Use as ``with self._cursor() as cur:`` for any synchronous query
-        on the cached connection. Generators that need the cursor alive
-        for streaming results should pin it in their closure so it isn't
-        closed before consumption finishes.
-        """
-        cur = self._duckdb.cursor()
-        try:
-            yield cur
-        finally:
-            cur.close()
 
     @property
     def version(self) -> int | None:
@@ -192,18 +194,30 @@ class ParquetStore(LakehouseApiMixin):
     def get_statements(self, entity_id: str) -> Statements:
         """Query all live statements for a single entity.
 
-        Uses the shard partition for efficient pruning.
+        Scopes :meth:`_query_statement_data` iteration to the entity's
+        own shard so single-entity lookups don't fan out to every
+        ``(shard, bucket)`` pair.
         """
         if not self.exists:
             return
         shard = path.entity_shard(entity_id, self.shards)
         q = select(TABLE).where(TABLE.c.shard == shard, TABLE.c.entity_id == entity_id)
-        yield from self.query_statements(q)
+        for stmt_dict in self._query_statement_data(q, shard=shard):
+            yield Statement.from_dict(stmt_dict)
 
     @no_api
     def stats(self) -> DatasetStats:
-        """Compute statistics from the statement store."""
-        return self.view().stats()
+        """Compute statistics from the statement store.
+
+        Targets the raw-view stats :class:`LakeStore` (``statement`` =
+        raw ``delta_scan`` with the ``deleted_at IS NULL`` filter) so
+        ftmq's aggregation SQL doesn't pay the dedupe window's per-row
+        overhead. ftmq's stats are distinct-keyed
+        (``count(canonical_id.distinct())`` etc.), so physical
+        duplicates from re-flushes don't inflate entity counts –
+        results stay correct between merges.
+        """
+        return self._lake_stats.default_view().stats()
 
     def _write_lock(self) -> Lock:
         """Dataset-wide write fence.
@@ -286,11 +300,17 @@ class ParquetStore(LakehouseApiMixin):
     def merge(self, grace_period_days: int | None = None) -> None:
         """Collapse duplicates and reap expired tombstones, partition by partition.
 
-        For each ``(shard, bucket, origin)`` partition, runs the merge query
-        (keep latest row per ``id`` by ``last_seen DESC``; fold ``first_seen``
-        to the min; drop tombstones older than the grace cutoff) and atomically
-        overwrites that partition via ``partition_filters``. Held under the
-        dataset write fence (``path.LOCK``).
+        For each ``(shard, bucket, origin)`` partition, runs the merge
+        query against ``statement_raw`` (keep latest row per ``id`` by
+        ``last_seen DESC``; fold ``first_seen`` to the min; drop
+        tombstones older than the grace cutoff) and atomically
+        overwrites that partition via ``partition_filters``. Held under
+        the dataset write fence (``path.LOCK``).
+
+        Physical cleanup only – the deduped read-time view already
+        produces the right query results without ``merge`` having run,
+        so this is purely about reclaiming disk space and reaping
+        tombstones past the grace window.
 
         Args:
             grace_period_days: Override ``settings.grace_period_days``. Pass
@@ -308,7 +328,7 @@ class ParquetStore(LakehouseApiMixin):
             for shard, bucket, origin in self._list_partitions():
                 merge_select = build_merge_query(shard, bucket, origin, grace_cutoff)
                 sql = str(merge_select.compile(compile_kwargs={"literal_binds": True}))
-                with self._cursor() as cur:
+                with self._lake.cursor() as cur:
                     # ``to_arrow_reader`` yields a pyarrow RecordBatchReader
                     # that DuckDB streams lazily from its execution
                     # pipeline; ``write_deltalake`` consumes the reader
@@ -393,30 +413,34 @@ class ParquetStore(LakehouseApiMixin):
         Catches both *new* / *modified* statements (``first_seen >= since``)
         and *deleted* ones (``deleted_at >= since``) – the latter so the diff
         consumer can emit DEL ops for entities whose tombstone landed after
-        the last diff state.
+        the last diff state. Targets ``statement_raw`` because the deduped
+        view filters tombstones; we need them visible here.
         """
         if not self.exists:
             return
-        from sqlalchemy import or_
 
         since_truncated = since.replace(microsecond=0)
         sql = (
-            select(TABLE)
-            .distinct(TABLE.c.entity_id)
+            select(TABLE_RAW)
+            .distinct(TABLE_RAW.c.entity_id)
             .where(
                 or_(
-                    TABLE.c.first_seen >= since_truncated,
-                    TABLE.c.deleted_at >= since_truncated,
+                    TABLE_RAW.c.first_seen >= since_truncated,
+                    TABLE_RAW.c.deleted_at >= since_truncated,
                 )
             )
         )
         if schemata:
-            sql = sql.where(TABLE.c.schema.in_(schemata))
+            sql = sql.where(TABLE_RAW.c.schema.in_(schemata))
         if prop:
-            sql = sql.where(TABLE.c.prop == prop)
-        for shard in self._iter_shards():
-            for row in stream_duckdb(sql.where(shard), self.deltatable):
-                yield row.entity_id
+            sql = sql.where(TABLE_RAW.c.prop == prop)
+        seen: set[str] = set()
+        for shard, _bucket in self._iter_shard_buckets():
+            scoped = sql.where(TABLE_RAW.c.shard == shard)
+            for row in self._lake._execute(scoped):
+                if row.entity_id not in seen:
+                    seen.add(row.entity_id)
+                    yield row.entity_id
 
     @no_api
     def destroy(self) -> None:
@@ -431,44 +455,79 @@ class ParquetStore(LakehouseApiMixin):
                 self._lake._backend.delete(key)
         self.log.info("Deleted statement store.", took=t.took)
 
-    def _iter_shards(self) -> Iterator[ColumnElement]:
-        """Get existing shard keys as Sqlalchemy predicates.
-
-        Returns free-column predicates (not bound to ``TABLE``) so they can be
-        added to queries built on ftmq's table object without dragging in a
-        second same-named ``Table`` reference (which would yield
-        ``FROM x, x`` in the rendered SQL).
-        """
-        shard_col = column("shard")
-        q = select(shard_col).select_from(TABLE).distinct()
-        for row in stream_duckdb(q, self.deltatable):
-            yield shard_col == row.shard
-
     def _list_partitions(self) -> list[tuple[str, str, str]]:
-        """List all ``(shard, bucket, origin)`` triples currently in the table."""
+        """List all ``(shard, bucket, origin)`` triples currently in the table.
+
+        Queries ``statement_raw`` so the enumeration scans the underlying
+        Delta partitions directly without going through the deduped
+        view's window function.
+        """
         if not self.exists:
             return []
-        with self._cursor() as cur:
+        with self._lake.cursor() as cur:
             rows = cur.execute(
-                f"SELECT DISTINCT shard, bucket, origin FROM {TABLE.name} "
+                f"SELECT DISTINCT shard, bucket, origin FROM {TABLE_RAW.name} "
                 "ORDER BY shard, bucket, origin"
             ).fetchall()
         return [(s, b, o) for s, b, o in rows]
 
-    def _query_statement_data(self, q: Select | None = None) -> Iterator[StatementDict]:
-        """
-        Query statement dicts, bypassing FtM object construction.
+    def _iter_shard_buckets(
+        self, shard: str | None = None
+    ) -> Iterator[tuple[str, str]]:
+        """Yield unique ``(shard, bucket)`` pairs from existing partitions.
+
+        Dedupe-aware reads (:meth:`_query_statement_data`) iterate per
+        ``(shard, bucket)`` because entity IDs (and thus statement IDs)
+        are uniquely placed in one ``(shard, bucket)`` by the model
+        layer. Adding ``WHERE shard = ? AND bucket = ?`` to each
+        iteration pushes through DuckDB's predicate pushdown to the
+        deduped view's parquet scan, keeping the window function input
+        bounded to one parquet file's worth of rows.
 
         Args:
-            q: Optional SQLAlchemy select (default: Query().sql.statements)
+            shard: Optional shard filter. When given, only ``(shard,
+                bucket)`` pairs for that shard are yielded – lets
+                single-entity lookups skip the other shards.
+        """
+        seen: set[tuple[str, str]] = set()
+        for s, b, _origin in self._list_partitions():
+            if shard is not None and s != shard:
+                continue
+            key = (s, b)
+            if key not in seen:
+                seen.add(key)
+                yield s, b
+
+    def _query_statement_data(
+        self, q: Select | None = None, *, shard: str | None = None
+    ) -> Iterator[StatementDict]:
+        """Query statement dicts via dedupe-on-read, bypassing FtM construction.
+
+        Iterates over ``(shard, bucket)`` partitions, adding ``WHERE
+        shard = ? AND bucket = ?`` to each query so the deduped
+        ``statement`` view's window function operates on one partition
+        at a time (DuckDB pushes the predicates through to the parquet
+        scan's File Filters). The live view is correct without running
+        :meth:`merge`: each statement id surfaces at most once,
+        carrying the earliest ``first_seen`` and the latest
+        ``last_seen``; tombstones are filtered out post-dedupe so a
+        re-add of a deleted entity still surfaces.
+
+        Args:
+            q: Optional SQLAlchemy select (default:
+                ``Query().sql.statements``).
+            shard: Optional shard filter passed through to
+                :meth:`_iter_shard_buckets` to scope iteration to one
+                shard – used by single-entity lookups.
 
         Yields:
-            StatementDict instances
+            StatementDict instances.
         """
         if q is None:
             q = Query().sql.statements
-        for shard in self._iter_shards():
-            for row in stream_duckdb(q.where(shard), self.deltatable, VIEW_FILTER):
+        for s, b in self._iter_shard_buckets(shard=shard):
+            scoped = q.where(column("shard") == s, column("bucket") == b)
+            for row in self._lake._execute(scoped):
                 yield StatementDict(**vars(row))
 
     def _query_data(self, q: Select | None = None) -> Iterator[EntityPayload]:
