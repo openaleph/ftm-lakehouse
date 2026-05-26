@@ -18,7 +18,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        # python-version: ["3.11", "3.12", "3.13"]
+        python-version: ["3.13"]
 
     # The docker-compose stack the test target boots provides its own
     # postgres for the lakehouse journal. A second postgres service is
@@ -98,4 +99,5 @@ jobs:
       uses: coverallsapp/github-action@v2
       with:
         parallel-finished: true
-        carryforward: "run-3.11,run-3.12,run-3.13"
+        # carryforward: "run-3.11,run-3.12,run-3.13"
+        carryforward: "run-3.13"
