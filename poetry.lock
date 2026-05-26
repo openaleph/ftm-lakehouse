@@ -6698,4 +6698,4 @@ api = ["fastapi", "granian", "pyjwt", "uvloop"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<3.14"
-content-hash = "2c910806822e3763f2a4d07f39311b2bae4dd652b100ccaa7e53266c9957259c"
+content-hash = "7177f80614be7f0b5cd34ebf9041aa28260192abd83d4a92f38bc00423477a6b"
