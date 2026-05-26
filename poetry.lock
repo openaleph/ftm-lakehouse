@@ -204,7 +204,6 @@ files = [
 
 [package.dependencies]
 frozenlist = ">=1.1.0"
-typing-extensions = {version = ">=4.2", markers = "python_version < \"3.13\""}
 
 [[package]]
 name = "annotated-doc"
@@ -256,7 +255,6 @@ files = [
 
 [package.dependencies]
 idna = ">=2.8"
-typing_extensions = {version = ">=4.5", markers = "python_version < \"3.13\""}
 
 [package.extras]
 trio = ["trio (>=0.32.0)"]
@@ -384,9 +382,6 @@ files = [
     {file = "arro3_core-0.8.0.tar.gz", hash = "sha256:b75d8281b87a87d3b66836bab89951ae06421970e5f880717723a93e38743f40"},
 ]
 
-[package.dependencies]
-typing-extensions = {version = "*", markers = "python_full_version < \"3.12.0\""}
-
 [[package]]
 name = "ast-serialize"
 version = "0.5.0"
@@ -445,19 +440,6 @@ files = [
 [package.extras]
 astroid = ["astroid (>=2,<5)"]
 test = ["astroid (>=2,<5)", "pytest (<9.0)", "pytest-cov", "pytest-xdist"]
-
-[[package]]
-name = "async-timeout"
-version = "5.0.1"
-description = "Timeout context manager for asyncio programs"
-optional = false
-python-versions = ">=3.8"
-groups = ["dev"]
-markers = "python_full_version < \"3.11.3\""
-files = [
-    {file = "async_timeout-5.0.1-py3-none-any.whl", hash = "sha256:39e3809566ff85354557ec2398b55e096c8364bacac9405a7a1fa429e77fe76c"},
-    {file = "async_timeout-5.0.1.tar.gz", hash = "sha256:d9321a7a3d5a6a5e187e824d2fa0793ce379a202935782d555d6e9d2735677d3"},
-]
 
 [[package]]
 name = "attrs"
@@ -2223,7 +2205,6 @@ psutil = ">=7"
 pygments = ">=2.14.0"
 stack_data = ">=0.6.0"
 traitlets = ">=5.13.0"
-typing_extensions = {version = ">=4.6", markers = "python_version < \"3.12\""}
 
 [package.extras]
 all = ["argcomplete (>=3.0)", "ipython[doc,matplotlib,terminal,test,test-extra]", "types-decorator"]
@@ -4279,6 +4260,28 @@ files = [
 tests = ["pytest"]
 
 [[package]]
+name = "putfs"
+version = "0.0.4"
+description = "Efficient HTTP blob storage over local filesystem"
+optional = true
+python-versions = "<4,>=3.13"
+groups = ["main"]
+markers = "extra == \"api\""
+files = [
+    {file = "putfs-0.0.4-py3-none-any.whl", hash = "sha256:c5194c1bbe4930d43638d71829d8562d7198547f168db650c6024c294232f830"},
+    {file = "putfs-0.0.4.tar.gz", hash = "sha256:26c501958fe8c9a6ffe972c5f6279115262b64ad9e4a58195cb2f09611d7232f"},
+]
+
+[package.dependencies]
+anyio = ">=4.13.0,<5.0.0"
+granian = ">=2.7.4,<3.0.0"
+starlette = ">=1.0.0,<2.0.0"
+uvloop = ">=0.22.1,<0.23.0"
+
+[package.extras]
+client = ["anystore (>=1.2.0,<2.0.0)"]
+
+[[package]]
 name = "py-partiql-parser"
 version = "0.6.3"
 description = "Pure Python PartiQL Parser"
@@ -4699,7 +4702,6 @@ files = [
 
 [package.dependencies]
 pytest = ">=8.2,<10"
-typing-extensions = {version = ">=4.12", markers = "python_version < \"3.13\""}
 
 [package.extras]
 docs = ["sphinx (>=5.3)", "sphinx-rtd-theme (>=1)"]
@@ -5053,9 +5055,6 @@ files = [
     {file = "redis-7.4.0.tar.gz", hash = "sha256:64a6ea7bf567ad43c964d2c30d82853f8df927c5c9017766c55a1d1ed95d18ad"},
 ]
 
-[package.dependencies]
-async-timeout = {version = ">=4.0.3", markers = "python_full_version < \"3.11.3\""}
-
 [package.extras]
 circuit-breaker = ["pybreaker (>=1.4.0)"]
 hiredis = ["hiredis (>=3.2.0)"]
@@ -5079,7 +5078,6 @@ files = [
 [package.dependencies]
 attrs = ">=22.2.0"
 rpds-py = ">=0.7.0"
-typing-extensions = {version = ">=4.4.0", markers = "python_version < \"3.13\""}
 
 [[package]]
 name = "regex"
@@ -5823,7 +5821,6 @@ files = [
 
 [package.dependencies]
 anyio = ">=3.6.2,<5"
-typing-extensions = {version = ">=4.10.0", markers = "python_version < \"3.13\""}
 
 [package.extras]
 full = ["httpx (>=0.27.0,<0.29.0)", "itsdangerous", "jinja2", "python-multipart (>=0.0.18)", "pyyaml"]
@@ -6686,9 +6683,9 @@ pyyaml = ">=6.0.2"
 tomli = ">=2.4.0"
 
 [extras]
-api = ["fastapi", "granian", "pyjwt", "uvloop"]
+api = ["fastapi", "granian", "putfs", "pyjwt", "uvloop"]
 
 [metadata]
 lock-version = "2.1"
-python-versions = ">=3.11,<3.14"
-content-hash = "546e810df0b3c172765a188086538132ad460dfb76dc96f54acd54d4d4e69e05"
+python-versions = ">=3.13,<3.14"
+content-hash = "8a1c1aec12a9ef501fa0cbb053d06331464dcf29e3b69610109f05351bdb9956"

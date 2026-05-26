@@ -1,8 +1,8 @@
 """Tests for the DuckDB cursor isolation + per-connection memory limit.
 
-``ParquetStore._cursor()`` returns a thread-isolated cursor so
-concurrent queries against one cached DuckDB connection don't race on
-shared connection state.
+``ParquetStore._lake.cursor()`` returns a thread-isolated cursor so
+concurrent queries against the cached :class:`LakeStore` DuckDB
+connection don't race on shared connection state.
 
 ``make_duckdb()`` plumbs ``Settings.duckdb_memory_limit`` into the
 connection so a single complex query can't OOM the worker.
@@ -51,7 +51,7 @@ def test_cursor_isolation_under_concurrent_reads(tmp_path) -> None:
     _seed(store)
 
     def _hit_duckdb(i: int) -> int:
-        with store._cursor() as cur:
+        with store._lake.cursor() as cur:
             (n,) = cur.execute("SELECT ?", [i]).fetchone()
             return n
 
@@ -68,7 +68,7 @@ def test_cursor_can_query_registered_view(tmp_path) -> None:
     store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
     _seed(store)
 
-    with store._cursor() as cur:
+    with store._lake.cursor() as cur:
         (n,) = cur.execute("SELECT COUNT(*) FROM statement").fetchone()
     assert n == 1
 

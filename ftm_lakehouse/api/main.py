@@ -2,9 +2,11 @@ from anystore.api.routes import router as archive_router
 from anystore.exceptions import DoesNotExist
 from anystore.logging import get_logger
 from anystore.store import get_store
+from anystore.util import ensure_uri, uri_to_path
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from followthemoney.dataset.util import dataset_name_check
+from putfs import api as putfs
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
 from ftm_lakehouse.api.routes.entities import router as entities_router
@@ -60,19 +62,36 @@ async def _bad_request_handler(_: Request, exc: Exception) -> JSONResponse:
 
 
 def get_app(lake_uri: str | None = None) -> FastAPI:
+    uri = ensure_uri(lake_uri or settings.uri)
     app = FastAPI(docs_url=None, redoc_url="/")
-    app.state.store = get_store(lake_uri or settings.uri)
-    app.state.lake = get_lakehouse(lake_uri or settings.uri)
+    app.state.lake = get_lakehouse(uri)
+
+    # lakehouse api
     app.include_router(entities_router)
     app.include_router(journal_router)
     app.include_router(operations_router)
-    app.include_router(archive_router)
+
+    # blob storage api
+    if uri.startswith("file://"):
+        # local fs, so we can use putfs. Mount the whole Starlette app so putfs
+        # keeps its own exception handlers; its catch-all /{key:path} sits
+        # behind the /{dataset}/_api/* routes above.
+        putfs.ROOT = uri_to_path(uri).resolve()
+        app.mount("/", putfs.app)
+    else:
+        app.state.store = get_store(uri)
+        app.include_router(archive_router)
+
+    # middlewares
     app.add_middleware(StaticHeadersMiddleware)
     if settings.on_zfs and settings.zfs_pool:
         app.add_middleware(ZfsEnsureMiddleware)
+
+    # error handlers
     app.add_exception_handler(DoesNotExist, _not_found_handler)
     app.add_exception_handler(FileNotFoundError, _not_found_handler)
     app.add_exception_handler(ValueError, _bad_request_handler)
+
     return app
 
 

@@ -14,9 +14,9 @@ services:
       retries: 30
 
   # Lakehouse Granian API on a Unix socket. Handles all structured
-  # `/{dataset}/_api/...` traffic – journal, entities, operations, etc.
-  # Blob storage is delegated to PutFS (below); reads are served from
-  # disk by nginx so the lakehouse never sits in the blob-read hot path.
+  # `/{dataset}/_api/...` traffic – journal, entities, operations, etc.  Blob
+  # storage is delegated to PutFS mounted inside; reads are served from disk by
+  # nginx so the lakehouse never sits in the blob-read hot path.
   lakehouse:
     build: .
     command: ["granian", "ftm_lakehouse.api:app"]
@@ -26,8 +26,10 @@ services:
     environment:
       LAKEHOUSE_URI: /data
       LAKEHOUSE_JOURNAL_URI: postgresql://lakehouse:lakehouse@postgres/lakehouse
+      PUTFS_WORM_GLOBS: "*/archive/*"
+      PUTFS_CHECKSUM_PATHS: 'archive/([0-9a-f]{2})/([0-9a-f]{2})/([0-9a-f]{2})/(?=\1\2\3)(?P<sha256>[0-9a-f]{64})/blob$$'
       GRANIAN_INTERFACE: asgi
-      GRANIAN_UDS: /run/lakehouse/lakehouse.sock
+      GRANIAN_UDS: /run/lakehouse/granian.sock
       GRANIAN_UDS_PERMISSIONS: "0666"
       GRANIAN_WORKERS: "4"
       GRANIAN_RUNTIME_MODE: mt
@@ -40,47 +42,28 @@ services:
       - lakehouse_run:/run/lakehouse
     healthcheck:
       # Granian has bound its UDS once the socket file exists.
-      test: ["CMD-SHELL", "test -S /run/lakehouse/lakehouse.sock"]
+      test: ["CMD-SHELL", "test -S /run/lakehouse/granian.sock"]
       interval: 2s
       timeout: 2s
       retries: 30
 
-  # PutFS handles raw blob storage (PUT / DELETE / listing for archive
-  # blobs). Reads (GET / HEAD) are served from disk by nginx for max
-  # throughput. See https://putf.sh/deployment/docker-compose/
-  putfs:
-    image: ghcr.io/dataresearchcenter/putfs
-    environment:
-      PUTFS_ROOT: /data
-    volumes:
-      - ./data:/data
-      - putfs_run:/run/putfs
-    healthcheck:
-      test: ["CMD-SHELL", "test -S /run/putfs/putfs.sock"]
-      interval: 2s
-      timeout: 2s
-      retries: 30
-
-  # Single nginx fronting both services with a shared api-key gate.
+  # nginx fronting with api-key gate.
   # Routing:
   #   /_/dl/...          → presigned download (HMAC inside the location)
-  #   /{ds}/_api/...     → lakehouse (UDS)
-  #   trailing slash     → PutFS (listing)
+  #   /{ds}/_api/...     → lakehouse UDS
+  #   trailing slash     → lakehouse UDS
   #   GET / HEAD other   → static from /data
-  #   PUT / DELETE other → PutFS (UDS)
+  #   PUT / DELETE other → lakehouse UDS
   nginx:
     image: nginx:alpine
     depends_on:
       lakehouse:
-        condition: service_healthy
-      putfs:
         condition: service_healthy
     ports:
       - 127.0.0.1:8000:80
     volumes:
       - ./data:/data:ro
       - ./contrib:/contrib:ro
-      - putfs_run:/run/putfs:ro
       - lakehouse_run:/run/lakehouse:ro
     configs:
       - source: nginx_conf
@@ -104,15 +87,8 @@ configs:
         log_not_found off;
         # access_log off;
 
-        upstream putfs {
-          server unix:/run/putfs/putfs.sock;
-          keepalive 64;
-          keepalive_requests 10000;
-          keepalive_time 1h;
-        }
-
-        upstream lakehouse {
-          server unix:/run/lakehouse/lakehouse.sock;
+        upstream api {
+          server unix:/run/lakehouse/granian.sock;
           keepalive 64;
           keepalive_requests 10000;
           keepalive_time 1h;
@@ -142,18 +118,18 @@ configs:
           # Lakehouse API surface – everything under /{dataset}/_api/.
           # Matched before the trailing-slash and root locations.
           location ~ ^/[^/]+/_api/ {
-            proxy_pass http://lakehouse;
+            proxy_pass http://api;
           }
 
-          # Listing requests (trailing slash) → PutFS API.
+          # Listing requests (trailing slash) → API.
           location ~ /$ {
-            proxy_pass http://putfs$$request_uri;
+            proxy_pass http://api$$request_uri;
           }
 
-          # GET / HEAD: serve blobs from disk. PUT / DELETE / etc.: PutFS.
+          # GET / HEAD: serve blobs from disk. PUT / DELETE / etc.: API.
           location / {
             limit_except GET HEAD {
-              proxy_pass http://putfs$$request_uri;
+              proxy_pass http://api$$request_uri;
             }
             root /data;
             try_files $$uri =404;
@@ -163,5 +139,4 @@ configs:
 
 volumes:
   postgres_data:
-  putfs_run:
   lakehouse_run:

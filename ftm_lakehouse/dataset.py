@@ -178,17 +178,3 @@ class Dataset(Generic[DM]):
         if not self.exists():
             self.update_model()
             self._log.info("Created dataset")
-
-    # -------------------------------------------------------------------------
-    # Public Url exposure
-    # -------------------------------------------------------------------------
-
-    def get_blob_url(self, checksum: str) -> str:
-        from ftm_lakehouse.core.archive_url import resolve_archive_url
-
-        return resolve_archive_url(
-            store=self._store,
-            dataset=self.name,
-            checksum=checksum,
-            public_prefix=self.model.get_public_prefix(),
-        )

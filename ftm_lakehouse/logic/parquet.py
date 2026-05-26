@@ -1,9 +1,14 @@
 """Pure functions for Delta Lake parquet operations.
 
-DuckDB helpers to register a Delta table as a SQL view and to compose merge
-queries via SQLAlchemy. Shard partitioning bounds the size of each query's
-input, so disk-spill plumbing (custom ``temp_directory``, ``memory_limit``)
-is not needed and relies on DuckDB defaults (see how this goes...)
+DuckDB view-SQL builders for ``LakeStore`` and the SQLAlchemy ``Select``
+that ``merge`` compiles per partition. Read-time dedupe lives in the
+``statement`` view (window over ``(shard, bucket, id)``); ``statement_raw``
+exposes the underlying Delta rows for code paths that need tombstones
+or per-row physical layout visible (``merge``, ``get_changed_entity_ids``).
+
+``make_duckdb`` / ``register_view`` are kept as test utilities for setting
+up a bare DuckDB connection against a specific Delta table outside of the
+``LakeStore`` lifecycle.
 """
 
 from datetime import datetime
@@ -13,36 +18,40 @@ from deltalake import DeltaTable
 from sqlalchemy import Select, func, or_, select
 
 from ftm_lakehouse.core.settings import Settings
-from ftm_lakehouse.model.statement import TABLE
+from ftm_lakehouse.model.statement import TABLE, TABLE_RAW
 
 QUERY_IN_BATCH_SIZE = 5_000
 
 
-def make_duckdb() -> duckdb.DuckDBPyConnection:
-    """Create a DuckDB connection with the configured memory ceiling,
-    spill directory, and auto-loaded extensions.
+def duckdb_config() -> dict[str, str]:
+    """LakeStore DuckDB config derived from lakehouse settings.
 
     Per-query memory is bounded by :attr:`Settings.duckdb_memory_limit`
     (env: ``LAKEHOUSE_DUCKDB_MEMORY_LIMIT``, default ``4GB``); queries
-    exceeding the limit spill to
-    :attr:`Settings.duckdb_temp_directory`
+    exceeding the limit spill to :attr:`Settings.duckdb_temp_directory`
     (env: ``LAKEHOUSE_DUCKDB_TEMP_DIRECTORY``) when set, otherwise to
-    the OS temp directory DuckDB picks by default.
-
-    ``autoinstall_known_extensions`` + ``autoload_known_extensions`` let
-    DuckDB lazy-resolve the Delta extension on the first ``delta_scan``
-    call instead of every :func:`register_view` running an explicit
-    ``INSTALL delta`` / ``LOAD delta``. ``INSTALL`` is idempotent and
-    cached on disk by DuckDB; ``LOAD`` runs at most once per connection.
+    the OS temp directory DuckDB picks by default. Passed to
+    :class:`~ftmq.store.lake.LakeStore` via the ``duckdb_config`` kwarg.
     """
     settings = Settings()
-    config: dict[str, str] = {
-        "memory_limit": settings.duckdb_memory_limit,
-        "autoinstall_known_extensions": "true",
-        "autoload_known_extensions": "true",
-    }
+    config: dict[str, str] = {"memory_limit": settings.duckdb_memory_limit}
     if settings.duckdb_temp_directory:
         config["temp_directory"] = settings.duckdb_temp_directory
+    return config
+
+
+def make_duckdb() -> duckdb.DuckDBPyConnection:
+    """Stand-alone DuckDB connection with the lakehouse memory / spill config.
+
+    Used by tests that want a bare DuckDB connection against a specific
+    Delta table outside the ``LakeStore`` lifecycle. Production code
+    uses :attr:`ftmq.store.lake.LakeStore._duckdb` instead.
+    """
+    config: dict[str, str] = {
+        "autoinstall_known_extensions": "true",
+        "autoload_known_extensions": "true",
+        **duckdb_config(),
+    }
     return duckdb.connect(":memory:", config=config)
 
 
@@ -51,26 +60,84 @@ def register_view(
     dt: DeltaTable,
     name: str = TABLE.name,
 ) -> None:
-    """Register a DeltaTable as a DuckDB view via ``delta_scan``.
+    """Register a raw ``delta_scan`` view named ``name`` on ``con``.
 
-    The Delta extension exposes partition values as columns and uses Delta's
-    column statistics for file skipping on filtered queries, so per-partition
-    queries (``WHERE shard = ? AND bucket = ? AND origin = ?``) prune to one
-    partition's files automatically.
-
-    The Delta extension is auto-installed and auto-loaded on first
-    ``delta_scan`` use thanks to the connection-level flags set in
-    :func:`make_duckdb`, so this function does not run an explicit
-    ``INSTALL`` / ``LOAD``.
-
-    DuckDB's ``delta_scan`` does not accept prepared parameters for its URI
-    argument, so the URI is interpolated as a SQL string literal. Single
-    quotes are doubled to prevent injection if a future code path lets a
-    dataset name (and thus the URI) carry a quote – primary validation is
-    in :func:`ftm_lakehouse.util.validate_dataset_name`.
+    Test utility – matches the legacy behaviour of registering one view
+    over a Delta table. Production code lets :class:`LakeStore`
+    register the configured ``view_sqls`` automatically.
     """
-    table_uri = dt.table_uri.replace("'", "''")
-    con.sql(f"CREATE OR REPLACE VIEW {name} AS SELECT * FROM delta_scan('{table_uri}')")
+    con.sql(f"CREATE OR REPLACE VIEW {name} AS {raw_view_sql(dt)}")
+
+
+def _delta_scan_clause(dt: DeltaTable) -> str:
+    """``delta_scan('<uri>')`` with the URI single-quote–escaped.
+
+    DuckDB's ``delta_scan`` does not accept prepared parameters for its
+    URI argument, so the URI is interpolated as a SQL string literal.
+    Single quotes are doubled to prevent injection if a future code
+    path lets a dataset name (and thus the URI) carry a quote – primary
+    validation is in :func:`ftm_lakehouse.util.validate_dataset_name`.
+    """
+    return f"delta_scan('{dt.table_uri.replace(chr(39), chr(39) * 2)}')"
+
+
+def raw_view_sql(dt: DeltaTable) -> str:
+    """SELECT body for the ``statement_raw`` view.
+
+    Surfaces every physical row in the Delta table, including
+    tombstones and pre-merge duplicates. Used by :func:`build_merge_query`
+    and :meth:`get_changed_entity_ids` – any path that needs the
+    physical layout visible.
+    """
+    return f"SELECT * FROM {_delta_scan_clause(dt)}"
+
+
+def dedupe_view_sql(dt: DeltaTable) -> str:
+    """SELECT body for the deduped ``statement`` view.
+
+    The view returns at most one row per statement ``id`` within each
+    ``(shard, bucket)`` slice (entity ids – and therefore statement
+    ids – are uniquely placed in one ``(shard, bucket)`` by the model
+    layer, so the window's ``PARTITION BY shard, bucket, id`` matches a
+    global window keyed by ``id``):
+
+    - ``ROW_NUMBER() OVER (PARTITION BY shard, bucket, id ORDER BY
+      last_seen DESC) = 1`` picks the row with the latest ``last_seen``
+      per id. Tombstones bump ``last_seen = deleted_at`` at write time,
+      so the tombstone wins ROW_NUMBER for a deleted statement; the
+      outer ``deleted_at IS NULL`` then filters it out – a deleted
+      entity is invisible to readers regardless of any surviving live
+      row alongside it.
+    - ``MIN(first_seen) OVER (PARTITION BY shard, bucket, id)``
+      surfaces the earliest ``first_seen`` for each id under the
+      ``first_seen`` column, so the dedupe matches what physical
+      ``merge`` would produce.
+
+    The column list is explicit so ``first_seen`` resolves to the
+    windowed MIN and the helper columns (``rn``, ``first_seen_min``)
+    aren't projected through to consumers.
+
+    Partition predicates (``WHERE shard = ? AND bucket = ?``) push
+    through this view to the parquet scan's File Filters because
+    ``shard`` / ``bucket`` are in the window's ``PARTITION BY`` – the
+    optimizer applies them before the window. That keeps each
+    per-partition read bounded to one parquet file's worth of rows.
+    """
+    return f"""
+SELECT
+    id, entity_id, canonical_id, dataset, bucket, origin, source,
+    schema, prop, prop_type, value, original_value, lang, external,
+    first_seen_min AS first_seen, last_seen, deleted_at, shard
+FROM (
+    SELECT *,
+        ROW_NUMBER() OVER (
+            PARTITION BY shard, bucket, id ORDER BY last_seen DESC
+        ) AS rn,
+        MIN(first_seen) OVER (PARTITION BY shard, bucket, id) AS first_seen_min
+    FROM {_delta_scan_clause(dt)}
+)
+WHERE rn = 1 AND deleted_at IS NULL
+""".strip()
 
 
 def build_merge_query(
@@ -79,11 +146,14 @@ def build_merge_query(
     origin: str,
     grace_cutoff: datetime,
 ) -> Select:
-    """SQLAlchemy ``Select`` that collapses one partition.
+    """SQLAlchemy ``Select`` that collapses one partition for physical merge.
 
-    The returned query:
+    Targets the **raw** ``statement_raw`` view (not the deduped
+    ``statement``) because ``merge`` needs every row visible – including
+    tombstones within the grace window – so it can rewrite the partition
+    file in its physically-merged form. The returned query:
 
-    - filters the source view to one ``(shard, bucket, origin)`` partition;
+    - filters the raw view to one ``(shard, bucket, origin)`` partition;
     - computes ``MIN(first_seen) OVER (PARTITION BY id)`` so the surviving
       row carries the earliest ``first_seen`` for that statement id;
     - keeps the row with the latest ``last_seen`` per id via
@@ -92,10 +162,7 @@ def build_merge_query(
     - orders by ``(entity_id, id, last_seen DESC)`` so the rewritten parquet
       file is ready for future merges without re-sort.
 
-    Consumers can compose further filters via ``.where(...)`` on the
-    returned Select (e.g.
-    ``query.where(query.selected_columns.entity_id == entity_id)`` for a
-    single-entity merge). Compile to executable DuckDB SQL with
+    Compile to executable DuckDB SQL with
     ``str(query.compile(compile_kwargs={"literal_binds": True}))``.
 
     Args:
@@ -110,21 +177,21 @@ def build_merge_query(
         A SQLAlchemy :class:`~sqlalchemy.sql.expression.Select` that
         compiles to DuckDB SQL.
     """
-    inner_cols = [c for c in TABLE.columns if c.name != "first_seen"]
+    inner_cols = [c for c in TABLE_RAW.columns if c.name != "first_seen"]
     inner = (
         select(
             *inner_cols,
-            func.min(TABLE.c.first_seen)
-            .over(partition_by=TABLE.c.id)
+            func.min(TABLE_RAW.c.first_seen)
+            .over(partition_by=TABLE_RAW.c.id)
             .label("first_seen"),
             func.row_number()
-            .over(partition_by=TABLE.c.id, order_by=TABLE.c.last_seen.desc())
+            .over(partition_by=TABLE_RAW.c.id, order_by=TABLE_RAW.c.last_seen.desc())
             .label("rn"),
         )
         .where(
-            TABLE.c.shard == shard,
-            TABLE.c.bucket == bucket,
-            TABLE.c.origin == origin,
+            TABLE_RAW.c.shard == shard,
+            TABLE_RAW.c.bucket == bucket,
+            TABLE_RAW.c.origin == origin,
         )
         .subquery("merge_src")
     )

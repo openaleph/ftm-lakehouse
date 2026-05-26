@@ -3,7 +3,7 @@ all: clean install test
 api:
 	LAKEHOUSE_API_AUTH_ENABLED=0 DEBUG=1 granian --interface asgi --reload --port 5000 ftm_lakehouse.api:app
 
-start:
+start: stop
 	docker compose up --build -d --wait
 
 stop:

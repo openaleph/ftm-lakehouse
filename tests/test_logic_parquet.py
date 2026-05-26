@@ -6,7 +6,7 @@ import pyarrow as pa
 import pytest
 
 from ftm_lakehouse.logic.parquet import build_merge_query, make_duckdb
-from ftm_lakehouse.model.statement import SHARDED_SCHEMA, TABLE
+from ftm_lakehouse.model.statement import SHARDED_SCHEMA, TABLE_RAW
 
 
 def _table(rows: list[dict]) -> pa.Table:
@@ -26,7 +26,7 @@ def _run(
     table: pa.Table, *, shard: str, bucket: str, origin: str, grace_cutoff: datetime
 ):
     con = make_duckdb()
-    con.register(TABLE.name, table)
+    con.register(TABLE_RAW.name, table)
     q = build_merge_query(shard, bucket, origin, grace_cutoff)
     sql = str(q.compile(compile_kwargs={"literal_binds": True}))
     return con.execute(sql).to_arrow_table()
@@ -181,7 +181,7 @@ def test_merge_query_composable_with_where(now):
         ]
     )
     con = make_duckdb()
-    con.register(TABLE.name, table)
+    con.register(TABLE_RAW.name, table)
     q = build_merge_query("0", "thing", "ingest", now)
     q = q.where(q.selected_columns.entity_id == "alice")
     sql = str(q.compile(compile_kwargs={"literal_binds": True}))
