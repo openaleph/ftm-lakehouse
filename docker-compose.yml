@@ -26,7 +26,7 @@ services:
     environment:
       LAKEHOUSE_URI: /data
       LAKEHOUSE_JOURNAL_URI: postgresql://lakehouse:lakehouse@postgres/lakehouse
-      PUTFS_WORM_GLOBS: "*/archive/*"
+      PUTFS_WORM_GLOBS: "**/archive/**/blob"
       PUTFS_CHECKSUM_PATHS: 'archive/([0-9a-f]{2})/([0-9a-f]{2})/([0-9a-f]{2})/(?=\1\2\3)(?P<sha256>[0-9a-f]{64})/blob$$'
       GRANIAN_INTERFACE: asgi
       GRANIAN_UDS: /run/lakehouse/granian.sock

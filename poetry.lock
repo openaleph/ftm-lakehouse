@@ -4261,21 +4261,21 @@ tests = ["pytest"]
 
 [[package]]
 name = "putfs"
-version = "0.0.4"
+version = "0.0.6"
 description = "Efficient HTTP blob storage over local filesystem"
 optional = true
 python-versions = "<4,>=3.13"
 groups = ["main"]
 markers = "extra == \"api\""
 files = [
-    {file = "putfs-0.0.4-py3-none-any.whl", hash = "sha256:c5194c1bbe4930d43638d71829d8562d7198547f168db650c6024c294232f830"},
-    {file = "putfs-0.0.4.tar.gz", hash = "sha256:26c501958fe8c9a6ffe972c5f6279115262b64ad9e4a58195cb2f09611d7232f"},
+    {file = "putfs-0.0.6-py3-none-any.whl", hash = "sha256:42cec97dc02f4da387227e4dcabb77bef3da819637f091a73c04c6e8af215bff"},
+    {file = "putfs-0.0.6.tar.gz", hash = "sha256:719911d007e2a52b9aa9de0bf3f1d8f04986d758f4e5170006da2ff67bb8bb19"},
 ]
 
 [package.dependencies]
 anyio = ">=4.13.0,<5.0.0"
 granian = ">=2.7.4,<3.0.0"
-starlette = ">=1.0.0,<2.0.0"
+starlette = ">=1.0.1,<2.0.0"
 uvloop = ">=0.22.1,<0.23.0"
 
 [package.extras]
@@ -6688,4 +6688,4 @@ api = ["fastapi", "granian", "putfs", "pyjwt", "uvloop"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.13,<3.14"
-content-hash = "8a1c1aec12a9ef501fa0cbb053d06331464dcf29e3b69610109f05351bdb9956"
+content-hash = "af9e9b621252db3c46d006fcc19b67be9f728adf3fef80dcc68bc9b26765f20d"
