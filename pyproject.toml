@@ -63,7 +63,7 @@ mkdocstrings-python = "^2.0.1"
 redis = "^7.2.0"
 sqlalchemy = "^2.0.50"
 uvicorn = "^0.47.0"
-granian = {extras = ["reload"], version = "^2.7.1"}
+granian = {extras = ["reload"], version = "^2.7.5"}
 griffe = "<3"
 zensical = "^0.0.43"
 
