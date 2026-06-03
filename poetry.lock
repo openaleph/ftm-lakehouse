@@ -1526,13 +1526,14 @@ Werkzeug = ">=0.7"
 
 [[package]]
 name = "followthemoney"
-version = "4.8.2"
+version = "4.8.4"
 description = "A data model for anti corruption data modeling and analysis."
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "followthemoney-4.8.2-py3-none-any.whl", hash = "sha256:d6e9c20032290697f1c9a5c32087294896524069379d74184561a3c1d55e77d2"},
+    {file = "followthemoney-4.8.4-py3-none-any.whl", hash = "sha256:7d1b7031ad6a6b7a3a511adbb2c224ad9708027d1b40e376110c051c66339500"},
+    {file = "followthemoney-4.8.4.tar.gz", hash = "sha256:c42f2ddda3864287fbcb059bf31aedf0a1516349cb54878a02af2289592f6118"},
 ]
 
 [package.dependencies]
@@ -6695,4 +6696,4 @@ api = ["fastapi", "granian", "putfs", "pyjwt", "uvloop"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.13,<3.14"
-content-hash = "7b1b355f36ab67034968eb6963e7bc48ce1284150559bff52b4392dff27ddfec"
+content-hash = "2126dfa7ca5920733731443cf61d57e3533b30df3687dd8203d3a5e804eb0d1d"
