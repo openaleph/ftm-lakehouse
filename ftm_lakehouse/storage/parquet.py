@@ -225,8 +225,17 @@ class ParquetStore(LakehouseApiMixin):
         All Delta writers (``append``, ``merge``, ``compact``, ``vacuum``)
         acquire this lock so they can't race on the same partition. The lock
         lives at ``{dataset_root}/.LOCK`` per ``path.LOCK``.
+
+        Acquisition is bounded by ``settings.lock_max_retries`` (total wait
+        roughly ``N²/2`` seconds); entering the returned lock raises
+        ``RuntimeError`` when the fence stays busy, so contended writers fail
+        instead of pinning a thread forever. A lock left behind by a crashed
+        writer must be released manually via :meth:`unlock`
+        (``ftm-lakehouse operations unlock``).
         """
-        return Lock(self._store, key=path.LOCK)
+        return Lock(
+            self._store, key=path.LOCK, max_retries=self.settings.lock_max_retries
+        )
 
     @no_api
     def unlock(self) -> bool:

@@ -1,5 +1,7 @@
 """Tests for the operator unlock CLI / repository hook."""
 
+import time
+
 import pytest
 from typer.testing import CliRunner
 
@@ -32,6 +34,24 @@ def test_entity_repository_unlock_delegates(tmp_path) -> None:
     repo._statements._store.touch(path.LOCK)
     assert repo.unlock() is True
     assert repo.unlock() is False
+
+
+def test_write_lock_bounded_acquisition(tmp_path, monkeypatch) -> None:
+    """A held .LOCK fails writers after bounded retries instead of hanging."""
+    monkeypatch.setenv("LAKEHOUSE_LOCK_MAX_RETRIES", "1")
+    repo = EntityRepository("test", tmp_path)
+    store = repo._statements
+    store._store.touch(path.LOCK)
+
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="Already locked"):
+        with store._write_lock():
+            pass
+    # One retry sleeps ~1–2s; anything near this bound means we hung.
+    assert time.monotonic() - started < 10
+
+    # Failing to acquire must not release the holder's lock.
+    assert store._store.exists(path.LOCK)
 
 
 @pytest.fixture()

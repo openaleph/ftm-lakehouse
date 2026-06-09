@@ -32,6 +32,14 @@ class Settings(BaseSettings):
     grace_period_days: int = 30
     max_buffer_rows: int = 1_000_000
 
+    lock_max_retries: int = 22
+    """Retry bound when acquiring the dataset write fence (``.LOCK``). Retry
+    ``n`` sleeps ``n + rand(0, 1)`` seconds, so the total wait is roughly
+    ``N²/2`` seconds – the default of 22 gives up after ~4.5 minutes, just
+    inside a 300s reverse-proxy read timeout. On exhaustion the writer raises
+    ``RuntimeError`` instead of waiting forever; a lock left behind by a
+    crashed writer must be released via ``ftm-lakehouse operations unlock``."""
+
     duckdb_memory_limit: str = "4GB"
     duckdb_temp_directory: str | None = None
 
