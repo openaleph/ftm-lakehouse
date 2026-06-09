@@ -29,7 +29,6 @@ Dataset Layout
             .LOCK                           # dataset-wide lock
             locks/{tenant}/                 # operation-specific locks
             tags/{tenant}/                  # workflow state / cache
-            queue/{tenant}/                 # task queues
 
             archive/                        # content-addressed file storage
                 ab/cd/ef/{checksum}/        # SHA256 split into segments
@@ -352,19 +351,3 @@ def job_prefix(name: str) -> str:
 
 def job_run(name: str, run_id: str | None = None) -> str:
     return f"{job_prefix(name)}/{run_id or ensure_uuid()}.json"
-
-
-QUEUE = "queue"
-"""Base path for global CRUD action queue"""
-
-
-def queue(tenant: str | None = TENANT) -> str:
-    """
-    Get the path for the global CRUD action queue.
-
-    All lakehouse mutations (entity upsert/delete, file archive, etc.)
-    go through this single queue, ordered by UUID7.
-
-    Layout: queue/{tenant}/
-    """
-    return join_relpaths(QUEUE, tenant or TENANT)

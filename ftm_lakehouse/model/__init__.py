@@ -1,6 +1,5 @@
 """Data models for ftm_lakehouse."""
 
-from ftm_lakehouse.model.crud import Crud, CrudAction, CrudResource
 from ftm_lakehouse.model.dataset import DM, CatalogModel, DatasetModel
 from ftm_lakehouse.model.file import File, Files
 from ftm_lakehouse.model.job import DatasetJobModel, JobModel
@@ -17,10 +16,6 @@ __all__ = [
     "CatalogModel",
     "DatasetModel",
     "DM",
-    # Crud
-    "Crud",
-    "CrudAction",
-    "CrudResource",
     # File
     "File",
     "Files",

@@ -6,12 +6,10 @@ No cross-store awareness or business logic.
 
 from ftm_lakehouse.storage.journal import JournalStore
 from ftm_lakehouse.storage.parquet import ParquetStore
-from ftm_lakehouse.storage.queue import QueueStore
 from ftm_lakehouse.storage.tags import TagStore
 
 __all__ = [
     "JournalStore",
     "ParquetStore",
-    "QueueStore",
     "TagStore",
 ]

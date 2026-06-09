@@ -183,16 +183,6 @@ def validate_dataset_name(name: str) -> str:
     return name
 
 
-def check_dataset(name: str, data: SDict) -> str:
-    validate_dataset_name(name)
-    if "dataset" in data and data["dataset"] != name:
-        raise RuntimeError(
-            "Invalid dataset name: ",
-            f"`{data['name']}` (should be: `{name}`)",
-        )
-    return name
-
-
 def make_entity(data: SDict, dataset: str) -> StatementEntity:
     return _make_entity(data, StatementEntity, dataset)
 
