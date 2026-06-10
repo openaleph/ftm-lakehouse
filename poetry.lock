@@ -1525,14 +1525,14 @@ Werkzeug = ">=0.7"
 
 [[package]]
 name = "followthemoney"
-version = "4.9.0"
+version = "4.9.1"
 description = "A data model for anti corruption data modeling and analysis."
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "followthemoney-4.9.0-py3-none-any.whl", hash = "sha256:643ad0c8499bbb4aecc1c219d7fa9d62de568ecbb622a64791d14d01f62ba18e"},
-    {file = "followthemoney-4.9.0.tar.gz", hash = "sha256:4364f98b8522f2273acca651b305ef3d8885a48ee6ddbc88f07736d04542808e"},
+    {file = "followthemoney-4.9.1-py3-none-any.whl", hash = "sha256:4df704aefcb874546ec5dd52f4882963e5355fddde21d8658c3d03bc98b83ea9"},
+    {file = "followthemoney-4.9.1.tar.gz", hash = "sha256:fc052b7876634f16504cbd713eafecc6af808b9de09579046d1ddcf0089f066d"},
 ]
 
 [package.dependencies]
@@ -1550,6 +1550,7 @@ pytz = ">=2021.1"
 pyyaml = ">=5.0.0,<7.0.0"
 rdflib = ">=6.2.0,<7.7.0"
 requests = ">=2.21.0,<3.0.0"
+rich = ">=13.0.0,<15.0.0"
 rigour = ">=2.0.0,<3.0.0"
 sqlalchemy = {version = ">=2.0.0,<3.0.0", extras = ["mypy"]}
 
@@ -6712,4 +6713,4 @@ api = ["fastapi", "granian", "putfs", "pyjwt", "uvloop"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.13,<3.14"
-content-hash = "38b2d50d66ebb1ce61b0c0c514f7b2845f3bb086182774313b913ffb9e6a3fea"
+content-hash = "cb9eb6efa3e7f3dea30a74d31a4262e473942dae33251ed461277b9d1da889eb"
