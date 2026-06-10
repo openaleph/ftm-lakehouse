@@ -17,9 +17,9 @@ from ftmq.store.lake import pack_statement
 
 from ftm_lakehouse.core.conventions.path import entity_shard
 from ftm_lakehouse.core.settings import Settings
-from ftm_lakehouse.logic.parquet import make_duckdb
 from ftm_lakehouse.model.statement import SHARDED_SCHEMA
 from ftm_lakehouse.storage.parquet import ParquetStore
+from tests.duck import make_duckdb
 
 DATASET = "test"
 SHARDS = 8

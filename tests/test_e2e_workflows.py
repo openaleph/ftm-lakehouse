@@ -28,12 +28,7 @@ from ftm_lakehouse.dataset import Dataset
 from ftm_lakehouse.lake import get_lakehouse
 from ftm_lakehouse.model.dataset import DatasetModel
 from ftm_lakehouse.model.mapping import DatasetMapping
-from ftm_lakehouse.operation import (
-    export_index,
-    export_statements,
-    export_statistics,
-    make,
-)
+from ftm_lakehouse.operation import ExportKind, export, make
 from ftm_lakehouse.operation.crawl import crawl
 from ftm_lakehouse.operation.mapping import MappingJob, MappingOperation
 from tests.conftest import (
@@ -69,7 +64,7 @@ def count_versions(dataset: Dataset, filename: str) -> int:
     return len(
         [
             v
-            for v in dataset.entities._store.iterate_keys(prefix="versions")
+            for v in dataset.get_entities()._store.iterate_keys(prefix="versions")
             if v.endswith(filename)
         ]
     )
@@ -83,7 +78,7 @@ def count_versions(dataset: Dataset, filename: str) -> int:
 def test_e2e_workflows_initial_crawl_and_make(dataset, fixtures_path):
     """Test initial crawl followed by make generates all exports."""
     dataset, base_path = dataset
-    store = dataset.entities._store
+    store = dataset.get_entities()._store
 
     # Initial state - nothing exists
     assert not store.exists(path.CONFIG)
@@ -158,7 +153,7 @@ def test_e2e_workflows_incremental_entity_addition(dataset):
     dataset, base_path = dataset
 
     # Initial entities
-    with dataset.entities.writer(origin="initial") as writer:
+    with dataset.get_entities().writer(origin="initial") as writer:
         for i in range(3):
             entity = model.make_entity("Company")
             entity.make_id(f"company-{i}")
@@ -170,7 +165,7 @@ def test_e2e_workflows_incremental_entity_addition(dataset):
     initial_stats_versions = count_versions(dataset, "exports/statistics.json")
 
     # Verify initial state via query
-    initial_entities = list(dataset.entities.query())
+    initial_entities = list(dataset.get_entities().query())
     assert len(initial_entities) == 3
 
     # Add a new entity via the entities interface
@@ -179,13 +174,13 @@ def test_e2e_workflows_incremental_entity_addition(dataset):
     person.add("name", "John Doe")
     person.add("nationality", "us")
 
-    dataset.entities.add(person, origin="test")
+    dataset.get_entities().add(person, origin="test")
 
     # Flush to see the new entity in queries
-    dataset.entities.flush()
+    dataset.get_entities().flush()
 
     # Query should now return 4 entities
-    all_entities = list(dataset.entities.query())
+    all_entities = list(dataset.get_entities().query())
     assert len(all_entities) == 4
 
     # Run make - should update statistics
@@ -200,7 +195,7 @@ def test_e2e_workflows_bulk_entity_writing(dataset):
     dataset, base_path = dataset
 
     # Create multiple entities in bulk
-    with dataset.entities.writer(origin="bulk_test") as writer:
+    with dataset.get_entities().writer(origin="bulk_test") as writer:
         for i in range(10):
             entity = model.make_entity("Company")
             entity.make_id(f"company-{i}")
@@ -211,13 +206,13 @@ def test_e2e_workflows_bulk_entity_writing(dataset):
     make(dataset)
 
     # Verify all entities were written
-    stats: DatasetStats = dataset.entities._store.get(
+    stats: DatasetStats = dataset.get_entities()._store.get(
         path.EXPORTS_STATISTICS, model=DatasetStats
     )
     assert stats.entity_count == 10
 
     # Query entities back
-    entities = list(dataset.entities.query(origin="bulk_test"))
+    entities = list(dataset.get_entities().query(origin="bulk_test"))
     assert len(entities) == 10
 
 
@@ -226,14 +221,14 @@ def test_e2e_workflows_multiple_origins(dataset):
     dataset, base_path = dataset
 
     # Add entities from different origins
-    with dataset.entities.writer(origin="source_a") as writer:
+    with dataset.get_entities().writer(origin="source_a") as writer:
         for i in range(5):
             entity = model.make_entity("Person")
             entity.make_id(f"person-a-{i}")
             entity.add("name", f"Person A{i}")
             writer.add_entity(entity)
 
-    with dataset.entities.writer(origin="source_b") as writer:
+    with dataset.get_entities().writer(origin="source_b") as writer:
         for i in range(3):
             entity = model.make_entity("Organization")
             entity.make_id(f"org-b-{i}")
@@ -243,14 +238,14 @@ def test_e2e_workflows_multiple_origins(dataset):
     make(dataset)
 
     # Query by origin
-    source_a_entities = list(dataset.entities.query(origin="source_a"))
-    source_b_entities = list(dataset.entities.query(origin="source_b"))
+    source_a_entities = list(dataset.get_entities().query(origin="source_a"))
+    source_b_entities = list(dataset.get_entities().query(origin="source_b"))
 
     assert len(source_a_entities) == 5
     assert len(source_b_entities) == 3
 
     # Total count
-    stats: DatasetStats = dataset.entities._store.get(
+    stats: DatasetStats = dataset.get_entities()._store.get(
         path.EXPORTS_STATISTICS, model=DatasetStats
     )
     assert stats.entity_count == 8
@@ -259,10 +254,10 @@ def test_e2e_workflows_multiple_origins(dataset):
 def test_e2e_workflows_export_files_created(dataset):
     """Test that exports are created after make() and grow with new data."""
     dataset, base_path = dataset
-    store = dataset.entities._store
+    store = dataset.get_entities()._store
 
     # Add initial data
-    with dataset.entities.writer(origin="test") as writer:
+    with dataset.get_entities().writer(origin="test") as writer:
         entity = model.make_entity("Person")
         entity.make_id("person-1")
         entity.add("name", "Initial Person")
@@ -280,14 +275,14 @@ def test_e2e_workflows_export_files_created(dataset):
     initial_csv_size = len(initial_csv_content)
 
     # Add more data and re-export
-    with dataset.entities.writer(origin="test") as writer:
+    with dataset.get_entities().writer(origin="test") as writer:
         entity = model.make_entity("Company")
         entity.make_id("company-1")
         entity.add("name", "New Company")
         writer.add_entity(entity)
 
-    dataset.entities.flush()
-    export_statements(dataset)
+    dataset.get_entities().flush()
+    export(dataset, ExportKind.statements)
 
     # Verify the file is bigger (more statements)
     new_csv_content = store.get(path.EXPORTS_STATEMENTS)
@@ -300,19 +295,19 @@ def test_e2e_workflows_file_archive_and_entity_creation(dataset, fixtures_path):
     dataset, base_path = dataset
 
     # Archive a file
-    file = dataset.archive.store(fixtures_path / "src" / "example.pdf")
+    file = dataset.get_archive().store(fixtures_path / "src" / "example.pdf")
 
     assert file.checksum is not None
     assert file.mimetype is not None
 
     # Create entity from file
     entity = file.to_entity()
-    dataset.entities.add(entity, origin="archive")
+    dataset.get_entities().add(entity, origin="archive")
 
-    dataset.entities.flush()
+    dataset.get_entities().flush()
 
     # Query the entity back
-    retrieved = dataset.entities.get(entity.id)
+    retrieved = dataset.get_entities().get(entity.id)
     assert retrieved is not None
     assert retrieved.schema.name == "Pages"
 
@@ -344,19 +339,19 @@ def test_e2e_workflows_index_includes_statistics(dataset):
     dataset, base_path = dataset
 
     # Add some data
-    with dataset.entities.writer(origin="test") as writer:
+    with dataset.get_entities().writer(origin="test") as writer:
         for i in range(5):
             entity = model.make_entity("Person")
             entity.make_id(f"person-{i}")
             entity.add("name", f"Person {i}")
             writer.add_entity(entity)
 
-    dataset.entities.flush()
-    export_statements(dataset)
-    export_statistics(dataset)
+    dataset.get_entities().flush()
+    export(dataset, ExportKind.statements)
+    export(dataset, ExportKind.statistics)
 
     # Make index
-    export_index(dataset)
+    export(dataset, ExportKind.index)
 
     # Verify the index with statistics included
     index = dataset._versions.get(path.INDEX, DatasetModel)
@@ -368,19 +363,19 @@ def test_e2e_workflows_iterate_vs_query_entities(dataset):
     dataset, base_path = dataset
 
     # Add data
-    with dataset.entities.writer(origin="test") as writer:
+    with dataset.get_entities().writer(origin="test") as writer:
         for i in range(3):
             entity = model.make_entity("Person")
             entity.make_id(f"person-{i}")
             entity.add("name", f"Person {i}")
             writer.add_entity(entity)
 
-    assert len(list(dataset.entities.stream())) == 0
-    assert len(list(dataset.entities.query(flush_first=True))) == 3
+    assert len(list(dataset.get_entities().stream())) == 0
+    assert len(list(dataset.get_entities().query(flush_first=True))) == 3
 
     # After full make, stream() also works
     make(dataset)
-    assert len(list(dataset.entities.stream())) == 3
+    assert len(list(dataset.get_entities().stream())) == 3
 
 
 def test_e2e_workflows_get_entity_by_id(dataset):
@@ -388,26 +383,26 @@ def test_e2e_workflows_get_entity_by_id(dataset):
     dataset, base_path = dataset
 
     # Add entities
-    with dataset.entities.writer(origin="test") as writer:
+    with dataset.get_entities().writer(origin="test") as writer:
         for i in range(3):
             entity = model.make_entity("Person")
             entity.make_id(f"person-{i}")
             entity.add("name", f"Person {i}")
             writer.add_entity(entity)
 
-    dataset.entities.flush()
+    dataset.get_entities().flush()
 
     # Get specific entity - note: ID format depends on make_id implementation
-    entities = list(dataset.entities.query())
+    entities = list(dataset.get_entities().query())
     assert len(entities) == 3
 
     # Get by the actual ID
     first_entity = entities[0]
-    retrieved = dataset.entities.get(first_entity.id)
+    retrieved = dataset.get_entities().get(first_entity.id)
     assert retrieved is not None
 
     # Non-existent entity
-    missing = dataset.entities.get("non-existent-id")
+    missing = dataset.get_entities().get("non-existent-id")
     assert missing is None
 
 
@@ -432,7 +427,7 @@ def test_e2e_workflows_full_workflow_with_multiple_updates(dataset):
     dataset, base_path = dataset
 
     # Phase 1: Initial entities
-    with dataset.entities.writer(origin="initial") as writer:
+    with dataset.get_entities().writer(origin="initial") as writer:
         for i in range(3):
             entity = model.make_entity("Company")
             entity.make_id(f"company-{i}")
@@ -442,20 +437,20 @@ def test_e2e_workflows_full_workflow_with_multiple_updates(dataset):
     make(dataset)
 
     # Verify phase 1 via query
-    phase1_entities = list(dataset.entities.query())
+    phase1_entities = list(dataset.get_entities().query())
     assert len(phase1_entities) == 3
 
     # Phase 2: Add manual entities
-    with dataset.entities.writer(origin="manual") as writer:
+    with dataset.get_entities().writer(origin="manual") as writer:
         person = model.make_entity("Person")
         person.make_id("manual-person-1")
         person.add("name", "Manual Person")
         writer.add_entity(person)
 
-    dataset.entities.flush()
+    dataset.get_entities().flush()
 
     # Verify phase 2 via query
-    phase2_entities = list(dataset.entities.query())
+    phase2_entities = list(dataset.get_entities().query())
     assert len(phase2_entities) == 4
 
     make(dataset)
@@ -485,17 +480,17 @@ def test_e2e_workflows_full_workflow_with_multiple_updates(dataset):
 def test_e2e_workflows_is_latest_logic(dataset):
     """Test the is_latest dependency check."""
     dataset, base_path = dataset
-    tags = dataset.entities._tags
+    tags = dataset.get_entities()._tags
 
     # Add and flush data
     entity = model.make_entity("Person")
     entity.make_id("test")
     entity.add("name", "Test")
-    dataset.entities.add(entity, origin="test")
-    dataset.entities.flush()
+    dataset.get_entities().add(entity, origin="test")
+    dataset.get_entities().flush()
 
     # Export statistics - sets the STATISTICS tag
-    export_statistics(dataset)
+    export(dataset, ExportKind.statistics)
 
     # Statistics should now be latest relative to STATEMENTS_UPDATED
     assert tags.is_latest(path.EXPORTS_STATISTICS, [tag.STATEMENTS_UPDATED])
@@ -504,8 +499,8 @@ def test_e2e_workflows_is_latest_logic(dataset):
     entity2 = model.make_entity("Company")
     entity2.make_id("test2")
     entity2.add("name", "Test Co")
-    dataset.entities.add(entity2, origin="test")
-    dataset.entities.flush()
+    dataset.get_entities().add(entity2, origin="test")
+    dataset.get_entities().flush()
 
     # Statistics is no longer latest
     assert not tags.is_latest(path.EXPORTS_STATISTICS, [tag.STATEMENTS_UPDATED])
@@ -521,7 +516,7 @@ def test_e2e_workflows_mapping(dataset, fixtures_path):
     dataset, base_path = dataset
 
     # Archive a CSV file
-    csv_file = dataset.archive.store(fixtures_path / "src" / "companies.csv")
+    csv_file = dataset.get_archive().store(fixtures_path / "src" / "companies.csv")
     assert csv_file.checksum is not None
 
     # Create mapping configuration
@@ -543,18 +538,11 @@ def test_e2e_workflows_mapping(dataset, fixtures_path):
             }
         ],
     )
-    dataset.mappings.put(mapping)
+    dataset.get_mappings().put(mapping)
 
     # Process the mapping via operation
     job = MappingJob.make(dataset=dataset.name, content_hash=csv_file.checksum)
-    op = MappingOperation(
-        job=job,
-        archive=dataset.archive,
-        entities=dataset.entities,
-        jobs=dataset.jobs,
-        tags=dataset._tags,
-        versions=dataset._versions,
-    )
+    op = MappingOperation.from_job(job, dataset)
     result = op.run()
     assert result.done == 3  # 3 companies in CSV
 
@@ -562,7 +550,7 @@ def test_e2e_workflows_mapping(dataset, fixtures_path):
     make(dataset)
 
     # Verify entities were created
-    entities = list(dataset.entities.query())
+    entities = list(dataset.get_entities().query())
     assert len(entities) == 3
     assert all(e.schema.name == "Company" for e in entities)
 
@@ -579,7 +567,7 @@ def test_e2e_workflows_mapping(dataset, fixtures_path):
 def test_e2e_workflows_archive_file(dataset, fixtures_path):
     """Test archiving a file."""
     dataset, base_path = dataset
-    file = dataset.archive.store(fixtures_path / "src" / "example.pdf")
+    file = dataset.get_archive().store(fixtures_path / "src" / "example.pdf")
 
     assert file.checksum is not None
     assert file.size > 0
@@ -589,29 +577,29 @@ def test_e2e_workflows_archive_file(dataset, fixtures_path):
 def test_e2e_workflows_archive_lookup(dataset, fixtures_path):
     """Test looking up an archived file."""
     dataset, base_path = dataset
-    file = dataset.archive.store(fixtures_path / "src" / "example.pdf")
+    file = dataset.get_archive().store(fixtures_path / "src" / "example.pdf")
 
     # Lookup by checksum
-    found = dataset.archive.get_file(file.checksum)
+    found = dataset.get_archive().get_file(file.checksum)
     assert found.checksum == file.checksum
 
 
 def test_e2e_workflows_archive_file_exists(dataset, fixtures_path):
     """Test checking if a file exists."""
     dataset, base_path = dataset
-    file = dataset.archive.store(fixtures_path / "src" / "example.pdf")
+    file = dataset.get_archive().store(fixtures_path / "src" / "example.pdf")
 
-    assert dataset.archive.exists(file.checksum)
+    assert dataset.get_archive().exists(file.checksum)
     # Use a valid but non-existent checksum format (64 hex chars for SHA256)
-    assert not dataset.archive.exists("0" * 64)
+    assert not dataset.get_archive().exists("0" * 64)
 
 
 def test_e2e_workflows_archive_open_file(dataset, fixtures_path):
     """Test opening an archived file."""
     dataset, base_path = dataset
-    file = dataset.archive.store(fixtures_path / "src" / "utf.txt")
+    file = dataset.get_archive().store(fixtures_path / "src" / "utf.txt")
 
-    with dataset.archive.open(file.checksum) as fh:
+    with dataset.get_archive().open(file.checksum) as fh:
         content = fh.read()
         assert len(content) > 0
 
@@ -621,8 +609,8 @@ def test_e2e_workflows_archive_iter_files(dataset, fixtures_path):
     dataset, base_path = dataset
 
     # Archive multiple files
-    dataset.archive.store(fixtures_path / "src" / "example.pdf")
-    dataset.archive.store(fixtures_path / "src" / "utf.txt")
+    dataset.get_archive().store(fixtures_path / "src" / "example.pdf")
+    dataset.get_archive().store(fixtures_path / "src" / "utf.txt")
 
-    files = list(dataset.archive.iterate_files())
+    files = list(dataset.get_archive().iterate_files())
     assert len(files) == 2

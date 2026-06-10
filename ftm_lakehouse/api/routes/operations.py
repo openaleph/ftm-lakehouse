@@ -1,58 +1,43 @@
 """Operation API routes: execute DatasetJob as operation"""
 
 import asyncio
+from typing import get_args
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from ftm_lakehouse import operation as operation_module
 from ftm_lakehouse.api.dependencies import Dataset
 from ftm_lakehouse.model import DatasetJobModel
 from ftm_lakehouse.operation.base import DatasetJobOperation
-from ftm_lakehouse.operation.crawl import CrawlJob, CrawlOperation
-from ftm_lakehouse.operation.download import (
-    DownloadArchiveJob,
-    DownloadArchiveOperation,
-)
-from ftm_lakehouse.operation.export import (
-    ExportDocumentsJob,
-    ExportDocumentsOperation,
-    ExportEntitiesJob,
-    ExportEntitiesOperation,
-    ExportIndexJob,
-    ExportIndexOperation,
-    ExportStatementsJob,
-    ExportStatementsOperation,
-    ExportStatisticsJob,
-    ExportStatisticsOperation,
-)
-from ftm_lakehouse.operation.maintenance import (
-    CompactJob,
-    CompactOperation,
-    MergeJob,
-    MergeOperation,
-    VacuumJob,
-    VacuumOperation,
-)
-from ftm_lakehouse.operation.make import MakeJob, MakeOperation
-from ftm_lakehouse.operation.mapping import MappingJob, MappingOperation
 
 router = APIRouter()
 
 
-OPERATIONS: dict[str, tuple[type[DatasetJobModel], type[DatasetJobOperation]]] = {
-    "CrawlJob": (CrawlJob, CrawlOperation),
-    "CompactJob": (CompactJob, CompactOperation),
-    "MergeJob": (MergeJob, MergeOperation),
-    "VacuumJob": (VacuumJob, VacuumOperation),
-    "ExportStatementsJob": (ExportStatementsJob, ExportStatementsOperation),
-    "ExportEntitiesJob": (ExportEntitiesJob, ExportEntitiesOperation),
-    "ExportStatisticsJob": (ExportStatisticsJob, ExportStatisticsOperation),
-    "ExportDocumentsJob": (ExportDocumentsJob, ExportDocumentsOperation),
-    "ExportIndexJob": (ExportIndexJob, ExportIndexOperation),
-    "MappingJob": (MappingJob, MappingOperation),
-    "DownloadArchiveJob": (DownloadArchiveJob, DownloadArchiveOperation),
-    "MakeJob": (MakeJob, MakeOperation),
-}
+def _registry() -> dict[str, tuple[type[DatasetJobModel], type[DatasetJobOperation]]]:
+    """Pair every operation exported by :mod:`ftm_lakehouse.operation` with
+    the job model from its ``DatasetJobOperation[...]`` generic parameter,
+    keyed by the job-model class name (the ``name`` field of a posted job).
+
+    Derived instead of hand-maintained so a new operation only needs to be
+    exported from the operation package to become routable here.
+    """
+    registry: dict[str, tuple[type[DatasetJobModel], type[DatasetJobOperation]]] = {}
+    for obj in vars(operation_module).values():
+        if not isinstance(obj, type) or not issubclass(obj, DatasetJobOperation):
+            continue
+        for base in getattr(obj, "__orig_bases__", ()):
+            args = get_args(base)
+            if (
+                args
+                and isinstance(args[0], type)
+                and issubclass(args[0], DatasetJobModel)
+            ):
+                registry[args[0].__name__] = (args[0], obj)
+    return registry
+
+
+OPERATIONS = _registry()
 
 
 @router.post("/{dataset}/_api/operations")
@@ -62,7 +47,7 @@ async def run_operation(
     """Run a job operation on the given dataset.
 
     The request body must be a serialized DatasetJobModel with a `name` field
-    identifying the job type (e.g. "CompactJob", "CrawlJob").
+    identifying the job type (e.g. "OptimizeJob", "CrawlJob").
     """
     body = await request.json()
     name = body.pop("name", None)

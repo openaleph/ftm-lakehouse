@@ -5,20 +5,15 @@ that ``merge`` compiles per partition. Read-time dedupe lives in the
 ``statement`` view (window over ``(shard, bucket, id)``); ``statement_raw``
 exposes the underlying Delta rows for code paths that need tombstones
 or per-row physical layout visible (``merge``, ``get_changed_entity_ids``).
-
-``make_duckdb`` / ``register_view`` are kept as test utilities for setting
-up a bare DuckDB connection against a specific Delta table outside of the
-``LakeStore`` lifecycle.
 """
 
 from datetime import datetime
 
-import duckdb
 from deltalake import DeltaTable
 from sqlalchemy import Select, func, or_, select
 
 from ftm_lakehouse.core.settings import Settings
-from ftm_lakehouse.model.statement import TABLE, TABLE_RAW
+from ftm_lakehouse.model.statement import TABLE_RAW
 
 QUERY_IN_BATCH_SIZE = 5_000
 
@@ -38,35 +33,6 @@ def duckdb_config() -> dict[str, str]:
     if settings.duckdb_temp_directory:
         config["temp_directory"] = settings.duckdb_temp_directory
     return config
-
-
-def make_duckdb() -> duckdb.DuckDBPyConnection:
-    """Stand-alone DuckDB connection with the lakehouse memory / spill config.
-
-    Used by tests that want a bare DuckDB connection against a specific
-    Delta table outside the ``LakeStore`` lifecycle. Production code
-    uses :attr:`ftmq.store.lake.LakeStore._duckdb` instead.
-    """
-    config: dict[str, str] = {
-        "autoinstall_known_extensions": "true",
-        "autoload_known_extensions": "true",
-        **duckdb_config(),
-    }
-    return duckdb.connect(":memory:", config=config)
-
-
-def register_view(
-    con: duckdb.DuckDBPyConnection,
-    dt: DeltaTable,
-    name: str = TABLE.name,
-) -> None:
-    """Register a raw ``delta_scan`` view named ``name`` on ``con``.
-
-    Test utility – matches the legacy behaviour of registering one view
-    over a Delta table. Production code lets :class:`LakeStore`
-    register the configured ``view_sqls`` automatically.
-    """
-    con.sql(f"CREATE OR REPLACE VIEW {name} AS {raw_view_sql(dt)}")
 
 
 def _delta_scan_clause(dt: DeltaTable) -> str:

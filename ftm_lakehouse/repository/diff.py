@@ -4,12 +4,21 @@ from abc import abstractmethod
 from datetime import datetime, timezone
 from typing import Iterator
 
+from anystore.types import SDict
 from anystore.util import mask_uri
 from structlog.stdlib import BoundLogger
 
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.storage.parquet import ParquetStore
 from ftm_lakehouse.storage.tags import TagStore
+
+
+def make_envelope(data: SDict, op: str = "ADD") -> SDict:
+    """Create a diff action envelope for an entity payload.
+
+    Ref. https://www.opensanctions.org/docs/bulk/delta/
+    """
+    return {"op": op, "entity": data}
 
 
 class ParquetDiffMixin:

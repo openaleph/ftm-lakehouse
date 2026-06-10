@@ -36,6 +36,7 @@ from ftm_lakehouse.model import DatasetModel
 from ftm_lakehouse.repository.factories import (
     LRU_MAX,
     get_archive,
+    get_documents,
     get_entities,
     get_mappings,
 )
@@ -92,7 +93,8 @@ def ensure_dataset(
     """
     Get a dataset and ensure it exists.
 
-    Creates config.yml if the dataset doesn't exist.
+    Creates config.yml if the dataset doesn't exist, recording ``data`` at
+    creation (e.g. ``ensure_dataset("big_leak", shards=8)``).
 
     Args:
         name: Dataset name
@@ -103,12 +105,13 @@ def ensure_dataset(
         Dataset instance (created if needed)
     """
     dataset = get_dataset(name, model_class=model_class, **data)
-    dataset.ensure()
+    dataset.ensure(**data)
     return dataset
 
 
 __all__ = [
     "get_archive",
+    "get_documents",
     "get_entities",
     "get_mappings",
     "get_lakehouse",

@@ -6,9 +6,6 @@ from anystore.types import Uri
 
 from ftm_lakehouse.core.api import LakehouseApiMixin, api_delegate, require_api
 from ftm_lakehouse.model.job import DJ
-from ftm_lakehouse.repository.archive import ArchiveRepository
-from ftm_lakehouse.repository.documents import DocumentRepository
-from ftm_lakehouse.repository.entities import EntityRepository
 from ftm_lakehouse.repository.factories import (
     get_archive,
     get_documents,
@@ -17,9 +14,7 @@ from ftm_lakehouse.repository.factories import (
     get_tags,
     get_versions,
 )
-from ftm_lakehouse.repository.job import JobRepository, JobRun
-from ftm_lakehouse.storage.tags import TagStore
-from ftm_lakehouse.storage.versions import VersionStore
+from ftm_lakehouse.repository.job import JobRun
 
 if TYPE_CHECKING:
     from ftm_lakehouse.dataset import Dataset
@@ -31,6 +26,10 @@ class DatasetJobOperation(LakehouseApiMixin, Generic[DJ]):
     checks dependencies for freshness to be able to skip this operation. The job
     result is stored after successful run.
 
+    Repositories are resolved through the LRU-cached factories, so an
+    operation shares its repository instances with every other path that
+    addresses the same dataset.
+
     Subclasses can either set class attributes `target` and `dependencies`,
     or override `get_target()` and `get_dependencies()` for dynamic values.
     """
@@ -39,47 +38,31 @@ class DatasetJobOperation(LakehouseApiMixin, Generic[DJ]):
     dependencies: list[str] = []  # dependencies for freshness check
     _dataset: Dataset
 
-    def __init__(
-        self,
-        job: DJ,
-        archive: ArchiveRepository | None = None,
-        entities: EntityRepository | None = None,
-        documents: DocumentRepository | None = None,
-        jobs: JobRepository | None = None,
-        tags: TagStore | None = None,
-        versions: VersionStore | None = None,
-        uri: Uri | None = None,
-    ) -> None:
+    def __init__(self, job: DJ, uri: Uri | None = None) -> None:
         self.job = job
         self.log = job.log
-        self.archive = archive or get_archive(job.dataset, uri)
-        self.entities = entities or get_entities(job.dataset, uri)
-        self.documents = documents or get_documents(job.dataset, uri)
-        self.jobs = jobs or get_jobs(job.dataset, job.__class__, uri)
-        self.tags = tags or get_tags(job.dataset, uri)
-        self.versions = versions or get_versions(job.dataset, uri)
+        self.archive = get_archive(job.dataset, uri)
+        self.entities = get_entities(job.dataset, uri)
+        self.documents = get_documents(job.dataset, uri)
+        self.jobs = get_jobs(job.dataset, job.__class__, uri)
+        self.tags = get_tags(job.dataset, uri)
+        self.versions = get_versions(job.dataset, uri)
         super().__init__(uri or self.archive.uri)
 
     @classmethod
     def from_job(cls, job: DJ, dataset: Dataset) -> Self:
-        """Create an operation instance from a job and Dataset.
+        """Create an operation bound to ``dataset``.
 
         Args:
             job: The job model instance
-            dataset: The Dataset providing repositories and storage
+            dataset: The Dataset – provides the storage uri and stays bound
+                as ``_dataset`` for operations that need the full handle
+                (e.g. ``make`` / the index export).
 
         Returns:
             Configured operation instance
         """
-        instance = cls(
-            job=job,
-            archive=dataset.archive,
-            entities=dataset.entities,
-            documents=dataset.documents,
-            jobs=get_jobs(dataset.name, job.__class__, dataset.uri),
-            tags=dataset._tags,
-            versions=dataset._versions,
-        )
+        instance = cls(job, uri=dataset.uri)
         instance._dataset = dataset
         return instance
 
@@ -127,10 +110,7 @@ class DatasetJobOperation(LakehouseApiMixin, Generic[DJ]):
             took=run.job.took,
             errors=run.job.errors,
         )
-        result = self.jobs.latest()
-        if result is not None:
-            return result
-        raise RuntimeError("Result is `None`")
+        return run.job
 
     @api_delegate("_api_run")
     def run(self, force: bool | None = False, *args, **kwargs) -> DJ:

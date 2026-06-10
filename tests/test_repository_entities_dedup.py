@@ -16,9 +16,9 @@ import pytest
 from followthemoney import EntityProxy
 
 from ftm_lakehouse.api.main import archive_router, entities_router, journal_router
-from ftm_lakehouse.logic.parquet import make_duckdb
 from ftm_lakehouse.repository.entities import EntityRepository
 from tests.conftest import make_docker_repo, make_test_api
+from tests.duck import make_duckdb
 from tests.shared import JANE, JOHN
 
 DATASET = "test"

@@ -1,12 +1,9 @@
 import re
 from typing import Any, BinaryIO
 
-from anystore.types import SDict
 from anystore.util import make_checksum as _make_checksum
 from anystore.util import make_data_checksum as _make_data_checksum
-from followthemoney import StatementEntity
 from followthemoney.dataset.util import dataset_name_check
-from ftmq.util import make_entity as _make_entity
 from jinja2 import Template
 
 from ftm_lakehouse.core.settings import CHECKSUM_ALGORITHM
@@ -181,15 +178,3 @@ def validate_dataset_name(name: str) -> str:
         raise ValueError(f"Invalid dataset name: `{name}` (reserved)")
     dataset_name_check(name)
     return name
-
-
-def make_entity(data: SDict, dataset: str) -> StatementEntity:
-    return _make_entity(data, StatementEntity, dataset)
-
-
-def make_envelope(data: SDict, op: str = "ADD") -> SDict:
-    """Create diff action envelope for data dict
-
-    Ref. https://www.opensanctions.org/docs/bulk/delta/
-    """
-    return {"op": op, "entity": data}

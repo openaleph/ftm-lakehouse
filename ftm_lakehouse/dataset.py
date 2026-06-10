@@ -1,10 +1,9 @@
 """Dataset class for single-dataset management."""
 
-from functools import cached_property
 from typing import Any, Generic
 
 from anystore.logging import get_logger
-from anystore.store import get_store
+from anystore.store import Store, get_store
 from anystore.types import Uri
 from anystore.util import mask_uri
 
@@ -13,16 +12,20 @@ from ftm_lakehouse.core.config import load_config
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.core.zfs import ensure_zfs_dataset
-from ftm_lakehouse.model import DM, DatasetJobModel, DatasetModel
+from ftm_lakehouse.model import DM, DatasetModel
 from ftm_lakehouse.repository import (
     ArchiveRepository,
     DocumentRepository,
     EntityRepository,
-    JobRepository,
     MappingRepository,
 )
-from ftm_lakehouse.repository.factories import get_tags, get_versions
-from ftm_lakehouse.storage.tags import TagStore
+from ftm_lakehouse.repository.factories import (
+    get_archive,
+    get_documents,
+    get_entities,
+    get_mappings,
+    get_versions,
+)
 from ftm_lakehouse.storage.versions import VersionStore
 
 log = get_logger(__name__)
@@ -30,14 +33,18 @@ log = get_logger(__name__)
 
 class Dataset(Generic[DM]):
     """
-    A single dataset within the lakehouse.
+    A single dataset within the lakehouse – a stateless handle around the
+    dataset's name, storage uri and configuration.
 
-    Provides access to repositories for domain operations:
+    Repository access goes through the LRU-cached factories, so every path
+    addressing the same dataset – this handle, the module-level
+    ``get_entities("name")`` convenience functions, and operations – shares
+    one repository instance:
 
-    - archive: File storage (ArchiveRepository)
-    - entities: Entity/statement operations (EntityRepository)
-    - mappings: Mapping configurations (MappingRepository)
-    - jobs: Job tracking (JobRepository)
+    - `get_archive()`: File storage (ArchiveRepository)
+    - `get_entities()`: Entity/statement operations (EntityRepository)
+    - `get_documents()`: Document metadata (DocumentRepository)
+    - `get_mappings()`: Mapping configurations (MappingRepository)
 
     Example:
         ```python
@@ -47,10 +54,10 @@ class Dataset(Generic[DM]):
         dataset.ensure()
 
         # Add entities
-        dataset.entities.add(entity, origin="import")
+        dataset.get_entities().add(entity, origin="import")
 
         # Archive files
-        dataset.archive.put(uri)
+        dataset.get_archive().store(uri)
 
         # Update config
         dataset.update_model(title="New Title")
@@ -81,17 +88,12 @@ class Dataset(Generic[DM]):
     # Storage primitives
     # -------------------------------------------------------------------------
 
-    @cached_property
-    def _store(self):
+    @property
+    def _store(self) -> Store:
         """Raw storage access."""
         return get_store(uri=ensure_api_uri(self.uri), serialization_mode="raw")
 
-    @cached_property
-    def _tags(self) -> TagStore:
-        """Tag store for freshness tracking."""
-        return get_tags(self.name, self.uri)
-
-    @cached_property
+    @property
     def _versions(self) -> VersionStore:
         """Version store for snapshots."""
         return get_versions(self.name, self.uri)
@@ -137,33 +139,24 @@ class Dataset(Generic[DM]):
         return model
 
     # -------------------------------------------------------------------------
-    # Repositories (cached, initialized on first access)
+    # Repositories (resolved through the LRU-cached factories)
     # -------------------------------------------------------------------------
 
-    @cached_property
-    def archive(self) -> ArchiveRepository:
+    def get_archive(self) -> ArchiveRepository:
         """File archive operations."""
-        return ArchiveRepository(self.name, self.uri)
+        return get_archive(self.name, self.uri)
 
-    @cached_property
-    def entities(self) -> EntityRepository:
+    def get_entities(self) -> EntityRepository:
         """Entity/statement operations."""
-        return EntityRepository(self.name, self.uri, shards=self.model.shards)
+        return get_entities(self.name, self.uri)
 
-    @cached_property
-    def documents(self) -> DocumentRepository:
+    def get_documents(self) -> DocumentRepository:
         """Document metadata operations."""
-        return DocumentRepository(self.name, self.uri, shards=self.model.shards)
+        return get_documents(self.name, self.uri)
 
-    @cached_property
-    def mappings(self) -> MappingRepository:
+    def get_mappings(self) -> MappingRepository:
         """Mapping configuration storage."""
-        return MappingRepository(self.name, self.uri)
-
-    @cached_property
-    def jobs(self) -> JobRepository:
-        """Job tracking."""
-        return JobRepository(self.name, self.uri, DatasetJobModel)
+        return get_mappings(self.name, self.uri)
 
     # -------------------------------------------------------------------------
     # Lifecycle
@@ -173,8 +166,14 @@ class Dataset(Generic[DM]):
         """Check if dataset exists (has config.yml)."""
         return self._store.exists(path.CONFIG)
 
-    def ensure(self) -> None:
-        """Ensure dataset exists, create config.yml if needed."""
+    def ensure(self, **data: Any) -> None:
+        """Ensure dataset exists, create config.yml if needed.
+
+        Args:
+            **data: Initial config data recorded at creation (e.g.
+                ``shards=8`` for a huge dataset). Ignored when the dataset
+                already exists.
+        """
         if not self.exists():
-            self.update_model()
+            self.update_model(**data)
             self._log.info("Created dataset")

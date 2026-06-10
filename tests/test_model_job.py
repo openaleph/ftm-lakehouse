@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from ftm_lakehouse.model.job import DatasetJobModel, JobModel
 
@@ -14,22 +14,16 @@ def test_job_model_make():
     assert job.name == "JobModel"
 
 
-def test_job_model_start():
-    """Test starting a job"""
-    job = JobModel.start()
-    assert job.run_id is not None
-    assert job.running is True
-    assert job.started is not None
-    assert job.last_updated is not None
-
-
 def test_job_model_stop():
-    """Test stopping a job"""
-    job = JobModel.start()
+    """Test stopping a job (lifecycle start is owned by JobRun)"""
+    job = JobModel.make()
+    job.started = datetime.now()
+    job.running = True
     job.stop()
     assert job.running is False
     assert job.stopped is not None
     assert isinstance(job.took, timedelta)
+    assert job.took >= timedelta()
 
 
 def test_job_model_touch():

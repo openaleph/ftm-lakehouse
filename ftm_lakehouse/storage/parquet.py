@@ -56,7 +56,6 @@ from ftmq.store.lake import (
 from ftmq.types import StatementEntities, Statements
 from ftmq.util import make_dataset
 from sqlalchemy import Select, column, or_, select
-from sqlalchemy.sql.elements import ColumnElement
 
 from ftm_lakehouse.core.api import LakehouseApiMixin, no_api
 from ftm_lakehouse.core.conventions import path
@@ -69,15 +68,10 @@ from ftm_lakehouse.logic.parquet import (
     duckdb_config,
     raw_view_sql,
 )
+from ftm_lakehouse.model.dataset import DEFAULT_SHARDS
 from ftm_lakehouse.model.statement import TABLE, TABLE_RAW
 
 PARTITIONS = ["shard", "bucket", "origin"]
-
-# ftmq's ``view_filter`` is appended as a WHERE clause to every query the
-# LakeStore runs. Applied to the raw-view stats store so ``stats()`` sees
-# live rows only (tombstones stripped) without going through the dedupe
-# window – fast aggregations on a freshly-merged table.
-_LIVE_ROW_FILTER: ColumnElement = column("deleted_at").is_(None)
 
 
 class ParquetStore(LakehouseApiMixin):
@@ -98,7 +92,7 @@ class ParquetStore(LakehouseApiMixin):
         super().__init__(self.uri)
         self.settings = Settings()
         self.dataset = dataset
-        self.shards = shards if shards is not None else self.settings.entity_shards
+        self.shards = shards if shards is not None else DEFAULT_SHARDS
         self._store = get_store(uri)
         self._lake = LakeStore(
             uri=str(self.uri),
@@ -108,23 +102,6 @@ class ParquetStore(LakehouseApiMixin):
                 TABLE.name: dedupe_view_sql,
                 TABLE_RAW.name: raw_view_sql,
             },
-            duckdb_config=duckdb_config(),
-        )
-        # Stats LakeStore registers the *raw* view as ``statement``.
-        # Aggregations bypass the deduped view's window function – a
-        # ~95× speedup on full-scan counts. ftmq's stats SQL uses
-        # ``count(canonical_id.distinct())`` and similar distinct-key
-        # aggregations, so physical duplicates from re-flushes don't
-        # inflate entity counts: same ``canonical_id`` across N
-        # physical rows still counts as one entity. The ``view_filter``
-        # strips tombstone rows so deletions still show up correctly
-        # post-flush, before merge has run.
-        self._lake_stats = LakeStore(
-            uri=str(self.uri),
-            dataset=self.dataset,
-            partition_by=PARTITIONS,
-            view_sqls={TABLE.name: raw_view_sql},
-            view_filter=_LIVE_ROW_FILTER,
             duckdb_config=duckdb_config(),
         )
         self.log = get_logger(
@@ -209,15 +186,13 @@ class ParquetStore(LakehouseApiMixin):
     def stats(self) -> DatasetStats:
         """Compute statistics from the statement store.
 
-        Targets the raw-view stats :class:`LakeStore` (``statement`` =
-        raw ``delta_scan`` with the ``deleted_at IS NULL`` filter) so
-        ftmq's aggregation SQL doesn't pay the dedupe window's per-row
-        overhead. ftmq's stats are distinct-keyed
-        (``count(canonical_id.distinct())`` etc.), so physical
-        duplicates from re-flushes don't inflate entity counts –
-        results stay correct between merges.
+        Runs ftmq's aggregation SQL through the deduped ``statement``
+        view. Assumes an optimized store – run ``optimize`` (merge +
+        compact + vacuum) before heavy stats workloads. Results are
+        correct on an unoptimized store too; the dedupe window just
+        makes the scan slower.
         """
-        return self._lake_stats.default_view().stats()
+        return self._lake.default_view().stats()
 
     def _write_lock(self) -> Lock:
         """Dataset-wide write fence.

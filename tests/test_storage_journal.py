@@ -1,6 +1,8 @@
 """Tests for JournalStore implementations (SQL-SQLite, SQL-PostgreSQL, and API)."""
 
 import os
+import tempfile
+from pathlib import Path
 from typing import Generator
 
 import httpx
@@ -20,11 +22,13 @@ from ftm_lakehouse.helpers.statements import (
     pack_statement,
     unpack_statement,
 )
+from ftm_lakehouse.lake import get_lakehouse
 from ftm_lakehouse.storage.journal import ApiJournalStore, JournalRows, SqlJournalStore
 from ftm_lakehouse.storage.journal import get_journal as _get_journal_factory
 from ftm_lakehouse.storage.journal.base import BaseJournalStore
 
 DATASET = "test"
+SHARDS = 8
 PSQL_URI = os.environ.get("PYTEST_POSTGRESQL_URI")
 
 
@@ -63,6 +67,11 @@ def _make_psql_journal() -> SqlJournalStore:
 def _make_api_journal() -> ApiJournalStore:
     app = FastAPI()
     app.include_router(router)
+    # The bulk route resolves the dataset's shard count from its config via
+    # ``app.state.lake`` – mirror the client-side SHARDS so both ends agree.
+    lake_path = Path(tempfile.mkdtemp())
+    app.state.lake = get_lakehouse(lake_path)
+    app.state.lake.get_dataset(DATASET).ensure(shards=SHARDS)
 
     test_client = TestClient(app)
     transport = httpx.MockTransport(
@@ -113,7 +122,7 @@ def test_storage_journal_initialize(journal):
 
 def test_storage_journal_put_and_flush(journal):
     """Test basic put and flush operations."""
-    with journal.writer() as w:
+    with journal.writer(SHARDS) as w:
         w.add_statement(make_statement("jane", "name", "Jane Doe"))
         w.add_statement(make_statement("jane", "firstName", "Jane"))
         w.add_statement(make_statement("jane", "lastName", "Doe"))
@@ -132,7 +141,7 @@ def test_storage_journal_put_and_flush(journal):
 
 def test_storage_journal_writer_context_manager(journal):
     """Test bulk writer with context manager."""
-    with journal.writer() as w:
+    with journal.writer(SHARDS) as w:
         for i in range(100):
             w.add_statement(make_statement(f"e{i}", "name", f"Name {i}"))
 
@@ -142,7 +151,7 @@ def test_storage_journal_writer_context_manager(journal):
 
 def test_storage_journal_flush_empties(journal):
     """Test that flush empties the journal."""
-    with journal.writer() as w:
+    with journal.writer(SHARDS) as w:
         for i in range(5):
             entity_id = f"entity_{i:02d}"
             w.add_statement(make_statement(entity_id, "name", f"Name {i}"))
@@ -165,7 +174,7 @@ def test_storage_journal_statement_fields(journal):
         lang="en",
         origin="import",
     )
-    with journal.writer() as w:
+    with journal.writer(SHARDS) as w:
         w.add_statement(stmt)
 
     flushed = collect_statements(journal.flush())
@@ -186,7 +195,7 @@ def test_storage_journal_statement_fields(journal):
 
 def test_storage_journal_flush_yields_shard(journal):
     """Test that flush yields (id, shard, data, deleted_at) tuples."""
-    with journal.writer() as w:
+    with journal.writer(SHARDS) as w:
         w.add_statement(
             Statement(
                 entity_id="e1",
@@ -222,16 +231,16 @@ def test_storage_journal_flush_yields_shard(journal):
     assert len(items) == 3
 
     for row in items:
-        # default shards = 8 (single hex char)
+        # 8 shards = single hex char
         assert len(row.shard) == 1
         stmt = unpack_statement(row.data)
-        assert row.shard == entity_shard(stmt.entity_id, 8)
+        assert row.shard == entity_shard(stmt.entity_id, SHARDS)
         assert stmt.origin in ("source_a", "source_b")
 
 
 def test_storage_journal_flush_sorted_order(journal):
     """Test that flush yields statements sorted by shard."""
-    with journal.writer() as w:
+    with journal.writer(SHARDS) as w:
         for origin in ["z_origin", "a_origin", "m_origin"]:
             for i in range(3):
                 stmt = Statement(
@@ -254,7 +263,7 @@ def test_storage_journal_rollback_on_consumer_error(request, journal):
     param = request.node.callspec.params["journal"]
     if param == "api":
         pytest.skip("API transport buffers full response; rollback is server-side only")
-    with journal.writer() as w:
+    with journal.writer(SHARDS) as w:
         for i in range(5):
             w.add_statement(make_statement(f"e{i}", "name", f"Name {i}"))
 
@@ -279,7 +288,7 @@ def test_storage_journal_rollback_on_consumer_abandon(request, journal):
     if param == "api":
         pytest.skip("API rollback is server-side only; client-side abandon is a no-op")
 
-    with journal.writer() as w:
+    with journal.writer(SHARDS) as w:
         for i in range(5):
             w.add_statement(make_statement(f"e{i}", "name", f"Name {i}"))
 
@@ -309,16 +318,16 @@ def test_storage_journal_upsert_duplicate_statements(journal):
         origin="import",
     )
 
-    with journal.writer() as w:
+    with journal.writer(SHARDS) as w:
         w.add_statement(stmt)
 
     # Add the same statement again (same id)
-    with journal.writer() as w:
+    with journal.writer(SHARDS) as w:
         w.add_statement(stmt)
 
     # Add same statement with different origin - should update
     stmt.origin = "updated"
-    with journal.writer() as w:
+    with journal.writer(SHARDS) as w:
         w.add_statement(stmt)
 
     flushed = collect_statements(journal.flush())
@@ -330,7 +339,7 @@ def test_storage_journal_count(journal):
     """Test counting rows in journal."""
     assert journal.count() == 0
 
-    with journal.writer() as w:
+    with journal.writer(SHARDS) as w:
         for i in range(10):
             w.add_statement(make_statement(f"e{i}", "name", f"Name {i}"))
 
@@ -343,7 +352,7 @@ def test_storage_journal_count(journal):
 
 def test_storage_journal_clear(journal):
     """Test clearing all rows from journal."""
-    with journal.writer() as w:
+    with journal.writer(SHARDS) as w:
         for i in range(10):
             w.add_statement(make_statement(f"e{i}", "name", f"Name {i}"))
 
@@ -381,7 +390,7 @@ def test_storage_journal_flush_concurrent_write(concurrent_journal):
     """
     journal = concurrent_journal
 
-    with journal.writer() as w:
+    with journal.writer(SHARDS) as w:
         for i in range(5):
             w.add_statement(make_statement(f"initial_{i}", "name", f"Initial {i}"))
 
@@ -396,7 +405,7 @@ def test_storage_journal_flush_concurrent_write(concurrent_journal):
 
         # After first row, inject new rows via a separate writer
         if not injected:
-            with journal.writer() as w:
+            with journal.writer(SHARDS) as w:
                 for i in range(3):
                     w.add_statement(
                         make_statement(f"concurrent_{i}", "name", f"Concurrent {i}")
@@ -460,7 +469,7 @@ def test_storage_journal_flush_skips_malformed_rows(request, journal):
     if param == "api":
         pytest.skip("Malformed-row injection requires direct SQL access")
 
-    with journal.writer() as w:
+    with journal.writer(SHARDS) as w:
         w.add_statement(make_statement("good_1", "name", "Good One"))
         w.add_statement(make_statement("good_2", "name", "Good Two"))
 

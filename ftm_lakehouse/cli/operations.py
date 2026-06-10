@@ -6,13 +6,9 @@
 
 Everything else groups under ``operations``:
 
-    ftm-lakehouse operations export-statements
-    ftm-lakehouse operations export-entities
-    ftm-lakehouse operations export-statistics
-    ftm-lakehouse operations export-documents
-    ftm-lakehouse operations compact
-    ftm-lakehouse operations merge
-    ftm-lakehouse operations vacuum
+    ftm-lakehouse operations export <kind>
+    ftm-lakehouse operations optimize
+    ftm-lakehouse operations unlock
     ftm-lakehouse operations crawl <uri>
 """
 
@@ -24,6 +20,7 @@ from ftm_lakehouse import operation as op
 from ftm_lakehouse.cli import DatasetContext, cli, console, settings, write_obj
 from ftm_lakehouse.model.dataset import DatasetModel
 from ftm_lakehouse.operation.crawl import HandleExistingMode
+from ftm_lakehouse.operation.export import ExportKind
 
 operations = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=settings.debug)
 cli.add_typer(operations, name="operations", help="Dataset pipeline operations")
@@ -63,8 +60,8 @@ def cli_make(
         if full:
             op.make(dataset, force=bool(force))
         else:
-            dataset.entities.flush()
-            op.export_index(dataset, force=bool(force))
+            dataset.get_entities().flush()
+            op.export(dataset, ExportKind.index, force=bool(force))
         console.print(dataset.index)
 
 
@@ -73,89 +70,44 @@ def cli_make(
 # ---------------------------------------------------------------------------
 
 
-@operations.command("export-statements")
-def cli_export_statements():
-    """Export the statement store to a sorted ``statements.csv``."""
-    with DatasetContext() as dataset:
-        op.export_statements(dataset)
-        console.print("Exported statements.csv")
-
-
-@operations.command("export-entities")
-def cli_export_entities():
-    """Export the statement store to ``entities.ftm.json``."""
-    with DatasetContext() as dataset:
-        op.export_entities(dataset)
-        console.print("Exported entities.ftm.json")
-
-
-@operations.command("export-statistics")
-def cli_export_statistics():
-    """Export statement store statistics to ``statistics.json``."""
-    with DatasetContext() as dataset:
-        op.export_statistics(dataset)
-        console.print("Exported statistics.json")
-
-
-@operations.command("export-documents")
-def cli_export_documents():
-    """Export document metadata to ``documents.csv``."""
-    with DatasetContext() as dataset:
-        op.export_documents(dataset)
-        console.print("Exported documents.csv")
-
-
-# ---------------------------------------------------------------------------
-# Async maintenance ops on the parquet statement store
-# ---------------------------------------------------------------------------
-
-
-@operations.command("compact")
-def cli_compact(
+@operations.command("export")
+def cli_export(
+    kind: Annotated[ExportKind, typer.Argument(help="Which export to produce.")],
     force: Annotated[
         Optional[bool], typer.Option(help="Run regardless of freshness state.")
     ] = False,
 ):
-    """Bin-pack small parquet files (cheap maintenance).
-
-    Does not collapse duplicate rows or drop tombstones – use ``merge`` for
-    that. Held under the dataset write fence.
-    """
+    """Export the dataset: ``statements`` (statements.csv), ``entities``
+    (entities.ftm.json), ``documents`` (documents.csv), ``statistics``
+    (statistics.json) or ``index`` (index.json)."""
     with DatasetContext() as dataset:
-        res = op.compact(dataset, force=bool(force))
+        res = op.export(dataset, kind, force=bool(force))
         console.print(res)
 
 
-@operations.command("merge")
-def cli_merge(
-    force: Annotated[
-        Optional[bool], typer.Option(help="Run regardless of freshness state.")
-    ] = False,
-):
-    """Collapse duplicates and reap expired tombstones per partition.
-
-    Expensive – overwrites each ``(shard, bucket, origin)`` partition with a
-    deduplicated view. Tombstones older than ``LAKEHOUSE_GRACE_PERIOD_DAYS``
-    are dropped.
-    """
-    with DatasetContext() as dataset:
-        res = op.merge(dataset, force=bool(force))
-        console.print(res)
+# ---------------------------------------------------------------------------
+# Async maintenance on the parquet statement store
+# ---------------------------------------------------------------------------
 
 
-@operations.command("vacuum")
-def cli_vacuum(
+@operations.command("optimize")
+def cli_optimize(
     retention_hours: Annotated[
         Optional[int],
-        typer.Option(help="Retain files newer than this many hours."),
+        typer.Option(help="Vacuum: retain obsolete files newer than this many hours."),
     ] = 0,
     force: Annotated[
         Optional[bool], typer.Option(help="Run regardless of freshness state.")
     ] = False,
 ):
-    """Delete obsolete parquet files no longer referenced by the Delta log."""
+    """Optimize the statement store: collapse duplicates and reap expired
+    tombstones, bin-pack small parquet files, delete obsolete files.
+
+    Tombstones older than ``LAKEHOUSE_GRACE_PERIOD_DAYS`` are dropped. Each
+    step is held under the dataset write fence.
+    """
     with DatasetContext() as dataset:
-        res = op.vacuum(
+        res = op.optimize(
             dataset, retention_hours=int(retention_hours or 0), force=bool(force)
         )
         console.print(res)
@@ -173,7 +125,7 @@ def cli_unlock():
     a held lock can corrupt an in-flight write. No-op if no lock is held.
     """
     with DatasetContext() as dataset:
-        if dataset.entities.unlock():
+        if dataset.get_entities().unlock():
             console.print("[green]Lock released.[/green]")
         else:
             console.print("[yellow]No lock held.[/yellow]")

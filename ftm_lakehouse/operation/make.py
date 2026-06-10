@@ -2,8 +2,8 @@
 
 from ftm_lakehouse.core.conventions import tag
 from ftm_lakehouse.model.job import DatasetJobModel
-from ftm_lakehouse.operation import factories
 from ftm_lakehouse.operation.base import DatasetJobOperation
+from ftm_lakehouse.operation.export import ExportJob, ExportKind, ExportOperation
 from ftm_lakehouse.repository.job import JobRun
 
 
@@ -18,10 +18,8 @@ class MakeOperation(DatasetJobOperation[MakeJob]):
     def handle(self, run: JobRun, *args, **kwargs) -> None:
         force = kwargs.get("force", False)
         ds = self._dataset
-        ds.entities.flush()
-        factories.export_statements(ds, force=force)
-        factories.export_entities(ds, force=force)
-        factories.export_documents(ds, force=force)
-        factories.export_statistics(ds, force=force)
-        factories.export_index(ds, force=force)
+        ds.get_entities().flush()
+        for kind in ExportKind:
+            job = ExportJob.make(dataset=ds.name, kind=kind)
+            ExportOperation.from_job(job, ds).run(force=force)
         run.job.done = 1

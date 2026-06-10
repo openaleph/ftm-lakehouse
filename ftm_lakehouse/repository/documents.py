@@ -17,7 +17,7 @@ from ftmq.query import Query
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.logic.parquet import QUERY_IN_BATCH_SIZE
 from ftm_lakehouse.model.file import Document, Documents
-from ftm_lakehouse.repository.base import BaseRepository
+from ftm_lakehouse.repository.base import BaseRepository, resolve_shards
 from ftm_lakehouse.repository.diff import ParquetDiffMixin
 from ftm_lakehouse.storage.parquet import ParquetStore
 
@@ -42,6 +42,8 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
 
     def __init__(self, dataset: str, uri: Uri, shards: int | None = None) -> None:
         super().__init__(dataset, uri)
+        if shards is None:
+            shards = resolve_shards(uri)
         self._statements = ParquetStore(uri, dataset, shards)
         self._storage = get_store(self._store_uri, serialization_mode="raw")
 

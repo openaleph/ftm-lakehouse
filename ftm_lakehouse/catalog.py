@@ -153,11 +153,12 @@ class Catalog(Generic[DM]):
 
         Args:
             name: Dataset name
-            **data: Initial config data
+            **data: Initial config data, recorded into ``config.yml`` at
+                creation (e.g. ``shards=8`` for a huge dataset)
 
         Returns:
             Created Dataset instance
         """
         dataset = self.get_dataset(name, **data)
-        dataset.ensure()
+        dataset.ensure(**data)
         return dataset

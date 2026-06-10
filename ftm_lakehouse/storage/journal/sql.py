@@ -216,7 +216,7 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
         """Iterate and delete yielded rows, one shard at a time.
 
         Reads the distinct shard values currently in the table (cheap – bounded
-        by ``Settings.entity_shards``), then for each shard streams rows with
+        by the dataset's shard count), then for each shard streams rows with
         ``WHERE shard = ?`` (index seek via ``ix_{ds}_shard``) and DELETEs the
         yielded ids in batches.
 

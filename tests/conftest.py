@@ -123,22 +123,12 @@ def tmp_dataset(tmp_path) -> Dataset:
 def clear_factory_caches():
     """Clear cached factories between tests to prevent cross-test pollution."""
     # Clear before test
-    factories.get_archive.cache_clear()
-    factories.get_entities.cache_clear()
-    factories.get_mappings.cache_clear()
-    factories.get_jobs.cache_clear()
-    factories.get_versions.cache_clear()
-    factories.get_tags.cache_clear()
+    factories.clear_caches()
     get_journal.cache_clear()
     get_lakehouse.cache_clear()
     yield
     # Clear after test
-    factories.get_archive.cache_clear()
-    factories.get_entities.cache_clear()
-    factories.get_mappings.cache_clear()
-    factories.get_jobs.cache_clear()
-    factories.get_versions.cache_clear()
-    factories.get_tags.cache_clear()
+    factories.clear_caches()
     get_journal.cache_clear()
     get_lakehouse.cache_clear()
 

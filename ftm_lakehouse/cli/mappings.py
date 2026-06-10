@@ -23,7 +23,7 @@ def cli_mappings_ls(
 ):
     """List mapping configuration hashes in the dataset."""
     with DatasetContext() as dataset:
-        hashes = list(dataset.mappings.list())
+        hashes = list(dataset.get_mappings().list())
         smart_write(out_uri, "\n".join(hashes) + "\n" if hashes else "", "wb")
 
 
@@ -34,7 +34,7 @@ def cli_mappings_get(
 ):
     """Retrieve a mapping configuration by its content hash."""
     with DatasetContext() as dataset:
-        mapping = dataset.mappings.get(content_hash)
+        mapping = dataset.get_mappings().get(content_hash)
         if mapping is None:
             console.print(f"[red]No mapping found for {content_hash}[/red]")
             raise typer.Exit(code=1)
@@ -58,7 +58,7 @@ def cli_mappings_process(
         else:
             total = 0
             count = 0
-            for mapping_hash in dataset.mappings.list():
+            for mapping_hash in dataset.get_mappings().list():
                 result = op.run_mapping(dataset, mapping_hash)
                 if result.done > 0:
                     console.print(f"{mapping_hash}: {result.done} entities")

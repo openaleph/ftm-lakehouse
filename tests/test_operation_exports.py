@@ -1,4 +1,4 @@
-"""Tests for export operations - statements, entities, statistics, index."""
+"""Tests for the ExportOperation kinds - statements, entities, statistics, documents, index."""
 
 from anystore.io import smart_stream_csv_models
 from ftmq.util import make_entity
@@ -6,20 +6,9 @@ from ftmq.util import make_entity
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.model.dataset import DatasetModel
 from ftm_lakehouse.model.file import Document
-from ftm_lakehouse.operation.export import (
-    ExportDocumentsJob,
-    ExportDocumentsOperation,
-    ExportEntitiesJob,
-    ExportEntitiesOperation,
-    ExportIndexJob,
-    ExportIndexOperation,
-    ExportStatementsJob,
-    ExportStatementsOperation,
-    ExportStatisticsJob,
-    ExportStatisticsOperation,
-)
+from ftm_lakehouse.operation.export import ExportJob, ExportKind, ExportOperation
 from ftm_lakehouse.repository import ArchiveRepository, EntityRepository
-from tests.shared import JANE, JOHN
+from tests.shared import BOB, JANE, JOHN
 
 DATASET = "export_test"
 
@@ -32,18 +21,22 @@ def setup_entities(repo: EntityRepository) -> None:
     repo.flush()
 
 
+def make_op(kind: ExportKind, tmp_path, **kwargs) -> ExportOperation:
+    job = ExportJob.make(dataset=DATASET, kind=kind, **kwargs)
+    return ExportOperation(job=job, uri=tmp_path)
+
+
 def test_operation_export_statements(tmp_path):
-    """Test ExportStatementsOperation: parquet to statements.csv with tags."""
+    """Export kind=statements: parquet to statements.csv with tags."""
     repo = EntityRepository(dataset=DATASET, uri=tmp_path)
     setup_entities(repo)
 
     # No target tag before run
-    target_path = f"tags/lakehouse/exports/statements.csv"
+    target_path = "tags/lakehouse/exports/statements.csv"
     assert not (tmp_path / target_path).exists()
 
     # Create operation and verify target/dependencies
-    job = ExportStatementsJob.make(dataset=DATASET)
-    op = ExportStatementsOperation(job=job, uri=tmp_path)
+    op = make_op(ExportKind.statements, tmp_path)
 
     assert op.get_target() == path.EXPORTS_STATEMENTS
     assert op.get_target() == "exports/statements.csv"
@@ -65,23 +58,21 @@ def test_operation_export_statements(tmp_path):
 
 
 def test_operation_export_entities(tmp_path):
-    """Test ExportEntitiesOperation: parquet to entities.ftm.json with tags."""
+    """Export kind=entities: parquet to entities.ftm.json with tags."""
     tmp_path = tmp_path / DATASET
     repo = EntityRepository(dataset=DATASET, uri=tmp_path)
     setup_entities(repo)
 
     # No target tag before run
-    target_path = f"tags/lakehouse/entities.ftm.json"
+    target_path = "tags/lakehouse/entities.ftm.json"
     assert not (tmp_path / target_path).exists()
 
     # Create operation and verify target/dependencies
-    job = ExportEntitiesJob.make(dataset=DATASET)
-    op = ExportEntitiesOperation(job=job, uri=tmp_path)
+    op = make_op(ExportKind.entities, tmp_path)
 
     assert op.get_target() == path.ENTITIES_JSON
     assert op.get_target() == "entities.ftm.json"
     assert op.get_dependencies() == [tag.STATEMENTS_UPDATED, tag.JOURNAL_UPDATED]
-    assert op.get_dependencies() == ["statements/last_updated", "journal/last_updated"]
 
     # Run the export operation
     result = op.run()
@@ -98,7 +89,7 @@ def test_operation_export_entities(tmp_path):
 
 
 def test_operation_export_statistics(tmp_path):
-    """Test ExportStatisticsOperation: parquet to statistics.json with tags."""
+    """Export kind=statistics: parquet to statistics.json with tags."""
     tmp_path = tmp_path / DATASET
     repo = EntityRepository(dataset=DATASET, uri=tmp_path)
     setup_entities(repo)
@@ -108,13 +99,11 @@ def test_operation_export_statistics(tmp_path):
     assert not (tmp_path / target_path).exists()
 
     # Create operation and verify target/dependencies
-    job = ExportStatisticsJob.make(dataset=DATASET)
-    op = ExportStatisticsOperation(job=job, uri=tmp_path)
+    op = make_op(ExportKind.statistics, tmp_path)
 
     assert op.get_target() == path.EXPORTS_STATISTICS
     assert op.get_target() == "exports/statistics.json"
     assert op.get_dependencies() == [tag.STATEMENTS_UPDATED, tag.JOURNAL_UPDATED]
-    assert op.get_dependencies() == ["statements/last_updated", "journal/last_updated"]
 
     # Run the export operation
     result = op.run()
@@ -132,25 +121,21 @@ def test_operation_export_statistics(tmp_path):
 
 
 def test_operation_export_index(tmp_path):
-    """Test ExportIndexOperation: generate index.json with tags."""
+    """Export kind=index: generate index.json with tags."""
     tmp_path = tmp_path / DATASET
     repo = EntityRepository(dataset=DATASET, uri=tmp_path)
     setup_entities(repo)
 
     # Run prerequisites first (statistics and entities exports)
-    stats_job = ExportStatisticsJob.make(dataset=DATASET)
-    ExportStatisticsOperation(job=stats_job, uri=tmp_path).run()
-
-    entities_job = ExportEntitiesJob.make(dataset=DATASET)
-    ExportEntitiesOperation(job=entities_job, uri=tmp_path).run()
+    make_op(ExportKind.statistics, tmp_path).run()
+    make_op(ExportKind.entities, tmp_path).run()
 
     # No target tag before run
     target_path = "tags/lakehouse/index.json"
     assert not (tmp_path / target_path).exists()
 
     # Create operation and verify target/dependencies
-    job = ExportIndexJob.make(dataset=DATASET)
-    op = ExportIndexOperation(job=job, uri=tmp_path)
+    op = make_op(ExportKind.index, tmp_path)
 
     assert op.get_target() == path.INDEX
     assert op.get_target() == "index.json"
@@ -183,8 +168,33 @@ def test_operation_export_index(tmp_path):
     assert len(versions) >= 1
 
 
+def test_export_entities_reuses_fresh_statements_csv(tmp_path):
+    """The entities export reuses statements.csv while it's fresh.
+
+    Regression: the freshness check used the dead ``exports/statements``
+    tag instead of the export's actual target key, so the reuse path
+    never fired.
+    """
+    repo = EntityRepository(dataset=DATASET, uri=tmp_path)
+    setup_entities(repo)
+
+    op = make_op(ExportKind.entities, tmp_path)
+    assert op._get_fresh_statements_csv() is None  # nothing exported yet
+
+    make_op(ExportKind.statements, tmp_path).run()
+    fresh = op._get_fresh_statements_csv()
+    assert fresh is not None
+    assert fresh.endswith(path.EXPORTS_STATEMENTS)
+
+    # New statements invalidate the exported CSV
+    with repo.writer(origin="test") as writer:
+        writer.add_entity(make_entity(BOB))
+    repo.flush()
+    assert op._get_fresh_statements_csv() is None
+
+
 def test_operation_export_documents(tmp_path, fixtures_path):
-    """Test ExportDocumentsOperation: parquet to documents.csv with tags."""
+    """Export kind=documents: parquet to documents.csv with tags."""
     tmp_path = tmp_path / DATASET
     archive = ArchiveRepository(dataset=DATASET, uri=tmp_path)
     repo = EntityRepository(dataset=DATASET, uri=tmp_path)
@@ -202,8 +212,7 @@ def test_operation_export_documents(tmp_path, fixtures_path):
     assert not (tmp_path / target_path).exists()
 
     # Create operation and verify target/dependencies
-    job = ExportDocumentsJob.make(dataset=DATASET)
-    op = ExportDocumentsOperation(job=job, uri=tmp_path)
+    op = make_op(ExportKind.documents, tmp_path)
 
     assert op.get_target() == path.EXPORTS_DOCUMENTS
     assert op.get_target() == "exports/documents.csv"

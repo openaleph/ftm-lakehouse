@@ -6,69 +6,45 @@ They are internal and triggered by the Dataset class.
 Factory functions provide convenient ways to run operations from a Dataset:
 
     from ftm_lakehouse import get_dataset
-    from ftm_lakehouse.operation import export_statements, make
+    from ftm_lakehouse.operation import export, make, optimize
 
     dataset = get_dataset("my_dataset")
-    export_statements(dataset)  # Run single export
-    make(dataset)               # Run full workflow
+    export(dataset, "statements")  # Run single export
+    optimize(dataset)              # Merge + compact + vacuum
+    make(dataset)                  # Run full workflow
 """
 
 from ftm_lakehouse.operation.crawl import CrawlOperation, crawl
 from ftm_lakehouse.operation.download import DownloadArchiveOperation
-from ftm_lakehouse.operation.export import (
-    ExportDocumentsOperation,
-    ExportEntitiesOperation,
-    ExportIndexOperation,
-    ExportStatementsOperation,
-    ExportStatisticsOperation,
-)
+from ftm_lakehouse.operation.export import ExportJob, ExportKind, ExportOperation
 from ftm_lakehouse.operation.factories import (
-    compact,
     download_archive,
-    export_documents,
-    export_entities,
-    export_index,
-    export_statements,
-    export_statistics,
+    export,
     make,
-    merge,
+    optimize,
     run_mapping,
-    vacuum,
 )
-from ftm_lakehouse.operation.maintenance import (
-    CompactOperation,
-    MergeOperation,
-    VacuumOperation,
-)
+from ftm_lakehouse.operation.maintenance import OptimizeJob, OptimizeOperation
 from ftm_lakehouse.operation.make import MakeJob, MakeOperation
 from ftm_lakehouse.operation.mapping import MappingOperation
 
 __all__ = [
     # Operations
-    "CompactOperation",
     "CrawlOperation",
     "DownloadArchiveOperation",
-    "ExportDocumentsOperation",
-    "ExportEntitiesOperation",
-    "ExportIndexOperation",
-    "ExportStatementsOperation",
-    "ExportStatisticsOperation",
+    "ExportJob",
+    "ExportKind",
+    "ExportOperation",
     "MakeJob",
     "MakeOperation",
     "MappingOperation",
-    "MergeOperation",
-    "VacuumOperation",
+    "OptimizeJob",
+    "OptimizeOperation",
     # Factory functions
-    "compact",
     "crawl",
     "download_archive",
-    "export_documents",
-    "export_entities",
-    "export_index",
-    "export_statements",
-    "export_statistics",
+    "export",
     "make",
-    "merge",
+    "optimize",
     "run_mapping",
-    "vacuum",
 ]

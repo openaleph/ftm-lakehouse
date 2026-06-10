@@ -5,8 +5,9 @@ from datetime import datetime, timedelta, timezone
 import pyarrow as pa
 import pytest
 
-from ftm_lakehouse.logic.parquet import build_merge_query, make_duckdb
+from ftm_lakehouse.logic.parquet import build_merge_query
 from ftm_lakehouse.model.statement import SHARDED_SCHEMA, TABLE_RAW
+from tests.duck import make_duckdb
 
 
 def _table(rows: list[dict]) -> pa.Table:

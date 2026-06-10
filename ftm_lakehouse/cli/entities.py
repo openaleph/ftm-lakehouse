@@ -7,19 +7,14 @@ Sub-typer group:
     ftm-lakehouse entities import    # FtM JSON -> parquet (bypasses journal)
 """
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Annotated, Optional
 
 import typer
-from anystore.io import logged_items
 from ftmq.io import smart_read_proxies, smart_write_proxies
 
 from ftm_lakehouse.cli import DatasetContext, cli, settings
-from ftm_lakehouse.exceptions import BufferFullError
-from ftm_lakehouse.logic.entities.buffer import EntityBuffer
-
-BULK_ORIGIN = "bulk"
-
+from ftm_lakehouse.cli.io import BULK_ORIGIN, import_entities
 
 entities = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=settings.debug)
 cli.add_typer(entities, name="entities", help="Read and write FtM entities")
@@ -32,10 +27,10 @@ def cli_entities_iterate(
     """Iterate entities from the parquet store as FtM JSON lines.
 
     Live read – reflects current state of the parquet table (post-flush,
-    post-merge). For the frozen pre-exported view use ``stream``.
+    post-optimize). For the frozen pre-exported view use ``stream``.
     """
     with DatasetContext() as dataset:
-        smart_write_proxies(out_uri, dataset.entities.query())
+        smart_write_proxies(out_uri, dataset.get_entities().query())
 
 
 @entities.command("stream")
@@ -44,7 +39,7 @@ def cli_entities_stream(
 ):
     """Stream FtM entities from the pre-exported ``entities.ftm.json``."""
     with DatasetContext() as dataset:
-        smart_write_proxies(out_uri, dataset.entities.stream())
+        smart_write_proxies(out_uri, dataset.get_entities().stream())
 
 
 @entities.command("import")
@@ -69,26 +64,10 @@ def cli_entities_import(
     be wasteful.
     """
     with DatasetContext() as dataset:
-        repo = dataset.entities
-        buffer = EntityBuffer(dataset.name, dataset.model.shards, origin)
-        now = last_seen or datetime.now(timezone.utc)
-
-        for proxy in logged_items(
+        import_entities(
+            dataset,
             smart_read_proxies(in_uri),
-            "Write",
-            item_name="Entity",
-            logger=dataset._log,
-        ):
-            try:
-                buffer.add_entity(proxy)
-            except BufferFullError:
-                # Buffer hit its cap before we got to the bulk_size check
-                # (e.g. bulk_size > LAKEHOUSE_MAX_BUFFER_ROWS). Drain and
-                # retry the failed add so the entity isn't dropped.
-                repo.write_statements(buffer.flush_buffer(), now=now)
-                buffer.add_entity(proxy)
-            if len(buffer) >= bulk_size:
-                repo.write_statements(buffer.flush_buffer(), now=now)
-
-        if buffer:
-            repo.write_statements(buffer.flush_buffer(), now=now)
+            origin=origin,
+            bulk_size=bulk_size,
+            last_seen=last_seen,
+        )

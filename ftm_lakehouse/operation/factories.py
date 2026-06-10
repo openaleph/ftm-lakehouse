@@ -6,12 +6,15 @@ constructing Job and Operation instances.
 Example:
     ```python
     from ftm_lakehouse import get_dataset
-    from ftm_lakehouse.operation import export_statements, make
+    from ftm_lakehouse.operation import export, make, optimize
 
     dataset = get_dataset("my_dataset")
 
     # Run a single export operation
-    export_statements(dataset)
+    export(dataset, "statements")
+
+    # Optimize the statement store (merge + compact + vacuum)
+    optimize(dataset)
 
     # Run the full make workflow (flush + all exports)
     make(dataset)
@@ -25,130 +28,62 @@ from ftm_lakehouse.operation.download import (
     DownloadArchiveJob,
     DownloadArchiveOperation,
 )
-from ftm_lakehouse.operation.export import (
-    ExportDocumentsJob,
-    ExportDocumentsOperation,
-    ExportEntitiesJob,
-    ExportEntitiesOperation,
-    ExportIndexJob,
-    ExportIndexOperation,
-    ExportStatementsJob,
-    ExportStatementsOperation,
-    ExportStatisticsJob,
-    ExportStatisticsOperation,
-)
-from ftm_lakehouse.operation.maintenance import (
-    CompactJob,
-    CompactOperation,
-    MergeJob,
-    MergeOperation,
-    VacuumJob,
-    VacuumOperation,
-)
+from ftm_lakehouse.operation.export import ExportJob, ExportKind, ExportOperation
+from ftm_lakehouse.operation.maintenance import OptimizeJob, OptimizeOperation
 from ftm_lakehouse.operation.make import MakeJob, MakeOperation
 from ftm_lakehouse.operation.mapping import MappingJob, MappingOperation
 
 
-def export_statements(dataset: Dataset, force: bool = False) -> ExportStatementsJob:
+def export(
+    dataset: Dataset,
+    kind: ExportKind | str,
+    force: bool = False,
+    make_diff: bool = True,
+) -> ExportJob:
     """
-    Run export statements operation (parquet -> statements.csv).
+    Run a single export operation.
 
     Args:
         dataset: The dataset to export from
+        kind: What to export – one of ``statements``, ``entities``,
+            ``documents``, ``statistics``, ``index``
         force: Force export even if up-to-date
+        make_diff: Also export a delta diff file (``entities`` / ``documents``)
 
     Returns:
         The completed job result
     """
-    job = ExportStatementsJob.make(dataset=dataset.name)
-    return ExportStatementsOperation.from_job(job, dataset).run(force=force)
-
-
-def export_entities(
-    dataset: Dataset, force: bool = False, make_diff: bool = True
-) -> ExportEntitiesJob:
-    """
-    Run export entities operation (parquet -> entities.ftm.json).
-
-    Args:
-        dataset: The dataset to export from
-        force: Force export even if up-to-date
-        make_diff: Also export delta diff file (default True)
-
-    Returns:
-        The completed job result
-    """
-    job = ExportEntitiesJob.make(dataset=dataset.name, make_diff=make_diff)
-    return ExportEntitiesOperation.from_job(job, dataset).run(force=force)
-
-
-def export_statistics(dataset: Dataset, force: bool = False) -> ExportStatisticsJob:
-    """
-    Run export statistics operation (parquet -> statistics.json).
-
-    Args:
-        dataset: The dataset to export from
-        force: Force export even if up-to-date
-
-    Returns:
-        The completed job result
-    """
-    job = ExportStatisticsJob.make(dataset=dataset.name)
-    return ExportStatisticsOperation.from_job(job, dataset).run(force=force)
-
-
-def export_documents(
-    dataset: Dataset, force: bool = False, make_diff: bool = True
-) -> ExportDocumentsJob:
-    """
-    Run export documents operation (parquet -> documents.csv).
-
-    Args:
-        dataset: The dataset to export from
-        force: Force export even if up-to-date
-
-    Returns:
-        The completed job result
-    """
-    job = ExportDocumentsJob.make(dataset=dataset.name, make_diff=make_diff)
-    return ExportDocumentsOperation.from_job(job, dataset).run(force=force)
-
-
-def export_index(dataset: Dataset, force: bool = False) -> ExportIndexJob:
-    """
-    Run export index operation (-> index.json).
-
-    Args:
-        dataset: The dataset to export from
-        force: Force export even if up-to-date
-
-    Returns:
-        The completed job result
-    """
-    job = ExportIndexJob.make(dataset=dataset.name)
-    return ExportIndexOperation.from_job(job, dataset).run(
-        force=force, dataset=dataset.model
+    job = ExportJob.make(
+        dataset=dataset.name, kind=ExportKind(kind), make_diff=make_diff
     )
+    return ExportOperation.from_job(job, dataset).run(force=force)
 
 
-def compact(dataset: Dataset, force: bool = False) -> CompactJob:
-    """Bin-pack small parquet files in the statement store."""
-    job = CompactJob.make(dataset=dataset.name)
-    return CompactOperation.from_job(job, dataset).run(force=force)
+def optimize(
+    dataset: Dataset,
+    retention_hours: int = 0,
+    grace_period_days: int | None = None,
+    force: bool = False,
+) -> OptimizeJob:
+    """
+    Optimize the statement store: merge duplicates / reap tombstones,
+    bin-pack small files, delete obsolete files.
 
+    Args:
+        dataset: The dataset to optimize
+        retention_hours: Vacuum retains obsolete files newer than this
+        grace_period_days: Override ``LAKEHOUSE_GRACE_PERIOD_DAYS`` for merge
+        force: Run regardless of freshness state
 
-def merge(dataset: Dataset, force: bool = False) -> MergeJob:
-    """Collapse duplicates and reap expired tombstones, partition by partition."""
-    job = MergeJob.make(dataset=dataset.name)
-    return MergeOperation.from_job(job, dataset).run(force=force)
-
-
-def vacuum(
-    dataset: Dataset, retention_hours: int = 0, force: bool = False
-) -> VacuumJob:
-    """Delete obsolete parquet files no longer referenced by the Delta log."""
-    job = VacuumJob.make(dataset=dataset.name, retention_hours=retention_hours)
-    return VacuumOperation.from_job(job, dataset).run(force=force)
+    Returns:
+        The completed job result
+    """
+    job = OptimizeJob.make(
+        dataset=dataset.name,
+        retention_hours=retention_hours,
+        grace_period_days=grace_period_days,
+    )
+    return OptimizeOperation.from_job(job, dataset).run(force=force)
 
 
 def run_mapping(

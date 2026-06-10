@@ -13,6 +13,12 @@ settings = Settings()
 
 DM = TypeVar("DM", bound="DatasetModel")
 
+DEFAULT_SHARDS = 0
+"""Hardcoded shard-count default – a single shard. The shard count is
+per-dataset configuration (``config.yml``), set once at creation; there is
+deliberately no environment override so changing environments can't
+mis-shard a dataset."""
+
 
 class CatalogModel(Catalog):
     storage: StoreModel | None = None
@@ -24,9 +30,12 @@ class DatasetModel(Dataset):
     """Set storage for external lakehouse"""
     public_url_prefix: HttpUrlStr | None = None
     """Public url prefix for resources"""
-    shards: int = settings.entity_shards
-    """Number of entity-id hash shards for the parquet store. Set once at
-    dataset creation; changing it requires a full rewrite."""
+    shards: int = DEFAULT_SHARDS
+    """Number of entity-id hash shards for the parquet store. ``0`` (default)
+    means a single shard; huge datasets should configure ``8`` or more at
+    creation for bounded per-partition working sets (e.g.
+    ``ensure_dataset("big_leak", shards=8)``). Immutable after first
+    write – changing it requires a full rewrite."""
 
     def get_public_prefix(self) -> str | None:
         if self.public_url_prefix:

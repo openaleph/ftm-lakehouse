@@ -6,6 +6,7 @@ from ftm_lakehouse.lake import (
     ensure_dataset,
     get_archive,
     get_dataset,
+    get_documents,
     get_entities,
     get_lakehouse,
     get_mappings,
@@ -20,6 +21,7 @@ __all__ = [
     "get_dataset",
     "ensure_dataset",
     "get_archive",
+    "get_documents",
     "get_entities",
     "get_mappings",
 ]

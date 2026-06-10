@@ -5,7 +5,7 @@ from ftm_lakehouse.logic.mappings import map_entities
 from ftm_lakehouse.model.job import DatasetJobModel
 from ftm_lakehouse.model.mapping import mapping_origin
 from ftm_lakehouse.operation.base import DatasetJobOperation
-from ftm_lakehouse.repository import MappingRepository
+from ftm_lakehouse.repository.factories import get_mappings
 from ftm_lakehouse.repository.job import JobRun
 
 
@@ -38,7 +38,7 @@ class MappingOperation(DatasetJobOperation[MappingJob]):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.mappings = MappingRepository(self.job.dataset, self.archive.uri)
+        self.mappings = get_mappings(self.job.dataset, self.archive.uri)
 
     def get_target(self) -> str:
         return tag.mapping_tag(self.job.content_hash)

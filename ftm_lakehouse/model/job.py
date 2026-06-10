@@ -57,14 +57,6 @@ class JobModel(BaseModel):
         kwargs["run_id"] = cls.ensure_run_id(kwargs.get("run_id"))
         return cls(**kwargs)
 
-    @classmethod
-    def start(cls, **kwargs) -> Self:
-        run = cls.make(**kwargs)
-        run.started = datetime.now()
-        run.running = True
-        run.touch()
-        return run
-
     @cached_property
     def log(self) -> BoundLogger:
         return get_logger(__name__, run_id=self.run_id)

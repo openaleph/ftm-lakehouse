@@ -28,14 +28,13 @@ from ftm_lakehouse.helpers.statements import unpack_statement
 from ftm_lakehouse.logic.entities.aggregate import aggregate_unsafe
 from ftm_lakehouse.logic.parquet import QUERY_IN_BATCH_SIZE
 from ftm_lakehouse.model.statement import SHARDED_SCHEMA, StatementRow
-from ftm_lakehouse.repository.base import BaseRepository
-from ftm_lakehouse.repository.diff import ParquetDiffMixin
+from ftm_lakehouse.repository.base import BaseRepository, resolve_shards
+from ftm_lakehouse.repository.diff import ParquetDiffMixin, make_envelope
 from ftm_lakehouse.repository.entities.api import ApiEntityRepository
 from ftm_lakehouse.storage.journal import get_journal
 from ftm_lakehouse.storage.journal.base import BaseJournalWriter
 from ftm_lakehouse.storage.journal.sql import SqlJournalStore
 from ftm_lakehouse.storage.parquet import ParquetStore
-from ftm_lakehouse.util import make_envelope
 
 settings = Settings()
 
@@ -81,7 +80,7 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         shards: int | None = None,
     ) -> None:
         super().__init__(dataset, uri)
-        self.shards = shards if shards is not None else settings.entity_shards
+        self.shards = shards if shards is not None else resolve_shards(uri)
         self._journal = get_journal(dataset)
         self._statements = ParquetStore(uri, dataset, self.shards)
         self._store = get_store(self._store_uri)

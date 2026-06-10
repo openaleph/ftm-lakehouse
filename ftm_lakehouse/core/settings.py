@@ -28,7 +28,6 @@ class Settings(BaseSettings):
     zfs_owner: str | None = None
     zfs_allowed_uid: int | None = None
 
-    entity_shards: int = 0
     grace_period_days: int = 30
     max_buffer_rows: int = 1_000_000
 

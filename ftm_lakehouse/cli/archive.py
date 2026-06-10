@@ -23,8 +23,11 @@ def cli_archive_get(
 ):
     """Retrieve a file by content hash and write it to an output URI."""
     with DatasetContext() as dataset:
-        file = dataset.archive.get_file(content_hash)
-        with dataset.archive.open(file.checksum) as i, smart_open(out_uri, "wb") as o:
+        file = dataset.get_archive().get_file(content_hash)
+        with (
+            dataset.get_archive().open(file.checksum) as i,
+            smart_open(out_uri, "wb") as o,
+        ):
             o.write(i.read())
 
 
@@ -34,7 +37,7 @@ def cli_archive_head(
 ):
     """Retrieve all metadata objects for a content hash and write them out."""
     with DatasetContext() as dataset:
-        smart_write_models(out_uri, dataset.archive.get_all_files(content_hash))
+        smart_write_models(out_uri, dataset.get_archive().get_all_files(content_hash))
 
 
 @archive.command("ls")
@@ -45,7 +48,7 @@ def cli_archive_ls(
 ):
     """List all files in the dataset archive."""
     with DatasetContext() as dataset:
-        iterator = dataset.archive.iterate_files()
+        iterator = dataset.get_archive().iterate_files()
         if keys:
             files = (f.key.encode() + b"\n" for f in iterator)
         elif checksums:

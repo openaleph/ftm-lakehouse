@@ -112,10 +112,16 @@ class BaseJournalStore(Generic[W]):
         self.dataset = dataset
         self.uri = uri or settings.resolved_journal_uri
 
-    def writer(self, shards: int | None = None, origin: str | None = None) -> W:
-        """Get a bulk writer for adding rows."""
-        if shards is None:
-            shards = settings.entity_shards
+    def writer(self, shards: int, origin: str | None = None) -> W:
+        """Get a bulk writer for adding rows.
+
+        Args:
+            shards: The dataset's shard count. Callers resolve it from the
+                dataset's config – via ``EntityRepository.shards`` or
+                :func:`ftm_lakehouse.repository.base.resolve_shards`. There
+                is deliberately no environment default.
+            origin: Origin tag for statements written through this writer.
+        """
         return self._writer_cls(self, shards=shards, origin=origin)
 
     def iterate(self, *args, **kwargs) -> JournalRows:
