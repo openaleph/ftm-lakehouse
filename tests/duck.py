@@ -19,7 +19,10 @@ def make_duckdb() -> duckdb.DuckDBPyConnection:
         "autoload_known_extensions": "true",
         **duckdb_config(),
     }
-    return duckdb.connect(":memory:", config=config)
+    con = duckdb.connect(":memory:", config=config)
+    # Match production: render TIMESTAMPTZ in UTC, not the host timezone.
+    con.execute("LOAD icu; SET TimeZone='UTC'")
+    return con
 
 
 def register_view(

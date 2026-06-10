@@ -31,8 +31,10 @@ Layout:
 """
 
 from datetime import datetime, timedelta, timezone
+from functools import cached_property
 from typing import Iterator
 
+import duckdb
 import pyarrow as pa
 import pyarrow.compute as pc
 from anystore.interface.lock import Lock
@@ -73,6 +75,34 @@ from ftm_lakehouse.model.statement import TABLE, TABLE_RAW
 
 PARTITIONS = ["shard", "bucket", "origin"]
 
+log = get_logger(__name__)
+
+
+class _UtcLakeStore(LakeStore):
+    """LakeStore whose DuckDB connection renders TIMESTAMPTZ in UTC.
+
+    DuckDB defaults to the host session timezone, leaking local-time
+    datetimes into statements, exports and the API. ``SET GLOBAL`` so
+    per-query cursors – fresh sessions that only inherit global settings –
+    pick it up too. The icu extension ships bundled with the duckdb wheel,
+    so this works offline. Interim shim until ftmq's ``LakeStore`` sets the
+    session timezone itself.
+    """
+
+    @cached_property
+    def _duckdb(self) -> duckdb.DuckDBPyConnection:
+        # build the connection via the parent's cached_property factory
+        con: duckdb.DuckDBPyConnection = LakeStore._duckdb.func(self)  # type: ignore[attr-defined]
+        try:
+            con.execute("LOAD icu; SET GLOBAL TimeZone='UTC'")
+        except Exception as e:
+            log.warning(
+                "Cannot set DuckDB session timezone to UTC; timestamps will "
+                "render in the host timezone",
+                error=str(e),
+            )
+        return con
+
 
 class ParquetStore(LakehouseApiMixin):
     """Single Delta Lake table (per dataset) partitioned by ``(shard, bucket,
@@ -94,7 +124,7 @@ class ParquetStore(LakehouseApiMixin):
         self.dataset = dataset
         self.shards = shards if shards is not None else DEFAULT_SHARDS
         self._store = get_store(uri)
-        self._lake = LakeStore(
+        self._lake = _UtcLakeStore(
             uri=str(self.uri),
             dataset=self.dataset,
             partition_by=PARTITIONS,

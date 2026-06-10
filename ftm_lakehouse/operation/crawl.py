@@ -5,7 +5,7 @@ local or remote file stores into the lakehouse. This just adds (or replaces)
 documents but no processing. Use `ingest-file` or any other client for that.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from fnmatch import fnmatch
 from typing import Generator
@@ -122,7 +122,7 @@ class CrawlOperation(DatasetJobOperation[CrawlJob]):
         Returns:
             Timestamp when the task was processed
         """
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
 
         self.log.info(f"Crawling `{uri}` ...", source=mask_uri(self.source.uri))
         checksum = None

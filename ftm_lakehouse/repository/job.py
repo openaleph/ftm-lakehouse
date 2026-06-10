@@ -1,7 +1,7 @@
 """JobRepository - job run storage."""
 
 import contextlib
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Generator, Generic
 
 from anystore.logging import get_logger
@@ -24,7 +24,7 @@ class JobRun(Generic[J]):
 
     def start(self) -> None:
         """Mark job as started and save."""
-        self.job.started = datetime.now()
+        self.job.started = datetime.now(timezone.utc)
         self.job.running = True
         self.repo.put(self.job)
 

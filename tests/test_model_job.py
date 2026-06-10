@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from ftm_lakehouse.model.job import DatasetJobModel, JobModel
 
@@ -17,7 +17,7 @@ def test_job_model_make():
 def test_job_model_stop():
     """Test stopping a job (lifecycle start is owned by JobRun)"""
     job = JobModel.make()
-    job.started = datetime.now()
+    job.started = datetime.now(timezone.utc)
     job.running = True
     job.stop()
     assert job.running is False

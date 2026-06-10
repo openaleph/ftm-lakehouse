@@ -1,6 +1,6 @@
 """Job status models."""
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import cached_property
 from typing import Self, TypeVar
 
@@ -43,11 +43,11 @@ class JobModel(BaseModel):
         return value or ensure_uuid()
 
     def touch(self) -> None:
-        self.last_updated = datetime.now()
+        self.last_updated = datetime.now(timezone.utc)
 
     def stop(self, exc: Exception | None = None) -> None:
         self.running = False
-        self.stopped = datetime.now()
+        self.stopped = datetime.now(timezone.utc)
         self.exc = str(exc)
         if self.started and self.stopped:
             self.took = self.stopped - self.started
