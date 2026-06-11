@@ -8,9 +8,10 @@ command modules only differ in how they parse their input.
 """
 
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, TypeVar
 
 from anystore.io import logged_items
+from followthemoney import EntityProxy, Statement
 
 from ftm_lakehouse.dataset import Dataset
 from ftm_lakehouse.exceptions import BufferFullError
@@ -18,11 +19,13 @@ from ftm_lakehouse.logic.entities.buffer import EntityBuffer
 
 BULK_ORIGIN = "bulk"
 
+Item = TypeVar("Item", EntityProxy, Statement)
+
 
 def _bulk_import(
-    dataset: Dataset,
-    items: Iterable[Any],
-    add: Callable[[EntityBuffer, Any], Any],
+    dataset: Dataset[Any],
+    items: Iterable[Item],
+    add: Callable[[EntityBuffer, Item], None],
     *,
     origin: str,
     bulk_size: int,
@@ -30,7 +33,7 @@ def _bulk_import(
     item_name: str,
 ) -> None:
     repo = dataset.get_entities()
-    buffer = EntityBuffer(dataset.name, dataset.model.shards, origin)
+    buffer = EntityBuffer(dataset.name, repo.shards, origin)
     now = last_seen or datetime.now(timezone.utc)
 
     for item in logged_items(items, "Write", item_name=item_name, logger=dataset._log):
@@ -50,8 +53,8 @@ def _bulk_import(
 
 
 def import_entities(
-    dataset: Dataset,
-    proxies: Iterable[Any],
+    dataset: Dataset[Any],
+    proxies: Iterable[EntityProxy],
     *,
     origin: str,
     bulk_size: int,
@@ -70,8 +73,8 @@ def import_entities(
 
 
 def import_statements(
-    dataset: Dataset,
-    statements: Iterable[Any],
+    dataset: Dataset[Any],
+    statements: Iterable[Statement],
     *,
     origin: str,
     bulk_size: int,
