@@ -19,10 +19,10 @@ classifiers = [
 ]
 requires-python = ">=3.13,<3.14"
 dependencies = [
-    "ftmq[lake] (>=4.8.2,<5.0.0)",
+    "ftmq[lake] @ git+https://github.com/dataresearchcenter/ftmq.git",
     "jinja2 (>=3.1.5,<4.0.0)",
     "followthemoney (>=4.9.0,<5.0.0)",
-    "anystore (>=1.2.1,<2.0.0)",
+    "anystore @ git+https://github.com/dataresearchcenter/anystore.git",
     "httpx (>=0.28.1,<0.29.0)",
 ]
 
@@ -32,7 +32,6 @@ api = [
     "putfs (>=0.0.7,<0.0.8)",
     "granian (>=2.7.2,<3.0.0)",
     "uvloop (>=0.22.1,<0.23.0)",
-    "pyjwt (>=2.12.1,<3.0.0)",
 ]
 
 [project.scripts]
@@ -58,9 +57,7 @@ bump2version = "^1.0.1"
 moto = { extras = ["server"], version = "^5.2.2" }
 pytest-asyncio = ">=1.4.0,<1.5.0"
 rangehttpserver = "^1.4.0"
-httpx = ">=0.27.2,<0.29.0"
 mkdocstrings-python = "^2.0.1"
-redis = "^8.0.0"
 sqlalchemy = "^2.0.50"
 uvicorn = "^0.49.0"
 granian = {extras = ["reload"], version = "^2.7.1"}
@@ -74,6 +71,12 @@ build-backend = "poetry.core.masonry.api"
 [tool.pytest.ini_options]
 filterwarnings = [
     "ignore:unclosed database:ResourceWarning",
+    # Regression gate: naive / local-time datetimes leaking into statements
+    # fail the suite instead of warning. pytz's UTC is a false positive in
+    # rigour's identity check (it *is* UTC), so that exact variant stays
+    # ignored – the dot anchor keeps fixed offsets like `UTC+02:00` failing.
+    "error:datetime_iso expects UTC timezone:UserWarning",
+    'ignore:datetime_iso expects UTC timezone, but got UTC\.:UserWarning',
 ]
 
 [tool.poetry.requires-plugins]
@@ -92,6 +95,5 @@ FTM_FRAGMENTS_URI = "sqlite:///:memory:"
 LAKEHOUSE_URI = {value = "tests/fixtures/lake", skip_if_set = true}
 LAKEHOUSE_JOURNAL_URI = {value = "sqlite:///:memory:", skip_if_set = true}
 LAKEHOUSE_PUBLIC_URL_PREFIX = "https://data.example.org/{{ dataset }}"
-LAKEHOUSE_ENTITY_SHARDS = 8
 LAKEHOUSE_API_KEY = "test-key"
 LAKEHOUSE_API_SECRET = "test-secret"

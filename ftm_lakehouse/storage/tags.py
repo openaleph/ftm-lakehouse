@@ -1,8 +1,7 @@
 """TagStore - key-value freshness tracking."""
 
-import contextlib
 from datetime import datetime, timezone
-from typing import Generator, Iterable, Literal
+from typing import Iterable, Literal
 
 from anystore.interface.tags import Tags as AnyTags
 from anystore.store import Store, get_store
@@ -68,18 +67,6 @@ class TagStore(AnyTags):
         ts = timestamp or datetime.now(timezone.utc)
         self.put(key, ts)
         return ts
-
-    @contextlib.contextmanager
-    def touch(self, key: Uri) -> Generator[datetime, None, None]:
-        """Store the start timestamp for ``key``, but only at context leave.
-
-        UTC-aware override of anystore's ``Tags.touch`` (which captures a
-        naive local timestamp); semantics are identical – the timestamp is
-        taken at entry and persisted only when the block succeeds.
-        """
-        now = datetime.now(timezone.utc)
-        yield now
-        self.put(key, now)
 
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__}({mask_uri(self.store.uri)})>"
