@@ -1,7 +1,7 @@
 all: clean install test
 
 api:
-	LAKEHOUSE_API_AUTH_ENABLED=0 DEBUG=1 granian --interface asgi --reload --port 5000 ftm_lakehouse.api:app
+	DEBUG=1 granian --interface asgi --reload --port 5000 ftm_lakehouse.api:app
 
 start: stop
 	docker compose up --build -d --wait
@@ -39,7 +39,7 @@ test: start
 	test $$rc1 -eq 0 -a $$rc2 -eq 0
 
 build:
-	poetry run build
+	poetry build
 
 clean:
 	rm -fr build/
