@@ -57,7 +57,7 @@ bump2version = "^1.0.1"
 moto = { extras = ["server"], version = "^5.2.2" }
 pytest-asyncio = ">=1.4.0,<1.5.0"
 rangehttpserver = "^1.4.0"
-mkdocstrings-python = "^2.0.1"
+mkdocstrings-python = "^2.0.5"
 sqlalchemy = "^2.0.50"
 uvicorn = "^0.49.0"
 granian = {extras = ["reload"], version = "^2.7.1"}
