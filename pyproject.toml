@@ -60,7 +60,7 @@ rangehttpserver = "^1.4.0"
 mkdocstrings-python = "^2.0.1"
 sqlalchemy = "^2.0.50"
 uvicorn = "^0.49.0"
-granian = {extras = ["reload"], version = "^2.7.1"}
+granian = {extras = ["reload"], version = "^2.7.7"}
 griffe = "<3"
 zensical = "^0.0.45"
 
