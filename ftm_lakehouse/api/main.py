@@ -2,11 +2,10 @@ from anystore.api.routes import router as archive_router
 from anystore.exceptions import DoesNotExist
 from anystore.logging import get_logger
 from anystore.store import get_store
-from anystore.util import ensure_uri, uri_to_path
+from anystore.util import ensure_uri
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from followthemoney.dataset.util import dataset_name_check
-from putfs import api as putfs
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
 from ftm_lakehouse.api.routes.entities import router as entities_router
@@ -71,16 +70,9 @@ def get_app(lake_uri: str | None = None) -> FastAPI:
     app.include_router(journal_router)
     app.include_router(operations_router)
 
-    # blob storage api
-    if uri.startswith("file://"):
-        # local fs, so we can use putfs. Mount the whole Starlette app so putfs
-        # keeps its own exception handlers; its catch-all /{key:path} sits
-        # behind the /{dataset}/_api/* routes above.
-        putfs.ROOT = uri_to_path(uri).resolve()
-        app.mount("/", putfs.app)
-    else:
-        app.state.store = get_store(uri)
-        app.include_router(archive_router)
+    # blob storage (pass through anystore)
+    app.state.store = get_store(uri)
+    app.include_router(archive_router)
 
     # middlewares
     app.add_middleware(StaticHeadersMiddleware)
