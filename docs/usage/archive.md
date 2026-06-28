@@ -26,27 +26,27 @@ from ftm_lakehouse import ensure_dataset
 dataset = ensure_dataset("my_dataset")
 
 # Archive a source file, returns File metadata:
-file = dataset.archive.store("/path/to/document.pdf")
+file = dataset.get_archive().store("/path/to/document.pdf")
 print(f"Archived: {file.name} ({file.checksum})")
 
 # Archive from HTTP URL
-file = dataset.archive.store("https://example.com/report.pdf")
+file = dataset.get_archive().store("https://example.com/report.pdf")
 print(f"Archived: {file.name} ({file.checksum})")
 
 # Retrieve file content
-with dataset.archive.open(file.checksum) as fh:
+with dataset.get_archive().open(file.checksum) as fh:
     content = fh.read()
 
 # Stream bytes (memory efficient for large files)
-for chunk in dataset.archive.stream(file.checksum):
+for chunk in dataset.get_archive().stream(file.checksum):
     process_chunk(chunk)
 
 # Get file metadata for checksum
-file = dataset.archive.get_file("<checksum>")
+file = dataset.get_archive().get_file("<checksum>")
 print(f"Size: {file.size}, Type: {file.mimetype}")
 
 # Check if a blob exists
-if dataset.archive.exists("<checksum>"):
+if dataset.get_archive().exists("<checksum>"):
     print("Blob exists")
 ```
 
@@ -68,7 +68,7 @@ from ftm_lakehouse import ensure_dataset
 
 dataset = ensure_dataset("my_dataset")
 
-file = dataset.archive.store("/path/to/document.pdf")
+file = dataset.get_archive().store("/path/to/document.pdf")
 print(f"Checksum: {file.checksum}")
 print(f"Size: {file.size}")
 print(f"MIME type: {file.mimetype}")
@@ -77,7 +77,7 @@ print(f"MIME type: {file.mimetype}")
 ### From URL
 
 ```python
-file = dataset.archive.store("https://example.com/report.pdf")
+file = dataset.get_archive().store("https://example.com/report.pdf")
 ```
 
 
@@ -89,7 +89,7 @@ file = dataset.archive.store("https://example.com/report.pdf")
 from ftm_lakehouse import get_dataset
 
 dataset = get_dataset("my_dataset")
-with dataset.archive.open("<checksum>") as fh:
+with dataset.get_archive().open("<checksum>") as fh:
     content = fh.read()
 ```
 
@@ -98,7 +98,7 @@ with dataset.archive.open("<checksum>") as fh:
 For large files, streaming is more memory efficient:
 
 ```python
-for chunk in dataset.archive.stream("<checksum>"):
+for chunk in dataset.get_archive().stream("<checksum>"):
     process_chunk(chunk)
 ```
 
@@ -107,7 +107,7 @@ for chunk in dataset.archive.stream("<checksum>"):
 For tools that require a local file path, this downloads the blob into a temporary directory which is cleaned up when leaving the context (except if the archive is local, see warning below).
 
 ```python
-with dataset.archive.local_path("<checksum>") as path:
+with dataset.get_archive().local_path("<checksum>") as path:
     # path is a pathlib.Path object
     subprocess.run(["pdftotext", str(path), "output.txt"])
 ```
@@ -124,7 +124,7 @@ from ftm_lakehouse import get_dataset
 
 dataset = get_dataset("my_dataset")
 
-file = dataset.archive.get_file(checksum)
+file = dataset.get_archive().get_file(checksum)
 if file:
     print(f"Name: {file.name}")
     print(f"Key: {file.key}")
@@ -140,7 +140,7 @@ from ftm_lakehouse import get_dataset
 
 dataset = get_dataset("my_dataset")
 
-for file in dataset.archive.iterate_files():
+for file in dataset.get_archive().iterate_files():
     print(f"{file.key}: {file.checksum}")
 ```
 
@@ -154,7 +154,7 @@ from ftm_lakehouse import ensure_dataset
 dataset = ensure_dataset("my_dataset")
 
 # Archive a file
-file = dataset.archive.store("/path/to/document.pdf")
+file = dataset.get_archive().store("/path/to/document.pdf")
 
 # Convert to FtM entity
 entity = file.to_entity()
@@ -162,7 +162,7 @@ print(f"Schema: {entity.schema.name}")  # Document or similar
 print(f"Content hash: {entity.first('contentHash')}")
 
 # Add to entity store
-dataset.entities.add(entity, origin="archive")
+dataset.get_entities().add(entity, origin="archive")
 ```
 
 ## CLI Usage
@@ -204,33 +204,11 @@ my_dataset/
 
 The checksum is split into directory segments for better filesystem performance.
 
-## Archive URL Resolution
+## Public Blob URLs
 
-Use `Dataset.get_blob_url()` to get a fetchable URL for an archived blob. The URL format is automatically determined by the storage backend:
+A public URL prefix (e.g. a CDN or the nginx in front of the lakehouse API) can be configured per dataset or globally. It is joined with the blob's archive path – `https://cdn.example.com/my_dataset/archive/ab/cd/ef/<checksum>/blob` – and embedded as `public_url` in the documents export (`documents.csv`) and the `index.json` resource links.
 
-```python
-from ftm_lakehouse import get_dataset
-
-dataset = get_dataset("my_dataset")
-url = dataset.get_blob_url("<checksum>")
-```
-
-### Resolution Priority
-
-The first matching strategy wins:
-
-| Priority | Backend | URL Format |
-|----------|---------|------------|
-| 1 | Public prefix configured | `https://cdn.example.com/archive/ab/cd/ef/<checksum>/blob` |
-| 2 | Cloud storage (S3, GCS, Azure) | Presigned URL via fsspec `sign()` |
-| 3 | HTTP API mode | API URL with scoped JWT `?token=...` |
-| 4 | Local filesystem | `file:///path/to/archive/ab/cd/ef/<checksum>/blob` |
-
-### Public Prefix
-
-If a public URL prefix is configured (e.g. for a CDN or reverse proxy), it is joined with the blob's archive path. This takes priority over all other strategies.
-
-The prefix can be set per-dataset in `config.yml`:
+Per-dataset in `config.yml`:
 
 ```yaml
 name: my_dataset
@@ -243,23 +221,7 @@ Or globally via environment variable (supports `{{ dataset }}` Jinja-style templ
 export LAKEHOUSE_PUBLIC_URL_PREFIX="https://cdn.example.com/{{ dataset }}"
 ```
 
-### Cloud Storage (S3, GCS, Azure)
-
-When the lakehouse is backed by a cloud storage provider that supports presigned URLs, `get_blob_url()` generates a time-limited signed URL. This works with any [fsspec](https://filesystem-spec.readthedocs.io/) backend that implements the `sign()` method (S3, GCS, Azure Blob Storage, etc.).
-
-The URL expiration is controlled by `LAKEHOUSE_ARCHIVE_URL_EXPIRE` (in seconds, default: 900 = 15 minutes):
-
-```bash
-export LAKEHOUSE_ARCHIVE_URL_EXPIRE=3600  # 1 hour
-```
-
-### HTTP API Mode
-
-When running against a remote lakehouse API, `get_blob_url()` returns the API URL with a scoped JWT query parameter. The token is restricted to `GET`/`HEAD` methods on the specific blob path and expires after `LAKEHOUSE_ARCHIVE_URL_EXPIRE` seconds.
-
-### Local Filesystem
-
-For local storage, `get_blob_url()` returns a `file:///` URI pointing directly to the blob on disk.
+Without a prefix, blobs are served by the lakehouse API itself under `/{dataset}/archive/...` – access control is the reverse proxy's concern (see [API deployment](../deployment/api.md)).
 
 ## Complete Example
 
@@ -273,21 +235,21 @@ def main():
     # Archive some files
     files = []
     for path in ["/path/to/doc1.pdf", "/path/to/doc2.pdf"]:
-        file = dataset.archive.put(path)
+        file = dataset.get_archive().put(path)
         files.append(file)
         print(f"Archived: {file.name} ({file.checksum})")
 
     # Convert to entities
-    with dataset.entities.writer(origin="archive") as writer:
+    with dataset.get_entities().writer(origin="archive") as writer:
         for file in files:
             entity = file.to_entity()
             writer.add_entity(entity)
 
-    dataset.entities.flush()
+    dataset.get_entities().flush()
 
     # List all archived files
     print("\nAll files:")
-    for file in dataset.archive.iterate_files():
+    for file in dataset.get_archive().iterate_files():
         print(f"  - {file.name}: {file.size} bytes")
 
 

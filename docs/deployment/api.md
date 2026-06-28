@@ -76,14 +76,8 @@ Available operations:
 | Job name | Description |
 |----------|-------------|
 | [`CrawlJob`](../reference/operation.md#ftm_lakehouse.operation.crawl.CrawlJob) | Batch file ingestion from a source URI |
-| [`CompactJob`](../reference/operation.md#ftm_lakehouse.operation.maintenance.CompactJob) | Bin-pack small parquet files |
-| [`MergeJob`](../reference/operation.md#ftm_lakehouse.operation.maintenance.MergeJob) | Per-partition dedup + tombstone reap |
-| [`VacuumJob`](../reference/operation.md#ftm_lakehouse.operation.maintenance.VacuumJob) | Delete obsolete parquet files |
-| [`ExportStatementsJob`](../reference/operation.md#ftm_lakehouse.operation.export.ExportStatementsJob) | Export to `statements.csv` |
-| [`ExportEntitiesJob`](../reference/operation.md#ftm_lakehouse.operation.export.ExportEntitiesJob) | Export to `entities.ftm.json` |
-| [`ExportStatisticsJob`](../reference/operation.md#ftm_lakehouse.operation.export.ExportStatisticsJob) | Export to `statistics.json` |
-| [`ExportDocumentsJob`](../reference/operation.md#ftm_lakehouse.operation.export.ExportDocumentsJob) | Export to `documents.csv` |
-| [`ExportIndexJob`](../reference/operation.md#ftm_lakehouse.operation.export.ExportIndexJob) | Export `index.json` with resources |
+| [`OptimizeJob`](../reference/operation.md#ftm_lakehouse.operation.maintenance.OptimizeJob) | Merge duplicates / reap tombstones, bin-pack small files, delete obsolete files |
+| [`ExportJob`](../reference/operation.md#ftm_lakehouse.operation.export.ExportJob) | Export by `kind`: `statements`, `entities`, `documents`, `statistics`, `index` |
 | [`MappingJob`](../reference/operation.md#ftm_lakehouse.operation.mapping.MappingJob) | Process a CSV mapping configuration |
 | [`DownloadArchiveJob`](../reference/operation.md#ftm_lakehouse.operation.download.DownloadArchiveJob) | Export archive files to original paths |
 | [`MakeJob`](../reference/operation.md#ftm_lakehouse.operation.make.MakeJob) | Full workflow: flush + all exports |
@@ -97,7 +91,6 @@ API-only settings use the `LAKEHOUSE_API_` prefix:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `LAKEHOUSE_API_TITLE` | OpenAPI title | `FollowTheMoney Data Lakehouse Api` |
-| `LAKEHOUSE_API_ALLOWED_ORIGINS` | CORS allow-list | `["http://localhost:3000"]` |
 | `LAKEHOUSE_API_STATIC_HEADERS` | Extra headers added to every response | `{}` |
 | `LAKEHOUSE_API_MAX_ENTITY_IDS` | Maximum length of an `entity_ids` list in a query body (caps the SQL `IN (…)` clause that DuckDB has to build). | `10_000` |
 | `LAKEHOUSE_API_MAX_FILTER_KEYS` | Maximum number of top-level keys (ftmq filter kwargs plus `entity_ids` / `flush_first`) accepted in a single query body. | `20` |

@@ -121,40 +121,32 @@ Pipeline operations on a dataset.
 
 | Command | Purpose |
 |---------|---------|
-| `export-statements` | Export the parquet store → `exports/statements.csv` |
-| `export-entities` | Export → `entities.ftm.json` |
-| `export-statistics` | Export → `exports/statistics.json` |
-| `export-documents` | Export → `exports/documents.csv` |
-| `compact` | Bin-pack small parquet files (cheap) |
-| `merge` | Collapse duplicates, reap expired tombstones (expensive) |
-| `vacuum` | Delete obsolete parquet files no longer referenced by the Delta log |
+| `export <kind>` | Export the dataset: `statements`, `entities`, `documents`, `statistics` or `index` |
+| `optimize` | Merge duplicates / reap expired tombstones, bin-pack small files, delete obsolete files |
+| `unlock` | Forcibly release the dataset write fence |
 | `crawl` | Crawl documents from a local/remote source into the archive |
 
 ### Exports
 
 ```bash
-ftm-lakehouse -d my_dataset operations export-statements
-ftm-lakehouse -d my_dataset operations export-entities
-ftm-lakehouse -d my_dataset operations export-statistics
-ftm-lakehouse -d my_dataset operations export-documents
+ftm-lakehouse -d my_dataset operations export statements   # exports/statements.csv
+ftm-lakehouse -d my_dataset operations export entities     # entities.ftm.json
+ftm-lakehouse -d my_dataset operations export statistics   # exports/statistics.json
+ftm-lakehouse -d my_dataset operations export documents    # exports/documents.csv
+ftm-lakehouse -d my_dataset operations export index        # index.json
 ```
 
 ### Maintenance (async, on the parquet statement store)
 
 ```bash
-# Cheap file bin-pack – does not change row contents.
-ftm-lakehouse -d my_dataset operations compact
-
-# Collapse duplicates per (shard, bucket, origin) partition; drop tombstones
-# older than `LAKEHOUSE_GRACE_PERIOD_DAYS`.
-ftm-lakehouse -d my_dataset operations merge
-
-# Remove obsolete parquet files (the ones merge/compact have tombstoned).
-ftm-lakehouse -d my_dataset operations vacuum
-ftm-lakehouse -d my_dataset operations vacuum --retention-hours 24
+# Merge duplicates per (shard, bucket, origin) partition and drop tombstones
+# older than `LAKEHOUSE_GRACE_PERIOD_DAYS`, bin-pack small files, then remove
+# obsolete parquet files – always in one pass.
+ftm-lakehouse -d my_dataset operations optimize
+ftm-lakehouse -d my_dataset operations optimize --retention-hours 24
 ```
 
-All three acquire a dataset-wide write fence at `.LOCK`, so they don't race with each other or with append-style writes.
+Each step acquires a dataset-wide write fence at `.LOCK`, so it doesn't race with concurrent maintenance or with append-style writes.
 
 ### Crawl
 
@@ -207,16 +199,9 @@ The `zfs` group does not require a catalog (it's about provisioning, not data).
 
 ## Environment Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `LAKEHOUSE_URI` | Base path to lakehouse storage | `data` |
-| `LAKEHOUSE_JOURNAL_URI` | SQLAlchemy URI for the journal | `sqlite:///:memory:` |
-| `LAKEHOUSE_ENTITY_SHARDS` | Uniform shard count per new dataset | `8` |
-| `LAKEHOUSE_GRACE_PERIOD_DAYS` | Tombstone grace period used by `operations merge` | `30` |
-| `LOG_LEVEL` | Logging level | `INFO` |
-| `DEBUG` | Pretty-print tracebacks etc. | `false` |
+The CLI reads the same settings as the library. The one you'll always need is `LAKEHOUSE_URI` – the base path to the lakehouse storage; everything else has sensible defaults.
 
-See also [Configuration](../deployment/configuration.md) for storage backend options (S3, GCS, Azure) and [ZFS Integration](../deployment/zfs.md).
+Full settings reference: [Configuration](../deployment/configuration.md). See also [ZFS Integration](../deployment/zfs.md) for ZFS deployments.
 
 ## Examples
 
@@ -238,9 +223,7 @@ ftm-lakehouse -d my_dataset entities import -i entities.ftm.json
 ftm-lakehouse -d my_dataset make --full
 
 # Maintenance – async, run on a schedule in production
-ftm-lakehouse -d my_dataset operations compact
-ftm-lakehouse -d my_dataset operations merge
-ftm-lakehouse -d my_dataset operations vacuum
+ftm-lakehouse -d my_dataset operations optimize
 ```
 
 ### S3-backed storage

@@ -69,7 +69,6 @@ model/
   file.py        # File, Files - archived file metadata
   mapping.py     # DatasetMapping - CSV transformation configs
   job.py         # JobModel, DatasetJobModel - job execution tracking
-  crud.py        # Crud, CrudAction, CrudResource - queue action payloads
   dataset.py     # CatalogModel, DatasetModel - catalog/dataset metadata
   statement.py   # SHARDED_SCHEMA (pyarrow) + TABLE (SQLAlchemy) +
                  # StatementRow (NamedTuple) – schema for the parquet
@@ -103,7 +102,6 @@ storage/
     sql.py           # SqlJournalStore (sqlite / psql)
     api.py           # ApiJournalStore (HTTP forwarding)
   tags.py            # TagStore – key-value freshness tracking
-  queue.py           # QueueStore – CRUD action queue
   versions.py        # VersionStore – timestamped snapshots
 ```
 
@@ -113,7 +111,7 @@ Blob, file metadata, and text storage are handled directly by repositories using
 
 The parquet statement store is partitioned by `(shard, bucket, origin)`:
 
-- `shard` – `hash(entity_id) % LAKEHOUSE_ENTITY_SHARDS`, hex-padded
+- `shard` – `hash(entity_id) % shards` (the dataset's configured shard count), hex-padded
 - `bucket` – coarse FtM schema group (thing / interval / document / page / pages / mention)
 - `origin` – caller-supplied source tag
 
@@ -121,13 +119,25 @@ Each row carries `first_seen`, `last_seen`, and `deleted_at` directly in the par
 
 Writes are **append-only**: `append` sorts a per-shard batch and writes one parquet file per `(shard, bucket, origin)` partition. Duplicates and tombstones land as additional rows.
 
-Three async maintenance ops collapse the redundancy, each acquiring the dataset-wide `.LOCK` so they don't race with each other or with appends:
+The async `optimize` operation collapses the redundancy by running the three storage primitives in order, each acquiring the dataset-wide `.LOCK` so they don't race with each other or with appends:
 
-| Op | Cost | What it does |
-|----|------|--------------|
-| `compact()` | cheap | Delta `OPTIMIZE compact` per partition – bin-packs small files |
+| Step | Cost | What it does |
+|------|------|--------------|
 | `merge()` | expensive | Per-partition rewrite: keep latest row per id (`ROW_NUMBER`), fold `first_seen` to min, drop tombstones past grace |
+| `compact()` | cheap | Delta `OPTIMIZE compact` per partition – bin-packs small files |
 | `vacuum()` | cheap | Delta `VACUUM` – delete files no longer referenced in the Delta log |
+
+#### Sharding – why, and how many shards
+
+The `shard` partition key is the unit that keeps per-partition working sets bounded, independent of total dataset size. Everything expensive in the lakehouse operates one `(shard, bucket)` partition at a time:
+
+- **Writes:** statement rows arrive shard-sorted from the journal (the journal table is indexed by shard), and `append` buffers at most one shard's batch in memory before writing it out.
+- **Reads:** statement queries iterate `(shard, bucket)` partitions in Python and push `WHERE shard = ?` into DuckDB, so the read-time dedupe window only ever spans one partition's parquet files. Single-entity lookups hash the entity id and scan just its own shard.
+- **Optimize:** the merge rewrite materializes one partition at a time – its memory and rewrite cost scale with the largest partition, not the whole table.
+
+Sharding is a trade-off, not a free win: every shard multiplies the partition count (`shard × bucket × origin`), which means more small parquet files, more Delta log metadata, and more per-partition query iterations. For small and medium datasets that overhead costs more than the bounded working sets gain.
+
+That's why the **default is `0`** – a single shard (`shard <= 1` collapses to one `"0"` partition). The default is hardcoded, deliberately not an environment setting: the shard count is per-dataset configuration, recorded in the dataset's `config.yml` at creation (e.g. `ensure_dataset("big_leak", shards=8)`), and every reader and writer resolves it from there – a process running with a different environment cannot mis-shard an existing dataset. Don't configure shards unless the dataset is huge: from roughly tens of millions of statements upward, set `shards: 8` (or more, scaling with entity count) so dedupe windows and merge rewrites stay bounded. The shard count is **immutable after the first write** – changing it requires a full rewrite of the statement store, so size it for the data you expect, not the data you have on day one.
 
 **Principles:**
 
@@ -170,13 +180,11 @@ Multi-step workflows that coordinate across repositories. This is where "action 
 ```
 operation/
   base.py          # DatasetJobOperation - base class with freshness checks
-  export.py        # ExportStatementsOperation, ExportEntitiesOperation, etc.
+  export.py        # ExportOperation - all exports, dispatched by ExportKind
   crawl.py         # CrawlOperation - source → files → entities
   mapping.py       # MappingOperation - config → entities → journal
-  maintenance.py   # CompactOperation, MergeOperation, VacuumOperation
-                   # (three independent ops on the parquet statement store)
+  maintenance.py   # OptimizeOperation - merge + compact + vacuum in one pass
   make.py          # MakeOperation - flush + all exports + index
-  recreate.py      # RecreateOperation - rebuild from exports
   download.py      # DownloadArchiveOperation
 ```
 
@@ -280,7 +288,6 @@ ftm_lakehouse/
 │   ├── file.py              # File, Files
 │   ├── mapping.py           # DatasetMapping
 │   ├── job.py               # JobModel, DatasetJobModel
-│   ├── crud.py              # Crud, CrudAction, CrudResource
 │   └── dataset.py           # CatalogModel, DatasetModel
 │
 ├── storage/
@@ -309,9 +316,8 @@ ftm_lakehouse/
 │   ├── export.py            # Export operations
 │   ├── crawl.py             # CrawlOperation
 │   ├── mapping.py           # MappingOperation
-│   ├── maintenance.py       # CompactOperation / MergeOperation / VacuumOperation
+│   ├── maintenance.py       # OptimizeOperation (merge + compact + vacuum)
 │   ├── make.py              # MakeOperation
-│   ├── recreate.py          # RecreateOperation
 │   └── download.py          # DownloadArchiveOperation
 │
 ├── helpers/

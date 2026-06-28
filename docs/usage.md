@@ -58,13 +58,13 @@ entity = model.make_entity("Person")
 entity.make_identifier("john-doe")
 entity.set("name", "John Doe")
 
-dataset.entities.add(entity, origin="import")
+dataset.get_entities().add(entity, origin="import")
 ```
 
 ### Bulk Write Entities
 
 ```python
-with dataset.entities.writer(origin="import") as writer:
+with dataset.get_entities().writer(origin="import") as writer:
     for entity in source_entities:
         writer.add_entity(entity)
 ```
@@ -72,7 +72,7 @@ with dataset.entities.writer(origin="import") as writer:
 ### Flush to Parquet Store
 
 ```python
-count = dataset.entities.flush()
+count = dataset.get_entities().flush()
 print(f"Flushed {count} statements")
 ```
 
@@ -80,17 +80,17 @@ print(f"Flushed {count} statements")
 
 ```python
 # Query with filters
-for entity in dataset.entities.query(origin="import"):
+for entity in dataset.get_entities().query(origin="import"):
     print(entity.caption)
 
 # Get by ID
-entity = dataset.entities.get("entity-id")
+entity = dataset.get_entities().get("entity-id")
 ```
 
 ### Stream from Exported JSON
 
 ```python
-for entity in dataset.entities.stream():
+for entity in dataset.get_entities().stream():
     process(entity)
 ```
 
@@ -101,21 +101,21 @@ The archive stores files with content-addressed storage.
 ### Archive a File
 
 ```python
-file = dataset.archive.put("/path/to/document.pdf")
+file = dataset.get_archive().put("/path/to/document.pdf")
 print(f"Archived: {file.checksum}")
 ```
 
 ### Check if File Exists
 
 ```python
-if dataset.archive.exists(checksum):
+if dataset.get_archive().exists(checksum):
     print("File exists")
 ```
 
 ### Get File Metadata
 
 ```python
-file = dataset.archive.get(checksum)
+file = dataset.get_archive().get(checksum)
 print(f"Size: {file.size}")
 print(f"Mimetype: {file.mimetype}")
 ```
@@ -123,21 +123,21 @@ print(f"Mimetype: {file.mimetype}")
 ### Open a File
 
 ```python
-with dataset.archive.open(file) as fh:
+with dataset.get_archive().open(file) as fh:
     content = fh.read()
 ```
 
 ### Stream File Content
 
 ```python
-for chunk in dataset.archive.stream(file):
+for chunk in dataset.get_archive().stream(file):
     process(chunk)
 ```
 
 ### Get Local Path (for external tools)
 
 ```python
-with dataset.archive.local_path(file) as path:
+with dataset.get_archive().local_path(file) as path:
     subprocess.run(["pdftotext", str(path)])
 ```
 
@@ -193,23 +193,21 @@ The parquet statement store is **append-only** on the write path. Deduplication,
 
 ```python
 # Bin-pack small parquet files (cheap, can be run often)
-dataset.entities.merge()  # via repo.merge()
+dataset.get_entities().merge()  # via repo.merge()
 
 # Three primitives exposed on the lower-level ParquetStore:
-dataset.entities._statements.compact()  # cheap file bin-pack
-dataset.entities._statements.merge(grace_period_days=7)  # dedup + reap tombstones
-dataset.entities._statements.vacuum(retention_hours=0)   # delete obsolete files
+dataset.get_entities()._statements.compact()  # cheap file bin-pack
+dataset.get_entities()._statements.merge(grace_period_days=7)  # dedup + reap tombstones
+dataset.get_entities()._statements.vacuum(retention_hours=0)   # delete obsolete files
 ```
 
-CLI equivalents:
+CLI equivalent (runs merge + compact + vacuum in one pass):
 
 ```bash
-ftm-lakehouse -d my_dataset operations compact
-ftm-lakehouse -d my_dataset operations merge
-ftm-lakehouse -d my_dataset operations vacuum
+ftm-lakehouse -d my_dataset operations optimize
 ```
 
-Tombstones (from `delete_entity` / `delete_statement`) are kept for `LAKEHOUSE_GRACE_PERIOD_DAYS` (default 30) before `merge` drops them.
+Tombstones (from `delete_entity` / `delete_statement`) are kept for `LAKEHOUSE_GRACE_PERIOD_DAYS` (default 30) before the merge step drops them.
 
 ## Bulk Import (bypassing the journal)
 
@@ -221,7 +219,7 @@ from ftmq.io import smart_read_proxies
 from ftm_lakehouse.logic.entities.buffer import EntityBuffer
 
 dataset = ensure_dataset("my_dataset")
-repo = dataset.entities
+repo = dataset.get_entities()
 buffer = EntityBuffer(dataset.name, dataset.model.shards, origin="bulk")
 now = datetime.now(timezone.utc)
 
@@ -238,19 +236,6 @@ This is exactly what `ftm-lakehouse entities import` does.
 
 ## Configuration
 
-Configure via environment variables:
+The settings you'll touch when using the library directly are `LAKEHOUSE_URI` (base storage path, local or S3-compatible) and `LAKEHOUSE_JOURNAL_URI` (persistent journal database for production). When creating huge datasets, also consider the shard count – see [Sharding](architecture.md#sharding-why-and-how-many-shards).
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `LAKEHOUSE_URI` | `data` | Base storage path |
-| `LAKEHOUSE_JOURNAL_URI` | `sqlite:///:memory:` | Journal database URI |
-| `LAKEHOUSE_ENTITY_SHARDS` | `8` | Uniform shard count per new dataset |
-| `LAKEHOUSE_GRACE_PERIOD_DAYS` | `30` | Tombstone grace period used by `merge` |
-
-Or use S3-compatible storage:
-
-```bash
-export LAKEHOUSE_URI=s3://my-bucket/lakehouse
-export AWS_ACCESS_KEY_ID=...
-export AWS_SECRET_ACCESS_KEY=...
-```
+Full settings reference, including storage backends (S3, GCS, Azure): [Configuration](deployment/configuration.md).

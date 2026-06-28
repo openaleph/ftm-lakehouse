@@ -44,13 +44,13 @@ person.add("name", "Jane Doe")
 person.add("nationality", "us")
 
 # Write the entity
-dataset.entities.add(person, origin="manual")
+dataset.get_entities().add(person, origin="manual")
 
 # Flush to storage
-dataset.entities.flush()
+dataset.get_entities().flush()
 
 # Read it back
-entity = dataset.entities.get(person.id)
+entity = dataset.get_entities().get(person.id)
 print(f"Found: {entity.caption}")
 ```
 
@@ -62,11 +62,11 @@ from ftm_lakehouse import ensure_dataset
 dataset = ensure_dataset("my_dataset")
 
 # Archive a file
-file = dataset.archive.put("/path/to/document.pdf")
+file = dataset.get_archive().put("/path/to/document.pdf")
 print(f"Archived: {file.checksum}")
 
 # Retrieve it
-with dataset.archive.open(file) as fh:
+with dataset.get_archive().open(file) as fh:
     content = fh.read()
 ```
 
@@ -80,23 +80,23 @@ from ftm_lakehouse import ensure_dataset
 dataset = ensure_dataset("my_dataset")
 
 # Write many entities efficiently
-with dataset.entities.writer(origin="bulk_import") as writer:
+with dataset.get_entities().writer(origin="bulk_import") as writer:
     for entity in large_entity_source():
         writer.add_entity(entity)
 
 # Flush to parquet store
-dataset.entities.flush()
+dataset.get_entities().flush()
 ```
 
 ### Query Entities
 
 ```python
 # Query with filters
-for entity in dataset.entities.query(origin="import"):
+for entity in dataset.get_entities().query(origin="import"):
     print(entity.caption)
 
 # Stream from exported JSON
-for entity in dataset.entities.stream():
+for entity in dataset.get_entities().stream():
     print(entity.caption)
 ```
 
@@ -153,12 +153,10 @@ ftm-lakehouse -d my_dataset archive get <checksum> -o output.pdf
 
 ### Maintenance
 
-The parquet statement store is append-only on the hot path. Deduplication and tombstone reaping happen via async maintenance ops:
+The parquet statement store is append-only on the hot path. Deduplication and tombstone reaping happen via the async optimize operation (merge + compact + vacuum in one pass):
 
 ```bash
-ftm-lakehouse -d my_dataset operations compact   # bin-pack small files
-ftm-lakehouse -d my_dataset operations merge     # collapse duplicates / drop tombstones past grace
-ftm-lakehouse -d my_dataset operations vacuum    # delete obsolete parquet files
+ftm-lakehouse -d my_dataset operations optimize
 ```
 
 ## Configuration
@@ -180,6 +178,8 @@ For persistent journal storage (recommended for production):
 ```bash
 export LAKEHOUSE_JOURNAL_URI=postgresql://user:pass@localhost/journal
 ```
+
+Full settings reference: [Configuration](deployment/configuration.md).
 
 ## Next Steps
 

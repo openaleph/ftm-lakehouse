@@ -23,76 +23,23 @@ Batch file ingestion from a source location.
         heading_level: 3
         show_root_heading: true
 
-## Export Operations
+## ExportOperation
 
-### ExportStatementsOperation
+One operation for all exports, dispatched by `ExportKind`: `statements` (`exports/statements.csv`), `entities` (`entities.ftm.json`), `documents` (`exports/documents.csv`), `statistics` (`exports/statistics.json`), `index` (`index.json`).
 
-Export parquet store to `exports/statements.csv`.
-
-::: ftm_lakehouse.operation.export.ExportStatementsJob
+::: ftm_lakehouse.operation.export.ExportKind
     options:
-        heading_level: 4
+        heading_level: 3
         show_root_heading: true
 
-::: ftm_lakehouse.operation.ExportStatementsOperation
+::: ftm_lakehouse.operation.export.ExportJob
     options:
-        heading_level: 4
+        heading_level: 3
         show_root_heading: true
 
-### ExportEntitiesOperation
-
-Export parquet store to `entities.ftm.json`.
-
-::: ftm_lakehouse.operation.export.ExportEntitiesJob
+::: ftm_lakehouse.operation.ExportOperation
     options:
-        heading_level: 4
-        show_root_heading: true
-
-::: ftm_lakehouse.operation.ExportEntitiesOperation
-    options:
-        heading_level: 4
-        show_root_heading: true
-
-### ExportStatisticsOperation
-
-Export statistics to `exports/statistics.json`.
-
-::: ftm_lakehouse.operation.export.ExportStatisticsJob
-    options:
-        heading_level: 4
-        show_root_heading: true
-
-::: ftm_lakehouse.operation.ExportStatisticsOperation
-    options:
-        heading_level: 4
-        show_root_heading: true
-
-### ExportDocumentsOperation
-
-Export document metadata to `exports/documents.csv`.
-
-::: ftm_lakehouse.operation.export.ExportDocumentsJob
-    options:
-        heading_level: 4
-        show_root_heading: true
-
-::: ftm_lakehouse.operation.ExportDocumentsOperation
-    options:
-        heading_level: 4
-        show_root_heading: true
-
-### ExportIndexOperation
-
-Export `index.json` with optional resources.
-
-::: ftm_lakehouse.operation.export.ExportIndexJob
-    options:
-        heading_level: 4
-        show_root_heading: true
-
-::: ftm_lakehouse.operation.ExportIndexOperation
-    options:
-        heading_level: 4
+        heading_level: 3
         show_root_heading: true
 
 ## MappingOperation
@@ -109,50 +56,18 @@ Process CSV-to-entity mapping configurations.
         heading_level: 3
         show_root_heading: true
 
-## Maintenance Operations
+## OptimizeOperation
 
-Three independent async operations on the parquet statement store. All three acquire the dataset-wide write fence (`.LOCK`).
+Optimize the parquet statement store in one pass: merge (per-partition rewrite that collapses duplicates, folds `first_seen` to the min, drops tombstones older than the grace cutoff per `LAKEHOUSE_GRACE_PERIOD_DAYS`), compact (bin-pack small files) and vacuum (delete obsolete files). Each step acquires the dataset-wide write fence (`.LOCK`).
 
-### CompactOperation
-
-Bin-pack small parquet files within each `(shard, bucket, origin)` partition (Delta `OPTIMIZE compact`). Cheap; does not change row contents.
-
-::: ftm_lakehouse.operation.maintenance.CompactJob
+::: ftm_lakehouse.operation.maintenance.OptimizeJob
     options:
-        heading_level: 4
+        heading_level: 3
         show_root_heading: true
 
-::: ftm_lakehouse.operation.CompactOperation
+::: ftm_lakehouse.operation.OptimizeOperation
     options:
-        heading_level: 4
-        show_root_heading: true
-
-### MergeOperation
-
-Per-partition rewrite that collapses duplicates (latest `last_seen` per id), folds `first_seen` to the min, and drops tombstones older than the grace cutoff (`LAKEHOUSE_GRACE_PERIOD_DAYS`).
-
-::: ftm_lakehouse.operation.maintenance.MergeJob
-    options:
-        heading_level: 4
-        show_root_heading: true
-
-::: ftm_lakehouse.operation.MergeOperation
-    options:
-        heading_level: 4
-        show_root_heading: true
-
-### VacuumOperation
-
-Delete obsolete parquet files no longer referenced by the Delta log.
-
-::: ftm_lakehouse.operation.maintenance.VacuumJob
-    options:
-        heading_level: 4
-        show_root_heading: true
-
-::: ftm_lakehouse.operation.VacuumOperation
-    options:
-        heading_level: 4
+        heading_level: 3
         show_root_heading: true
 
 ## MakeOperation

@@ -68,7 +68,7 @@ Entities are composed of statements. There are two write paths:
 ### Bulk write (journal)
 
 ```python
-with dataset.entities.writer(origin="import") as writer:
+with dataset.get_entities().writer(origin="import") as writer:
     for entity in entities:
         writer.add_entity(entity)
 ```
@@ -157,26 +157,15 @@ Key-value store for freshness tracking and tenant-specific runtime data.
 | `journal/last_updated` | Statement writes | Journal has uncommitted data |
 | `journal/last_flushed` | Flush operation | Journal was flushed |
 | `statements/last_updated` | Flush operation | Parquet store was updated |
-| `statements/last_compacted` | Compact operation | Parquet files were bin-packed |
-| `statements/last_merged` | Merge operation | Per-partition dedup + tombstone reaping ran |
-| `statements/last_vacuumed` | Vacuum operation | Obsolete parquet files were deleted |
+| `statements/last_optimized` | Optimize operation | Merge + compact + vacuum ran |
 | `archive/last_updated` | File archive | New file was archived |
-| `exports/statements` | Export operation | `statements.csv` was regenerated |
-| `exports/entities_json` | Export operation | `entities.ftm.json` was regenerated |
-| `exports/statistics` | Export operation | `statistics.json` was regenerated |
+| `exports/statements.csv`, `entities.ftm.json`, `exports/documents.csv`, `exports/statistics.json`, `index.json` | Export operation | The export target key doubles as its freshness tag |
 | `operations/crawl/last_run` | Crawl operation | Last crawl execution |
 | `mappings/{hash}/last_processed` | Mapping operation | Last mapping execution for a specific CSV |
 
 ### Freshness check
 
 `is_latest(key, dependencies)` returns `True` if the `key` timestamp is newer than all `dependencies` timestamps. Used to skip unnecessary recomputation in export operations.
-
----
-
-## Queue
-
-!!! note "Future feature"
-    The queue infrastructure exists but isn't actively used in current operations. Direct repository calls are used instead.
 
 ---
 
@@ -196,50 +185,33 @@ Key-value store for freshness tracking and tenant-specific runtime data.
 
 **Returns:** number of statements written.
 
-### Compact (cheap bin-pack)
+### Optimize (merge + compact + vacuum)
 
-**Trigger:** explicit call.
+**Trigger:** explicit call. The three maintenance steps always run together, in order:
 
-**Process:** for each `(shard, bucket, origin)` partition, run Delta's `OPTIMIZE compact` to merge small files into larger ones. Does not change row contents.
+1. **Merge** – for each `(shard, bucket, origin)` partition, run a DuckDB streaming query that keeps the row with the latest `last_seen` per `id` (`ROW_NUMBER`), folds `first_seen` to the minimum across the id-group (`MIN(first_seen) OVER`), drops tombstones whose `deleted_at` is older than the grace cutoff, and writes the result back via `write_deltalake(mode="overwrite", predicate=…)` scoped to that partition.
+2. **Compact** – for each partition, run Delta's `OPTIMIZE compact` to merge small files into larger ones. Does not change row contents.
+3. **Vacuum** – Delta `VACUUM` deletes parquet files no longer referenced in the Delta log (those tombstoned by merge / compact).
 
-**Side effects:** sets `statements/last_compacted`. Held under the dataset write fence.
+**Side effects:** sets `statements/last_optimized`. Each step held under the dataset write fence.
 
-### Merge (expensive per-partition rewrite)
-
-**Trigger:** explicit call.
-
-**Process:** for each `(shard, bucket, origin)` partition, run a DuckDB streaming query that:
-
-- keeps the row with the latest `last_seen` per `id` (`ROW_NUMBER`),
-- folds `first_seen` to the minimum across the id-group (`MIN(first_seen) OVER`),
-- drops tombstones whose `deleted_at` is older than the grace cutoff,
-- writes the result back via `write_deltalake(mode="overwrite", predicate=…)` scoped to that partition.
-
-**Side effects:** sets `statements/last_merged`. Held under the dataset write fence.
-
-### Vacuum
-
-**Trigger:** explicit call.
-
-**Process:** Delta `VACUUM` – deletes parquet files no longer referenced in the Delta log (those tombstoned by `merge` / `compact`).
-
-**Side effects:** sets `statements/last_vacuumed`. Held under the dataset write fence.
+Exports and statistics assume an optimized store – run this after large write batches.
 
 ### Export statements (parquet → CSV)
 
-**Freshness check:** skip if `exports/statements` newer than `statements/last_updated` and `journal/last_updated`.
+**Freshness check:** skip if the `exports/statements.csv` tag is newer than `statements/last_updated` and `journal/last_updated`.
 
 **Process:** stream statements from the parquet store via DuckDB; write sorted CSV to `exports/statements.csv`.
 
-**Side effects:** sets `exports/statements`.
+**Side effects:** sets the `exports/statements.csv` tag (the export target doubles as its freshness tag).
 
 ### Export entities (parquet → JSON)
 
-Same shape as export-statements but aggregates statements into entities and writes `entities.ftm.json`. Sets `exports/entities_json`.
+Same shape as export-statements but aggregates statements into entities and writes `entities.ftm.json`. Sets the `entities.ftm.json` tag. Reuses a fresh `statements.csv` as input when one exists.
 
 ### Export statistics
 
-Computes entity counts and schema distribution; writes versioned `exports/statistics.json`. Sets `exports/statistics`.
+Computes entity counts and schema distribution; writes versioned `exports/statistics.json`. Sets the `exports/statistics.json` tag.
 
 ### Export index
 
@@ -271,28 +243,24 @@ flowchart TD
     B --> |"flush()"| C[(Parquet Store)]
     A3[Tenant bulk imports] --> |"EntityBuffer + write_statements"| C
 
-    C --> |"merge()"| C
-    C --> |"compact()"| C
-    C --> |"vacuum()"| C
+    C --> |"optimize() – merge + compact + vacuum"| C
 
-    C --> |"export_statements()"| D[statements.csv]
-    C --> |"export_entities()"| E[entities.ftm.json]
-    C --> |"export_statistics()"| F[statistics.json]
-    F --> |"export_index()"| G[index.json]
+    C --> |"export(statements)"| D[statements.csv]
+    C --> |"export(entities)"| E[entities.ftm.json]
+    C --> |"export(statistics)"| F[statistics.json]
+    F --> |"export(index)"| G[index.json]
 
     B -.-> T1[journal/last_updated]
     B -.-> T1b[journal/last_flushed]
     C -.-> T2[statements/last_updated]
-    C -.-> T2a[statements/last_compacted]
-    C -.-> T2b[statements/last_merged]
-    C -.-> T2c[statements/last_vacuumed]
+    C -.-> T2a[statements/last_optimized]
     D -.-> T3[exports/statements]
     E -.-> T4[exports/entities_json]
     F -.-> T5[exports/statistics]
 
     classDef tag fill:#f9f,stroke:#333,stroke-width:1px
     classDef storage fill:#69b,stroke:#333,stroke-width:2px,color:#fff
-    class T0,T1,T1b,T2,T2a,T2b,T2c,T3,T4,T5 tag
+    class T0,T1,T1b,T2,T2a,T3,T4,T5 tag
     class B,C,AR storage
 ```
 

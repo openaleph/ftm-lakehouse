@@ -21,10 +21,10 @@ from ftm_lakehouse import ensure_dataset
 dataset = ensure_dataset("my_dataset")
 
 # Archive a CSV file
-file = dataset.archive.put("companies.csv")
+file = dataset.get_archive().put("companies.csv")
 
 # Create the mapping configuration
-dataset.mappings.make(
+dataset.get_mappings().make(
     file.checksum,
     queries=[{
         "entities": {
@@ -41,11 +41,11 @@ dataset.mappings.make(
 )
 
 # Process the mapping
-count = dataset.mappings.process(file.checksum)
+count = dataset.get_mappings().process(file.checksum)
 print(f"Generated {count} entities")
 
 # Flush to storage
-dataset.entities.flush()
+dataset.get_entities().flush()
 ```
 
 Alternatively, use the shortcut to get the repository directly:
@@ -90,7 +90,7 @@ from ftm_lakehouse import get_dataset
 dataset = get_dataset("my_dataset")
 
 # Process by content hash
-count = dataset.mappings.process(file.checksum)
+count = dataset.get_mappings().process(file.checksum)
 print(f"Generated {count} entities")
 ```
 
@@ -102,7 +102,7 @@ from ftm_lakehouse import get_dataset
 dataset = get_dataset("my_dataset")
 
 # Process all mapping configurations in the dataset
-results = dataset.mappings.process_all()
+results = dataset.get_mappings().process_all()
 
 for content_hash, count in results.items():
     print(f"{content_hash}: {count} entities")
@@ -118,14 +118,14 @@ from ftm_lakehouse import get_dataset
 dataset = get_dataset("my_dataset")
 
 # First run: processes and generates entities
-count1 = dataset.mappings.process(file.checksum)  # Returns 100
+count1 = dataset.get_mappings().process(file.checksum)  # Returns 100
 
 # Second run: skips (returns 0)
-count2 = dataset.mappings.process(file.checksum)  # Returns 0
+count2 = dataset.get_mappings().process(file.checksum)  # Returns 0
 
 # After updating the mapping config, processing runs again
-dataset.mappings.make(file.checksum, queries=[updated_config])
-count3 = dataset.mappings.process(file.checksum)  # Processes again
+dataset.get_mappings().make(file.checksum, queries=[updated_config])
+count3 = dataset.get_mappings().process(file.checksum)  # Processes again
 ```
 
 ## Managing Mapping Configs
@@ -137,7 +137,7 @@ from ftm_lakehouse import get_dataset
 
 dataset = get_dataset("my_dataset")
 
-for content_hash in dataset.mappings.list():
+for content_hash in dataset.get_mappings().list():
     print(content_hash)
 ```
 
@@ -148,7 +148,7 @@ from ftm_lakehouse import get_dataset
 
 dataset = get_dataset("my_dataset")
 
-mapping = dataset.mappings.get(file.checksum)
+mapping = dataset.get_mappings().get(file.checksum)
 if mapping:
     print(f"Dataset: {mapping.dataset}")
     print(f"Queries: {len(mapping.queries)}")
@@ -163,7 +163,7 @@ from ftm_lakehouse import get_dataset
 
 dataset = get_dataset("my_dataset")
 
-for entity in dataset.entities.query():
+for entity in dataset.get_entities().query():
     # Origin tracks where data came from
     origins = entity.context.get("origin", [])
 
@@ -201,11 +201,11 @@ def main():
     dataset = ensure_dataset("company_registry")
 
     # Archive the source CSV
-    file = dataset.archive.put("companies.csv")
+    file = dataset.get_archive().put("companies.csv")
     print(f"Archived: {file.checksum}")
 
     # Create mapping configuration
-    dataset.mappings.make(
+    dataset.get_mappings().make(
         file.checksum,
         queries=[{
             "entities": {
@@ -224,15 +224,15 @@ def main():
     )
 
     # Process the mapping
-    count = dataset.mappings.process(file.checksum)
+    count = dataset.get_mappings().process(file.checksum)
     print(f"Generated {count} entities")
 
     # Flush to storage
-    dataset.entities.flush()
+    dataset.get_entities().flush()
 
     # Query the generated entities
     print("\nCompanies:")
-    for entity in dataset.entities.query(origin=f"mapping:{file.checksum}"):
+    for entity in dataset.get_entities().query(origin=f"mapping:{file.checksum}"):
         print(f"  - {entity.caption}")
 
 

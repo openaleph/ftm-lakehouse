@@ -51,16 +51,16 @@ from ftm_lakehouse import get_dataset, ensure_dataset
 dataset = ensure_dataset("my_dataset")
 
 # Write entities through the journal (buffered, then flushed to parquet)
-with dataset.entities.writer(origin="import") as writer:
+with dataset.get_entities().writer(origin="import") as writer:
     for entity in entities:
         writer.add_entity(entity)
-dataset.entities.flush()
+dataset.get_entities().flush()
 
 # Read back
-entity = dataset.entities.get("entity-id-123")
+entity = dataset.get_entities().get("entity-id-123")
 
 # Live query of the parquet store
-for entity in dataset.entities.query(origin="crawl"):
+for entity in dataset.get_entities().query(origin="crawl"):
     process(entity)
 ```
 

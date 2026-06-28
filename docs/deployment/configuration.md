@@ -10,8 +10,7 @@
 |----------|-------------|---------|
 | `LAKEHOUSE_URI` | Base path to lakehouse storage | `./data` |
 | `LAKEHOUSE_JOURNAL_URI` | SQLAlchemy URI for statement journal | `sqlite:///:memory:` |
-| `LAKEHOUSE_ENTITY_SHARDS` | Uniform shard count per new dataset (recorded in `config.yml`; immutable after first write – change requires full rewrite) | `8` |
-| `LAKEHOUSE_GRACE_PERIOD_DAYS` | Default tombstone grace period used by `operations merge` (rows with `deleted_at` older than this are physically dropped) | `30` |
+| `LAKEHOUSE_GRACE_PERIOD_DAYS` | Default tombstone grace period used by `operations optimize` (rows with `deleted_at` older than this are physically dropped in the merge step) | `30` |
 | `LAKEHOUSE_MAX_BUFFER_ROWS` | Hard cap on rows held in an in-memory `EntityBuffer` before a flush is required. Bulk-import paths that hit the cap raise `BufferFullError` and the caller flushes + retries. | `1_000_000` |
 | `LAKEHOUSE_LOCK_MAX_RETRIES` | Retry bound when acquiring the dataset write fence (`.LOCK`). Retry `n` sleeps `n` + jitter seconds, so the total wait is roughly `N²/2` seconds; the default gives up after ~4.5 minutes with a `RuntimeError` instead of waiting forever. Stale locks from crashed writers need a manual `ftm-lakehouse operations unlock`. | `22` |
 | `LAKEHOUSE_DUCKDB_MEMORY_LIMIT` | Per-DuckDB-connection RAM ceiling. Queries exceeding it spill to disk rather than growing toward all available RAM. Format follows DuckDB's `SET memory_limit` (e.g. `4GB`, `512MB`). | `4GB` |
@@ -21,9 +20,10 @@
 | `LAKEHOUSE_ZFS_SOCKET` | Unix socket path for remote ZFS operations (see [ZFS Integration](zfs.md)) | (unset) |
 | `LAKEHOUSE_ZFS_OWNER` | `uid:gid` to chown new ZFS mountpoints to (see [ZFS Integration](zfs.md)) | (unset -- no chown) |
 | `LAKEHOUSE_PUBLIC_URL_PREFIX` | Public URL prefix for blob URLs (supports `{{ dataset }}` Jinja-style template) | (unset) |
-| `LAKEHOUSE_ARCHIVE_URL_EXPIRE` | Expiration for signed/tokenized archive URLs in seconds | `900` (15 min) |
 | `LOG_LEVEL` | Logging level (DEBUG, INFO, WARNING, ERROR) | `INFO` |
 | `DEBUG` | Enable debug mode | `false` |
+
+There is deliberately **no environment setting for the shard count**: it is per-dataset configuration (`shards` in `config.yml`, default `0` = single shard, immutable after first write), so a process with a different environment can't mis-shard an existing dataset. Huge datasets should configure `8` or more at creation – see [Sharding](../architecture.md#sharding-why-and-how-many-shards).
 
 ### Basic Usage
 
@@ -47,6 +47,7 @@ Each dataset can have its own `config.yml` file that follows the [ftmq.model.Dat
 ```yaml
 name: my_dataset  # also known as "foreign_id"
 title: An Awesome Dataset
+shards: 0  # entity-id hash shards; configure 8+ for huge datasets at creation
 description: >
   A detailed description of this dataset,
   its sources, and contents.

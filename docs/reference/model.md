@@ -39,20 +39,3 @@ Pure data structures with no dependencies. Pydantic models for serialization.
     options:
         heading_level: 3
         show_root_heading: true
-
-## CRUD Models
-
-::: ftm_lakehouse.model.Crud
-    options:
-        heading_level: 3
-        show_root_heading: true
-
-::: ftm_lakehouse.model.CrudAction
-    options:
-        heading_level: 3
-        show_root_heading: true
-
-::: ftm_lakehouse.model.CrudResource
-    options:
-        heading_level: 3
-        show_root_heading: true

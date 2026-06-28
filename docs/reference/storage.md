@@ -28,12 +28,3 @@ Key-value freshness tracking.
     options:
         heading_level: 3
         show_root_heading: true
-
-## QueueStore
-
-CRUD action queue for async processing.
-
-::: ftm_lakehouse.storage.QueueStore
-    options:
-        heading_level: 3
-        show_root_heading: true

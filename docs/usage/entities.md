@@ -13,11 +13,11 @@ Entities in `ftm-lakehouse` are stored as **statements** – granular property-l
 
 The underlying storage is a single Delta Lake table per dataset, partitioned by `(shard, bucket, origin)`:
 
-- `shard` – `hash(entity_id) % LAKEHOUSE_ENTITY_SHARDS`, hex-padded
+- `shard` – `hash(entity_id) % shards` (the dataset's configured shard count, default a single shard), hex-padded
 - `bucket` – coarse FtM schema group (`thing`, `interval`, `document`, `page`, `pages`, `mention`)
 - `origin` – caller-supplied source tag
 
-Writes are **append-only**. Deduplication, `first_seen` folding, and tombstone reaping happen via three async maintenance operations (`compact`, `merge`, `vacuum`), all guarded by a dataset-wide write fence at `.LOCK`.
+Writes are **append-only**. Deduplication, `first_seen` folding, and tombstone reaping happen via the async `optimize` operation (merge + compact + vacuum), guarded by a dataset-wide write fence at `.LOCK`.
 
 ## Quick Start
 
@@ -27,18 +27,18 @@ from ftm_lakehouse import ensure_dataset
 dataset = ensure_dataset("my_dataset")
 
 # Write entities
-with dataset.entities.writer(origin="import") as writer:
+with dataset.get_entities().writer(origin="import") as writer:
     for entity in entities:
         writer.add_entity(entity)
 
 # Persist the journal to parquet
-dataset.entities.flush()
+dataset.get_entities().flush()
 
 # Read a specific entity
-entity = dataset.entities.get("entity-id-123")
+entity = dataset.get_entities().get("entity-id-123")
 
 # Query entities
-for entity in dataset.entities.query():
+for entity in dataset.get_entities().query():
     process(entity)
 ```
 
@@ -66,7 +66,7 @@ entity.id = "jane-doe"
 entity.add("name", "Jane Doe")
 entity.add("nationality", "us")
 
-dataset.entities.add(entity, origin="manual")
+dataset.get_entities().add(entity, origin="manual")
 ```
 
 ### Bulk Writing (through the journal)
@@ -74,15 +74,15 @@ dataset.entities.add(entity, origin="manual")
 For interactive ingestion that wants the journal's per-row dedup and crash-safety guarantees:
 
 ```python
-with dataset.entities.writer(origin="bulk_import") as writer:
+with dataset.get_entities().writer(origin="bulk_import") as writer:
     for entity in source_entities:
         writer.add_entity(entity)
 ```
 
-Writes buffer in a SQL journal. Call `dataset.entities.flush()` to drain the journal into parquet:
+Writes buffer in a SQL journal. Call `dataset.get_entities().flush()` to drain the journal into parquet:
 
 ```python
-count = dataset.entities.flush()
+count = dataset.get_entities().flush()
 print(f"Flushed {count} statements")
 ```
 
@@ -95,7 +95,7 @@ from datetime import datetime, timezone
 from ftmq.io import smart_read_proxies
 from ftm_lakehouse.logic.entities.buffer import EntityBuffer
 
-repo = dataset.entities
+repo = dataset.get_entities()
 buffer = EntityBuffer(dataset.name, dataset.model.shards, origin="bulk")
 now = datetime.now(timezone.utc)
 
@@ -117,7 +117,7 @@ The CLI command `ftm-lakehouse entities import` does exactly this.
 ### Get by ID
 
 ```python
-entity = dataset.entities.get("jane-doe")
+entity = dataset.get_entities().get("jane-doe")
 if entity:
     print(entity.caption)
 ```
@@ -125,15 +125,15 @@ if entity:
 ### Query with Filters
 
 ```python
-for entity in dataset.entities.query(origin="import"):
+for entity in dataset.get_entities().query(origin="import"):
     print(entity.id)
 
 ids = ["jane-doe", "john-smith"]
-for entity in dataset.entities.query(entity_ids=ids):
+for entity in dataset.get_entities().query(entity_ids=ids):
     print(entity.caption)
 
 # By schema bucket (thing / interval / document / page / pages / mention)
-for entity in dataset.entities.query(bucket="thing"):
+for entity in dataset.get_entities().query(bucket="thing"):
     print(entity.schema.name)
 ```
 
@@ -142,7 +142,7 @@ for entity in dataset.entities.query(bucket="thing"):
 For full-dataset iteration, streaming from the pre-exported JSON file is typically faster than running an aggregating query against the parquet store:
 
 ```python
-for entity in dataset.entities.stream():
+for entity in dataset.get_entities().stream():
     process(entity)
 ```
 
@@ -153,15 +153,15 @@ for entity in dataset.entities.stream():
 `origin` is part of the partition key (alongside `shard` and `bucket`) and tracks where data came from. Useful for filtering, auditing, and partition-scoped re-runs:
 
 ```python
-with dataset.entities.writer(origin="source_a") as writer:
+with dataset.get_entities().writer(origin="source_a") as writer:
     for entity in source_a_entities:
         writer.add_entity(entity)
 
-with dataset.entities.writer(origin="source_b") as writer:
+with dataset.get_entities().writer(origin="source_b") as writer:
     for entity in source_b_entities:
         writer.add_entity(entity)
 
-for entity in dataset.entities.query(origin="source_a"):
+for entity in dataset.get_entities().query(origin="source_a"):
     print(entity.id)
 ```
 
@@ -172,33 +172,33 @@ Deletes are tombstones routed through the journal (or `EntityBuffer` for the bul
 ### Delete an Entity
 
 ```python
-count = dataset.entities.delete_entity("jane-doe")
+count = dataset.get_entities().delete_entity("jane-doe")
 print(f"Wrote {count} tombstones")
 
-dataset.entities.flush()
-dataset.entities.merge()  # collapse live+tombstone → tombstone survives until grace
+dataset.get_entities().flush()
+dataset.get_entities().merge()  # collapse live+tombstone → tombstone survives until grace
 ```
 
 ### Delete a Single Statement
 
 ```python
-stmts = list(dataset.entities.query_statements())
+stmts = list(dataset.get_entities().query_statements())
 target = stmts[0]
 
-dataset.entities.delete_statement(target)
-dataset.entities.flush()
-dataset.entities.merge()
+dataset.get_entities().delete_statement(target)
+dataset.get_entities().flush()
+dataset.get_entities().merge()
 ```
 
 ### Re-adding After Delete
 
 ```python
-dataset.entities.delete_entity("jane-doe")
-dataset.entities.flush()
-dataset.entities.merge(grace_period_days=0)  # drop tombstones immediately
+dataset.get_entities().delete_entity("jane-doe")
+dataset.get_entities().flush()
+dataset.get_entities().merge(grace_period_days=0)  # drop tombstones immediately
 
-dataset.entities.add(updated_jane, origin="correction")
-dataset.entities.flush()
+dataset.get_entities().add(updated_jane, origin="correction")
+dataset.get_entities().flush()
 # jane-doe is alive again with the new data
 ```
 
@@ -209,12 +209,12 @@ dataset.entities.flush()
 **Across flushes**: re-flushing the same statement appends a new parquet row. The duplicates only collapse when `merge` runs. `merge` keeps the row with the latest `last_seen` per statement id and folds `first_seen` to the minimum across the group.
 
 ```python
-dataset.entities.add(entity)
-dataset.entities.flush()   # one row in parquet
-dataset.entities.add(entity)
-dataset.entities.flush()   # two rows now; same statement.id
+dataset.get_entities().add(entity)
+dataset.get_entities().flush()   # one row in parquet
+dataset.get_entities().add(entity)
+dataset.get_entities().flush()   # two rows now; same statement.id
 
-dataset.entities.merge()   # back to one row, last_seen=now, first_seen=original
+dataset.get_entities().merge()   # back to one row, last_seen=now, first_seen=original
 ```
 
 If you want immediate-effect dedup at write time, use the journal path with `flush()` – the journal upsert dedups within a window – and run `merge` on a schedule.
@@ -226,7 +226,7 @@ Three independent async operations on the parquet statement store. All three acq
 ### Flush (journal → parquet)
 
 ```python
-count = dataset.entities.flush()
+count = dataset.get_entities().flush()
 ```
 
 Drains the journal in one shard-sorted pass; each per-shard batch becomes one parquet file per `(shard, bucket, origin)` partition. No dedup happens here – duplicates and tombstones land as new rows for `merge` to collapse later.
@@ -236,7 +236,7 @@ Drains the journal in one shard-sorted pass; each per-shard batch becomes one pa
 Bin-packs small parquet files within each `(shard, bucket, origin)` partition via Delta's `OPTIMIZE compact`. Does not change row contents.
 
 ```python
-dataset.entities._statements.compact()
+dataset.get_entities()._statements.compact()
 ```
 
 ### Merge (expensive)
@@ -244,8 +244,8 @@ dataset.entities._statements.compact()
 Per-partition rewrite that collapses duplicates (`ROW_NUMBER OVER (PARTITION BY id ORDER BY last_seen DESC) = 1`), folds `first_seen` to the min across the id group, and drops tombstones whose `deleted_at` is older than the grace cutoff.
 
 ```python
-dataset.entities.merge()  # uses default grace from settings
-dataset.entities.merge(grace_period_days=0)  # drop all tombstones immediately
+dataset.get_entities().merge()  # uses default grace from settings
+dataset.get_entities().merge(grace_period_days=0)  # drop all tombstones immediately
 ```
 
 Default grace is `LAKEHOUSE_GRACE_PERIOD_DAYS` (30 days).
@@ -255,8 +255,8 @@ Default grace is `LAKEHOUSE_GRACE_PERIOD_DAYS` (30 days).
 Deletes obsolete parquet files that `merge` / `compact` have tombstoned in the Delta log.
 
 ```python
-dataset.entities._statements.vacuum()
-dataset.entities._statements.vacuum(retention_hours=24)
+dataset.get_entities()._statements.vacuum()
+dataset.get_entities()._statements.vacuum(retention_hours=24)
 ```
 
 ## Complete Example
@@ -284,21 +284,21 @@ def main():
     ]
 
     # Write
-    with dataset.entities.writer(origin="manual") as writer:
+    with dataset.get_entities().writer(origin="manual") as writer:
         for person in people:
             writer.add_entity(person)
-    count = dataset.entities.flush()
+    count = dataset.get_entities().flush()
     print(f"Flushed {count} statements")
 
     # Maintenance – run on a schedule in production
-    dataset.entities._statements.compact()
-    dataset.entities.merge()
+    dataset.get_entities()._statements.compact()
+    dataset.get_entities().merge()
 
     # Read back
-    jane = dataset.entities.get(people[0].id)
+    jane = dataset.get_entities().get(people[0].id)
     print(f"Found: {jane.caption}")
 
-    for entity in dataset.entities.query():
+    for entity in dataset.get_entities().query():
         print(f"  - {entity.caption}")
 
 

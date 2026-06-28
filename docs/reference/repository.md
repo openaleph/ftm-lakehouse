@@ -7,9 +7,9 @@ Domain-specific combinations of multiple stores. Each repository owns one domain
 Content-addressed file archive with metadata and extracted text storage.
 
 ```python
-dataset.archive.put(uri)
-dataset.archive.get(checksum)
-dataset.archive.stream(file)
+dataset.get_archive().put(uri)
+dataset.get_archive().get(checksum)
+dataset.get_archive().stream(file)
 ```
 
 ::: ftm_lakehouse.repository.ArchiveRepository
@@ -22,10 +22,10 @@ dataset.archive.stream(file)
 Entity/statement operations combining JournalStore and ParquetStore.
 
 ```python
-dataset.entities.add(entity, origin="import")
-dataset.entities.writer(origin="import")
-dataset.entities.flush()
-dataset.entities.query(origin="import")
+dataset.get_entities().add(entity, origin="import")
+dataset.get_entities().writer(origin="import")
+dataset.get_entities().flush()
+dataset.get_entities().query(origin="import")
 ```
 
 ::: ftm_lakehouse.repository.EntityRepository
@@ -38,9 +38,9 @@ dataset.entities.query(origin="import")
 Mapping configuration storage.
 
 ```python
-dataset.mappings.put(mapping)
-dataset.mappings.get(content_hash)
-dataset.mappings.list()
+dataset.get_mappings().put(mapping)
+dataset.get_mappings().get(content_hash)
+dataset.get_mappings().list()
 ```
 
 ::: ftm_lakehouse.repository.MappingRepository
@@ -50,11 +50,15 @@ dataset.mappings.list()
 
 ## JobRepository
 
-Job tracking and status.
+Job tracking and status. Job runs are stored per job class – resolve the
+repository through the factory:
 
 ```python
-dataset.jobs.put(job)
-dataset.jobs.get(run_id)
+from ftm_lakehouse.repository.factories import get_jobs
+
+jobs = get_jobs("my_dataset", CrawlJob)
+jobs.put(job)
+jobs.get(run_id)
 ```
 
 ::: ftm_lakehouse.repository.JobRepository
