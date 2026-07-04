@@ -24,8 +24,9 @@ dependencies = [
     "ftmq[lake] (>=4.9.2,<5.0.0)",
     "jinja2 (>=3.1.5,<4.0.0)",
     "followthemoney (>=4.9.2,<5.0.0)",
-    "anystore (>=1.2.4,<2.0.0)",
+    "anystore @ git+https://github.com/dataresearchcenter/anystore.git",
     "httpx (>=0.28.1,<0.29.0)",
+    "nomenklatura (<4.11)",
 ]
 
 [project.optional-dependencies]
@@ -33,7 +34,12 @@ api = [
     "fastapi (>=0.138.2,<0.139.0)",
     "granian (>=2.7.7,<3.0.0)",
     "uvloop (>=0.22.1,<0.23.0)",
+    "aiohttp (!=4.0.0a0,!=4.0.0a1)",
 ]
+http = ["aiohttp (!=4.0.0a0,!=4.0.0a1)"]
+s3 = ["s3fs (>2024.2.0)"]
+gcs = ["gcsfs (>2024.2.0)"]
+azure = ["adlfs"]
 
 [project.scripts]
 ftm-lakehouse = "ftm_lakehouse.cli:cli"

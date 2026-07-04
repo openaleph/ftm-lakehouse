@@ -22,6 +22,17 @@ Requires python 3.11 or later.
 pip install ftm-lakehouse
 ```
 
+Remote storage backends are optional extras – install the one matching your archive/lake URI:
+
+```bash
+pip install "ftm-lakehouse[s3]"     # S3-compatible object storage (s3fs)
+pip install "ftm-lakehouse[gcs]"    # Google Cloud Storage (gcsfs)
+pip install "ftm-lakehouse[azure]"  # Azure Blob Storage (adlfs)
+pip install "ftm-lakehouse[http]"   # HTTP(S)-backed api stores (aiohttp)
+```
+
+Extras combine, e.g. `pip install "ftm-lakehouse[s3,gcs]"`.
+
 ## Documentation
 
 [openaleph.org/docs/lib/ftm-lakehouse](https://openaleph.org/docs/lib/ftm-lakehouse)
