@@ -30,7 +30,7 @@ dependencies = [
 
 [project.optional-dependencies]
 api = [
-    "fastapi (>=0.138.1,<0.139.0)",
+    "fastapi (>=0.138.2,<0.139.0)",
     "granian (>=2.7.7,<3.0.0)",
     "uvloop (>=0.22.1,<0.23.0)",
 ]
