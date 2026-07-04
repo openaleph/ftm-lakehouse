@@ -1,5 +1,5 @@
 aiobotocore==3.7.0 ; python_version >= "3.11" and python_version < "3.14"
-aiohappyeyeballs==2.6.2 ; python_version >= "3.11" and python_version < "3.14"
+aiohappyeyeballs==2.7.1 ; python_version >= "3.11" and python_version < "3.14"
 aiohttp==3.14.1 ; python_version >= "3.11" and python_version < "3.14"
 aioitertools==0.13.0 ; python_version >= "3.11" and python_version < "3.14"
 aiosignal==1.4.0 ; python_version >= "3.11" and python_version < "3.14"
