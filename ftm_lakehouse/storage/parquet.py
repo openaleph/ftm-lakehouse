@@ -42,12 +42,13 @@ from anystore.store import get_store
 from anystore.types import Uri
 from anystore.util import Took, join_uri, mask_uri
 from deltalake import DeltaTable, write_deltalake
-from followthemoney import Statement, StatementEntity
+from followthemoney import StatementEntity
 from followthemoney.statement import StatementDict
 from ftmq.model.stats import DatasetStats
 from ftmq.query import Query
 from ftmq.store.lake import (
     LakeQueryView,
+    LakeStatement,
     LakeStore,
     setup_duckdb_storage,
     storage_options,
@@ -63,7 +64,7 @@ from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.logic.entities import aggregate_unsafe
 from ftm_lakehouse.logic.entities.aggregate import EntityPayload
 from ftm_lakehouse.logic.parquet import (
-    build_merge_query,
+    build_merge_sql,
     dedupe_view_sql,
     duckdb_config,
     raw_view_sql,
@@ -165,7 +166,7 @@ class ParquetStore(LakehouseApiMixin):
             Statement objects matching the query
         """
         for stmt_dict in self._query_statement_data(q):
-            yield Statement.from_dict(stmt_dict)
+            yield LakeStatement.from_dict(stmt_dict)
 
     @no_api
     def get_statements(self, entity_id: str) -> Statements:
@@ -173,14 +174,17 @@ class ParquetStore(LakehouseApiMixin):
 
         Scopes :meth:`_query_statement_data` iteration to the entity's
         own shard so single-entity lookups don't fan out to every
-        ``(shard, bucket)`` pair.
+        ``(shard, bucket)`` pair. Yields
+        :class:`ftmq.store.lake.LakeStatement` so the ``fragment`` group
+        key stays visible – tombstone writers rely on it so a delete
+        lands in the same supersession group as the live row.
         """
         if not self.exists:
             return
         shard = path.entity_shard(entity_id, self.shards)
         q = select(TABLE).where(TABLE.c.shard == shard, TABLE.c.entity_id == entity_id)
         for stmt_dict in self._query_statement_data(q, shard=shard):
-            yield Statement.from_dict(stmt_dict)
+            yield LakeStatement.from_dict(stmt_dict)
 
     @no_api
     def stats(self) -> DatasetStats:
@@ -240,10 +244,13 @@ class ParquetStore(LakehouseApiMixin):
 
         The batch should be scoped to a single ``shard`` for write efficiency
         (one parquet file per ``(shard, bucket, origin)`` partition). The
-        method sorts by ``(bucket, origin, entity_id, id, last_seen DESC)``
-        then splits by ``bucket`` so each ``write_deltalake`` call uses the
-        bucket-appropriate ``writer_properties`` (small vs. large profile).
-        Duplicates land as separate rows and are reaped by :meth:`merge`.
+        method sorts by ``(bucket, origin, entity_id, fragment, prop, id,
+        last_seen DESC)`` – clustering a fragment's rows physically
+        contiguous, then by ``prop`` because the supersession group key
+        includes it – then splits by ``bucket`` so each ``write_deltalake``
+        call uses the bucket-appropriate ``writer_properties`` (small vs.
+        large profile). Duplicates land as separate rows and are reaped by
+        :meth:`merge`.
 
         Held under the dataset write fence so concurrent :meth:`merge` /
         :meth:`compact` / :meth:`vacuum` can't tombstone an in-flight append.
@@ -261,6 +268,8 @@ class ParquetStore(LakehouseApiMixin):
                 ("bucket", "ascending"),
                 ("origin", "ascending"),
                 ("entity_id", "ascending"),
+                ("fragment", "ascending"),
+                ("prop", "ascending"),
                 ("id", "ascending"),
                 ("last_seen", "descending"),
             ]
@@ -285,11 +294,13 @@ class ParquetStore(LakehouseApiMixin):
         """Collapse duplicates and reap expired tombstones, partition by partition.
 
         For each ``(shard, bucket, origin)`` partition, runs the merge
-        query against ``statement_raw`` (keep latest row per ``id`` by
-        ``last_seen DESC``; fold ``first_seen`` to the min; drop
-        tombstones older than the grace cutoff) and atomically
-        overwrites that partition via ``partition_filters``. Held under
-        the dataset write fence (``path.LOCK``).
+        query against ``statement_raw`` (non-fragment rows: keep latest
+        row per ``id`` by ``last_seen DESC``; fragment rows: keep the
+        latest emission per ``(entity_id, prop, fragment)`` group; fold
+        ``first_seen`` to the min; drop tombstones older than the grace
+        cutoff) and atomically overwrites that partition via
+        ``partition_filters``. Held under the dataset write fence
+        (``path.LOCK``).
 
         Physical cleanup only – the deduped read-time view already
         produces the right query results without ``merge`` having run,
@@ -310,8 +321,7 @@ class ParquetStore(LakehouseApiMixin):
         grace_cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         with self._write_lock():
             for shard, bucket, origin in self._list_partitions():
-                merge_select = build_merge_query(shard, bucket, origin, grace_cutoff)
-                sql = str(merge_select.compile(compile_kwargs={"literal_binds": True}))
+                sql = build_merge_sql(shard, bucket, origin, grace_cutoff)
                 with self._lake.cursor() as cur:
                     # ``to_arrow_reader`` yields a pyarrow RecordBatchReader
                     # that DuckDB streams lazily from its execution

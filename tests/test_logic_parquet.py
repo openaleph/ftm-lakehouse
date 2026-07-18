@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pyarrow as pa
 import pytest
 
-from ftm_lakehouse.logic.parquet import build_merge_query
+from ftm_lakehouse.logic.parquet import build_merge_sql
 from ftm_lakehouse.model.statement import SHARDED_SCHEMA, TABLE_RAW
 from tests.duck import make_duckdb
 
@@ -14,7 +14,8 @@ def _table(rows: list[dict]) -> pa.Table:
     cols: dict[str, list] = {f.name: [] for f in SHARDED_SCHEMA}
     for r in rows:
         for k in cols:
-            cols[k].append(r.get(k))
+            # fragment uses the empty-string sentinel, never NULL
+            cols[k].append(r.get(k, "") if k == "fragment" else r.get(k))
     return pa.table(cols, schema=SHARDED_SCHEMA)
 
 
@@ -28,8 +29,7 @@ def _run(
 ):
     con = make_duckdb()
     con.register(TABLE_RAW.name, table)
-    q = build_merge_query(shard, bucket, origin, grace_cutoff)
-    sql = str(q.compile(compile_kwargs={"literal_binds": True}))
+    sql = build_merge_sql(shard, bucket, origin, grace_cutoff)
     return con.execute(sql).to_arrow_table()
 
 
@@ -153,42 +153,241 @@ def test_merge_filters_to_partition(now):
     assert out.to_pylist()[0]["id"] == "s1"
 
 
-def test_merge_query_composable_with_where(now):
-    """Consumers can add `.where()` to narrow further (e.g. a single entity)."""
+def _row(now, **kwargs) -> dict:
+    """A statement row with partition defaults, for fragment test tables."""
+    defaults = {
+        "shard": "0",
+        "bucket": "thing",
+        "origin": "ingest",
+        "schema": "Company",
+        "first_seen": now,
+        "last_seen": now,
+        "deleted_at": None,
+    }
+    return {**defaults, **kwargs}
+
+
+def test_merge_fragment_supersession_single_value(now):
+    """A later emission of the same (entity_id, prop, fragment) replaces
+    the older one, even though the statement ids differ."""
+    t2 = now + timedelta(hours=1)
     table = _table(
         [
-            {
-                "id": "s1",
-                "entity_id": "alice",
-                "shard": "0",
-                "bucket": "thing",
-                "origin": "ingest",
-                "schema": "Person",
-                "first_seen": now,
-                "last_seen": now,
-                "deleted_at": None,
-            },
-            {
-                "id": "s2",
-                "entity_id": "bob",
-                "shard": "0",
-                "bucket": "thing",
-                "origin": "ingest",
-                "schema": "Person",
-                "first_seen": now,
-                "last_seen": now,
-                "deleted_at": None,
-            },
+            _row(now, id="h1", entity_id="acme", prop="name", fragment="row42"),
+            _row(
+                now,
+                id="h2",
+                entity_id="acme",
+                prop="name",
+                fragment="row42",
+                first_seen=t2,
+                last_seen=t2,
+            ),
         ]
     )
-    con = make_duckdb()
-    con.register(TABLE_RAW.name, table)
-    q = build_merge_query("0", "thing", "ingest", now)
-    q = q.where(q.selected_columns.entity_id == "alice")
-    sql = str(q.compile(compile_kwargs={"literal_binds": True}))
-    out = con.execute(sql).to_arrow_table()
+    out = _run(table, shard="0", bucket="thing", origin="ingest", grace_cutoff=now)
     assert out.num_rows == 1
-    assert out.to_pylist()[0]["entity_id"] == "alice"
+    row = out.to_pylist()[0]
+    assert row["id"] == "h2"
+    # first_seen folded to the group minimum, spanning superseded rows
+    assert row["first_seen"] == now
+
+
+def test_merge_fragment_supersession_multi_value(now):
+    """Multi-valued props of the latest emission survive together because
+    they share last_seen; the whole earlier emission is superseded."""
+    t1, t2 = now, now + timedelta(hours=1)
+    table = _table(
+        [
+            _row(t1, id="h1", entity_id="acme", prop="name", fragment="row42"),
+            _row(t1, id="h2", entity_id="acme", prop="name", fragment="row42"),
+            _row(
+                t1,
+                id="h3",
+                entity_id="acme",
+                prop="name",
+                fragment="row42",
+                first_seen=t2,
+                last_seen=t2,
+            ),
+            _row(
+                t1,
+                id="h4",
+                entity_id="acme",
+                prop="name",
+                fragment="row42",
+                first_seen=t2,
+                last_seen=t2,
+            ),
+        ]
+    )
+    out = _run(table, shard="0", bucket="thing", origin="ingest", grace_cutoff=now)
+    assert sorted(r["id"] for r in out.to_pylist()) == ["h3", "h4"]
+
+
+def test_merge_fragment_prop_dropped_between_emissions(now):
+    """Supersession is per (entity_id, prop, fragment), not per fragment as
+    a whole: a prop absent from the later emission keeps its older row."""
+    t2 = now + timedelta(hours=1)
+    table = _table(
+        [
+            _row(now, id="h1", entity_id="acme", prop="name", fragment="row42"),
+            _row(now, id="h2", entity_id="acme", prop="country", fragment="row42"),
+            _row(
+                now,
+                id="h3",
+                entity_id="acme",
+                prop="name",
+                fragment="row42",
+                first_seen=t2,
+                last_seen=t2,
+            ),
+        ]
+    )
+    out = _run(table, shard="0", bucket="thing", origin="ingest", grace_cutoff=now)
+    assert sorted(r["id"] for r in out.to_pylist()) == ["h2", "h3"]
+
+
+def test_merge_fragment_contract_violation_partial_supersession(now):
+    """Jittered last_seen within one logical emission is a producer bug:
+    only the very latest row survives (degraded, not corrupt)."""
+    jitter = now + timedelta(microseconds=1)
+    table = _table(
+        [
+            _row(now, id="h1", entity_id="acme", prop="name", fragment="row42"),
+            _row(
+                now,
+                id="h2",
+                entity_id="acme",
+                prop="name",
+                fragment="row42",
+                last_seen=jitter,
+            ),
+        ]
+    )
+    out = _run(table, shard="0", bucket="thing", origin="ingest", grace_cutoff=now)
+    assert [r["id"] for r in out.to_pylist()] == ["h2"]
+
+
+def test_merge_same_id_under_multiple_fragments(now):
+    """The same content-addressed id under two fragments is two rows –
+    distinct supersession groups."""
+    table = _table(
+        [
+            _row(now, id="h1", entity_id="acme", prop="name", fragment="row1"),
+            _row(now, id="h1", entity_id="acme", prop="name", fragment="row2"),
+        ]
+    )
+    out = _run(table, shard="0", bucket="thing", origin="ingest", grace_cutoff=now)
+    assert sorted(r["fragment"] for r in out.to_pylist()) == ["row1", "row2"]
+
+
+def test_merge_fragment_and_nonfragment_isolated(now):
+    """The same content in fragment and non-fragment mode coexists – the
+    branches never interact, and a later non-fragment row does not
+    supersede the fragment row (or vice versa)."""
+    t2 = now + timedelta(hours=1)
+    table = _table(
+        [
+            _row(now, id="h1", entity_id="acme", prop="name", fragment="row42"),
+            _row(now, id="h1", entity_id="acme", prop="name", last_seen=t2),
+        ]
+    )
+    out = _run(table, shard="0", bucket="thing", origin="ingest", grace_cutoff=now)
+    assert sorted(r["fragment"] for r in out.to_pylist()) == ["", "row42"]
+
+
+def test_merge_fragment_tombstone_within_grace(now):
+    """A fragment tombstone supersedes the group's live rows and is kept
+    as the group's canonical row while within grace."""
+    deleted = now + timedelta(hours=1)
+    table = _table(
+        [
+            _row(now, id="h1", entity_id="acme", prop="name", fragment="row42"),
+            _row(
+                now,
+                id="h1",
+                entity_id="acme",
+                prop="name",
+                fragment="row42",
+                last_seen=deleted,
+                deleted_at=deleted,
+            ),
+        ]
+    )
+    grace_cutoff = now - timedelta(days=7)
+    out = _run(
+        table, shard="0", bucket="thing", origin="ingest", grace_cutoff=grace_cutoff
+    )
+    assert out.num_rows == 1
+    assert out.to_pylist()[0]["deleted_at"] == deleted
+
+
+def test_merge_fragment_tombstone_past_grace_removes_group(now):
+    """A fragment tombstone past grace removes the whole group: the live
+    rows lost the window, the tombstone is reaped."""
+    old = now - timedelta(days=14)
+    deleted = now - timedelta(days=10)
+    table = _table(
+        [
+            _row(old, id="h1", entity_id="acme", prop="name", fragment="row42"),
+            _row(
+                old,
+                id="h1",
+                entity_id="acme",
+                prop="name",
+                fragment="row42",
+                last_seen=deleted,
+                deleted_at=deleted,
+            ),
+        ]
+    )
+    grace_cutoff = now - timedelta(days=7)
+    out = _run(
+        table, shard="0", bucket="thing", origin="ingest", grace_cutoff=grace_cutoff
+    )
+    assert out.num_rows == 0
+
+
+def test_merge_fragment_cross_origin_isolation(now):
+    """The same fragment in two origins is two independent supersession
+    groups – merge only ever sees one origin per partition."""
+    t2 = now + timedelta(hours=1)
+    table = _table(
+        [
+            _row(now, id="h1", entity_id="acme", prop="name", fragment="row42"),
+            _row(
+                now,
+                id="h2",
+                entity_id="acme",
+                prop="name",
+                fragment="row42",
+                origin="other",
+                first_seen=t2,
+                last_seen=t2,
+            ),
+        ]
+    )
+    out = _run(table, shard="0", bucket="thing", origin="ingest", grace_cutoff=now)
+    # the newer row in origin "other" does not supersede origin "ingest"
+    assert [r["id"] for r in out.to_pylist()] == ["h1"]
+
+
+def test_merge_output_sorted_with_fragments(now):
+    """Output rows are sorted by (entity_id, fragment, prop, id)."""
+    table = _table(
+        [
+            _row(now, id="z", entity_id="e1", prop="name", fragment="b"),
+            _row(now, id="a", entity_id="e1", prop="name", fragment="a"),
+            _row(now, id="m", entity_id="e1", prop="address"),
+        ]
+    )
+    out = _run(table, shard="0", bucket="thing", origin="ingest", grace_cutoff=now)
+    assert [(r["fragment"], r["id"]) for r in out.to_pylist()] == [
+        ("", "m"),
+        ("a", "a"),
+        ("b", "z"),
+    ]
 
 
 def test_merge_output_sorted(now):

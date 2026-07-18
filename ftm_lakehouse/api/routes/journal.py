@@ -38,7 +38,7 @@ async def journal_bulk(
                 # statement again for the journal.
                 row = deserialize_row(line.decode())
                 stmt = unpack_statement(row.data)
-                writer.add_statement(stmt, row.deleted_at)
+                writer.add_statement(stmt, row.deleted_at, fragment=row.fragment)
                 count += 1
         return count
 

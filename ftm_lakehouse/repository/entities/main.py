@@ -16,7 +16,7 @@ from followthemoney import EntityProxy, Statement, StatementEntity
 from ftmq.io import smart_read_proxies
 from ftmq.model.stats import DatasetStats
 from ftmq.query import Query
-from ftmq.store.lake import pack_statement
+from ftmq.store.lake import LakeStatement, pack_statement
 from ftmq.types import StatementEntities, Statements, ValueEntities
 from sqlalchemy import select
 
@@ -343,7 +343,10 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         """Delete all statements for an entity via journal tombstones.
 
         Reads statements from both parquet and journal, then UPSERTs
-        tombstone rows (with deleted_at set) into the journal.
+        tombstone rows (with deleted_at set) into the journal. Each
+        tombstone carries the live row's ``fragment`` so it lands in the
+        same supersession group – a bare tombstone would sit in the
+        isolated non-fragment branch and never shadow a fragment row.
 
         Args:
             entity_id: The entity ID to delete
@@ -361,30 +364,40 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         self._tags.set(tag.JOURNAL_UPDATED)
         return len(stmts)
 
-    def delete_statement(self, stmt: Statement) -> None:
+    def delete_statement(self, stmt: Statement, fragment: str | None = None) -> None:
         """Delete a single statement via journal tombstone.
 
         Args:
-            stmt: The Statement to delete
+            stmt: The Statement to delete. A
+                :class:`ftmq.store.lake.LakeStatement` (e.g. read back via
+                :meth:`ParquetStore.get_statements`) carries its own
+                fragment.
+            fragment: Fragment override – required to shadow a
+                fragment-bearing row when passing a plain ``Statement``;
+                leave unset otherwise.
         """
         with self._tags.touch(tag.JOURNAL_UPDATED):
             now = datetime.now(timezone.utc)
             with self._journal.writer(self.shards) as w:
-                w.add_statement(stmt, deleted_at=now)
+                w.add_statement(stmt, deleted_at=now, fragment=fragment)
 
     @no_api
-    def _collect_entity_statements(self, entity_id: str) -> list[Statement]:
+    def _collect_entity_statements(self, entity_id: str) -> list[LakeStatement]:
         """Read all statements for an entity from parquet + journal.
 
         Uses shard-partitioned query for efficient single-entity lookup.
+        Statements are keyed by :attr:`LakeStatement.dedupe_key` – the same
+        statement content under distinct fragments is distinct for
+        tombstoning purposes.
         """
-        stmts_by_id: dict[str, Statement] = {}
+        stmts_by_key: dict[str, LakeStatement] = {}
         journal = cast(SqlJournalStore, self._journal)
 
         # Read from parquet store (uses shard partition for pruning)
         for stmt in self._statements.get_statements(entity_id):
+            stmt = cast(LakeStatement, stmt)
             if stmt.id:
-                stmts_by_id[stmt.id] = stmt
+                stmts_by_key[stmt.dedupe_key] = stmt
 
         # Read from journal (may override parquet entries). Use the shard
         # index for an index-assisted scan, then filter by canonical_id in
@@ -409,10 +422,11 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
                     continue
                 if stmt.entity_id != entity_id:
                     continue
-                if stmt.id:
-                    stmts_by_id[stmt.id] = stmt
+                lake_stmt = LakeStatement.from_statement(stmt, row.fragment or "")
+                if lake_stmt.id:
+                    stmts_by_key[lake_stmt.dedupe_key] = lake_stmt
 
-        return list(stmts_by_id.values())
+        return list(stmts_by_key.values())
 
     @api_delegate("_api_stats")
     def get_statistics(self) -> DatasetStats:

@@ -115,15 +115,20 @@ The parquet statement store is partitioned by `(shard, bucket, origin)`:
 - `bucket` – coarse FtM schema group (thing / interval / document / page / pages / mention)
 - `origin` – caller-supplied source tag
 
-Each row carries `first_seen`, `last_seen`, and `deleted_at` directly in the parquet schema (no separate translog). The default query view filters `deleted_at IS NULL` per row.
+Each row carries `first_seen`, `last_seen`, `fragment`, and `deleted_at` directly in the parquet schema (no separate translog). The default query view filters `deleted_at IS NULL` per row.
 
-Writes are **append-only**: `append` sorts a per-shard batch and writes one parquet file per `(shard, bucket, origin)` partition. Duplicates and tombstones land as additional rows.
+Writes are **append-only**: `append` sorts a per-shard batch by `(bucket, origin, entity_id, fragment, prop, id, last_seen DESC)` and writes one parquet file per `(shard, bucket, origin)` partition. Duplicates and tombstones land as additional rows.
+
+Dedupe – both in the read-time `statement` view and in physical `merge` – routes every row into one of two isolated branches on the `fragment` column (empty-string sentinel, never NULL):
+
+- **non-fragment** (`fragment = ''`, the default): content-addressed dedup – latest `last_seen` per statement `id` wins; distinct ids never interact.
+- **fragment-bearing** (`fragment != ''`): supersession per `(origin, entity_id, prop, fragment)` group – every row tied at the group's max `last_seen` survives (the latest emission, multi-valued props included), older emissions go. See [Fragment Supersession](usage/entities.md#fragment-supersession) for semantics and the producer contract.
 
 The async `optimize` operation collapses the redundancy by running the three storage primitives in order, each acquiring the dataset-wide `.LOCK` so they don't race with each other or with appends:
 
 | Step | Cost | What it does |
 |------|------|--------------|
-| `merge()` | expensive | Per-partition rewrite: keep latest row per id (`ROW_NUMBER`), fold `first_seen` to min, drop tombstones past grace |
+| `merge()` | expensive | Per-partition rewrite: keep latest row per id (`ROW_NUMBER`) / latest emission per fragment group, fold `first_seen` to min, drop tombstones past grace |
 | `compact()` | cheap | Delta `OPTIMIZE compact` per partition – bin-packs small files |
 | `vacuum()` | cheap | Delta `VACUUM` – delete files no longer referenced in the Delta log |
 

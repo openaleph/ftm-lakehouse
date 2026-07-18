@@ -38,6 +38,7 @@ def _pack(stmt: Statement, deleted_at: datetime | None = None) -> dict:
     row["last_seen"] = row.get("last_seen") or now
     row["shard"] = entity_shard(row["canonical_id"], SHARDS)
     row["deleted_at"] = deleted_at
+    row["fragment"] = ""
     return row
 
 

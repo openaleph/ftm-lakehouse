@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Generator, Generic, NamedTuple, Self, TypeAlias, TypeVar
 
 from anystore.logging import get_logger
+from ftmq.store.lake import LakeStatement
 
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.exceptions import MalformedStatementError
@@ -22,12 +23,18 @@ class JournalRow(NamedTuple):
 
     ``shard`` is the entity-id hash bucket the statement routes to in the
     parquet store. PyArrow handles the final sort within each batch.
+    ``fragment`` is the supersession group key (empty string = non-fragment);
+    it rides as its own column – not inside the packed ``data`` – because it
+    is part of the journal's primary key. Writers derive it from
+    ``LakeStatement.fragment``; readers stamp it back via
+    :meth:`ftmq.store.lake.LakeStatement.from_statement`.
     """
 
     id: str
     shard: str
     data: str
     deleted_at: datetime | None
+    fragment: str = ""
 
 
 JournalRows: TypeAlias = Generator[JournalRow, None, None]
@@ -57,6 +64,7 @@ class BaseJournalWriter(EntityBuffer, Generic[S]):
                 row.shard,
                 pack_statement(row.stmt),
                 row.deleted_at,
+                row.stmt.fragment,
             )
 
     def add_statement(self, *args, **kwargs) -> None:
@@ -160,7 +168,9 @@ class BaseJournalStore(Generic[W]):
 
         Yields:
             :class:`StatementRow` ``(shard, stmt, deleted_at)`` produced by
-            unpacking each :class:`JournalRow`.
+            unpacking each :class:`JournalRow`; ``stmt`` is a
+            :class:`ftmq.store.lake.LakeStatement` stamped with the row's
+            ``fragment`` column.
         """
         for r in self.flush():
             try:
@@ -173,7 +183,9 @@ class BaseJournalStore(Generic[W]):
                     error=str(exc),
                 )
                 continue
-            yield StatementRow(r.shard, stmt, r.deleted_at)
+            yield StatementRow(
+                r.shard, LakeStatement.from_statement(stmt, r.fragment), r.deleted_at
+            )
 
     def count(self) -> int:
         """Count rows for this dataset."""

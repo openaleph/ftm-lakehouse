@@ -41,6 +41,7 @@ def _seed(store: ParquetStore) -> None:
     row["last_seen"] = now
     row["shard"] = entity_shard(row["canonical_id"], SHARDS)
     row["deleted_at"] = None
+    row["fragment"] = ""
     store.append(pa.Table.from_pylist([row], schema=SHARDED_SCHEMA))
 
 

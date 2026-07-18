@@ -55,7 +55,7 @@ description = "Happy Eyeballs for asyncio"
 optional = true
 python-versions = ">=3.10"
 groups = ["main"]
-markers = "extra == \"api\" or extra == \"http\" or extra == \"azure\" or extra == \"gcs\" or extra == \"s3\""
+markers = "extra == \"api\" or extra == \"http\" or extra == \"s3\" or extra == \"gcs\" or extra == \"azure\""
 files = [
     {file = "aiohappyeyeballs-2.7.1-py3-none-any.whl", hash = "sha256:9243213661e29250eb41368e5daa826fc017156c3b8a11440826b2e3ed376472"},
     {file = "aiohappyeyeballs-2.7.1.tar.gz", hash = "sha256:065665c041c42a5938ed220bdcd7230f22527fbec085e1853d2402c8a3615d9d"},
@@ -68,7 +68,7 @@ description = "Async http client/server framework (asyncio)"
 optional = true
 python-versions = ">=3.10"
 groups = ["main"]
-markers = "extra == \"api\" or extra == \"http\" or extra == \"azure\" or extra == \"gcs\" or extra == \"s3\""
+markers = "extra == \"api\" or extra == \"http\" or extra == \"s3\" or extra == \"gcs\" or extra == \"azure\""
 files = [
     {file = "aiohttp-3.14.1-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:8f6bb621e5863cfe8fe5ff5468002d200ec31f30f1280b259dc505b02595099e"},
     {file = "aiohttp-3.14.1-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:4f7215cb3933784f79ed20e5f050e15984f390424339b22375d5a53c933a0491"},
@@ -224,7 +224,7 @@ description = "aiosignal: a list of registered asynchronous callbacks"
 optional = true
 python-versions = ">=3.9"
 groups = ["main"]
-markers = "extra == \"api\" or extra == \"http\" or extra == \"azure\" or extra == \"gcs\" or extra == \"s3\""
+markers = "extra == \"api\" or extra == \"http\" or extra == \"s3\" or extra == \"gcs\" or extra == \"azure\""
 files = [
     {file = "aiosignal-1.4.0-py3-none-any.whl", hash = "sha256:053243f8b92b990551949e63930a839ff0cf0b0ebbe0597b0f3fb19e1a0fe82e"},
     {file = "aiosignal-1.4.0.tar.gz", hash = "sha256:f47eecd9468083c2029cc99945502cb7708b082c232f9aca65da147157b251c7"},
@@ -489,7 +489,7 @@ files = [
     {file = "attrs-26.1.0-py3-none-any.whl", hash = "sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309"},
     {file = "attrs-26.1.0.tar.gz", hash = "sha256:d03ceb89cb322a8fd706d4fb91940737b6642aa36998fe130a9bc96c985eff32"},
 ]
-markers = {main = "extra == \"api\" or extra == \"http\" or extra == \"azure\" or extra == \"gcs\" or extra == \"s3\""}
+markers = {main = "extra == \"api\" or extra == \"http\" or extra == \"s3\" or extra == \"gcs\" or extra == \"azure\""}
 
 [[package]]
 name = "aws-sam-translator"
@@ -1635,7 +1635,7 @@ description = "A list-like structure which implements collections.abc.MutableSeq
 optional = true
 python-versions = ">=3.9"
 groups = ["main"]
-markers = "extra == \"api\" or extra == \"http\" or extra == \"azure\" or extra == \"gcs\" or extra == \"s3\""
+markers = "extra == \"api\" or extra == \"http\" or extra == \"s3\" or extra == \"gcs\" or extra == \"azure\""
 files = [
     {file = "frozenlist-1.8.0-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:b37f6d31b3dcea7deb5e9696e529a6aa4a898adc33db82da12e4c60a7c4d2011"},
     {file = "frozenlist-1.8.0-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:ef2b7b394f208233e471abc541cc6991f907ffd47dc72584acee3147899d6565"},
@@ -1814,27 +1814,25 @@ name = "ftmq"
 version = "4.10.0"
 description = "followthemoney query dsl and io helpers"
 optional = false
-python-versions = "<3.15,>=3.11"
+python-versions = ">=3.11,<3.15"
 groups = ["main"]
-files = [
-    {file = "ftmq-4.10.0-py3-none-any.whl", hash = "sha256:abbd1ff0f816bf0fc65815161e7d87b58fa03711d4adfe30c6ebaf3c5279dea4"},
-    {file = "ftmq-4.10.0.tar.gz", hash = "sha256:346e66035608a1b341b32402ef442f3e75641c2a14afc750cfeecb33d2ec141c"},
-]
+files = []
+develop = false
 
 [package.dependencies]
 anystore = ">=1.2.5,<2.0.0"
 click = ">=8.4.2,<9.0.0"
 click-default-group = ">=1.2.4,<2.0.0"
-deltalake = {version = ">=1.6.2,<2.0.0", optional = true, markers = "extra == \"lake\""}
-duckdb = {version = ">=1.5.4,<2.0.0", optional = true, markers = "extra == \"lake\""}
+deltalake = {version = ">=1.6.2,<2.0.0", optional = true}
+duckdb = {version = ">=1.5.4,<2.0.0", optional = true}
 followthemoney = ">=4.10.0,<5.0.0"
 nomenklatura = ">=4.11.4,<5.0.0"
 normality = ">=3.1.0,<4.0.0"
 orjson = ">=3.10.18,<4.0.0"
-pandas = {version = ">=3.0.3,<4.0.0", optional = true, markers = "extra == \"lake\""}
-pyarrow = {version = ">=24.0.0,<25.0.0", optional = true, markers = "extra == \"lake\""}
+pandas = {version = ">=3.0.3,<4.0.0", optional = true}
+pyarrow = {version = ">=24.0.0,<25.0.0", optional = true}
 pydantic = ">=2.13.3,<3.0.0"
-rigour = ">=2.1.2,<3.0.0"
+rigour = ">=2.2.2,<3.0.0"
 
 [package.extras]
 aleph = ["alephclient (>=2.6.0,<3.0.0)", "furl (>=2.1.4,<3.0.0)"]
@@ -1843,6 +1841,12 @@ level = ["plyvel (>=1.5.1,<2.0.0)"]
 postgres = ["psycopg[pool] (>=3.2.9,<4.0.0)", "sqlalchemy (>=2.0.51,<3.0.0)"]
 redis = ["fakeredis (>=2.36.2,<3.0.0)", "redis (>=5.2.1,<6.0.0)"]
 sql = ["sqlalchemy (>=2.0.51,<3.0.0)"]
+
+[package.source]
+type = "git"
+url = "https://github.com/dataresearchcenter/ftmq.git"
+reference = "HEAD"
+resolved_reference = "2139eb4959c11699355e833685dfb63343db7417"
 
 [[package]]
 name = "gcsfs"
@@ -3795,7 +3799,7 @@ description = "multidict implementation"
 optional = true
 python-versions = ">=3.9"
 groups = ["main"]
-markers = "extra == \"api\" or extra == \"http\" or extra == \"azure\" or extra == \"gcs\" or extra == \"s3\""
+markers = "extra == \"api\" or extra == \"http\" or extra == \"s3\" or extra == \"gcs\" or extra == \"azure\""
 files = [
     {file = "multidict-6.7.1-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:c93c3db7ea657dd4637d57e74ab73de31bccefe144d3d4ce370052035bc85fb5"},
     {file = "multidict-6.7.1-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:974e72a2474600827abaeda71af0c53d9ebbc3c2eb7da37b37d7829ae31232d8"},
@@ -4693,7 +4697,7 @@ description = "Accelerated property cache"
 optional = true
 python-versions = ">=3.10"
 groups = ["main"]
-markers = "extra == \"api\" or extra == \"http\" or extra == \"azure\" or extra == \"gcs\" or extra == \"s3\""
+markers = "extra == \"api\" or extra == \"http\" or extra == \"s3\" or extra == \"gcs\" or extra == \"azure\""
 files = [
     {file = "propcache-0.5.2-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:d5a81be28596d6559f6131ef33e10200de6e17643b3c74ce03f9eb103be6ae8b"},
     {file = "propcache-0.5.2-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:29cbaac5ea0212663e6845e04b5e188d5a6ae6dd919810ac835bf1d3b42c3f4c"},
@@ -7277,7 +7281,7 @@ description = "Yet another URL library"
 optional = true
 python-versions = ">=3.10"
 groups = ["main"]
-markers = "extra == \"api\" or extra == \"http\" or extra == \"azure\" or extra == \"gcs\" or extra == \"s3\""
+markers = "extra == \"api\" or extra == \"http\" or extra == \"s3\" or extra == \"gcs\" or extra == \"azure\""
 files = [
     {file = "yarl-1.24.2-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:5249a113065c2b7a958bc699759e359cd61cfc81e3069662208f48f191b7ed12"},
     {file = "yarl-1.24.2-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:7f4425fa244fbf530b006d0c5f79ce920114cfff5b4f5f6056e669f8e160fdc0"},
@@ -7433,4 +7437,4 @@ s3 = ["s3fs"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<3.15"
-content-hash = "b23e61226a41ca25aa4821fa9b7bd3e6b8ca70449f573a87ddfed3401afddd06"
+content-hash = "022437d18174cc4fd75724b4654724664ab5d6541f91686fd999963be8e8b8f3"

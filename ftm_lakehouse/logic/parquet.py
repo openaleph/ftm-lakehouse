@@ -1,16 +1,19 @@
 """Pure functions for Delta Lake parquet operations.
 
-DuckDB view-SQL builders for ``LakeStore`` and the SQLAlchemy ``Select``
-that ``merge`` compiles per partition. Read-time dedupe lives in the
-``statement`` view (window over ``(shard, bucket, id)``); ``statement_raw``
-exposes the underlying Delta rows for code paths that need tombstones
-or per-row physical layout visible (``merge``, ``get_changed_entity_ids``).
+DuckDB view-SQL builders for ``LakeStore`` and the per-partition merge
+SQL. Read-time dedupe lives in the ``statement`` view; ``statement_raw``
+exposes the underlying Delta rows for code paths that need tombstones or
+per-row physical layout visible (``merge``, ``get_changed_entity_ids``).
+
+The ``statement`` view and ``merge`` compile from one shared skeleton
+(:func:`_dedupe_sql`), so read-time dedupe matches what a physical merge
+would produce by construction. See its docstring for the two-branch
+fragment semantics.
 """
 
 from datetime import datetime
 
 from deltalake import DeltaTable
-from sqlalchemy import Select, func, or_, select
 
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.model.statement import TABLE_RAW
@@ -51,125 +54,150 @@ def raw_view_sql(dt: DeltaTable) -> str:
     """SELECT body for the ``statement_raw`` view.
 
     Surfaces every physical row in the Delta table, including
-    tombstones and pre-merge duplicates. Used by :func:`build_merge_query`
+    tombstones and pre-merge duplicates. Used by :func:`build_merge_sql`
     and :meth:`get_changed_entity_ids` – any path that needs the
     physical layout visible.
     """
     return f"SELECT * FROM {_delta_scan_clause(dt)}"
 
 
-def dedupe_view_sql(dt: DeltaTable) -> str:
-    """SELECT body for the deduped ``statement`` view.
+def _dedupe_sql(
+    source: str,
+    where: str = "",
+    tombstone: str = "deleted_at IS NULL",
+    order_by: str = "",
+) -> str:
+    """Shared two-branch dedupe skeleton for the ``statement`` view and merge.
 
-    The view returns at most one row per statement ``id`` within each
-    ``(shard, bucket)`` slice (entity ids – and therefore statement
-    ids – are uniquely placed in one ``(shard, bucket)`` by the model
-    layer, so the window's ``PARTITION BY shard, bucket, id`` matches a
-    global window keyed by ``id``):
+    Rows route into two isolated branches on ``fragment`` (empty-string
+    sentinel, applied *before* any window runs so the branches can never
+    group with each other):
 
-    - ``ROW_NUMBER() OVER (PARTITION BY shard, bucket, id ORDER BY
-      last_seen DESC) = 1`` picks the row with the latest ``last_seen``
-      per id. Tombstones bump ``last_seen = deleted_at`` at write time,
-      so the tombstone wins ROW_NUMBER for a deleted statement; the
-      outer ``deleted_at IS NULL`` then filters it out – a deleted
-      entity is invisible to readers regardless of any surviving live
-      row alongside it.
-    - ``MIN(first_seen) OVER (PARTITION BY shard, bucket, id)``
-      surfaces the earliest ``first_seen`` for each id under the
-      ``first_seen`` column, so the dedupe matches what physical
-      ``merge`` would produce.
+    - **non-fragment** (``fragment = ''``): at most one row per statement
+      ``id`` – ``QUALIFY ROW_NUMBER() OVER (... ORDER BY last_seen DESC)
+      = 1`` picks the row with the latest ``last_seen``. Entity ids (and
+      therefore statement ids) are uniquely placed in one ``(shard,
+      bucket)`` by the model layer, so partitioning by ``(shard, bucket,
+      id)`` matches a global window keyed by ``id``. Tombstones bump
+      ``last_seen = deleted_at`` at write time, so the tombstone wins
+      ROW_NUMBER for a deleted statement and the ``tombstone`` predicate
+      decides whether it survives the final projection.
+    - **fragment-bearing** (``fragment != ''``): supersession per
+      ``(origin, entity_id, prop, fragment)`` group – ``QUALIFY
+      last_seen = MAX(last_seen) OVER (...)`` admits *every* row tied at
+      the group's maximum ``last_seen`` (multi-valued props of one
+      emission share their timestamp and survive together) and drops
+      earlier emissions. ``origin`` in the group key keeps the same
+      fragment under two origins as two independent supersession groups,
+      matching the per-``(shard, bucket, origin)`` scope of physical
+      merge.
 
-    The column list is explicit so ``first_seen`` resolves to the
-    windowed MIN and the helper columns (``rn``, ``first_seen_min``)
-    aren't projected through to consumers.
+    Both branches fold ``first_seen`` to ``MIN(first_seen)`` over their
+    group via ``SELECT * REPLACE``, so the surviving row carries its
+    group's earliest observation and read-time results match post-merge
+    results exactly.
 
-    Partition predicates (``WHERE shard = ? AND bucket = ?``) push
-    through this view to the parquet scan's File Filters because
-    ``shard`` / ``bucket`` are in the window's ``PARTITION BY`` – the
-    optimizer applies them before the window. That keeps each
-    per-partition read bounded to one parquet file's worth of rows.
+    Args:
+        source: Relation to read from – a ``delta_scan('...')`` clause
+            or a view name.
+        where: Optional ``WHERE ...`` clause scoping ``source``.
+        tombstone: Tombstone predicate applied after the branches union.
+        order_by: Optional ``ORDER BY ...`` clause on the final output.
+
+    Returns:
+        Executable DuckDB SQL.
     """
     return f"""
-SELECT
-    id, entity_id, canonical_id, dataset, bucket, origin, source,
-    schema, prop, prop_type, value, original_value, lang, external,
-    first_seen_min AS first_seen, last_seen, deleted_at, shard
-FROM (
-    SELECT *,
-        ROW_NUMBER() OVER (
-            PARTITION BY shard, bucket, id ORDER BY last_seen DESC
-        ) AS rn,
-        MIN(first_seen) OVER (PARTITION BY shard, bucket, id) AS first_seen_min
-    FROM {_delta_scan_clause(dt)}
+WITH base AS (
+    SELECT * FROM {source} {where}
+),
+nonfragment_rows AS (
+    SELECT * REPLACE (
+        MIN(first_seen) OVER (PARTITION BY shard, bucket, id) AS first_seen
+    )
+    FROM base
+    WHERE fragment = ''
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY shard, bucket, id ORDER BY last_seen DESC
+    ) = 1
+),
+fragment_rows AS (
+    SELECT * REPLACE (
+        MIN(first_seen) OVER (
+            PARTITION BY shard, bucket, origin, entity_id, prop, fragment
+        ) AS first_seen
+    )
+    FROM base
+    WHERE fragment != ''
+    QUALIFY last_seen = MAX(last_seen) OVER (
+        PARTITION BY shard, bucket, origin, entity_id, prop, fragment
+    )
 )
-WHERE rn = 1 AND deleted_at IS NULL
+SELECT * FROM (
+    SELECT * FROM nonfragment_rows
+    UNION ALL
+    SELECT * FROM fragment_rows
+)
+WHERE {tombstone}
+{order_by}
 """.strip()
 
 
-def build_merge_query(
+def dedupe_view_sql(dt: DeltaTable) -> str:
+    """SELECT body for the deduped ``statement`` view.
+
+    :func:`_dedupe_sql` over the live Delta scan with tombstones hidden
+    (``deleted_at IS NULL``) – a deleted entity is invisible to readers
+    regardless of any surviving live row alongside its tombstone.
+
+    Partition predicates (``WHERE shard = ? AND bucket = ?``) push
+    through this view to the parquet scan's File Filters because
+    ``shard`` / ``bucket`` are in both windows' ``PARTITION BY`` – the
+    optimizer applies them before the window. That keeps each
+    per-partition read bounded to one parquet file's worth of rows.
+    """
+    return _dedupe_sql(source=_delta_scan_clause(dt))
+
+
+def build_merge_sql(
     shard: str,
     bucket: str,
     origin: str,
     grace_cutoff: datetime,
-) -> Select:
-    """SQLAlchemy ``Select`` that collapses one partition for physical merge.
+) -> str:
+    """DuckDB SQL that collapses one partition for physical merge.
 
-    Targets the **raw** ``statement_raw`` view (not the deduped
-    ``statement``) because ``merge`` needs every row visible – including
-    tombstones within the grace window – so it can rewrite the partition
-    file in its physically-merged form. The returned query:
-
-    - filters the raw view to one ``(shard, bucket, origin)`` partition;
-    - computes ``MIN(first_seen) OVER (PARTITION BY id)`` so the surviving
-      row carries the earliest ``first_seen`` for that statement id;
-    - keeps the row with the latest ``last_seen`` per id via
-      ``ROW_NUMBER() OVER (PARTITION BY id ORDER BY last_seen DESC) = 1``;
-    - drops tombstones whose ``deleted_at`` is older than ``grace_cutoff``;
-    - orders by ``(entity_id, id, last_seen DESC)`` so the rewritten parquet
-      file is ready for future merges without re-sort.
-
-    Compile to executable DuckDB SQL with
-    ``str(query.compile(compile_kwargs={"literal_binds": True}))``.
+    :func:`_dedupe_sql` over the **raw** ``statement_raw`` view (not the
+    deduped ``statement``) because ``merge`` needs every row visible –
+    including tombstones within the grace window, which must persist
+    physically to keep shadowing their live rows – scoped to one
+    ``(shard, bucket, origin)`` partition. Output is ordered by
+    ``(entity_id, fragment, prop, id, last_seen DESC)`` – the file sort
+    key – so the rewritten parquet file is ready for future merges
+    without re-sort.
 
     Args:
         shard: Target shard value (hex-padded).
         bucket: Target bucket (``thing`` / ``interval`` / ``document`` /
             ``page`` / ``pages`` / ``mention``).
-        origin: Target origin tag.
+        origin: Target origin tag – validated at the write boundary;
+            single quotes are doubled here as defense in depth.
         grace_cutoff: Tombstones with ``deleted_at <= grace_cutoff`` are
             dropped. Typically ``now - LAKEHOUSE_GRACE_PERIOD_DAYS``.
 
     Returns:
-        A SQLAlchemy :class:`~sqlalchemy.sql.expression.Select` that
-        compiles to DuckDB SQL.
+        Executable DuckDB SQL.
     """
-    inner_cols = [c for c in TABLE_RAW.columns if c.name != "first_seen"]
-    inner = (
-        select(
-            *inner_cols,
-            func.min(TABLE_RAW.c.first_seen)
-            .over(partition_by=TABLE_RAW.c.id)
-            .label("first_seen"),
-            func.row_number()
-            .over(partition_by=TABLE_RAW.c.id, order_by=TABLE_RAW.c.last_seen.desc())
-            .label("rn"),
-        )
-        .where(
-            TABLE_RAW.c.shard == shard,
-            TABLE_RAW.c.bucket == bucket,
-            TABLE_RAW.c.origin == origin,
-        )
-        .subquery("merge_src")
-    )
-
-    return (
-        select(*[c for c in inner.c if c.name != "rn"])
-        .where(
-            inner.c.rn == 1,
-            or_(
-                inner.c.deleted_at.is_(None),
-                inner.c.deleted_at > grace_cutoff,
-            ),
-        )
-        .order_by(inner.c.entity_id, inner.c.id, inner.c.last_seen.desc())
+    safe_origin = origin.replace("'", "''")
+    return _dedupe_sql(
+        source=TABLE_RAW.name,
+        where=(
+            f"WHERE shard = '{shard}' AND bucket = '{bucket}' "
+            f"AND origin = '{safe_origin}'"
+        ),
+        tombstone=(
+            "(deleted_at IS NULL OR deleted_at > "
+            f"TIMESTAMPTZ '{grace_cutoff.isoformat()}')"
+        ),
+        order_by="ORDER BY entity_id, fragment, prop, id, last_seen DESC",
     )

@@ -493,3 +493,51 @@ def test_storage_journal_flush_skips_malformed_rows(request, journal):
     assert {row.stmt.entity_id for row in flushed} == {"good_1", "good_2"}
     # Flush remains destructive: nothing left in the journal.
     assert journal.count() == 0
+
+
+def test_storage_journal_fragment_round_trip(journal):
+    """Fragment rides through the journal as its own column and surfaces
+    on both JournalRow and StatementRow."""
+    with journal.writer(SHARDS) as w:
+        w.add_statement(make_statement("jane", "name", "Jane Doe"), fragment="row1")
+        w.add_statement(make_statement("john", "name", "John Smith"))
+
+    rows = {row.id: row for row in journal.flush()}
+    fragments = {unpack_statement(r.data).entity_id: r.fragment for r in rows.values()}
+    assert fragments == {"jane": "row1", "john": ""}
+
+
+def test_storage_journal_flush_statements_fragment(journal):
+    """flush_statements stamps fragment onto the LakeStatement."""
+    with journal.writer(SHARDS) as w:
+        w.add_statement(make_statement("jane", "name", "Jane Doe"), fragment="row1")
+
+    rows = list(journal.flush_statements())
+    assert len(rows) == 1
+    assert rows[0].stmt.fragment == "row1"
+
+
+def test_storage_journal_same_id_multiple_fragments(journal):
+    """The same statement content under distinct fragments (and without
+    one) is distinct rows – the primary key is (id, fragment)."""
+    stmt = make_statement("jane", "name", "Jane Doe")
+    with journal.writer(SHARDS) as w:
+        w.add_statement(stmt)
+        w.add_statement(stmt, fragment="row1")
+        w.add_statement(stmt, fragment="row2")
+
+    assert journal.count() == 3
+    rows = list(journal.flush())
+    assert sorted(r.fragment for r in rows) == ["", "row1", "row2"]
+    assert len({r.id for r in rows}) == 1
+
+
+def test_storage_journal_upsert_same_id_fragment(journal):
+    """Re-adding the same (id, fragment) upserts into one row."""
+    stmt = make_statement("jane", "name", "Jane Doe")
+    with journal.writer(SHARDS) as w:
+        w.add_statement(stmt, fragment="row1")
+    with journal.writer(SHARDS) as w:
+        w.add_statement(stmt, fragment="row1")
+
+    assert journal.count() == 1

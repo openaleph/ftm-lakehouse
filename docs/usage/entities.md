@@ -165,6 +165,52 @@ for entity in dataset.get_entities().query(origin="source_a"):
     print(entity.id)
 ```
 
+## Fragment Supersession
+
+Every statement is written in one of two modes, decided by the producer per statement. The default is **non-fragment**: content-addressed dedup, where each statement `id` lives or dies on its own `last_seen` and distinct ids never interact – everything described in this document so far.
+
+Passing a `fragment` switches a statement into **supersession** mode (the same capability as the original [followthemoney-store](https://github.com/alephdata/followthemoney-store) `fragment` column): a later emission of the same `(entity_id, prop, fragment)` triple completely replaces the older emission for that triple, even though the changed values produce different content-addressed statement ids.
+
+```python
+with dataset.get_entities().writer(origin="csv_import") as writer:
+    writer.add_entity(company, fragment="row42")
+
+# later, the source row changed – re-emit under the same fragment:
+with dataset.get_entities().writer(origin="csv_import") as writer:
+    writer.add_entity(updated_company, fragment="row42")
+
+# after flush, only the updated values are visible – the first emission
+# is superseded, not accumulated
+```
+
+The typical use is one fragment per source row in a CSV-style ingest (or per document in a crawler): re-processing the source replaces what that row previously said about the entity instead of accumulating stale values forever. `add_statement` accepts the same parameter for statement-level producers.
+
+### Semantics
+
+- **Scope is per `(entity_id, prop, fragment)`**, not per fragment as a whole. If the first emission had `name`, `address` and `country` and the re-emission only has `name` and `address`, the old `country` value survives – no newer row exists in its group. If you want whole-fragment replacement, emit explicit tombstones for the dropped props: statements read back from the store are `ftmq.store.lake.LakeStatement`s carrying their own fragment, so `delete_statement(stmt)` shadows the right group; the `fragment=` override is only needed for hand-built plain statements.
+- **Multi-valued props survive together.** All rows of one emission share a `last_seen`, so all values of the latest emission are kept (ties at the group maximum), and all values of older emissions go.
+- **The two modes are isolated.** A non-fragment row never supersedes a fragment row or vice versa, even with identical content. The same statement can legitimately exist under multiple fragments (and additionally without one) – `fragment` is part of the journal's primary key, but not part of the statement `id`.
+- **Origins are isolated too.** The same fragment written under two different origins forms two independent supersession groups, matching the `(shard, bucket, origin)` partition scope of `merge`.
+- **Tombstones participate.** A tombstone written with the fragment supersedes its group like any emission; the group disappears from queries immediately and is physically reaped once the tombstone passes the grace period. `delete_entity` handles this automatically – it reads each live row's fragment and writes fragment-matched tombstones.
+
+### Producer contract
+
+All rows of one logical fragment emission **must share the same `last_seen` timestamp** – supersession keeps every row tied at the group's maximum, so jitter within an emission would keep only the very latest row and break multi-valued props. `add_entity` pins one timestamp per emission (from the entity's `last_seen` / `last_change`, falling back to a single `now`); statement-level producers assign one timestamp per batch themselves:
+
+```python
+ts = datetime.now(timezone.utc).isoformat()
+with dataset.get_entities().writer(origin="import") as writer:
+    for prop, value in row_values:
+        writer.add_statement(
+            Statement(entity_id=entity_id, prop=prop, value=value, schema=schema, dataset=dataset.name, last_seen=ts),
+            fragment=f"row{row_number}",
+        )
+```
+
+Note that the FtM statement model truncates `last_seen` to **second granularity**: two emissions of the same fragment within the same second tie, and both survive. Distinct emissions need distinct timestamps – re-processing loops faster than once per second should carry producer-assigned timestamps.
+
+In storage, "no fragment" is the empty string, never NULL; the SDK translates `fragment=None` to `''` at the boundary.
+
 ## Deleting Entities
 
 Deletes are tombstones routed through the journal (or `EntityBuffer` for the bulk path). They land in parquet as rows with `deleted_at` set. The default query view filters out tombstones via `deleted_at IS NULL`, so deleted entities disappear from `query()` and `stream()` as soon as `merge` has collapsed the live + tombstone pair.
@@ -204,9 +250,9 @@ dataset.get_entities().flush()
 
 ## Deduplication
 
-**On write**: identical statements within the same journal window are de-duplicated by primary key (`id`); the journal's `ON CONFLICT (id) DO UPDATE` collapses re-emissions.
+**On write**: identical statements within the same journal window are de-duplicated by primary key (`id, fragment`); the journal's `ON CONFLICT (id, fragment) DO UPDATE` collapses re-emissions.
 
-**Across flushes**: re-flushing the same statement appends a new parquet row. The duplicates only collapse when `merge` runs. `merge` keeps the row with the latest `last_seen` per statement id and folds `first_seen` to the minimum across the group.
+**Across flushes**: re-flushing the same statement appends a new parquet row. The duplicates only collapse when `merge` runs. `merge` keeps the row with the latest `last_seen` per statement id (per supersession group for fragment rows) and folds `first_seen` to the minimum across the group.
 
 ```python
 dataset.get_entities().add(entity)
@@ -241,7 +287,7 @@ dataset.get_entities()._statements.compact()
 
 ### Merge (expensive)
 
-Per-partition rewrite that collapses duplicates (`ROW_NUMBER OVER (PARTITION BY id ORDER BY last_seen DESC) = 1`), folds `first_seen` to the min across the id group, and drops tombstones whose `deleted_at` is older than the grace cutoff.
+Per-partition rewrite that collapses duplicates, folds `first_seen` to the min across each group, and drops tombstones whose `deleted_at` is older than the grace cutoff. Non-fragment rows dedupe per statement `id` (`ROW_NUMBER OVER (PARTITION BY id ORDER BY last_seen DESC) = 1`); fragment rows keep the latest emission per `(entity_id, prop, fragment)` group.
 
 ```python
 dataset.get_entities().merge()  # uses default grace from settings

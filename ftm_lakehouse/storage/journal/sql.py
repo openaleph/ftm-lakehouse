@@ -15,6 +15,7 @@ from sqlalchemy import (
     delete,
     func,
     select,
+    tuple_,
 )
 from sqlalchemy.dialects.postgresql import insert as psql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -38,8 +39,14 @@ def make_journal_table(metadata: MetaData, dataset: str) -> Table:
     """Create the journal table schema.
 
     Rows are flushed in ``shard`` order so a per-shard batch can be built
-    cheaply; the final sort by (entity_id, id, last_seen DESC) happens in
-    PyArrow before each parquet append.
+    cheaply; the final sort by (entity_id, fragment, prop, id, last_seen
+    DESC) happens in PyArrow before each parquet append.
+
+    The primary key is ``(id, fragment)`` – the same statement content can
+    legitimately exist under multiple fragments (the content-addressed id
+    does not include the fragment). ``fragment`` uses the empty-string
+    sentinel for non-fragment rows, never NULL: SQL treats each NULL as
+    distinct in unique constraints, which would defeat the upsert.
     """
     return Table(
         f"journal_{dataset}",
@@ -48,6 +55,7 @@ def make_journal_table(metadata: MetaData, dataset: str) -> Table:
         Column("shard", String(8), nullable=False),
         Column("data", Text, nullable=False),
         Column("deleted_at", DateTime(timezone=True), nullable=True),
+        Column("fragment", String(255), primary_key=True, default=""),
         Index(f"ix_{dataset}_shard", "shard"),
     )
 
@@ -84,7 +92,7 @@ class SqlJournalWriter(BaseJournalWriter["SqlJournalStore"]):
                 self.tx = self.conn.begin()
             sqlite_istmt = sqlite_insert(table).values(rows)
             sqlite_stmt = sqlite_istmt.on_conflict_do_update(
-                index_elements=["id"],
+                index_elements=["id", "fragment"],
                 set_={
                     "shard": sqlite_istmt.excluded.shard,
                     "data": sqlite_istmt.excluded.data,
@@ -101,7 +109,7 @@ class SqlJournalWriter(BaseJournalWriter["SqlJournalStore"]):
                 try:
                     psql_istmt = psql_insert(table).values(rows)
                     psql_stmt = psql_istmt.on_conflict_do_update(
-                        index_elements=["id"],
+                        index_elements=["id", "fragment"],
                         set_={
                             "shard": psql_istmt.excluded.shard,
                             "data": psql_istmt.excluded.data,
@@ -208,6 +216,7 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
                             row.shard,
                             row.data,
                             row.deleted_at,
+                            row.fragment,
                         )
             finally:
                 cursor.close()
@@ -254,17 +263,26 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
                     )
                     try:
                         while rows := cursor.fetchmany(10_000):
-                            flushed: list[str] = []
+                            # Delete by full (id, fragment) primary key – a
+                            # bare id filter would also remove the same id's
+                            # rows under other fragments that may only be
+                            # yielded in a later batch.
+                            flushed: list[tuple[str, str]] = []
                             for row in rows:
-                                flushed.append(row.id)
+                                flushed.append((row.id, row.fragment))
                                 yield JournalRow(
                                     row.id,
                                     row.shard,
                                     row.data,
                                     row.deleted_at,
+                                    row.fragment,
                                 )
                             write_conn.execute(
-                                delete(self.table).where(self.table.c.id.in_(flushed))
+                                delete(self.table).where(
+                                    tuple_(self.table.c.id, self.table.c.fragment).in_(
+                                        flushed
+                                    )
+                                )
                             )
                     finally:
                         cursor.close()
