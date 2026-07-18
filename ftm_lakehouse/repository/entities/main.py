@@ -168,6 +168,7 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         self,
         statements: Iterable[StatementRow],
         now: datetime | None = None,
+        batch_size: int | None = WRITE_SHARD_BATCH,
     ) -> int:
         """Pack and append a shard-sorted stream of statements to parquet.
 
@@ -197,6 +198,8 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
             statements: Shard-sorted stream of :class:`StatementRow`.
             now: Default timestamp for missing ``first_seen`` /
                 ``last_seen``. Defaults to the current UTC time.
+            batch_size: Override batch size (memory cap) or set to ``None`` to
+                signal the caller already batches.
 
         Returns:
             Number of statements written.
@@ -220,8 +223,9 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         for row in statements:
             if current_shard is not None and current_shard != row.shard:
                 _emit()
-            elif len(buffer) >= WRITE_SHARD_BATCH:
-                _emit()
+            if batch_size is not None:
+                if len(buffer) >= batch_size:
+                    _emit()
             current_shard = row.shard
 
             data = pack_statement(row.stmt)

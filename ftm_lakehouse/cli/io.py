@@ -43,13 +43,13 @@ def _bulk_import(
             # Buffer hit its cap before we got to the bulk_size check
             # (e.g. bulk_size > LAKEHOUSE_MAX_BUFFER_ROWS). Drain and
             # retry the failed add so the item isn't dropped.
-            repo.write_statements(buffer.flush_buffer(), now=now)
+            repo.write_statements(buffer.flush_buffer(), now=now, batch_size=None)
             add(buffer, item)
         if len(buffer) >= bulk_size:
-            repo.write_statements(buffer.flush_buffer(), now=now)
+            repo.write_statements(buffer.flush_buffer(), now=now, batch_size=None)
 
     if buffer:
-        repo.write_statements(buffer.flush_buffer(), now=now)
+        repo.write_statements(buffer.flush_buffer(), now=now, batch_size=None)
 
 
 def import_entities(
