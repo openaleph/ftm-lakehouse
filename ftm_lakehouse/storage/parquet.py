@@ -263,6 +263,13 @@ class ParquetStore(LakehouseApiMixin):
         if len(batch) == 0:
             return
 
+        buckets = pc.unique(batch["bucket"]).to_pylist()
+        shards = pc.unique(batch["shard"]).to_pylist()
+        self.log.info(
+            f"Flushing {len(batch)} statements to parquet ...",
+            buckets=buckets,
+            shards=shards,
+        )
         batch = batch.sort_by(
             [
                 ("bucket", "ascending"),
@@ -276,7 +283,7 @@ class ParquetStore(LakehouseApiMixin):
         )
         with self._write_lock():
             mode = "append" if self.exists else "overwrite"
-            for bucket in pc.unique(batch["bucket"]).to_pylist():
+            for bucket in buckets:
                 sub = batch.filter(pc.equal(batch["bucket"], bucket))
                 write_deltalake(
                     str(self.uri),
@@ -321,25 +328,33 @@ class ParquetStore(LakehouseApiMixin):
         grace_cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         with self._write_lock():
             for shard, bucket, origin in self._list_partitions():
-                sql = build_merge_sql(shard, bucket, origin, grace_cutoff)
-                with self._lake.cursor() as cur:
-                    # ``to_arrow_reader`` yields a pyarrow RecordBatchReader
-                    # that DuckDB streams lazily from its execution
-                    # pipeline; ``write_deltalake`` consumes the reader
-                    # batch by batch, so the merge never materialises the
-                    # full partition in Python memory.
-                    reader = cur.execute(sql).to_arrow_reader()
-                    write_deltalake(
-                        str(self.uri),
-                        reader,
-                        mode="overwrite",
-                        partition_by=PARTITIONS,
-                        predicate=(
-                            f"shard = '{shard}' AND bucket = '{bucket}' "
-                            f"AND origin = '{origin}'"
-                        ),
-                        writer_properties=writer_for_bucket(bucket),
-                        storage_options=storage_options(),
+                with Took() as t:
+                    sql = build_merge_sql(shard, bucket, origin, grace_cutoff)
+                    with self._lake.cursor() as cur:
+                        # ``to_arrow_reader`` yields a pyarrow RecordBatchReader
+                        # that DuckDB streams lazily from its execution
+                        # pipeline; ``write_deltalake`` consumes the reader
+                        # batch by batch, so the merge never materialises the
+                        # full partition in Python memory.
+                        reader = cur.execute(sql).to_arrow_reader()
+                        write_deltalake(
+                            str(self.uri),
+                            reader,
+                            mode="overwrite",
+                            partition_by=PARTITIONS,
+                            predicate=(
+                                f"shard = '{shard}' AND bucket = '{bucket}' "
+                                f"AND origin = '{origin}'"
+                            ),
+                            writer_properties=writer_for_bucket(bucket),
+                            storage_options=storage_options(),
+                        )
+                    self.log.info(
+                        f"Merged partition `{shard}/{bucket}/{origin}`.",
+                        took=t.took,
+                        shard=shard,
+                        bucket=bucket,
+                        origin=origin,
                     )
 
     @no_api
@@ -355,14 +370,22 @@ class ParquetStore(LakehouseApiMixin):
             return
         with self._write_lock():
             for shard, bucket, origin in self._list_partitions():
-                self.deltatable.optimize.compact(
-                    partition_filters=[
-                        ("shard", "=", shard),
-                        ("bucket", "=", bucket),
-                        ("origin", "=", origin),
-                    ],
-                    writer_properties=writer_for_bucket(bucket),
-                )
+                with Took() as t:
+                    self.deltatable.optimize.compact(
+                        partition_filters=[
+                            ("shard", "=", shard),
+                            ("bucket", "=", bucket),
+                            ("origin", "=", origin),
+                        ],
+                        writer_properties=writer_for_bucket(bucket),
+                    )
+                    self.log.info(
+                        f"Compacted partition `{shard}/{bucket}/{origin}`.",
+                        took=t.took,
+                        shard=shard,
+                        bucket=bucket,
+                        origin=origin,
+                    )
 
     @no_api
     def vacuum(self, retention_hours: int = 0) -> None:
@@ -380,11 +403,13 @@ class ParquetStore(LakehouseApiMixin):
         if not self.exists:
             return
         with self._write_lock():
-            self.deltatable.vacuum(
-                retention_hours=retention_hours,
-                dry_run=False,
-                enforce_retention_duration=False,
-            )
+            with Took() as t:
+                self.deltatable.vacuum(
+                    retention_hours=retention_hours,
+                    dry_run=False,
+                    enforce_retention_duration=False,
+                )
+                self.log.info("Vacuumed.", took=t)
 
     @no_api
     def export_csv(self, key: str, q: Select | None = None) -> None:
@@ -520,9 +545,13 @@ class ParquetStore(LakehouseApiMixin):
         if q is None:
             q = Query().sql.statements
         for s, b in self._iter_shard_buckets(shard=shard):
-            scoped = q.where(column("shard") == s, column("bucket") == b)
-            for row in self._lake._execute(scoped):
-                yield StatementDict(**vars(row))
+            with Took() as t:
+                scoped = q.where(column("shard") == s, column("bucket") == b)
+                for row in self._lake._execute(scoped):
+                    yield StatementDict(**vars(row))
+                self.log.info(
+                    f"Iterate partition `{s}/{b}", shard=s, bucket=b, took=t.took
+                )
 
     def _query_data(self, q: Select | None = None) -> Iterator[EntityPayload]:
         """
