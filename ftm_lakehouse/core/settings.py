@@ -35,11 +35,14 @@ class Settings(BaseSettings):
     """Retry bound when acquiring the dataset write fence (``.LOCK``). Retry
     ``n`` sleeps ``n + rand(0, 1)`` seconds, so the total wait is roughly
     ``N²/2`` seconds – the default of 22 gives up after ~4.5 minutes, just
-    inside a 300s reverse-proxy read timeout. On exhaustion the writer raises
+    inside a 300s reverse-proxy read timeout (each API client waiting on the
+    fence pins a worker thread, so a higher bound multiplies across retrying
+    clients). Long-running local bulk jobs can raise it via
+    ``LAKEHOUSE_LOCK_MAX_RETRIES``. On exhaustion the writer raises
     ``RuntimeError`` instead of waiting forever; a lock left behind by a
     crashed writer must be released via ``ftm-lakehouse operations unlock``."""
 
-    duckdb_memory_limit: str = "4GB"
+    duckdb_memory_limit: str = "8GB"
     duckdb_temp_directory: str | None = None
 
     public_url_prefix: str | None = None

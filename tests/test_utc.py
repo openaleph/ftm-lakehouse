@@ -93,5 +93,8 @@ def test_statement_roundtrip_timestamps_are_utc(tmp_path):
     repo._statements.export_csv(path.EXPORTS_STATEMENTS)
     csv_content = (tmp_path / path.EXPORTS_STATEMENTS).read_text()
     header, first_row = csv_content.splitlines()[:2]
-    assert "+00:00" in first_row, first_row
+    # UTC may be rendered as `+00:00` or the `Z` (Zulu) suffix – both are UTC.
+    # ``Z`` only appears in the timestamp columns (checksums/ids are hex), and
+    # they are no longer the last column (``fragment`` trails them).
+    assert "+00:00" in first_row or "Z" in first_row, first_row
     assert "+01:00" not in csv_content and "+02:00" not in csv_content

@@ -3,11 +3,13 @@
 import time
 
 import pytest
+from ftmq.util import make_entity
 from typer.testing import CliRunner
 
 from ftm_lakehouse.cli import cli as cli_app
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.repository.entities.main import EntityRepository
+from tests.shared import JANE
 
 
 def test_parquet_store_unlock_releases_lock(tmp_path) -> None:
@@ -52,6 +54,22 @@ def test_write_lock_bounded_acquisition(tmp_path, monkeypatch) -> None:
 
     # Failing to acquire must not release the holder's lock.
     assert store._store.exists(path.LOCK)
+
+
+def test_vacuum_requires_write_fence(tmp_path, monkeypatch) -> None:
+    """vacuum acquires the dataset write fence – a held .LOCK fails it
+    instead of letting it delete files under a concurrent writer's feet."""
+    monkeypatch.setenv("LAKEHOUSE_LOCK_MAX_RETRIES", "1")
+    repo = EntityRepository("test", tmp_path)
+    with repo.writer() as writer:
+        writer.add_entity(make_entity(JANE))
+    repo.flush()
+
+    store = repo._statements
+    store._store.touch(path.LOCK)
+    with pytest.raises(RuntimeError, match="Already locked"):
+        store.vacuum()
+    assert store.unlock() is True
 
 
 @pytest.fixture()

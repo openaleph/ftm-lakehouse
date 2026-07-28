@@ -212,6 +212,28 @@ def test_delete_then_merge_cleans_main_table(tmp_path):
     assert {e.id for e in repo.query()} == {"john"}
 
 
+def test_delete_grace_zero_purges_clean_partition(tmp_path):
+    """merge(grace_period_days=0) physically reaps tombstones even in
+    partitions an earlier default merge already stamped clean – an explicit
+    grace bound bypasses the partition skip (a purge must reach cold
+    partitions too)."""
+    repo = _make_local_repo(tmp_path)
+    _populate(repo)
+
+    repo.delete_entity("jane")
+    repo.flush()
+    repo.merge()  # tombstones within grace survive; partitions stamped clean
+
+    dt = repo._statements.deltatable
+    raw = dt.to_pyarrow_table()
+    assert "jane" in set(raw.column("entity_id").to_pylist())
+
+    repo.merge(0)  # explicit grace forces the rewrite despite clean tags
+    raw = repo._statements.deltatable.to_pyarrow_table()
+    assert "jane" not in set(raw.column("entity_id").to_pylist())
+    assert {e.id for e in repo.query()} == {"john"}
+
+
 def test_deleted_at_appended_after_flush(tmp_path):
     """After delete + flush (no merge), tombstone rows exist alongside live rows."""
     repo = _make_local_repo(tmp_path)

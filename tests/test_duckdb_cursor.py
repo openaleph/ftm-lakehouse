@@ -39,7 +39,7 @@ def _seed(store: ParquetStore) -> None:
     row = pack_statement(stmt)
     row["first_seen"] = now
     row["last_seen"] = now
-    row["shard"] = entity_shard(row["canonical_id"], SHARDS)
+    row["shard"] = entity_shard(row["entity_id"], SHARDS)
     row["deleted_at"] = None
     row["fragment"] = ""
     store.append(pa.Table.from_pylist([row], schema=SHARDED_SCHEMA))

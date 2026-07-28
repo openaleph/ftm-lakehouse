@@ -2,7 +2,6 @@
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from itertools import islice
 from typing import Generator, Iterable, Iterator, cast
 
 import orjson
@@ -15,7 +14,7 @@ from anystore.util import Took, mask_uri
 from followthemoney import EntityProxy, Statement, StatementEntity
 from ftmq.io import smart_read_proxies
 from ftmq.model.stats import DatasetStats
-from ftmq.query import Query
+from ftmq.query import M, Query
 from ftmq.store.lake import LakeStatement, pack_statement
 from ftmq.types import StatementEntities, Statements, ValueEntities
 from sqlalchemy import select
@@ -26,7 +25,6 @@ from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.exceptions import MalformedStatementError
 from ftm_lakehouse.helpers.statements import unpack_statement
 from ftm_lakehouse.logic.entities.aggregate import aggregate_unsafe
-from ftm_lakehouse.logic.parquet import QUERY_IN_BATCH_SIZE
 from ftm_lakehouse.model.statement import SHARDED_SCHEMA, StatementRow
 from ftm_lakehouse.repository.base import BaseRepository, resolve_shards
 from ftm_lakehouse.repository.diff import ParquetDiffMixin, make_envelope
@@ -144,11 +142,7 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
                 self._tags.set(tag.STATEMENTS_UPDATED)
             return 0
 
-        with (
-            self._tags.touch(tag.JOURNAL_FLUSHED),
-            self._tags.touch(tag.STATEMENTS_UPDATED),
-            Took() as t,
-        ):
+        with self._tags.touch(tag.JOURNAL_FLUSHED), Took() as t:
             self.log.info("Flushing journal ...", journal=mask_uri(self._journal.uri))
 
             now = datetime.now(timezone.utc)
@@ -261,36 +255,47 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
     @api_delegate("_api_query")
     def query(
         self,
+        q: Query | None = None,
+        *,
         entity_ids: Iterable[str] | None = None,
         flush_first: bool = False,
-        **filters,
+        origin: str | None = None,
     ) -> StatementEntities:
-        """
-        Query entities from the parquet store.
-
-        Additional filter kwargs are passed to ftmq Query.
+        """Query entities from the parquet store.
 
         Args:
-            entity_ids: Filter by entity IDs
-            flush_first: Flush journal before querying (default False)
+            q: ftmq ``Query`` of entity-level filters (schema, properties, ...).
+            entity_ids: Restrict to these entity ids (folded in as
+                ``M(entity_id__in=...)``).
+            flush_first: Flush the journal to parquet before querying.
+            origin: Restrict to statements of this origin – a storage-level row
+                filter, so an assembled entity carries only that origin's
+                statements.
 
         Yields:
-            StatementEntity objects matching the query
+            StatementEntity objects matching the query.
         """
         if flush_first:
             self.flush()
-
         if entity_ids:
-            filters["entity_id__in"] = list(entity_ids)
-        q = Query().where(**filters)
-
-        yield from self._statements.query(q)
+            q = (q or Query()).where(M(entity_id__in=list(entity_ids)))
+        yield from self._statements.query(q, origin=origin)
 
     @api_delegate("_api_query_statements")
-    def query_statements(self, q: Query | None = None) -> Statements:
-        q = q or Query()
-        sql = q.sql.statements
-        yield from self._statements.query_statements(sql)
+    def query_statements(
+        self, q: Query | None = None, origin: str | None = None
+    ) -> Statements:
+        """Query statements from the parquet store.
+
+        Args:
+            q: ftmq ``Query`` – filters plus ordering / slicing.
+            origin: Restrict to statements of this origin (storage-level
+                row filter).
+
+        Yields:
+            :class:`~ftmq.store.lake.LakeStatement` objects.
+        """
+        yield from self._statements.query_statements(q, origin=origin)
 
     def get(
         self,
@@ -299,7 +304,9 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         flush_first: bool = False,
     ) -> StatementEntity | None:
         """Get a single entity by ID."""
-        for entity in self.query([entity_id], flush_first, origin=origin):
+        for entity in self.query(
+            entity_ids=[entity_id], flush_first=flush_first, origin=origin
+        ):
             return entity
         return None
 
@@ -316,21 +323,25 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
 
     @no_api
     def export_entities(self, statements_csv_uri: str | None = None) -> None:
-        """
-        Export entities to a JSON lines file without FtM object construction.
+        """Export entities to a JSON lines file without FtM object construction.
 
-        Uses aggregate_unsafe() to bypass Statement/StatementEntity/to_dict()
-        and writes directly to orjson output.
+        Uses :func:`aggregate_unsafe` to bypass Statement/StatementEntity/
+        ``to_dict()`` and writes directly to orjson output.
 
-        When ``statements_csv_uri`` is provided (e.g. from ``make --full``
-        where statements.csv was just exported), reads the already-sorted CSV
-        instead of re-scanning the parquet store.
+        The statement source defaults to a **fresh** ``statements.csv`` when one
+        exists – streaming the pre-sorted CSV into ``aggregate_unsafe`` is ~2x
+        faster than re-scanning the parquet store, which pays per-row
+        DuckDB→Python marshaling – and falls back to the live parquet view
+        otherwise.
 
         Args:
-            statements_csv_uri: Optional path to a fresh, sorted statements.csv
+            statements_csv_uri: Force a specific sorted statements.csv instead
+                of the freshness-based default.
         """
         self._store.ensure_parent(path.ENTITIES_JSON)
 
+        if statements_csv_uri is None:
+            statements_csv_uri = self._fresh_statements_csv()
         if statements_csv_uri is not None:
             rows = smart_stream_csv(statements_csv_uri)
         else:
@@ -341,6 +352,23 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
 
         with self._store.open(path.ENTITIES_JSON, "wb") as fh:
             smart_write_json(fh, entities)
+
+    def _fresh_statements_csv(self) -> str | None:
+        """URI of the exported ``statements.csv`` if it's current, else ``None``.
+
+        Current = its freshness tag (its own target key) is newer than
+        ``statements/last_updated`` (bumped by appends *and* merges, so an
+        optimize invalidates the CSV) and ``journal/last_updated`` (unflushed
+        journal data means the CSV is behind). Within a full export run
+        statements.csv is written first, so entity export streams it instead
+        of re-scanning parquet.
+        """
+        if not self._store.exists(path.EXPORTS_STATEMENTS):
+            return None
+        deps = [tag.STATEMENTS_UPDATED, tag.JOURNAL_UPDATED]
+        if self._tags.is_latest(path.EXPORTS_STATEMENTS, deps):
+            return self._store.to_uri(path.EXPORTS_STATEMENTS)
+        return None
 
     @api_delegate("_api_delete_entity")
     def delete_entity(self, entity_id: str) -> int:
@@ -404,7 +432,7 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
                 stmts_by_key[stmt.dedupe_key] = stmt
 
         # Read from journal (may override parquet entries). Use the shard
-        # index for an index-assisted scan, then filter by canonical_id in
+        # index for an index-assisted scan, then filter by entity_id in
         # the unpacked statement.
         shard = path.entity_shard(entity_id, self.shards)
         q = (
@@ -454,26 +482,29 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         return self._statements.get_changed_entity_ids(since)
 
     @no_api
-    def _write_diff(self, entity_ids: Iterator[str], ts: datetime, **kwargs) -> str:
+    def _write_diff(
+        self, entity_ids: Iterator[str], since: datetime, ts: datetime, **kwargs
+    ) -> str:
         """Write entities as line-based JSON with operation envelopes."""
         key = path.entities_diff(ts)
         with self._store.open(key, "wb") as o:
-            smart_write_json(o, self._get_delta_entities(entity_ids))
+            smart_write_json(o, self._get_delta_entities(entity_ids, since))
         return self._store.to_uri(key)
 
     @no_api
     def _get_delta_entities(
-        self, entity_ids: Iterator[str]
+        self, entity_ids: Iterator[str], since: datetime
     ) -> Generator[SDict, None, None]:
-        original_ids: set[str] = set()
+        """ADD envelopes for entities changed since ``since`` – one scoped
+        subquery per partition via :meth:`ParquetStore.query_changed`, no
+        per-batch ``IN`` loop – plus DEL envelopes for changed ids whose live
+        statements are all gone."""
+        original_ids: set[str] = set(entity_ids)
         seen_ids: set[str] = set()
-        it = iter(entity_ids)
-        while batch := set(islice(it, QUERY_IN_BATCH_SIZE)):
-            original_ids.update(batch)
-            for entity in self.query(entity_ids=batch, flush_first=False):
-                if entity.id:
-                    seen_ids.add(entity.id)
-                yield make_envelope(entity.to_dict())
+        for entity in self._statements.query_changed(since):
+            if entity.id:
+                seen_ids.add(entity.id)
+            yield make_envelope(entity.to_dict())
         for entity_id in original_ids - seen_ids:
             yield make_envelope({"id": entity_id}, op="DEL")
 

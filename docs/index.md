@@ -41,7 +41,7 @@ The **entities** interface is the primary way to work with [FollowTheMoney](http
 
 Entities are stored as _[statements](https://followthemoney.tech/docs/statements/)_ - granular property-level records that enable versioning, provenance tracking, and incremental updates.
 
-A statement represents a single fact: one property value for one entity from one source. Each statement contains an `entity_id`, `schema` (entity type), `prop` (property name), `value`, and `dataset` identifier. This decomposition allows tracking where each piece of information originated - which source file, processing step, or import batch contributed a specific value. The `canonical_id` field enables entity deduplication by linking multiple source entities that represent the same real-world thing.
+A statement represents a single fact: one property value for one entity from one source. Each statement contains an `entity_id`, `schema` (entity type), `prop` (property name), `value`, and `dataset` identifier. This decomposition allows tracking where each piece of information originated - which source file, processing step, or import batch contributed a specific value. This is a single-dataset store with no in-store entity resolution, so entities are keyed on `entity_id` and `canonical_id` is not persisted (it always equals `entity_id`).
 
 This statement-based storage model makes it possible to merge data from multiple sources while preserving full provenance, perform incremental updates without reprocessing entire datasets, and use standard file-based tools (sorting, filtering) rather than requiring database infrastructure.
 

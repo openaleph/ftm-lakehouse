@@ -5,8 +5,10 @@ from datetime import datetime, timezone
 
 import pyarrow as pa
 from followthemoney import Statement
+from ftmq.store.base import DEFAULT_ORIGIN
 from ftmq.store.lake import pack_statement
 
+from ftm_lakehouse.core.conventions import tag
 from ftm_lakehouse.core.conventions.path import entity_shard
 from ftm_lakehouse.model.statement import SHARDED_SCHEMA, TABLE_RAW
 from ftm_lakehouse.storage.parquet import ParquetStore
@@ -36,7 +38,7 @@ def _pack(stmt: Statement, deleted_at: datetime | None = None) -> dict:
     row = pack_statement(stmt)
     row["first_seen"] = row.get("first_seen") or now
     row["last_seen"] = row.get("last_seen") or now
-    row["shard"] = entity_shard(row["canonical_id"], SHARDS)
+    row["shard"] = entity_shard(row["entity_id"], SHARDS)
     row["deleted_at"] = deleted_at
     row["fragment"] = ""
     return row
@@ -56,7 +58,8 @@ def _flush(store: ParquetStore, rows: list[dict]) -> int:
 
 
 def _row_count(store: ParquetStore) -> int:
-    """Physical row count from the raw view – bypasses dedupe-on-read."""
+    """Physical row count from the raw view – pre-merge duplicates and
+    tombstones included (the live view only hides tombstones)."""
     with store._lake.cursor() as cur:
         return cur.execute(f"SELECT COUNT(*) FROM {TABLE_RAW.name}").fetchone()[0]
 
@@ -118,37 +121,95 @@ def test_storage_parquet_merge_collapses_duplicates(tmp_path):
     assert stmt.last_seen == datetime(2021, 6, 1, tzinfo=timezone.utc)
 
 
-def test_storage_parquet_soft_delete_hidden_without_merge(tmp_path):
-    """Dedupe-on-read hides a tombstoned statement before merge runs.
+def test_storage_parquet_soft_delete_hidden_after_merge(tmp_path):
+    """A tombstone hides its statement once ``merge`` makes the store canonical.
 
-    The live row and the tombstone coexist physically until ``merge()``
-    rewrites the partition, but the deduped ``statement`` view picks
-    the latest ``last_seen`` per id (the tombstone) and then filters
-    ``deleted_at IS NULL``, so the statement is invisible to queries
-    from the moment the tombstone lands.
+    The live view is a plain ``deleted_at IS NULL`` scan with no read-time
+    dedupe, so before merge the live row and the tombstone coexist and the
+    live row stays visible. ``merge`` collapses the id to its tombstone (the
+    latest ``last_seen``), which the live view then filters out.
     """
     store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
 
     stmt = make_statement("jane", "name", "Jane Doe")
     _flush(store, [_pack(stmt)])
+    store.merge()
     assert len(list(store.query_statements())) == 1
 
-    # Tombstone has a strictly LATER last_seen so ROW_NUMBER picks it
-    # as the surviving row per id; deleted_at IS NOT NULL then filters it.
+    # Tombstone has a strictly LATER last_seen so merge picks it as the
+    # surviving row per id; deleted_at IS NOT NULL then filters it out.
     tomb = _pack(stmt, deleted_at=datetime(2025, 1, 1, tzinfo=timezone.utc))
     tomb["last_seen"] = datetime(2025, 1, 1, tzinfo=timezone.utc)
     _flush(store, [tomb])
 
-    # Dedupe-on-read picks the tombstone and filters it – nothing visible.
-    assert list(store.query_statements()) == []
-
-    # Two physical rows still on disk until merge reaps them.
+    # Before merge the live row is still visible – no read-time dedupe.
+    assert len(list(store.query_statements())) == 1
     assert _row_count(store) == 2
 
-    # Merge with grace=0 drops both physical rows.
+    # Merge with grace=0 collapses the id to its tombstone and reaps both rows.
     store.merge(grace_period_days=0)
     assert list(store.query_statements()) == []
     assert _row_count(store) == 0
+
+
+def test_storage_parquet_merge_skips_unchanged_partitions(tmp_path):
+    """merge() rewrites only partitions dirtied since their last merge.
+
+    Asserts the freshness-tag mechanism directly: ``append`` stamps a
+    ``last_updated`` tag per touched ``(shard, bucket, origin)``; ``merge``
+    rewrites (and stamps ``last_optimized`` on) only partitions whose
+    ``last_updated`` is newer than ``last_optimized``. So a skipped partition's
+    ``last_optimized`` tag is left untouched, while a rewritten one's advances.
+    """
+    store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
+
+    # two entities in distinct shards => two `thing` partitions, each with a dup
+    jane_shard = entity_shard("e-jane", SHARDS)
+    john_shard = entity_shard("e-john", SHARDS)
+    assert jane_shard != john_shard
+    for eid in ("e-jane", "e-john"):
+        _flush(store, [_pack(make_statement(eid, "name", f"{eid} v1"))])
+        _flush(store, [_pack(make_statement(eid, "name", f"{eid} v1"))])
+    assert _row_count(store) == 4  # two partitions x two duplicate rows
+
+    # per-partition freshness-tag keys (bucket "thing", default origin)
+    jane_opt = tag.statements_partition_optimized(jane_shard, "thing", DEFAULT_ORIGIN)
+    john_opt = tag.statements_partition_optimized(john_shard, "thing", DEFAULT_ORIGIN)
+    jane_upd = tag.statements_partition_updated(jane_shard, "thing", DEFAULT_ORIGIN)
+    john_upd = tag.statements_partition_updated(john_shard, "thing", DEFAULT_ORIGIN)
+
+    # before the first merge both partitions are dirty (no last_optimized yet)
+    assert not store._tags.is_latest(jane_opt, [jane_upd])
+    assert not store._tags.is_latest(john_opt, [john_upd])
+
+    store.merge()
+    assert _row_count(store) == 2  # both partitions collapsed
+    # both partitions now optimized (last_optimized newer than last_updated)
+    assert store._tags.is_latest(jane_opt, [jane_upd])
+    assert store._tags.is_latest(john_opt, [john_upd])
+    jane_opt_ts = store._tags.get(jane_opt)
+    john_opt_ts = store._tags.get(john_opt)
+
+    # no-op merge: nothing dirtied since last merge -> no partition re-stamped
+    store.merge()
+    assert store._tags.get(jane_opt) == jane_opt_ts
+    assert store._tags.get(john_opt) == john_opt_ts
+    assert _row_count(store) == 2
+
+    # touch only e-jane's partition with another duplicate
+    _flush(store, [_pack(make_statement("e-jane", "name", "e-jane v1"))])
+    assert _row_count(store) == 3
+    # e-jane is now dirty (last_updated newer than last_optimized); e-john clean
+    assert not store._tags.is_latest(jane_opt, [jane_upd])
+    assert store._tags.is_latest(john_opt, [john_upd])
+
+    store.merge()
+    assert _row_count(store) == 2
+    # e-jane was rewritten -> its last_optimized advanced and it is clean again
+    assert store._tags.get(jane_opt) > jane_opt_ts
+    assert store._tags.is_latest(jane_opt, [jane_upd])
+    # e-john was skipped -> its last_optimized tag is untouched
+    assert store._tags.get(john_opt) == john_opt_ts
 
 
 def test_storage_parquet_get_statements_uses_shard(tmp_path):

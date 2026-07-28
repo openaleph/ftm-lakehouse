@@ -115,16 +115,16 @@ The parquet statement store is partitioned by `(shard, bucket, origin)`:
 - `bucket` – coarse FtM schema group (thing / interval / document / page / pages / mention)
 - `origin` – caller-supplied source tag
 
-Each row carries `first_seen`, `last_seen`, `fragment`, and `deleted_at` directly in the parquet schema (no separate translog). The default query view filters `deleted_at IS NULL` per row.
+Each row carries `first_seen`, `last_seen`, `fragment`, and `deleted_at` directly in the parquet schema (no separate translog). The live `statement` query view is a plain `WHERE deleted_at IS NULL` scan – **no read-time dedupe** – so a filter (`schema` / `prop` / `entity_id`) pushes straight through to DuckDB's per-file statistics.
 
 Writes are **append-only**: `append` sorts a per-shard batch by `(bucket, origin, entity_id, fragment, prop, id, last_seen DESC)` and writes one parquet file per `(shard, bucket, origin)` partition. Duplicates and tombstones land as additional rows.
 
-Dedupe – both in the read-time `statement` view and in physical `merge` – routes every row into one of two isolated branches on the `fragment` column (empty-string sentinel, never NULL):
+**Correctness assumes an optimized store.** Dedupe, fragment supersession, `first_seen`/`last_seen` folding, and tombstone reaping all happen in `merge`; between a write and the next merge, reads can surface duplicate ids and rows whose delete has not been applied. Run `optimize` before you query or export. `merge` routes every row into one of two isolated branches on the `fragment` column (empty-string sentinel, never NULL):
 
-- **non-fragment** (`fragment = ''`, the default): content-addressed dedup – latest `last_seen` per statement `id` wins; distinct ids never interact.
+- **non-fragment** (`fragment = ''`, the default): content-addressed dedup – latest `last_seen` per statement `id` wins; distinct ids never interact. Scoped per `(shard, bucket, origin)` partition, so the *same* statement observed under two origins is kept once per origin (merge cannot cross origin partitions).
 - **fragment-bearing** (`fragment != ''`): supersession per `(origin, entity_id, prop, fragment)` group – every row tied at the group's max `last_seen` survives (the latest emission, multi-valued props included), older emissions go. See [Fragment Supersession](usage/entities.md#fragment-supersession) for semantics and the producer contract.
 
-The async `optimize` operation collapses the redundancy by running the three storage primitives in order, each acquiring the dataset-wide `.LOCK` so they don't race with each other or with appends:
+The async `optimize` operation produces this canonical state by running the three storage primitives in order, each acquiring the dataset-wide `.LOCK` so they don't race with each other or with appends:
 
 | Step | Cost | What it does |
 |------|------|--------------|
@@ -137,12 +137,12 @@ The async `optimize` operation collapses the redundancy by running the three sto
 The `shard` partition key is the unit that keeps per-partition working sets bounded, independent of total dataset size. Everything expensive in the lakehouse operates one `(shard, bucket)` partition at a time:
 
 - **Writes:** statement rows arrive shard-sorted from the journal (the journal table is indexed by shard), and `append` buffers at most one shard's batch in memory before writing it out.
-- **Reads:** statement queries iterate `(shard, bucket)` partitions in Python and push `WHERE shard = ?` into DuckDB, so the read-time dedupe window only ever spans one partition's parquet files. Single-entity lookups hash the entity id and scan just its own shard.
+- **Reads:** statement queries iterate `(shard, bucket)` partitions in Python and push `WHERE shard = ?` into DuckDB; the live view is a plain scan, so filters push to file statistics and a full-store `ORDER BY entity_id` stays bounded to one partition. Single-entity lookups hash the entity id and scan just its own shard.
 - **Optimize:** the merge rewrite materializes one partition at a time – its memory and rewrite cost scale with the largest partition, not the whole table.
 
 Sharding is a trade-off, not a free win: every shard multiplies the partition count (`shard × bucket × origin`), which means more small parquet files, more Delta log metadata, and more per-partition query iterations. For small and medium datasets that overhead costs more than the bounded working sets gain.
 
-That's why the **default is `0`** – a single shard (`shard <= 1` collapses to one `"0"` partition). The default is hardcoded, deliberately not an environment setting: the shard count is per-dataset configuration, recorded in the dataset's `config.yml` at creation (e.g. `ensure_dataset("big_leak", shards=8)`), and every reader and writer resolves it from there – a process running with a different environment cannot mis-shard an existing dataset. Don't configure shards unless the dataset is huge: from roughly tens of millions of statements upward, set `shards: 8` (or more, scaling with entity count) so dedupe windows and merge rewrites stay bounded. The shard count is **immutable after the first write** – changing it requires a full rewrite of the statement store, so size it for the data you expect, not the data you have on day one.
+That's why the **default is `0`** – a single shard (`shard <= 1` collapses to one `"0"` partition). The default is hardcoded, deliberately not an environment setting: the shard count is per-dataset configuration, recorded in the dataset's `config.yml` at creation (e.g. `ensure_dataset("big_leak", shards=8)`), and every reader and writer resolves it from there – a process running with a different environment cannot mis-shard an existing dataset. Don't configure shards unless the dataset is huge: from roughly tens of millions of statements upward, set `shards: 8` (or more, scaling with entity count) so merge rewrites stay bounded. The shard count is **immutable after the first write** – changing it requires a full rewrite of the statement store, so size it for the data you expect, not the data you have on day one.
 
 **Principles:**
 

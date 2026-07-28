@@ -26,7 +26,6 @@ def _stmt(i: int) -> Statement:
     return Statement(
         id=f"stmt-{i}",
         entity_id=f"entity-{i}",
-        canonical_id=f"entity-{i}",
         prop="name",
         schema="Person",
         value=f"Name {i}",

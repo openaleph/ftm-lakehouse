@@ -1,10 +1,14 @@
-"""Fragment supersession end-to-end: journal → parquet → dedupe-on-read.
+"""Fragment supersession end-to-end: journal → parquet → merge.
 
 A statement written with a ``fragment`` participates in ``(entity_id,
 prop, fragment)``-keyed supersession – a later emission of the same
 triple replaces the older one even though the content-addressed
 statement ids differ. Non-fragment statements (the default) keep the
 existing content-addressed dedup; the two modes never interact.
+
+Supersession is applied by ``merge`` (the live view does no dedupe), so
+these tests merge before asserting which emission survives – between a
+write and the next merge both emissions are physically present.
 """
 
 from datetime import datetime, timezone
@@ -76,6 +80,7 @@ def test_fragment_supersession_replaces_older_emission(repo):
     with repo.writer() as w:
         w.add_statement(_stmt("name", "Acme Corp", T2), fragment="row42")
     repo.flush()
+    repo.merge()
 
     assert _values(repo, "name") == ["Acme Corp"]
 
@@ -91,6 +96,7 @@ def test_fragment_multi_value_props_survive_together(repo):
         w.add_statement(_stmt("name", "Acme Corp", T2), fragment="row42")
         w.add_statement(_stmt("name", "Acme Ltd", T2), fragment="row42")
     repo.flush()
+    repo.merge()
 
     assert _values(repo, "name") == ["Acme Corp", "Acme Ltd"]
 
@@ -106,6 +112,7 @@ def test_fragment_prop_dropped_between_emissions_survives(repo):
     with repo.writer() as w:
         w.add_statement(_stmt("name", "Acme Corp", T2), fragment="row42")
     repo.flush()
+    repo.merge()
 
     assert _values(repo, "name") == ["Acme Corp"]
     assert _values(repo, "country") == ["de"]
@@ -164,6 +171,7 @@ def test_add_entity_fragment_emissions(repo):
     with repo.writer() as w:
         w.add_entity(changed, fragment="row1")
     repo.flush()
+    repo.merge()
 
     entity = repo.get("jane")
     assert entity is not None
@@ -183,10 +191,26 @@ def test_delete_entity_with_fragments(repo):
     count = repo.delete_entity("acme")
     assert count == 2
     repo.flush()
+    repo.merge()
 
     assert repo.get("acme") is None
-    repo.merge()
-    assert repo.get("acme") is None
+
+
+def test_query_statements_fragment_roundtrip(repo):
+    """``query_statements`` exposes ``fragment`` in local AND api mode – the
+    NDJSON wire carries it as an explicit field (``Statement.to_dict`` has
+    no notion of it) and the client rebuilds ``LakeStatement``s, so
+    statement-level tombstones land in the correct supersession branch
+    either way."""
+    repo, _ = repo
+    with repo.writer() as w:
+        w.add_statement(_stmt("name", "Acme Inc", T1), fragment="row42")
+        w.add_statement(_stmt("country", "de", T1))
+    repo.flush()
+
+    stmts = list(repo.query_statements())
+    assert all(isinstance(s, LakeStatement) for s in stmts)
+    assert {s.prop: s.fragment for s in stmts} == {"name": "row42", "country": ""}
 
 
 def test_read_statements_expose_fragment(local_repo):

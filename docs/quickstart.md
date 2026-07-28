@@ -164,7 +164,7 @@ ftm-lakehouse -d my_dataset archive get <checksum> -o output.pdf
 
 ### Maintenance
 
-The parquet statement store is append-only on the hot path. Deduplication and tombstone reaping happen via the async optimize operation (merge + compact + vacuum in one pass):
+The parquet statement store is append-only on the hot path. Deduplication and tombstone reaping happen via the async optimize operation (merge + compact + vacuum in one pass). Reads have no read-time dedupe, so queries, exports, and statistics assume an optimized store – run this after write batches and before reading:
 
 ```bash
 ftm-lakehouse -d my_dataset operations optimize

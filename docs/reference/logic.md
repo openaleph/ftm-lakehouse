@@ -13,7 +13,7 @@ for entity in aggregate_unsafe(statement_dicts, "my_dataset"):
     print(f"{entity['id']}: {entity['caption']}")
 ```
 
-`aggregate_unsafe` assumes the input is pre-sorted by `canonical_id` – the parquet store guarantees this for its queries.
+`aggregate_unsafe` assumes the input is pre-sorted by `entity_id` – the parquet store guarantees this for its queries.
 
 ::: ftm_lakehouse.logic.aggregate_unsafe
     options:

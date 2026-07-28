@@ -41,6 +41,7 @@ class EntityBuffer:
         shards: int,
         origin: str | None = None,
         max_rows: int | None = None,
+        last_seen: datetime | None = None,
     ) -> None:
         self.dataset: str = dataset
         self.shards: int = shards
@@ -48,6 +49,9 @@ class EntityBuffer:
         self.max_rows: int = (
             max_rows if max_rows is not None else settings.max_buffer_rows
         )
+        # Default emission timestamp for entities that carry none of their
+        # own (:meth:`add_entity` pin chain) - e.g. the CLI ``--last-seen``.
+        self.last_seen: str | None = last_seen.isoformat() if last_seen else None
         self._buffer: dict[str, StatementRow] = {}
         self._buffer_size: int = 0
 
@@ -63,6 +67,7 @@ class EntityBuffer:
         stmt: Statement,
         deleted_at: datetime | None = None,
         fragment: str | None = None,
+        origin: str | None = None,
     ) -> None:
         """Add a statement to the buffer.
 
@@ -76,10 +81,12 @@ class EntityBuffer:
                 statement. ``None`` (the default) preserves the fragment of
                 a passed :class:`ftmq.store.lake.LakeStatement` and means
                 non-fragment (empty-string sentinel) otherwise.
+            origin: Origin tag override. Falls back to ``stmt.origin`` then
+                the buffer's default origin.
 
         Raises:
-            ValueError: If ``stmt.origin`` is set but not a safe origin
-                name (see :func:`ftm_lakehouse.util.validate_origin`).
+            ValueError: If the resolved origin is not a safe origin name
+                (see :func:`ftm_lakehouse.util.validate_origin`).
             BufferFullError: If the buffer has reached :attr:`max_rows`
                 and has not been flushed.
         """
@@ -87,16 +94,16 @@ class EntityBuffer:
             return
         self._check_capacity()
 
-        canonical_id = stmt.canonical_id or stmt.entity_id
-        origin = validate_origin(stmt.origin or self.origin)
+        origin = validate_origin(origin or stmt.origin or self.origin)
         if fragment is None and isinstance(stmt, LakeStatement):
             fragment = stmt.fragment
 
-        # Create new LakeStatement with correct values (Statement is immutable)
+        # Create new LakeStatement with correct values (Statement is immutable).
+        # canonical_id is intentionally unset – storage drops it and FtM
+        # defaults it to entity_id (single-dataset store, no resolution).
         stmt = LakeStatement(
             id=stmt.id,
             entity_id=stmt.entity_id,
-            canonical_id=canonical_id,
             prop=stmt.prop,
             schema=stmt.schema,
             value=stmt.value,
@@ -125,6 +132,9 @@ class EntityBuffer:
         Args:
             e: The entity whose statements to buffer.
             origin: Origin tag override for this entity's statements.
+                ``None`` keeps each statement's own origin (a read-back
+                ``StatementEntity`` carries per-statement provenance),
+                falling back to the buffer's default origin.
             fragment: Supersession group key for this emission. A later
                 ``add_entity`` with the same fragment replaces the earlier
                 emission per ``(entity_id, prop, fragment)`` group.
@@ -140,19 +150,26 @@ class EntityBuffer:
         self._check_capacity()
         e = namespace.apply(e)
         e = ensure_entity(e, StatementEntity, self.dataset)
-        # Producer contract: all rows of one fragment emission must share a
-        # single last_seen – sub-second jitter would break the tie that lets
-        # multi-valued props survive supersession together. Pin one fallback
-        # timestamp per emission instead of leaving last_seen unset (which
-        # downstream fills per row / per flush).
-        last_seen = e.last_seen or e.last_change
-        if fragment and not last_seen:
-            last_seen = datetime.now(timezone.utc).isoformat()
+        # Producer contract: all rows of one *fragment* emission share a
+        # single last_seen – sub-second jitter (or heterogeneous
+        # per-statement timestamps from a store read-back) would break the
+        # tie that lets multi-valued props survive supersession together,
+        # so fragment emissions pin one timestamp: the entity's own, else
+        # the buffer default, else now. Non-fragment statements keep their
+        # own last_seen (faithful provenance on round-trips) and only fall
+        # back to the pinned value when unset.
+        last_seen = (
+            e.last_seen
+            or e.last_change
+            or self.last_seen
+            or datetime.now(timezone.utc).isoformat()
+        )
         for stmt in e.statements:
-            stmt.origin = origin or self.origin or stmt.origin
             stmt.first_seen = stmt.first_seen or e.first_seen or e.last_change
-            stmt.last_seen = stmt.last_seen or last_seen
-            self.add_statement(stmt, fragment=fragment)
+            stmt.last_seen = last_seen if fragment else (stmt.last_seen or last_seen)
+            # origin resolution delegates to add_statement:
+            # override > stmt.origin > buffer default
+            self.add_statement(stmt, fragment=fragment, origin=origin)
 
     def flush_buffer(self) -> StatementRows:
         """Yield buffered rows sorted by shard, then clear the buffer.

@@ -13,7 +13,7 @@
 | `LAKEHOUSE_GRACE_PERIOD_DAYS` | Default tombstone grace period used by `operations optimize` (rows with `deleted_at` older than this are physically dropped in the merge step) | `30` |
 | `LAKEHOUSE_MAX_BUFFER_ROWS` | Hard cap on rows held in an in-memory `EntityBuffer` before a flush is required. Bulk-import paths that hit the cap raise `BufferFullError` and the caller flushes + retries. | `1_000_000` |
 | `LAKEHOUSE_LOCK_MAX_RETRIES` | Retry bound when acquiring the dataset write fence (`.LOCK`). Retry `n` sleeps `n` + jitter seconds, so the total wait is roughly `N²/2` seconds; the default gives up after ~4.5 minutes with a `RuntimeError` instead of waiting forever. Stale locks from crashed writers need a manual `ftm-lakehouse operations unlock`. | `22` |
-| `LAKEHOUSE_DUCKDB_MEMORY_LIMIT` | Per-DuckDB-connection RAM ceiling. Queries exceeding it spill to disk rather than growing toward all available RAM. Format follows DuckDB's `SET memory_limit` (e.g. `4GB`, `512MB`). | `4GB` |
+| `LAKEHOUSE_DUCKDB_MEMORY_LIMIT` | Per-DuckDB-connection RAM ceiling. Queries exceeding it spill to disk rather than growing toward all available RAM. Format follows DuckDB's `SET memory_limit` (e.g. `8GB`, `512MB`). | `8GB` |
 | `LAKEHOUSE_DUCKDB_TEMP_DIRECTORY` | Spill-to-disk path for queries that overflow `LAKEHOUSE_DUCKDB_MEMORY_LIMIT`. Unset = DuckDB picks the OS temp dir. Point at a fast, capacity-controlled volume for heavy workloads. | (unset) |
 | `LAKEHOUSE_ON_ZFS` | Enable ZFS dataset creation for local storage | `false` |
 | `LAKEHOUSE_ZFS_POOL` | ZFS dataset path for the lakehouse root (e.g. `zpools/tank/lakehouse`) | (required when `ON_ZFS` is enabled) |

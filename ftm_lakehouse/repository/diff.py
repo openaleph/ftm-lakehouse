@@ -44,9 +44,13 @@ class ParquetDiffMixin:
         ...
 
     @abstractmethod
-    def _write_diff(self, entity_ids: Iterator[str], ts: datetime, **kwargs) -> str:
-        """Write the diff file for the given entity IDs and return the uri to
-        the diff file."""
+    def _write_diff(
+        self, entity_ids: Iterator[str], since: datetime, ts: datetime, **kwargs
+    ) -> str:
+        """Write the diff file for entities changed since ``since`` and return
+        its uri. ``entity_ids`` is the changed set (used to derive deletes);
+        ``since`` lets an impl re-derive the change set in SQL rather than
+        binding a large id list."""
         ...
 
     @abstractmethod
@@ -125,7 +129,7 @@ class ParquetDiffMixin:
                 return
 
             diff_uri = self._write_diff(
-                iter(changed_entity_ids), current_timestamp, **kwargs
+                iter(changed_entity_ids), last_timestamp, current_timestamp, **kwargs
             )
 
             self._set_diff_state(current_timestamp, current_version)

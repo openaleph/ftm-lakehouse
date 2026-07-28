@@ -170,14 +170,16 @@ def aggregate_unsafe(
 
     Completely circumvents the dict -> Statement -> StatementEntity -> dict
     Python path, but therefore has no validation checks. Input must be sorted
-    by canonical_id.
+    by entity_id (this store never resolves, so canonical_id == entity_id;
+    the ftmq entity query still orders by canonical_id, which is the same
+    ordering via the ``entity_id AS canonical_id`` view alias).
     """
     current: EntityPayload | None = None
     for statement in data:
-        if current is None or statement["canonical_id"] != current.id:
+        if current is None or statement["entity_id"] != current.id:
             if current is not None:
                 yield current
-            current = EntityPayload(id=statement["canonical_id"], dataset=dataset)
+            current = EntityPayload(id=statement["entity_id"], dataset=dataset)
         current.add(statement)
     if current is not None:
         yield current

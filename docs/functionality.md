@@ -112,7 +112,9 @@ Single-statement tombstone via the journal. Same flow as delete-entity, scoped t
 
 **Input:** optional `entity_ids`, `origin`, plus any `ftmq.Query` filters.
 
-**Process:** run a SQLAlchemy `Select` over the Delta table via DuckDB (`delta_scan`). Results are streamed and aggregated into `StatementEntity` objects on the fly.
+**Process:** run a SQLAlchemy `Select` over the live `statement` view (a plain `WHERE deleted_at IS NULL` scan) per `(shard, bucket)` partition via DuckDB (`delta_scan`); filters push through to the parquet file statistics. Results are streamed and aggregated into `StatementEntity` objects on the fly.
+
+**Assumes an optimized store.** The view does no read-time dedupe, so on a store that hasn't been optimized since its last write, `query` can surface duplicate statements and entities whose delete hasn't been applied yet. Run `optimize` (or `merge`) first – dedupe, supersession, and tombstone reaping all happen there.
 
 **Output:** generator of `StatementEntity`.
 
@@ -195,7 +197,7 @@ Key-value store for freshness tracking and tenant-specific runtime data.
 
 **Side effects:** sets `statements/last_optimized`. Each step held under the dataset write fence.
 
-Exports and statistics assume an optimized store – run this after large write batches.
+Queries, exports, and statistics all assume an optimized store – reads have no read-time dedupe, so run this after large write batches (and before querying) to make the store canonical.
 
 ### Export statements (parquet → CSV)
 

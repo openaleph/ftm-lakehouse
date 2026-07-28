@@ -1,5 +1,6 @@
 """Round-trip tests for the CLI bulk-import commands."""
 
+import orjson
 import pytest
 from ftmq.io import smart_write_proxies
 from ftmq.util import make_entity
@@ -78,3 +79,68 @@ def test_cli_entities_import_roundtrip(tmp_path, cli_runner):
     entities = {e.id: e for e in dst.query()}
     assert set(entities) == {"jane", "john"}
     assert "John Doe" in entities["john"].get("name")
+
+
+def test_cli_entities_import_per_item_origin(tmp_path, cli_runner):
+    """Payload origin applies per item and never sticks to the next one:
+    an origin-less entity after an origin-bearing one gets the CLI default,
+    and a multi-origin payload (ambiguous) falls back to the default too."""
+    in_uri = str(tmp_path / "entities.ftm.json")
+    rows = [
+        {
+            "id": "a",
+            "schema": "Person",
+            "properties": {"name": ["A"]},
+            "origin": ["crawl"],
+        },
+        {"id": "b", "schema": "Person", "properties": {"name": ["B"]}},
+        {
+            "id": "c",
+            "schema": "Person",
+            "properties": {"name": ["C"]},
+            "origin": ["x", "y"],
+        },
+    ]
+    with open(in_uri, "wb") as fh:
+        for row in rows:
+            fh.write(orjson.dumps(row, option=orjson.OPT_APPEND_NEWLINE))
+
+    result = cli_runner.invoke(
+        cli_app, ["-d", "dst", "entities", "import", "-i", in_uri]
+    )
+    assert result.exit_code == 0, result.output
+
+    dst = EntityRepository("dst", tmp_path / "dst")
+    origins: dict[str, set[str]] = {}
+    for stmt in dst._statements.query_statements():
+        origins.setdefault(stmt.entity_id, set()).add(stmt.origin)
+    assert origins == {"a": {"crawl"}, "b": {"bulk"}, "c": {"bulk"}}
+
+
+def test_cli_stream_commands(tmp_path, cli_runner):
+    """``entities stream`` / ``statements stream`` pipe the exported files
+    byte-for-byte to the output."""
+    # seed + export under the CLI's LAKEHOUSE_URI so DatasetContext finds it
+    repo = EntityRepository("dst", tmp_path / "dst")
+    with repo.writer(origin="test") as writer:
+        writer.add_entity(make_entity(JANE))
+    repo.flush()
+    repo._store.ensure_parent(path.EXPORTS_STATEMENTS)
+    repo._statements.export_csv(path.EXPORTS_STATEMENTS)
+    entities_json = tmp_path / "dst" / path.ENTITIES_JSON
+    smart_write_proxies(str(entities_json), repo.query())
+
+    out = tmp_path / "streamed.ftm.json"
+    result = cli_runner.invoke(
+        cli_app, ["-d", "dst", "entities", "stream", "-o", str(out)]
+    )
+    assert result.exit_code == 0, result.output
+    assert out.read_bytes() == entities_json.read_bytes()
+
+    out_csv = tmp_path / "streamed.csv"
+    result = cli_runner.invoke(
+        cli_app, ["-d", "dst", "statements", "stream", "-o", str(out_csv)]
+    )
+    assert result.exit_code == 0, result.output
+    exported = tmp_path / "dst" / path.EXPORTS_STATEMENTS
+    assert out_csv.read_bytes() == exported.read_bytes()

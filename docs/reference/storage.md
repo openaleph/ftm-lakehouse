@@ -13,7 +13,7 @@ SQL statement buffer for write-ahead logging.
 
 ## ParquetStore
 
-Delta Lake parquet storage for statements, partitioned by ``(shard, bucket, origin)``. Writes are append-only; deduplication, ``first_seen`` folding, and tombstone reaping happen in three independent async ops (``compact`` / ``merge`` / ``vacuum``), all coordinated by a dataset-wide write fence.
+Delta Lake parquet storage for statements, partitioned by ``(shard, bucket, origin)``. Writes are append-only; deduplication, ``first_seen`` folding, and tombstone reaping happen in three independent async ops (``compact`` / ``merge`` / ``vacuum``), all coordinated by a dataset-wide write fence. Reads target a live ``WHERE deleted_at IS NULL`` view with no read-time dedupe, so queries, exports, and statistics assume an optimized store – run ``merge`` before reading.
 
 ::: ftm_lakehouse.storage.ParquetStore
     options:

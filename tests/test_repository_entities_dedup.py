@@ -1,13 +1,16 @@
-"""Flush appends; queries dedupe on read. Re-adding identical entities is
-idempotent at the query layer (one entity in, one out) and at the
-statement layer too, because the deduped ``statement`` view registered
-on the :class:`LakeStore` connection collapses duplicates per
-``(shard, bucket, id)`` and filters tombstones at read time.
-Re-flushing still adds new physical rows; :meth:`merge` exists only to
-compact those duplicates and reap tombstones past grace.
+"""Flush appends physical rows; ``merge`` makes the store canonical.
+
+Correctness is guaranteed only after ``merge``: it collapses duplicates per
+``(shard, bucket, id)``, applies fragment supersession, and reaps tombstones.
+The live ``statement`` view is a plain ``deleted_at IS NULL`` scan, so between
+a write and the next merge, statement reads can surface duplicate ids and rows
+whose delete has not been applied. Entity-level reads still fold by
+``entity_id`` on assembly, so an entity's *id* is stable even before merge –
+only its statement-level dedupe / tombstoning waits for merge.
 """
 
 import time
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Generator
@@ -75,33 +78,36 @@ def test_flush_appends_duplicates(repo):
 
 
 def test_query_dedup_after_re_add(repo):
-    """Re-flushing the same entity surfaces one row per statement id."""
+    """Re-flushing the same entity then merging surfaces one row per statement id."""
     repo, _ = repo
     jane = EntityProxy.from_dict(JANE)
 
     repo.add(jane)
     repo.flush()
+    repo.merge()
     stmts1 = list(repo.query_statements())
 
     repo.add(jane)
     repo.flush()
+    repo.merge()  # dedupe is applied by merge; reads assume an optimized store
     stmts2 = list(repo.query_statements())
 
     entities = list(repo.query(flush_first=False))
     assert {e.id for e in entities} == {"jane"}
-    # Statement stream also dedupes – without the deduped view the
-    # second flush would have doubled the row count visible to readers.
+    # Statement stream dedupes after merge – the second flush's fresh copies
+    # are collapsed back to one row per id.
     assert len(stmts2) == len(stmts1)
     assert {s.id for s in stmts2} == {s.id for s in stmts1}
 
 
-def test_query_statements_dedup_without_merge(repo):
-    """Statement stream surfaces one row per id with merged first_seen / latest last_seen."""
+def test_query_statements_dedup_after_merge(repo):
+    """After merge, one row per id with folded first_seen / latest last_seen."""
     repo, _ = repo
     jane = EntityProxy.from_dict(JANE)
 
     repo.add(jane)
     repo.flush()
+    repo.merge()
     first = {s.id: (s.first_seen, s.last_seen) for s in repo.query_statements()}
 
     # Re-add with a distinct timestamp so last_seen differs across the
@@ -110,10 +116,11 @@ def test_query_statements_dedup_without_merge(repo):
     time.sleep(1.1)
     repo.add(jane)
     repo.flush()
+    repo.merge()  # merge folds first_seen to min and last_seen to max per id
 
     stmts = list(repo.query_statements())
     by_id = {s.id: s for s in stmts}
-    # No duplicate statement ids in the dedupe-on-read output.
+    # No duplicate statement ids once merge made the store canonical.
     assert len(stmts) == len(by_id)
     # Dedupe keeps the earliest first_seen and the latest last_seen.
     for stmt_id, (orig_first, orig_last) in first.items():
@@ -121,31 +128,32 @@ def test_query_statements_dedup_without_merge(repo):
         assert by_id[stmt_id].last_seen > orig_last
 
 
-def test_query_skips_tombstone_without_merge(repo):
-    """Deleting an entity hides it from queries before merge runs."""
+def test_query_skips_tombstone_after_merge(repo):
+    """Deleting an entity hides it from queries once merge runs."""
     repo, _ = repo
     jane = EntityProxy.from_dict(JANE)
 
     repo.add(jane)
     repo.flush()
+    repo.merge()
     assert {e.id for e in repo.query(flush_first=False)} == {"jane"}
 
     # Sleep keeps the tombstone last_seen strictly greater than the live
-    # row's last_seen so ROW_NUMBER picks the tombstone deterministically.
+    # row's last_seen so merge picks the tombstone deterministically.
     time.sleep(1.1)
     repo.delete_entity("jane")
     repo.flush()
+    # Merge collapses the id to its tombstone (latest last_seen); the live
+    # view then filters deleted_at IS NOT NULL, so the entity vanishes. Before
+    # merge the live row and tombstone coexist and the entity is still visible.
+    repo.merge()
 
-    # The deduped view picks the tombstone (latest last_seen) and then
-    # filters deleted_at IS NOT NULL, so the entity vanishes from reads.
-    # Without dedupe-on-read, VIEW_FILTER alone would drop the tombstone
-    # and leave the stale live row visible – the bug this refactor fixes.
     assert list(repo.query(flush_first=False)) == []
     assert list(repo.query_statements()) == []
 
 
 def test_query_re_add_after_delete(repo):
-    """Re-adding a deleted entity makes it visible again without merge."""
+    """Re-adding a deleted entity makes it visible again after merge."""
     repo, _ = repo
     jane = EntityProxy.from_dict(JANE)
 
@@ -154,38 +162,47 @@ def test_query_re_add_after_delete(repo):
     time.sleep(1.1)
     repo.delete_entity("jane")
     repo.flush()
+    repo.merge()
     assert list(repo.query(flush_first=False)) == []
 
     # Re-add: new live row has last_seen > the tombstone's last_seen, so
-    # ROW_NUMBER picks the re-add and deleted_at IS NULL keeps it.
+    # merge picks the re-add and deleted_at IS NULL keeps it.
     time.sleep(1.1)
     repo.add(jane)
     repo.flush()
+    repo.merge()
     assert {e.id for e in repo.query(flush_first=False)} == {"jane"}
 
 
-def test_query_dedupes_across_origins(repo):
-    """Same entity under two origins: latest last_seen wins, regardless of origin."""
+def test_query_no_cross_origin_dedupe(repo):
+    """The same statement under two origins is kept per origin after merge.
+
+    ``origin`` is a partition key, so ``merge`` – which rewrites each
+    ``(shard, bucket, origin)`` partition independently – cannot collapse a
+    statement observed under two origins into one; both copies survive, each
+    carrying its origin. This is a deliberate consequence of the simplified
+    model: reads reflect the physical, per-origin layout rather than an
+    id-level dedupe that crossed origins (which the old read-time view did).
+    """
     repo, _ = repo
     jane = EntityProxy.from_dict(JANE)
 
     repo.add(jane, origin="source-a")
     repo.flush()
-
-    time.sleep(1.1)
     repo.add(jane, origin="source-b")
     repo.flush()
+    repo.merge()
 
     stmts = list(repo.query_statements())
-    by_id = {s.id: s for s in stmts}
-    # One row per statement id – cross-origin dedupe.
-    assert len(stmts) == len(by_id)
-    # The later write under "source-b" wins ROW_NUMBER for every id.
-    assert {s.origin for s in stmts} == {"source-b"}
+    # Both origins survive; each statement id appears once per origin.
+    assert {s.origin for s in stmts} == {"source-a", "source-b"}
+    assert set(Counter(s.id for s in stmts).values()) == {2}
 
 
-def test_view_query_dedupes_without_merge(local_repo):
-    """LakeStore view().query() sees deduped entities (global view, no iteration)."""
+def test_view_query_assembles_entities_without_merge(local_repo):
+    """LakeStore view().query() yields one entity per id even on an
+    un-merged store: the live view has no statement dedupe, but duplicate
+    rows fold at entity assembly."""
     repo = local_repo
     jane = EntityProxy.from_dict(JANE)
 
@@ -195,9 +212,9 @@ def test_view_query_dedupes_without_merge(local_repo):
     repo.add(jane)
     repo.flush()
 
-    # Reach through the parquet store to ftmq's view – this path doesn't
-    # iterate (shard, bucket) but still sees the deduped view because the
-    # view is registered globally on the LakeStore connection.
+    # Reach through the parquet store to ftmq's global view – this path
+    # doesn't iterate (shard, bucket); the physical duplicate rows collapse
+    # into one assembled entity per id.
     entities = list(repo._statements.view().query())
     assert {e.id for e in entities} == {"jane"}
 

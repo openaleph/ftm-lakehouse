@@ -189,10 +189,11 @@ dataset = catalog.create_dataset("new_dataset", title="New Dataset")
 
 ## Maintenance
 
-The parquet statement store is **append-only** on the write path. Deduplication, `first_seen` folding, and tombstone reaping happen in three independent async operations that all run under a single dataset-wide write fence (`.LOCK`):
+The parquet statement store is **append-only** on the write path. Deduplication, `first_seen` folding, and tombstone reaping happen in three independent async operations that all run under a single dataset-wide write fence (`.LOCK`). Reads have no read-time dedupe – queries, exports, and statistics assume an optimized store, so run this after write batches and before reading:
 
 ```python
-# Bin-pack small parquet files (cheap, can be run often)
+# Collapse duplicates and reap expired tombstones (merge only – compact
+# and vacuum are separate primitives, see below):
 dataset.get_entities().merge()  # via repo.merge()
 
 # Three primitives exposed on the lower-level ParquetStore:

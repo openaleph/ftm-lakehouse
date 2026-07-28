@@ -6,7 +6,7 @@ import orjson
 from fastapi import APIRouter
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from ftmq.model.stats import DatasetStats
-from ftmq.query import Query
+from ftmq.query import M, Query
 
 from ftm_lakehouse.api.dependencies import EMBED, Dataset, QueryBody
 
@@ -35,12 +35,16 @@ def entities_merge(
 @router.post("/{dataset}/_api/entities/query")
 def entities_query(dataset: Dataset, body: QueryBody) -> StreamingResponse:
     """Query entities from parquet store, streamed as NDJSON."""
+    # Parse (and thereby validate) the query BEFORE streaming starts – an
+    # invalid body must 400, not break the stream after 200 + headers.
+    query = body.to_query()
 
     def generate():
         for entity in dataset.get_entities().query(
+            query,
             entity_ids=body.entity_ids,
             flush_first=body.flush_first,
-            **body.filter_kwargs(),
+            origin=body.origin,
         ):
             yield orjson.dumps(entity.to_dict(), option=orjson.OPT_APPEND_NEWLINE)
 
@@ -69,12 +73,26 @@ def entities_version(dataset: Dataset) -> PlainTextResponse:
 
 @router.post("/{dataset}/_api/entities/statements/query")
 def statements_query(dataset: Dataset, body: QueryBody) -> StreamingResponse:
-    """Query statements from parquet store, streamed as NDJSON."""
-    query = Query().where(**body.filter_kwargs())
-    sql = query.sql.statements
+    """Query statements from parquet store, streamed as NDJSON.
+
+    Honors the full body contract: ``entity_ids`` folds into the query,
+    ``origin`` applies as a storage-level row filter, ``flush_first``
+    drains the journal before reading. Each line carries the statement's
+    ``fragment`` alongside the followthemoney fields so the supersession
+    group key survives the wire (``Statement.to_dict`` has no notion of
+    it).
+    """
+    # Parse (and thereby validate) the query BEFORE streaming starts.
+    query = body.to_query()
+    repo = dataset.get_entities()
+    if body.flush_first:
+        repo.flush()
+    if body.entity_ids:
+        query = (query or Query()).where(M(entity_id__in=body.entity_ids))
 
     def generate():
-        for statement in dataset.get_entities()._statements.query_statements(sql):
-            yield orjson.dumps(statement.to_dict(), option=orjson.OPT_APPEND_NEWLINE)
+        for statement in repo.query_statements(query, origin=body.origin):
+            data = {**statement.to_dict(), "fragment": statement.fragment}
+            yield orjson.dumps(data, option=orjson.OPT_APPEND_NEWLINE)
 
     return StreamingResponse(generate(), media_type=NDJSON_CONTENT_TYPE)

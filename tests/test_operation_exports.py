@@ -178,11 +178,10 @@ def test_export_entities_reuses_fresh_statements_csv(tmp_path):
     repo = EntityRepository(dataset=DATASET, uri=tmp_path)
     setup_entities(repo)
 
-    op = make_op(ExportKind.entities, tmp_path)
-    assert op._get_fresh_statements_csv() is None  # nothing exported yet
+    assert repo._fresh_statements_csv() is None  # nothing exported yet
 
     make_op(ExportKind.statements, tmp_path).run()
-    fresh = op._get_fresh_statements_csv()
+    fresh = repo._fresh_statements_csv()
     assert fresh is not None
     assert fresh.endswith(path.EXPORTS_STATEMENTS)
 
@@ -190,7 +189,33 @@ def test_export_entities_reuses_fresh_statements_csv(tmp_path):
     with repo.writer(origin="test") as writer:
         writer.add_entity(make_entity(BOB))
     repo.flush()
-    assert op._get_fresh_statements_csv() is None
+    assert repo._fresh_statements_csv() is None
+
+
+def test_export_stale_after_optimize(tmp_path):
+    """A merge that rewrote partitions stamps STATEMENTS_UPDATED, so exports
+    captured pre-merge go stale and re-run instead of skipping as
+    'up-to-date' with duplicate / undeleted rows baked in."""
+    repo = EntityRepository(dataset=DATASET, uri=tmp_path)
+    setup_entities(repo)
+    setup_entities(repo)  # duplicate physical rows -> merge will rewrite
+
+    make_op(ExportKind.statements, tmp_path).run()
+    assert repo._fresh_statements_csv() is not None
+
+    repo.merge()
+
+    # merge changed the logical content: the exported CSV is stale again
+    assert not repo._tags.is_latest(path.EXPORTS_STATEMENTS, [tag.STATEMENTS_UPDATED])
+    assert repo._fresh_statements_csv() is None
+
+    # a re-run regenerates instead of skipping, and is fresh once more
+    make_op(ExportKind.statements, tmp_path).run()
+    assert repo._fresh_statements_csv() is not None
+
+    # a merge with nothing to rewrite does not dirty anything
+    repo.merge()
+    assert repo._fresh_statements_csv() is not None
 
 
 def test_operation_export_documents(tmp_path, fixtures_path):

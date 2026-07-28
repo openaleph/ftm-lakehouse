@@ -9,7 +9,7 @@ Entities in `ftm-lakehouse` are stored as **statements** – granular property-l
 - **Versioning**: Track changes over time via `first_seen` / `last_seen`
 - **Provenance**: Know where each piece of data came from (`origin`, `original_value`, and other metadata from the [Statement model](https://followthemoney.tech/docs/statements/))
 - **Incremental updates**: Add new data without reprocessing everything
-- **Deduplication**: Merge entities from multiple sources via `canonical_id`
+- **Simple identity**: entities are keyed on `entity_id`; this is a single-dataset store with no cross-source resolution, so `canonical_id` is not persisted (it always equals `entity_id`)
 
 The underlying storage is a single Delta Lake table per dataset, partitioned by `(shard, bucket, origin)`:
 
@@ -114,6 +114,9 @@ The CLI command `ftm-lakehouse entities import` does exactly this.
 
 ## Reading Entities
 
+!!! note "Reads assume an optimized store"
+    Statement reads target a live `WHERE deleted_at IS NULL` view with no read-time dedupe. Dedupe, fragment supersession, and tombstone reaping all happen in `merge` (see [Deduplication](#deduplication)), so between a write and the next `optimize`/`merge`, `query` can surface duplicate statements and entities whose delete hasn't been applied yet. Run `optimize` before querying, exporting, or computing statistics.
+
 ### Get by ID
 
 ```python
@@ -195,7 +198,7 @@ The typical use is one fragment per source row in a CSV-style ingest (or per doc
 
 ### Producer contract
 
-All rows of one logical fragment emission **must share the same `last_seen` timestamp** – supersession keeps every row tied at the group's maximum, so jitter within an emission would keep only the very latest row and break multi-valued props. `add_entity` pins one timestamp per emission (from the entity's `last_seen` / `last_change`, falling back to a single `now`); statement-level producers assign one timestamp per batch themselves:
+All rows of one logical fragment emission **must share the same `last_seen` timestamp** – supersession keeps every row tied at the group's maximum, so jitter within an emission would keep only the very latest row and break multi-valued props. `add_entity` pins one timestamp per fragment emission (from the entity's `last_seen` / `last_change`, falling back to a single `now`); non-fragment emissions keep each statement's own `last_seen` (faithful provenance on store round-trips) and only fall back to the pinned value when unset. Statement-level producers assign one timestamp per batch themselves:
 
 ```python
 ts = datetime.now(timezone.utc).isoformat()

@@ -44,23 +44,45 @@ def test_entities_query_rejects_non_list_entity_ids(client) -> None:
     assert "list" in _error_messages(response).lower()
 
 
-def test_entities_query_rejects_too_many_filter_keys(client, monkeypatch) -> None:
-    monkeypatch.setattr(dependencies.api_settings, "max_filter_keys", 3)
-    body = {
-        "entity_ids": ["e1"],
-        "flush_first": False,
-        "schema": "Person",
-        "origin": "x",
-        "prop": "name",
-        "value": "v",
-    }
+def test_entities_query_rejects_unknown_body_keys(client) -> None:
+    """The legacy flat filter-kwargs format fails loudly (extra="forbid")
+    instead of silently streaming an unfiltered result."""
+    body = {"schema": "Person", "prop": "name", "value": "v"}
     response = client.post("/test_ds/_api/entities/query", json=body)
     assert response.status_code == 422
-    assert "filter keys" in _error_messages(response)
 
-
-def test_statements_query_rejects_too_many_filter_keys(client, monkeypatch) -> None:
-    monkeypatch.setattr(dependencies.api_settings, "max_filter_keys", 2)
-    body = {"schema": "Person", "origin": "x", "prop": "name"}
-    response = client.post("/test_ds/_api/entities/statements/query", json=body)
+    response = client.post(
+        "/test_ds/_api/entities/statements/query", json={"schema": "Person"}
+    )
     assert response.status_code == 422
+
+
+def test_query_rejects_too_many_rql_conditions(client, monkeypatch) -> None:
+    """The leaf-count cap applies to the parsed RQL tree, not body keys."""
+    monkeypatch.setattr(dependencies.api_settings, "max_filter_keys", 2)
+    rql = "and(eq(schema,Person),eq(properties.name,x),eq(countries,de))"
+    response = client.post("/test_ds/_api/entities/query", json={"query": rql})
+    assert response.status_code == 400
+    assert "filter conditions" in response.json()["detail"]
+
+
+def test_query_rejects_oversized_rql_id_list(client, monkeypatch) -> None:
+    """An `in(entity_id, (...))` list cannot bypass the entity_ids cap by
+    riding in the RQL string."""
+    monkeypatch.setattr(dependencies.api_settings, "max_entity_ids", 5)
+    ids = ",".join(f"e{i}" for i in range(6))
+    response = client.post(
+        "/test_ds/_api/entities/query", json={"query": f"in(entity_id,({ids}))"}
+    )
+    assert response.status_code == 400
+    assert "maximum" in response.json()["detail"]
+
+
+def test_query_rejects_malformed_rql(client) -> None:
+    """Malformed RQL maps to a 400, before any streaming starts."""
+    for endpoint in ("query", "statements/query"):
+        response = client.post(
+            f"/test_ds/_api/entities/{endpoint}", json={"query": "in(entity_id,"}
+        )
+        assert response.status_code == 400, endpoint
+        assert "Invalid RQL" in response.json()["detail"]

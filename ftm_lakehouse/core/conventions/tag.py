@@ -6,6 +6,8 @@ Export operations don't have constants here – their freshness tag is the
 by :meth:`DatasetJobOperation._run_local` after a successful run.
 """
 
+from ftm_lakehouse.util import validate_origin
+
 STATEMENTS_UPDATED = "statements/last_updated"
 """Statement store was updated"""
 
@@ -34,6 +36,40 @@ OP_MAKE = "operations/make/last_run"
 def mapping_tag(content_hash: str) -> str:
     """Get the tag key for a mapping execution."""
     return f"mappings/{content_hash}/last_processed"
+
+
+def statements_partition_updated(shard: str, bucket: str, origin: str) -> str:
+    """Per-partition freshness tag: a ``(shard, bucket, origin)`` was written.
+
+    Partition-scoped analog of :data:`STATEMENTS_UPDATED`, stamped by
+    :meth:`ParquetStore.append`. :meth:`ParquetStore.merge` compares it
+    against :func:`statements_partition_optimized` via
+    :meth:`TagStore.is_latest` to skip partitions that haven't changed
+    since their last merge.
+
+    Args:
+        shard: Hex-padded shard value.
+        bucket: FtM schema bucket (``thing`` / ``interval`` / ...).
+        origin: Source tag – validated so it stays a single path segment.
+    """
+    validate_origin(origin)
+    return f"statements/{shard}/{bucket}/{origin}/last_updated"
+
+
+def statements_partition_optimized(shard: str, bucket: str, origin: str) -> str:
+    """Per-partition freshness tag: a ``(shard, bucket, origin)`` was merged.
+
+    Partition-scoped analog of :data:`STATEMENTS_OPTIMIZED`, stamped by
+    :meth:`ParquetStore.merge` after it rewrites the partition. See
+    :func:`statements_partition_updated` for the freshness comparison.
+
+    Args:
+        shard: Hex-padded shard value.
+        bucket: FtM schema bucket (``thing`` / ``interval`` / ...).
+        origin: Source tag – validated so it stays a single path segment.
+    """
+    validate_origin(origin)
+    return f"statements/{shard}/{bucket}/{origin}/last_optimized"
 
 
 DEFAULT_ORIGIN = "default"

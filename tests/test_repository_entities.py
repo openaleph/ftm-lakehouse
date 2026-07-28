@@ -1,9 +1,12 @@
 import json
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Generator
 
 import pytest
-from followthemoney import model
+from followthemoney import EntityProxy, model
+from ftmq.query import M, P, Query
 from ftmq.util import make_entity
 
 from ftm_lakehouse.api.main import archive_router, entities_router, journal_router
@@ -84,6 +87,22 @@ def test_repository_entities(repo):
 
     # Non-existent entity returns None
     assert repo.get("nobody") is None
+
+    # Node-based Query filters (round-trips as RQL through the api variant)
+    named = list(repo.query(Query().where(M(schema="Person"), P(name="Jane Doe"))))
+    assert {e.id for e in named} == {"jane"}
+    assert not list(repo.query(Query().where(P(name="nobody"))))
+    stmts = list(repo.query_statements(Query().where(M(entity_id="john"))))
+    assert stmts and {s.entity_id for s in stmts} == {"john"}
+
+    # Pagination + ordering hold end to end (api variant: the wire carries
+    # order_by / limit / offset as sibling fields next to the RQL string)
+    assert len(list(repo.query(Query()[:2]))) == 2
+    assert len(list(repo.query(Query()[:1]))) == 1
+    ordered = [e.first("name") for e in repo.query(Query().order_by("name"))]
+    assert ordered == sorted(ordered)
+    sliced = list(repo.query_statements(Query()[:1]))
+    assert len({s.entity_id for s in sliced}) == 1
 
     # Adding more entities updates the journal tag
     with repo.writer() as writer:
@@ -240,8 +259,11 @@ def test_repository_entities_export_diff(tmp_path):
     assert delta["entity"]["id"] == "jane"
 
 
-def test_repository_entities_export_diff_delete(tmp_path):
-    """Test that deleting an entity produces a DEL op in the incremental diff."""
+@pytest.mark.parametrize("merge", [False, True])
+def test_repository_entities_export_diff_delete(tmp_path, merge):
+    """Deleting an entity produces a DEL op in the incremental diff – with
+    or without an intervening merge: the diff reads canonical rows via the
+    dedupe query, so flushed tombstones shadow their live rows either way."""
     from ftmq.io import smart_write_proxies
 
     repo = EntityRepository("test", tmp_path)
@@ -260,13 +282,13 @@ def test_repository_entities_export_diff_delete(tmp_path):
     diff_name_1 = repo.export_diff()
     assert diff_name_1 is not None
 
-    # Delete jane, flush tombstones to parquet, then merge with the default
-    # 7-day grace: live rows are collapsed away (so jane is invisible to
-    # queries) but tombstones survive (so the diff sees the deleted_at >=
-    # since signal and emits DEL).
+    # Delete jane and flush the tombstones to parquet. The merge=True leg
+    # additionally collapses the partition (tombstones survive grace); the
+    # diff must emit the DEL in both cases.
     repo.delete_entity("jane")
     repo.flush()
-    repo.merge()
+    if merge:
+        repo.merge()
 
     # Incremental diff should contain a DEL for jane
     diff_name_2 = repo.export_diff()
@@ -287,6 +309,87 @@ def test_repository_entities_export_diff_delete(tmp_path):
     del_ops = [o for o in ops if o["op"] == "DEL"]
     assert len(del_ops) == 1
     assert del_ops[0]["entity"]["id"] == "jane"
+
+
+def test_repository_entities_query_slice_multi_shard(tmp_path):
+    """LIMIT / ORDER BY hold across shards: sliced or sorted queries execute
+    globally instead of once per (shard, bucket) partition (which would
+    return up to N entities *per partition*)."""
+    repo = EntityRepository("test", tmp_path, shards=4)
+    with repo.writer() as writer:
+        for i in range(8):
+            writer.add_entity(
+                make_entity(
+                    {
+                        "id": f"e{i}",
+                        "schema": "Person",
+                        "properties": {"name": [f"P {i}"]},
+                    }
+                )
+            )
+    repo.flush()
+
+    # the fixture entities actually spread over multiple shards
+    shards = {path.entity_shard(f"e{i}", 4) for i in range(8)}
+    assert len(shards) > 1
+
+    assert len(list(repo.query(Query()[:3]))) == 3
+    stmts = list(repo.query_statements(Query()[:3]))
+    assert len({s.entity_id for s in stmts}) == 3
+    names = [e.first("name") for e in repo.query(Query().order_by("name"))]
+    assert names == sorted(names)
+    assert len(names) == 8
+
+
+def test_repository_entities_export_diff_fragment_update_without_merge(tmp_path):
+    """An updated fragment emission diffs with only its latest values on an
+    un-merged store – the diff reads canonical (superseded) rows, not the
+    raw live view where both emissions still coexist."""
+    from ftmq.io import smart_write_proxies
+
+    repo = EntityRepository("test", tmp_path)
+
+    t1 = datetime.now(timezone.utc).isoformat()
+    jane_v1 = EntityProxy.from_dict(
+        {
+            "id": "jane",
+            "schema": "Person",
+            "properties": {"name": ["Jane Doe"]},
+            "last_change": t1,
+        }
+    )
+    with repo.writer() as writer:
+        writer.add_entity(jane_v1, fragment="row1")
+    repo.flush()
+
+    entities_json_path = tmp_path / path.ENTITIES_JSON
+    smart_write_proxies(str(entities_json_path), repo.query())
+    assert repo.export_diff() is not None
+
+    # Re-emit the same fragment with a changed name; no merge before diffing.
+    time.sleep(1.1)
+    t2 = datetime.now(timezone.utc).isoformat()
+    jane_v2 = EntityProxy.from_dict(
+        {
+            "id": "jane",
+            "schema": "Person",
+            "properties": {"name": ["Jane D. Doe"]},
+            "last_change": t2,
+        }
+    )
+    with repo.writer() as writer:
+        writer.add_entity(jane_v2, fragment="row1")
+    repo.flush()
+
+    assert repo.export_diff() is not None
+    diff_files = sorted(
+        (tmp_path / path.DIFFS_ENTITIES).glob("*.delta.json"), key=lambda p: p.name
+    )
+    ops = [json.loads(line) for line in open(diff_files[-1])]
+    assert len(ops) == 1
+    assert ops[0]["op"] == "ADD"
+    # only the superseding emission's value – v1 is shadowed, not accumulated
+    assert ops[0]["entity"]["properties"]["name"] == ["Jane D. Doe"]
 
 
 def test_repository_entities_export_diff_no_changes(tmp_path):

@@ -11,10 +11,13 @@ from datetime import datetime
 from typing import Annotated, Optional
 
 import typer
+from anystore.io import smart_open
+from anystore.logic.io import stream
 from ftmq.io import smart_read_proxies, smart_write_proxies
 
 from ftm_lakehouse.cli import DatasetContext, cli, settings
 from ftm_lakehouse.cli.io import BULK_ORIGIN, import_entities
+from ftm_lakehouse.core.conventions import path
 
 entities = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=settings.debug)
 cli.add_typer(entities, name="entities", help="Read and write FtM entities")
@@ -26,8 +29,9 @@ def cli_entities_iterate(
 ):
     """Iterate entities from the parquet store as FtM JSON lines.
 
-    Live read – reflects current state of the parquet table (post-flush,
-    post-optimize). For the frozen pre-exported view use ``stream``.
+    Live read – reflects current state of the parquet table post-flush, but
+    correctness is only guaranteed after ``maintenance optimize``. For the
+    frozen pre-exported view use ``stream``.
     """
     with DatasetContext() as dataset:
         smart_write_proxies(out_uri, dataset.get_entities().query())
@@ -39,13 +43,25 @@ def cli_entities_stream(
 ):
     """Stream FtM entities from the pre-exported ``entities.ftm.json``."""
     with DatasetContext() as dataset:
-        smart_write_proxies(out_uri, dataset.get_entities().stream())
+        # we trust our exports so stream byte-to-byte directly instead the
+        # python / ftm roundtrip
+        in_uri = dataset._store.to_uri(path.ENTITIES_JSON)
+        with smart_open(in_uri, "rb") as i, smart_open(out_uri, "wb") as o:
+            stream(i, o)
 
 
 @entities.command("import")
 def cli_entities_import(
     in_uri: Annotated[str, typer.Option("-i")] = "-",
-    origin: Annotated[str, typer.Option(help="Data origin")] = BULK_ORIGIN,
+    origin: Annotated[
+        str,
+        typer.Option(
+            help="Default data origin if missing or multiple in entity payload"
+        ),
+    ] = BULK_ORIGIN,
+    override_origin: Annotated[
+        bool, typer.Option(help="Override entity payload origin")
+    ] = False,
     bulk_size: Annotated[
         int,
         typer.Option(help="Number of statements buffered before flush to parquet."),
@@ -55,19 +71,20 @@ def cli_entities_import(
         typer.Option(help="Default last_seen timestamp if entity payload has none"),
     ] = None,
 ):
-    """Bulk-import FtM entities straight into the parquet store.
+    """
+    Bulk-import FtM entities straight into the parquet store, bypassing the
+    Journal.
 
-    Bypasses the journal – statements go through an in-memory ``EntityBuffer``
-    that pre-sorts by shard, then ``EntityRepository.write_statements`` packs
-    them per-shard into the parquet store. Intended for one-shot loads of
-    large ``entities.ftm.json`` files where journal write-amplification would
-    be wasteful.
+    Can as well take unsorted fragments as input for migration from
+    ``followthemoney-store`` into ``ftm-lakehouse`` keeping fragments and origin
+    provenance. (Use ``ftmq fragments iterate-fragments -d ...`` for export.)
     """
     with DatasetContext() as dataset:
         import_entities(
             dataset,
             smart_read_proxies(in_uri),
             origin=origin,
+            override_origin=override_origin,
             bulk_size=bulk_size,
             last_seen=last_seen,
         )

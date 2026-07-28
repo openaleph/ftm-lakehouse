@@ -6,17 +6,24 @@ execute against DuckDB views over the parquet data.
 
 The schema is: ``shard`` (entity-id hash bucket, hex-padded) prepended to
 ftmq's ``ARROW_SCHEMA`` (all statement columns, including ``fragment`` – the
-supersession group key, empty-string sentinel for non-fragment rows), with
-``deleted_at`` (tombstone marker) appended.
+supersession group key, empty-string sentinel for non-fragment rows) minus
+``canonical_id``, with ``deleted_at`` (tombstone marker) appended.
+
+``canonical_id`` is dropped from physical storage: this is a single-dataset
+store with no entity resolution, so ``canonical_id`` always equals
+``entity_id``. It is re-derived as ``entity_id AS canonical_id`` in the live
+``statement`` view (:func:`ftm_lakehouse.logic.parquet.live_view_sql`) so
+ftmq's query layer (which keys entity identity on ``canonical_id``) keeps
+working unchanged.
 """
 
 from datetime import datetime
-from typing import Generator, NamedTuple, TypeAlias
+from typing import Any, Generator, NamedTuple, TypeAlias
 
 import pyarrow as pa
 from ftmq.store.lake import ARROW_SCHEMA, LakeStatement
 from nomenklatura import settings as nks
-from sqlalchemy import Boolean, DateTime, TableClause, column, table
+from sqlalchemy import Boolean, DateTime, Select, TableClause, column, select, table
 
 PA_TS = pa.timestamp("us", tz="UTC")
 """Timezone-aware microsecond timestamp type for metadata columns."""
@@ -32,12 +39,13 @@ SHARDED_SCHEMA = pa.schema(
         *(
             pa.field(f.name, PA_TS) if f.name in _TZ_AWARE_FIELDS else f
             for f in ARROW_SCHEMA
+            if f.name != "canonical_id"
         ),
         pa.field("deleted_at", PA_TS),
     ]
 )
 """Parquet schema: ``shard`` + ftmq ``ARROW_SCHEMA`` (with tz-aware
-timestamps) + ``deleted_at``.
+timestamps, minus ``canonical_id``) + ``deleted_at``.
 
 ``fragment`` (part of ``ARROW_SCHEMA``) uses the empty string – never
 NULL – as the "no fragment" sentinel; :class:`ftmq.store.lake.LakeStatement`
@@ -77,6 +85,42 @@ TABLE = _sharded_table(nks.STATEMENT_TABLE)
 # tombstone retention) and :meth:`get_changed_entity_ids` (diff
 # consumers emit DEL ops).
 TABLE_RAW = _sharded_table(f"{nks.STATEMENT_TABLE}_raw")
+
+
+STATEMENT_CSV_COLUMNS = [
+    "id",
+    "entity_id",
+    "canonical_id",
+    "prop",
+    "prop_type",
+    "schema",
+    "value",
+    "original_value",
+    "dataset",
+    "origin",
+    "lang",
+    "external",
+    "first_seen",
+    "last_seen",
+    "fragment",
+]
+"""Columns of the exported ``statements.csv``: the followthemoney standard set
+plus the lakehouse ``fragment`` supersession key, so ``statements import``
+round-trips it (followthemoney's ``read_csv_statements`` has no notion of
+``fragment`` – :func:`ftm_lakehouse.helpers.statements.read_csv_statements`
+reads it back). ``canonical_id`` is the ``entity_id`` alias, kept for FtM
+interop."""
+
+_STATEMENT_CSV_TABLE = table(
+    nks.STATEMENT_TABLE, *(column(c) for c in STATEMENT_CSV_COLUMNS)
+)
+
+
+def statement_csv_select() -> Select[Any]:
+    """SELECT of :data:`STATEMENT_CSV_COLUMNS` from the live ``statement`` view,
+    ordered by ``entity_id`` (so an entity's rows stay contiguous for
+    per-partition streaming exports)."""
+    return select(_STATEMENT_CSV_TABLE).order_by(_STATEMENT_CSV_TABLE.c.entity_id)
 
 
 class StatementRow(NamedTuple):

@@ -37,9 +37,9 @@ class OptimizeOperation(DatasetJobOperation[OptimizeJob]):
     target = tag.STATEMENTS_OPTIMIZED
     dependencies = [tag.STATEMENTS_UPDATED]
 
-    def handle(self, run: JobRun[OptimizeJob], *args, **kwargs) -> None:
+    def handle(self, run: JobRun[OptimizeJob], force: bool = False, **kwargs) -> None:
         store = self.entities._statements
-        store.merge(run.job.grace_period_days)
+        store.merge(run.job.grace_period_days, force)
         run.job.done += 1
         run.save()
         store.compact()

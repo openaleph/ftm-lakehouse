@@ -11,12 +11,16 @@ from datetime import datetime
 from typing import Annotated, Optional
 
 import typer
-from anystore.io import smart_open, smart_write_csv, stream_bytes
-from followthemoney.statement.serialize import read_csv_statements
+from anystore.io import smart_open, smart_write_csv
+from anystore.logic.io import stream
+from anystore.util import Took
+from rich.console import Console
+from rich.table import Table
 
 from ftm_lakehouse.cli import DatasetContext, cli, settings
 from ftm_lakehouse.cli.io import BULK_ORIGIN, import_statements
 from ftm_lakehouse.core.conventions import path
+from ftm_lakehouse.helpers.statements import read_csv_statements
 
 statements = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=settings.debug)
 cli.add_typer(statements, name="statements", help="Read and write raw FtM statements")
@@ -43,10 +47,11 @@ def cli_statements_stream(
 ):
     """Stream the pre-exported ``statements.csv`` to the output."""
     with DatasetContext() as dataset:
+        # we trust our exports so stream byte-to-byte directly instead the
+        # python / ftm roundtrip
         in_uri = dataset._store.to_uri(path.EXPORTS_STATEMENTS)
         with smart_open(in_uri, "rb") as i, smart_open(out_uri, "wb") as o:
-            for chunk in stream_bytes(i):
-                o.write(chunk)
+            stream(i, o)
 
 
 @statements.command("import")
@@ -65,18 +70,41 @@ def cli_statements_import(
     """Bulk-import raw statements (CSV) straight into the parquet store.
 
     Mirrors ``entities import`` at the statement grain. Rows are parsed with
-    followthemoney's ``read_csv_statements`` – the canonical statements-CSV
-    reader, which coerces ``external`` to a bool and empty optional columns
-    to ``None`` – then buffered in ``EntityBuffer`` to pre-sort by shard and
-    handed to ``EntityRepository.write_statements`` for a per-shard parquet
-    append. Bypasses the journal.
+    the lakehouse ``read_csv_statements`` – which preserves the ``fragment``
+    supersession key (followthemoney's reader has no notion of it) – then
+    buffered in ``EntityBuffer`` to pre-sort by shard and handed to
+    ``EntityRepository.write_statements`` for a per-shard parquet append.
+    Bypasses the journal.
     """
     with DatasetContext() as dataset:
-        with smart_open(in_uri, "rb") as fh:
-            import_statements(
-                dataset,
-                read_csv_statements(fh),
-                origin=origin,
-                bulk_size=bulk_size,
-                last_seen=last_seen,
-            )
+        import_statements(
+            dataset,
+            read_csv_statements(in_uri),
+            origin=origin,
+            bulk_size=bulk_size,
+            last_seen=last_seen,
+        )
+
+
+@statements.command("sql")
+def cli_statements_sql(query: str):
+    """Run a raw SQL query against the parquet store, rendered as a table.
+
+    Queries the registered DuckDB views – ``statement`` (deduped-live) and
+    ``statement_raw`` (physical rows). Results print as a rich table; add a
+    ``LIMIT`` when scanning large partitions.
+    """
+    with DatasetContext() as dataset:
+        store = dataset.get_entities()._statements._lake
+        with store.cursor() as cur:
+            with Took() as t:
+                cur.execute(query)
+            Console().print(f"Query took: {t.took}")
+            if cur.description is None:  # statement with no result set
+                return
+            columns = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+    table = Table(*columns, caption=f"{len(rows)} row(s)")
+    for row in rows:
+        table.add_row(*("" if value is None else str(value) for value in row))
+    Console().print(table)

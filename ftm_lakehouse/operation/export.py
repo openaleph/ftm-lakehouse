@@ -66,8 +66,8 @@ def _export_statements(op: "ExportOperation", run: JobRun, **kwargs: Any) -> Non
 
 
 def _export_entities(op: "ExportOperation", run: JobRun, **kwargs: Any) -> None:
-    csv_uri = op._get_fresh_statements_csv()
-    op.entities.export_entities(statements_csv_uri=csv_uri)
+    # export_entities prefers a fresh statements.csv on its own
+    op.entities.export_entities()
     if run.job.make_diff:
         op.entities.export_diff()
 
@@ -189,19 +189,6 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
             )
             return False
         return True
-
-    def _get_fresh_statements_csv(self) -> str | None:
-        """Return statements.csv URI if it's at least as fresh as the store.
-
-        The statements export's freshness tag is its target key
-        (``path.EXPORTS_STATEMENTS``), touched after a successful run.
-        """
-        store = self.entities._store
-        if not store.exists(path.EXPORTS_STATEMENTS):
-            return None
-        if self.tags.is_latest(path.EXPORTS_STATEMENTS, [tag.STATEMENTS_UPDATED]):
-            return store.to_uri(path.EXPORTS_STATEMENTS)
-        return None
 
     def handle(self, run: JobRun, *args: Any, **kwargs: Any) -> None:
         has_statements = self.ensure_flush()

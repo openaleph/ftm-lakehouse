@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pyarrow as pa
 import pytest
 
-from ftm_lakehouse.logic.parquet import build_merge_sql
+from ftm_lakehouse.logic.parquet import build_changed_sql, build_merge_sql
 from ftm_lakehouse.model.statement import SHARDED_SCHEMA, TABLE_RAW
 from tests.duck import make_duckdb
 
@@ -373,6 +373,81 @@ def test_merge_fragment_cross_origin_isolation(now):
     assert [r["id"] for r in out.to_pylist()] == ["h1"]
 
 
+def test_merge_fragment_identical_duplicates_collapse(now):
+    """Physically identical fragment rows (same id, fragment, last_seen –
+    e.g. the same statements.csv imported twice) collapse to one row."""
+    table = _table(
+        [
+            _row(now, id="h1", entity_id="acme", prop="name", fragment="row42"),
+            _row(now, id="h1", entity_id="acme", prop="name", fragment="row42"),
+            _row(now, id="h2", entity_id="acme", prop="name", fragment="row42"),
+        ]
+    )
+    out = _run(table, shard="0", bucket="thing", origin="ingest", grace_cutoff=now)
+    # h1's duplicate collapses; the distinct-id tie partner h2 survives
+    assert sorted(r["id"] for r in out.to_pylist()) == ["h1", "h2"]
+
+
+def test_merge_idempotent(now):
+    """Feeding merge output through the merge again changes nothing – the
+    per-id tiebreak makes repeated optimize passes converge."""
+    t2 = now + timedelta(hours=1)
+    table = _table(
+        [
+            # identical fragment duplicates + a superseded emission
+            _row(now, id="h1", entity_id="acme", prop="name", fragment="row42"),
+            _row(now, id="h1", entity_id="acme", prop="name", fragment="row42"),
+            _row(
+                now,
+                id="h2",
+                entity_id="acme",
+                prop="name",
+                fragment="row42",
+                first_seen=t2,
+                last_seen=t2,
+            ),
+            # identical non-fragment duplicates
+            _row(now, id="n1", entity_id="acme", prop="address"),
+            _row(now, id="n1", entity_id="acme", prop="address"),
+        ]
+    )
+    out1 = _run(table, shard="0", bucket="thing", origin="ingest", grace_cutoff=now)
+    out2 = _run(out1, shard="0", bucket="thing", origin="ingest", grace_cutoff=now)
+    assert sorted(r["id"] for r in out1.to_pylist()) == ["h2", "n1"]
+    assert out2.to_pylist() == out1.to_pylist()
+
+
+def test_merge_tombstone_wins_same_second_tie(now):
+    """A live row and its tombstone sharing one second-granular last_seen
+    tie deterministically: the ``deleted_at DESC`` tiebreak keeps the
+    tombstone, so the delete survives into the grace filter."""
+    table = _table(
+        [
+            # non-fragment branch
+            _row(now, id="s1", entity_id="acme", prop="name"),
+            _row(now, id="s1", entity_id="acme", prop="name", deleted_at=now),
+            # fragment branch
+            _row(now, id="h1", entity_id="acme", prop="name", fragment="row42"),
+            _row(
+                now,
+                id="h1",
+                entity_id="acme",
+                prop="name",
+                fragment="row42",
+                deleted_at=now,
+            ),
+        ]
+    )
+    grace_cutoff = now - timedelta(days=7)
+    out = _run(
+        table, shard="0", bucket="thing", origin="ingest", grace_cutoff=grace_cutoff
+    )
+    rows = {(r["id"], r["fragment"]): r for r in out.to_pylist()}
+    assert len(rows) == 2
+    assert rows[("s1", "")]["deleted_at"] == now
+    assert rows[("h1", "row42")]["deleted_at"] == now
+
+
 def test_merge_output_sorted_with_fragments(now):
     """Output rows are sorted by (entity_id, fragment, prop, id)."""
     table = _table(
@@ -388,6 +463,82 @@ def test_merge_output_sorted_with_fragments(now):
         ("a", "a"),
         ("b", "z"),
     ]
+
+
+def _run_changed(table: pa.Table, *, shard: str, bucket: str, since: datetime):
+    con = make_duckdb()
+    con.register(TABLE_RAW.name, table)
+    return con.execute(build_changed_sql(shard, bucket, since)).to_arrow_table()
+
+
+def test_changed_sql_deleted_entity_yields_zero_rows(now):
+    """A deleted-but-unmerged entity has no canonical live rows: its
+    tombstones shadow the live rows and are filtered – so the diff can
+    emit a DEL without a merge having run."""
+    deleted = now + timedelta(hours=1)
+    table = _table(
+        [
+            _row(now, id="s1", entity_id="acme", prop="name"),
+            _row(
+                now,
+                id="s1",
+                entity_id="acme",
+                prop="name",
+                last_seen=deleted,
+                deleted_at=deleted,
+            ),
+            # untouched second entity, outside the change window
+            _row(now - timedelta(days=1), id="s2", entity_id="other", prop="name"),
+        ]
+    )
+    out = _run_changed(table, shard="0", bucket="thing", since=now)
+    assert out.num_rows == 0
+
+
+def test_changed_sql_multi_origin_slice_keeps_per_origin_rows(now):
+    """The changed slice spans all origins of a partition: the same id
+    tombstoned in one origin must not shadow its live twin in another."""
+    deleted = now + timedelta(hours=1)
+    table = _table(
+        [
+            _row(now, id="s1", entity_id="acme", prop="name", origin="a"),
+            _row(now, id="s1", entity_id="acme", prop="name", origin="b"),
+            _row(
+                now,
+                id="s1",
+                entity_id="acme",
+                prop="name",
+                origin="a",
+                last_seen=deleted,
+                deleted_at=deleted,
+            ),
+        ]
+    )
+    out = _run_changed(table, shard="0", bucket="thing", since=now)
+    rows = out.to_pylist()
+    assert [(r["origin"], r["id"]) for r in rows] == [("b", "s1")]
+
+
+def test_changed_sql_supersession_applied(now):
+    """The changed slice returns canonical rows: a superseded fragment
+    emission is dropped even though both rows are physically present."""
+    t2 = now + timedelta(hours=1)
+    table = _table(
+        [
+            _row(now, id="h1", entity_id="acme", prop="name", fragment="row1"),
+            _row(
+                now,
+                id="h2",
+                entity_id="acme",
+                prop="name",
+                fragment="row1",
+                first_seen=t2,
+                last_seen=t2,
+            ),
+        ]
+    )
+    out = _run_changed(table, shard="0", bucket="thing", since=now)
+    assert [r["id"] for r in out.to_pylist()] == ["h2"]
 
 
 def test_merge_output_sorted(now):

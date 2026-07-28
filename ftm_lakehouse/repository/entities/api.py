@@ -1,9 +1,10 @@
-from typing import Iterable
+from typing import Any, Iterable
 
 import orjson
-from followthemoney import Statement, StatementEntity
+from followthemoney import StatementEntity
 from ftmq.model.stats import DatasetStats
 from ftmq.query import Query
+from ftmq.store.lake import LakeStatement
 from ftmq.types import StatementEntities, Statements
 from ftmq.util import ensure_entity
 
@@ -11,6 +12,21 @@ from ftm_lakehouse.core.api import LakehouseApiMixin, require_api
 from ftm_lakehouse.core.settings import Settings
 
 settings = Settings()
+
+
+def _serialize_query(q: Query | None) -> dict[str, Any]:
+    """Wire form of a ``Query`` for the lakehouse query endpoints.
+
+    The filter tree travels as RQL (``query``); ``to_rql`` does not carry
+    ordering or slicing, so those ride as sibling fields the server
+    recombines (:meth:`ftm_lakehouse.api.dependencies.QueryBody.to_query`).
+    """
+    return {
+        "query": q.to_rql() if q else None,
+        "order_by": q.sort.serialize() if q and q.sort else None,
+        "limit": q.limit if q else None,
+        "offset": q.offset if q else None,
+    }
 
 
 class ApiEntityRepository(LakehouseApiMixin):
@@ -40,26 +56,30 @@ class ApiEntityRepository(LakehouseApiMixin):
     @require_api
     def _api_query(
         self,
+        q: Query | None = None,
+        *,
         entity_ids: Iterable[str] | None = None,
         flush_first: bool = False,
-        **filters,
+        origin: str | None = None,
     ) -> StatementEntities:
         url = self._make_url("query")
         data = {
             "entity_ids": list(entity_ids) if entity_ids else [],
             "flush_first": flush_first,
-            **filters,
+            "origin": origin,
+            **_serialize_query(q),
         }
         for line in self._api.stream_request(url, "POST", json=data):
             yield ensure_entity(orjson.loads(line), StatementEntity)
 
     @require_api
-    def _api_query_statements(self, q: Query | None = None) -> Statements:
-        q = q or Query()
-        data = q.to_dict()
+    def _api_query_statements(
+        self, q: Query | None = None, origin: str | None = None
+    ) -> Statements:
         url = self._make_url("statements/query")
+        data = {"origin": origin, **_serialize_query(q)}
         for line in self._api.stream_request(url, "POST", json=data):
-            yield Statement.from_dict(orjson.loads(line))
+            yield LakeStatement.from_dict(orjson.loads(line))
 
     @require_api
     def _api_delete_entity(self, entity_id: str) -> int:

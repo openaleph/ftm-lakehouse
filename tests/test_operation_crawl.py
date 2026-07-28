@@ -1,3 +1,5 @@
+from ftmq.query import M, Query
+
 from ftm_lakehouse.core.conventions import tag
 from ftm_lakehouse.operation.crawl import CrawlJob, CrawlOperation
 
@@ -42,8 +44,8 @@ def test_operation_crawl(fixtures_path, tmp_path):
     entities = list(op.entities.query(origin=tag.CRAWL_ORIGIN))
     assert len(entities) == 5 + 1  # files + folder
 
-    assert len(list(op.entities.query(schema="Pages"))) == 1
-    assert len(list(op.entities.query(schema="Folder"))) == 1
+    assert len(list(op.entities.query(Query().where(M(schema="Pages"))))) == 1
+    assert len(list(op.entities.query(Query().where(M(schema="Folder"))))) == 1
 
 
 def test_operation_crawl_globs(fixtures_path, tmp_path):
