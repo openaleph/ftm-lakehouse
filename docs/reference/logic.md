@@ -57,19 +57,24 @@ The DuckDB config, the `statement` / `statement_raw` view-SQL builders, and the 
         heading_level: 3
         show_root_heading: true
 
-::: ftm_lakehouse.logic.parquet.dedupe_view_sql
+::: ftm_lakehouse.logic.parquet.live_view_sql
     options:
         heading_level: 3
         show_root_heading: true
 
-Both builders emit `delta_scan('<uri>')`, so a view defined from this SQL resolves the current Delta log on every query – defining it once per connection is enough; subsequent `write_deltalake` commits are picked up automatically. The deduped `statement` view windows over `(shard, bucket, id)` and hides tombstones, so every read (including stats) sees one live row per id; `statement_raw` exposes every physical row – tombstones and pre-merge duplicates included – for `merge` and `get_changed_entity_ids`.
+Both builders emit `delta_scan('<uri>')`, so a view defined from this SQL resolves the current Delta log on every query – defining it once per connection is enough; subsequent `write_deltalake` commits are picked up automatically. The live `statement` view is a plain `WHERE deleted_at IS NULL` scan (no window function, so predicate pushdown survives) and is only correct on an **optimized** store; `statement_raw` exposes every physical row – tombstones and pre-merge duplicates included – for `merge` and `get_changed_entity_ids`.
 
-::: ftm_lakehouse.logic.parquet.build_merge_query
+::: ftm_lakehouse.logic.parquet.build_merge_sql
     options:
         heading_level: 3
         show_root_heading: true
 
-Returns a SQLAlchemy `Select` over the raw view that collapses one `(shard, bucket, origin)` partition; compile it to DuckDB SQL via `str(query.compile(compile_kwargs={"literal_binds": True}))`.
+::: ftm_lakehouse.logic.parquet.build_changed_sql
+    options:
+        heading_level: 3
+        show_root_heading: true
+
+Both are executable DuckDB SQL strings over `statement_raw`, sharing the dedupe / fragment-supersession logic: `build_merge_sql` collapses one `(shard, bucket, origin)` partition for physical rewrite, `build_changed_sql` returns the canonical live rows of entities changed since a watermark without requiring a merge first.
 
 ## Statement Serialization
 
