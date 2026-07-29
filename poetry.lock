@@ -4903,6 +4903,28 @@ files = [
 tests = ["pytest"]
 
 [[package]]
+name = "putfs"
+version = "0.3.3"
+description = "Efficient HTTP blob storage over local filesystem"
+optional = true
+python-versions = "<3.15,>=3.11"
+groups = ["main"]
+markers = "extra == \"api\""
+files = [
+    {file = "putfs-0.3.3-py3-none-any.whl", hash = "sha256:7e57d6ad4ba7cff35d66b44f09b62eddb44de8c193d5033533936368eb31114f"},
+    {file = "putfs-0.3.3.tar.gz", hash = "sha256:a48446020cd2746104e7f9e54352c1b5e1ec5720f6b1d86e156efc37eba73df8"},
+]
+
+[package.dependencies]
+anyio = ">=4.14.2,<5.0.0"
+granian = ">=2.7.8,<3.0.0"
+starlette = ">=1.3.1,<2.0.0"
+uvloop = ">=0.22.1,<0.23.0"
+
+[package.extras]
+client = ["anystore[http] (>=1.2.5,<2.0.0)", "tqdm (>=4.70.0,<5.0.0)"]
+
+[[package]]
 name = "py-partiql-parser"
 version = "0.6.3"
 description = "Pure Python PartiQL Parser"
@@ -7415,7 +7437,7 @@ pyyaml = ">=6.0.2"
 tomli = ">=2.4.0"
 
 [extras]
-api = ["aiohttp", "fastapi", "granian", "uvloop"]
+api = ["aiohttp", "fastapi", "granian", "putfs", "uvloop"]
 azure = ["adlfs"]
 gcs = ["gcsfs"]
 http = ["aiohttp"]
@@ -7424,4 +7446,4 @@ s3 = ["s3fs"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<3.15"
-content-hash = "7a0d57ea43254d6b204f44add333b18e208430028c9c0412aa30008be4e51c83"
+content-hash = "5ac36781a329f4da8465c7be5e8220cbf1f1a420632259177f043e904da14323"
