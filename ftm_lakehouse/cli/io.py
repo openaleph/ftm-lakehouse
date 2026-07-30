@@ -65,7 +65,9 @@ def _bulk_import(
     item_name: str,
 ) -> None:
     repo = dataset.get_entities()
-    buffer = EntityBuffer(dataset.name, repo.shards, origin, last_seen=last_seen)
+    buffer = EntityBuffer(
+        dataset.name, repo.shards, origin, last_seen=last_seen, max_rows=bulk_size
+    )
     now = last_seen or datetime.now(timezone.utc)
 
     for item in logged_items(
