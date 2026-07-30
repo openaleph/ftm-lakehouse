@@ -391,21 +391,22 @@ class ParquetStore(LakehouseApiMixin):
                 ("last_seen", "descending"),
             ]
         )
-        with self._write_lock(), self._tags.touch(tag.STATEMENTS_UPDATED):
+        with self._tags.touch(tag.STATEMENTS_UPDATED):
             self._mark_updated(batch)
             mode = "append" if self.exists else "overwrite"
             for bucket in buckets:
                 sub = batch.filter(pc.equal(batch["bucket"], bucket))
-                write_deltalake(
-                    str(self.uri),
-                    sub,
-                    partition_by=PARTITIONS,
-                    mode=mode,
-                    writer_properties=writer_for_bucket(bucket),
-                    storage_options=storage_options(),
-                )
-                # After the first sub-batch, the table exists for subsequent buckets.
-                mode = "append"
+                with self._write_lock():
+                    write_deltalake(
+                        str(self.uri),
+                        sub,
+                        partition_by=PARTITIONS,
+                        mode=mode,
+                        writer_properties=writer_for_bucket(bucket),
+                        storage_options=storage_options(),
+                    )
+                    # After the first sub-batch, the table exists for subsequent buckets.
+                    mode = "append"
 
     def _mark_updated(self, batch: pa.Table) -> None:
         """Stamp a ``last_updated`` tag on every partition present in ``batch``.
