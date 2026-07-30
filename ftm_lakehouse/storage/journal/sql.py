@@ -12,10 +12,12 @@ from sqlalchemy import (
     String,
     Table,
     Text,
+    column,
     delete,
     func,
     select,
     tuple_,
+    values,
 )
 from sqlalchemy.dialects.postgresql import insert as psql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -277,13 +279,25 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
                                     row.deleted_at,
                                     row.fragment,
                                 )
-                            write_conn.execute(
-                                delete(self.table).where(
-                                    tuple_(self.table.c.id, self.table.c.fragment).in_(
-                                        flushed
-                                    )
-                                )
-                            )
+                            key = tuple_(self.table.c.id, self.table.c.fragment)
+                            if self.engine.dialect.name in ("postgresql", "postgres"):
+                                # Postgres expands a literal row-value IN list
+                                # into a left-nested OR chain (one parser stack
+                                # frame per element) and raises 54001
+                                # ``StatementTooComplex`` at batch size; a
+                                # VALUES semi-join keeps expression depth
+                                # constant. SQLite can't parse the derived
+                                # column alias this renders, but treats the
+                                # literal IN list as a flat expression list.
+                                flushed_vals = values(
+                                    column("id", String),
+                                    column("fragment", String),
+                                    name="flushed",
+                                ).data(flushed)
+                                where = key.in_(select(flushed_vals))
+                            else:
+                                where = key.in_(flushed)
+                            write_conn.execute(delete(self.table).where(where))
                     finally:
                         cursor.close()
 

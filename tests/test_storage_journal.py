@@ -363,6 +363,30 @@ def test_storage_journal_clear(journal):
     assert journal.count() == 0
 
 
+def test_storage_journal_flush_large_single_shard_batch(request, journal):
+    """A full 10k-row fetch batch in one shard flushes in one pass.
+
+    Regression: the per-batch DELETE keyed on the ``(id, fragment)``
+    primary key used a literal row-value IN list – postgres expands that
+    into a left-nested OR chain (one parser stack frame per element) and
+    raised ``StatementTooComplex`` (54001) at batch size. The keys now go
+    through a VALUES semi-join with constant expression depth.
+    """
+    param = request.node.callspec.params["journal"]
+    if param == "api":
+        pytest.skip("Exercises the SQL delete path; server side is covered by sql")
+
+    with journal.writer(1) as w:
+        for i in range(10_001):
+            w.add_statement(make_statement(f"e{i}", "name", f"Name {i}"))
+
+    assert journal.count() == 10_001
+    flushed = list(journal.flush())
+    assert len(flushed) == 10_001
+    assert {row.shard for row in flushed} == {"0"}
+    assert journal.count() == 0
+
+
 @pytest.fixture(params=["sqlite"] + (["psql"] if PSQL_URI else []))
 def concurrent_journal(request, tmp_path):
     """Journal fixture for concurrent write tests (needs file-based or network DB)."""
