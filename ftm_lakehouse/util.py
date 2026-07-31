@@ -1,8 +1,10 @@
 import re
+from functools import lru_cache
 from typing import Any, BinaryIO
 
 from anystore.util import make_checksum as _make_checksum
 from anystore.util import make_data_checksum as _make_data_checksum
+from banal import ensure_list
 from followthemoney.dataset.util import dataset_name_check
 from jinja2 import Template
 
@@ -23,6 +25,13 @@ def make_checksum(io: BinaryIO) -> str:
 def make_data_checksum(data: Any) -> str:
     """Compute data checksum using SHA256."""
     return _make_data_checksum(data, algorithm=CHECKSUM_ALGORITHM)
+
+
+def single_string(value: Any) -> str | None:
+    """A single string from a scalar-or-sequence value, else ``None``"""
+    for v in ensure_list(value):
+        if v or isinstance(v, int):  # v=0 literally
+            return str(v)
 
 
 def safe_name(value: str, field: str = "name") -> str:
@@ -68,6 +77,7 @@ def safe_name(value: str, field: str = "name") -> str:
     return value
 
 
+@lru_cache(100_000)
 def validate_origin(origin: str) -> str:
     """Validate an ``origin`` tag for safe use as a path / partition value.
 

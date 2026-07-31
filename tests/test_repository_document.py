@@ -153,11 +153,12 @@ def test_repository_document_export_diff(tmp_path, fixtures_path):
     # before first diff export
     _archive_with_entities(archive, entities, fixtures_path / "src" / "utf.txt")
     entities.flush()
-    assert entities._statements.version == 0
+    # version 0 is the empty create commit (ParquetStore._ensure_table)
+    assert entities._statements.version == 1
 
     _archive_with_entities(archive, entities, fixtures_path / "src" / "companies.csv")
     entities.flush()
-    assert entities._statements.version == 1
+    assert entities._statements.version == 2
 
     # Cross second boundary so initial entities are in an earlier second
     time.sleep(1.1)

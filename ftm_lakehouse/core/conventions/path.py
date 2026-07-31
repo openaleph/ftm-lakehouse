@@ -26,7 +26,8 @@ Dataset Layout
             versions/                       # versioned snapshots
                 YYYY/MM/...
 
-            .LOCK                           # dataset-wide lock
+            .LOCK                           # dataset-wide maintenance lock
+            .LOCK-APPENDS/                  # in-flight append markers
             locks/{tenant}/                 # operation-specific locks
             tags/{tenant}/                  # workflow state / cache
 
@@ -118,7 +119,10 @@ def version(name: str, ts: str | None = None) -> str:
 
 
 LOCK = ".LOCK"
-"""dataset-wide lock key name"""
+"""dataset-wide maintenance lock key name"""
+
+LOCK_APPENDS = ".LOCK-APPENDS"
+"""Prefix for per-writer append marker keys (shared side of the write fence)"""
 
 LOCKS = "locks"
 """Base path for storing locks"""

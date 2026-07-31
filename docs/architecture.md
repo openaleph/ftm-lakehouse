@@ -124,7 +124,7 @@ Writes are **append-only**: `append` sorts a per-shard batch by `(bucket, origin
 - **non-fragment** (`fragment = ''`, the default): content-addressed dedup – latest `last_seen` per statement `id` wins; distinct ids never interact. Scoped per `(shard, bucket, origin)` partition, so the *same* statement observed under two origins is kept once per origin (merge cannot cross origin partitions).
 - **fragment-bearing** (`fragment != ''`): supersession per `(origin, entity_id, prop, fragment)` group – every row tied at the group's max `last_seen` survives (the latest emission, multi-valued props included), older emissions go. See [Fragment Supersession](usage/entities.md#fragment-supersession) for semantics and the producer contract.
 
-The async `optimize` operation produces this canonical state by running the three storage primitives in order, each acquiring the dataset-wide `.LOCK` so they don't race with each other or with appends:
+The async `optimize` operation produces this canonical state by running the three storage primitives in order. Each acquires the exclusive maintenance fence – the dataset-wide `.LOCK` plus a drain of in-flight append markers (`.LOCK-APPENDS/`) – so maintenance never races other maintenance or an append it could tombstone. Appends themselves only register a marker and run concurrently; Delta's optimistic concurrency serializes their commits:
 
 | Step | Cost | What it does |
 |------|------|--------------|

@@ -12,13 +12,18 @@ from typing import Annotated, Optional
 
 import typer
 from anystore.io import smart_open, smart_write_csv
+from anystore.io.read import smart_stream_csv
 from anystore.logic.io import stream
 from anystore.util import Took
 from rich.console import Console
 from rich.table import Table
 
 from ftm_lakehouse.cli import DatasetContext, cli, settings
-from ftm_lakehouse.cli.io import BULK_ORIGIN, import_statements
+from ftm_lakehouse.cli.io import (
+    BULK_ORIGIN,
+    import_statements,
+    import_statements_unsafe,
+)
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.helpers.statements import read_csv_statements
 
@@ -66,6 +71,15 @@ def cli_statements_import(
         Optional[datetime],
         typer.Option(help="Default last_seen timestamp if row has none"),
     ] = None,
+    unsafe: Annotated[
+        bool,
+        typer.Option(
+            "--unsafe",
+            help="Fast path: map CSV rows straight to parquet rows, skipping "
+            "Statement object construction and validation. Trusted input "
+            "only.",
+        ),
+    ] = False,
 ):
     """Bulk-import raw statements (CSV) straight into the parquet store.
 
@@ -74,16 +88,26 @@ def cli_statements_import(
     supersession key (followthemoney's reader has no notion of it) – then
     buffered in ``EntityBuffer`` to pre-sort by shard and handed to
     ``EntityRepository.write_statements`` for a per-shard parquet append.
-    Bypasses the journal.
+    Bypasses the journal. With ``--unsafe``, rows skip Statement
+    construction entirely and map straight to parquet rows.
     """
     with DatasetContext() as dataset:
-        import_statements(
-            dataset,
-            read_csv_statements(in_uri),
-            origin=origin,
-            bulk_size=bulk_size,
-            last_seen=last_seen,
-        )
+        if unsafe:
+            import_statements_unsafe(
+                dataset,
+                smart_stream_csv(in_uri),
+                origin=origin,
+                bulk_size=bulk_size,
+                last_seen=last_seen,
+            )
+        else:
+            import_statements(
+                dataset,
+                read_csv_statements(in_uri),
+                origin=origin,
+                bulk_size=bulk_size,
+                last_seen=last_seen,
+            )
 
 
 @statements.command("sql")

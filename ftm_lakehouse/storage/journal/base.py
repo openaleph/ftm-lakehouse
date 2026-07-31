@@ -67,10 +67,11 @@ class BaseJournalWriter(EntityBuffer, Generic[S]):
                 row.stmt.fragment,
             )
 
-    def add_statement(self, *args, **kwargs) -> None:
-        super().add_statement(*args, **kwargs)
+    def add_statement(self, *args, **kwargs) -> str | None:
+        stmt_id = super().add_statement(*args, **kwargs)
         if self._buffer_size >= WRITE_BATCH_SIZE:
             self._upsert_batch()
+        return stmt_id
 
     def flush(self) -> None:
         """Flush pending rows and commit transaction."""

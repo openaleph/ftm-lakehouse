@@ -183,11 +183,6 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         BY last_seen DESC)`` tiebreak against the live row in
         :meth:`ParquetStore.merge`.
 
-        Memory is bounded by :data:`WRITE_SHARD_BATCH`: within a single
-        shard, the in-memory accumulator is emitted to parquet every
-        ``WRITE_SHARD_BATCH`` rows so a pathologically large shard cannot
-        OOM the writer.
-
         Args:
             statements: Shard-sorted stream of :class:`StatementRow`.
             now: Default timestamp for missing ``first_seen`` /
@@ -201,9 +196,51 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         if now is None:
             now = datetime.now(timezone.utc)
 
+        def rows() -> Generator[SDict, None, None]:
+            for row in statements:
+                data = pack_statement(row.stmt)
+                data["first_seen"] = data.get("first_seen") or now
+                data["deleted_at"] = row.deleted_at
+                # Tombstones bump last_seen to the delete timestamp so they win
+                # the ROW_NUMBER ORDER BY last_seen DESC tiebreak in merge().
+                data["last_seen"] = row.deleted_at or data.get("last_seen") or now
+                data["shard"] = row.shard
+                yield data
+
+        return self.write_rows(rows(), batch_size=batch_size)
+
+    @no_api
+    def write_rows(
+        self,
+        rows: Iterable[SDict],
+        batch_size: int | None = WRITE_SHARD_BATCH,
+    ) -> int:
+        """Append a shard-sorted stream of packed row dicts to parquet.
+
+        The shared emit loop under :meth:`write_statements` and the direct
+        target of the unsafe bulk-import path
+        (:mod:`ftm_lakehouse.logic.entities.explode`), which produces these
+        rows without any FtM object construction. Rows must carry every
+        :data:`~ftm_lakehouse.model.statement.SHARDED_SCHEMA` column plus
+        ``shard`` and arrive sorted by shard; consecutive rows of one shard
+        accumulate into a single batch and :meth:`ParquetStore.append`
+        splits each batch by bucket.
+
+        Memory is bounded by ``batch_size``: within a single shard, the
+        in-memory accumulator is emitted to parquet every ``batch_size``
+        rows so a pathologically large shard cannot OOM the writer.
+
+        Args:
+            rows: Shard-sorted stream of packed row dicts.
+            batch_size: Row cap per in-memory shard batch, or ``None`` to
+                signal the caller already batches.
+
+        Returns:
+            Number of rows written.
+        """
         total = 0
         current_shard: str | None = None
-        buffer: list[dict] = []
+        buffer: list[SDict] = []
 
         def _emit() -> None:
             nonlocal total
@@ -214,21 +251,14 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
             total += len(batch)
             buffer.clear()
 
-        for row in statements:
-            if current_shard is not None and current_shard != row.shard:
+        for data in rows:
+            shard = data["shard"]
+            if current_shard is not None and current_shard != shard:
                 _emit()
             if batch_size is not None:
                 if len(buffer) >= batch_size:
                     _emit()
-            current_shard = row.shard
-
-            data = pack_statement(row.stmt)
-            data["first_seen"] = data.get("first_seen") or now
-            data["deleted_at"] = row.deleted_at
-            # Tombstones bump last_seen to the delete timestamp so they win
-            # the ROW_NUMBER ORDER BY last_seen DESC tiebreak in merge().
-            data["last_seen"] = row.deleted_at or data.get("last_seen") or now
-            data["shard"] = row.shard
+            current_shard = shard
             buffer.append(data)
 
         _emit()

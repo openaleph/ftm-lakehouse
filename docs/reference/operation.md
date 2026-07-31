@@ -58,7 +58,7 @@ Process CSV-to-entity mapping configurations.
 
 ## OptimizeOperation
 
-Optimize the parquet statement store in one pass: merge (per-partition rewrite that collapses duplicates, folds `first_seen` to the min, drops tombstones older than the grace cutoff per `LAKEHOUSE_GRACE_PERIOD_DAYS`), compact (bin-pack small files) and vacuum (delete obsolete files). Each step acquires the dataset-wide write fence (`.LOCK`).
+Optimize the parquet statement store in one pass: merge (per-partition rewrite that collapses duplicates, folds `first_seen` to the min, `last_seen` to the max, drops tombstones older than the grace cutoff per `LAKEHOUSE_GRACE_PERIOD_DAYS`), compact (bin-pack small files) and vacuum (delete obsolete files). Each step acquires the exclusive maintenance fence (`.LOCK`) and waits for in-flight append markers to drain.
 
 ::: ftm_lakehouse.operation.maintenance.OptimizeJob
     options:

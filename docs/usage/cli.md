@@ -97,6 +97,11 @@ ftm-lakehouse -d my_dataset entities stream -o out.json
 cat entities.ftm.json | ftm-lakehouse -d my_dataset entities import
 ftm-lakehouse -d my_dataset entities import -i entities.ftm.json --origin bulk
 ftm-lakehouse -d my_dataset entities import -i entities.ftm.json --bulk-size 250000
+
+# Fast path for trusted input: explode entity JSON straight into parquet rows,
+# skipping FtM object construction and validation (several times faster, same
+# statement ids and namespace stripping as the safe path)
+cat entities.ftm.json | ftm-lakehouse -d my_dataset entities import --unsafe
 ```
 
 ## `statements`
@@ -113,6 +118,10 @@ Raw statement-grain read/write, mirroring `entities` at the lower level.
 ftm-lakehouse -d my_dataset statements iterate -o live-statements.csv
 ftm-lakehouse -d my_dataset statements stream -o exported.csv
 cat statements.csv | ftm-lakehouse -d my_dataset statements import
+
+# Fast path for trusted input: map CSV rows straight to parquet rows,
+# skipping Statement object construction
+cat statements.csv | ftm-lakehouse -d my_dataset statements import --unsafe
 ```
 
 ## `operations`
@@ -146,7 +155,7 @@ ftm-lakehouse -d my_dataset operations optimize
 ftm-lakehouse -d my_dataset operations optimize --retention-hours 24
 ```
 
-Each step acquires a dataset-wide write fence at `.LOCK`, so it doesn't race with concurrent maintenance or with append-style writes.
+Each step acquires the exclusive maintenance fence – the dataset-wide `.LOCK` plus a drain of in-flight append markers – so it doesn't race with concurrent maintenance or with append-style writes. Appends themselves don't take `.LOCK`; parallel imports never block each other.
 
 ### Crawl
 

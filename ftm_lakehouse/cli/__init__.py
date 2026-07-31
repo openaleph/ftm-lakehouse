@@ -19,7 +19,7 @@ from ftm_lakehouse import __version__
 from ftm_lakehouse.catalog import Catalog
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.dataset import Dataset
-from ftm_lakehouse.lake import get_dataset, get_lakehouse
+from ftm_lakehouse.lake import get_lakehouse
 
 settings = Settings()
 cli = typer.Typer(
@@ -108,7 +108,10 @@ def cli_ftm_lakehouse(
             # if dataset_uri:
             #     STATE["dataset"] = get_dataset(dataset, dataset_uri)
             # else:
-            STATE["dataset"] = get_dataset(dataset)
+            # Resolve through the catalog just built so --uri actually
+            # applies; the module-level get_dataset would re-resolve via the
+            # cached uri-less get_lakehouse() and silently ignore the flag.
+            STATE["dataset"] = catalog.get_dataset(dataset)
     except Exception as e:
         if settings_.debug:
             raise

@@ -169,12 +169,13 @@ def test_repository_entities_export_diff(tmp_path):
     with repo.writer() as writer:
         writer.add_entity(make_entity(JANE))
     repo.flush()
-    assert repo.version == 0
+    # version 0 is the empty create commit (ParquetStore._ensure_table)
+    assert repo.version == 1
 
     with repo.writer() as writer:
         writer.add_entity(make_entity(JOHN))
     repo.flush()
-    assert repo.version == 1
+    assert repo.version == 2
 
     # Export entities.ftm.json (required for initial diff)
     smart_write_proxies(repo._store.open(path.ENTITIES_JSON, "wb"), repo.query())
@@ -402,12 +403,13 @@ def test_repository_entities_export_diff_no_changes(tmp_path):
     with repo.writer() as writer:
         writer.add_entity(make_entity(JANE))
     repo.flush()
-    assert repo.version == 0
+    # version 0 is the empty create commit (ParquetStore._ensure_table)
+    assert repo.version == 1
 
     with repo.writer() as writer:
         writer.add_entity(make_entity(JOHN))
     repo.flush()
-    assert repo.version == 1
+    assert repo.version == 2
 
     # Export entities.ftm.json for initial diff
     entities_json_path = tmp_path / path.ENTITIES_JSON

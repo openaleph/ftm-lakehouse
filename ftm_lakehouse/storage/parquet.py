@@ -36,8 +36,12 @@ Layout:
     entities/statements/shard={s}/bucket={b}/origin={o}/part-*.parquet
 """
 
+import random
+import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Iterator, cast
+from typing import Callable, Iterator, cast
+from uuid import uuid4
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -79,7 +83,12 @@ from ftm_lakehouse.logic.parquet import (
     raw_view_sql,
 )
 from ftm_lakehouse.model.dataset import DEFAULT_SHARDS
-from ftm_lakehouse.model.statement import TABLE, TABLE_RAW, statement_csv_select
+from ftm_lakehouse.model.statement import (
+    SHARDED_SCHEMA,
+    TABLE,
+    TABLE_RAW,
+    statement_csv_select,
+)
 from ftm_lakehouse.storage.tags import TagStore
 
 PARTITIONS = ["shard", "bucket", "origin"]
@@ -305,11 +314,16 @@ class ParquetStore(LakehouseApiMixin):
         return 0
 
     def _write_lock(self) -> Lock:
-        """Dataset-wide write fence.
+        """Exclusive side of the dataset write fence.
 
-        All Delta writers (``append``, ``merge``, ``compact``, ``vacuum``)
-        acquire this lock so they can't race on the same partition. The lock
-        lives at ``{dataset_root}/.LOCK`` per ``path.LOCK``.
+        Held by maintenance (:meth:`merge`, :meth:`compact`, :meth:`vacuum`
+        via :meth:`_maintenance_fence`) and by the first-ever :meth:`append`
+        of a dataset (table creation must not race). The lock lives at
+        ``{dataset_root}/.LOCK`` per ``path.LOCK``.
+
+        Regular appends do **not** take this lock – they register a shared
+        marker instead (:meth:`_append_fence`); Delta's optimistic
+        concurrency serializes concurrent append commits safely on its own.
 
         Acquisition is bounded by ``settings.lock_max_retries`` (total wait
         roughly ``N²/2`` seconds); entering the returned lock raises
@@ -322,27 +336,133 @@ class ParquetStore(LakehouseApiMixin):
             self._store, key=path.LOCK, max_retries=self.settings.lock_max_retries
         )
 
+    def _await(self, ready: Callable[[], bool], what: str) -> None:
+        """Block until ``ready()`` is true, with the fence's retry bound.
+
+        Linear backoff matching the ``Lock`` acquisition semantics
+        (anystore's ``error_handler`` with ``backoff_random``): attempt
+        ``N`` sleeps ``N`` seconds plus up to one second of jitter – so
+        concurrent waiters don't wake in lockstep – and
+        ``settings.lock_max_retries`` retries wait roughly ``N²/2`` seconds
+        in total before raising ``RuntimeError``.
+        """
+        retries = 0
+        while not ready():
+            retries += 1
+            if retries > self.settings.lock_max_retries:
+                raise RuntimeError(
+                    f"Write fence busy: {what}. If a writer crashed, release "
+                    "the fence via `ftm-lakehouse operations unlock`."
+                )
+            time.sleep(retries + random.random())
+
+    def _append_markers(self) -> list[str]:
+        """Keys of all currently registered append markers."""
+        return list(self._store.iterate_keys(prefix=path.LOCK_APPENDS))
+
+    @contextmanager
+    def _append_fence(self) -> Iterator[None]:
+        """Shared (append) side of the dataset write fence.
+
+        Registers a marker key under ``.LOCK-APPENDS/`` and only *then*
+        checks the maintenance ``.LOCK`` – the store-then-load order makes
+        the handshake sound on a linearizable store: when the ``.LOCK``
+        check sees no lock, the marker write is already visible to any
+        later drain poll by a maintenance holder, so
+        :meth:`_maintenance_fence` can never pass its drain while an
+        unnoticed append is in flight. When ``.LOCK`` is held, the marker
+        is removed *before* backing off (a parked appender must not
+        deadlock the drain), then register-and-check retries under the
+        fence's usual bound.
+
+        Concurrent appends never block each other – Delta append commits
+        are blind appends that delta-rs serializes via optimistic commit
+        retries. A marker left behind by a crashed appender blocks
+        maintenance until released via :meth:`unlock`
+        (``ftm-lakehouse operations unlock``).
+        """
+        marker = f"{path.LOCK_APPENDS}/{uuid4().hex}"
+        retries = 0
+        while True:
+            self._store.touch(marker)
+            if not self._store.exists(path.LOCK):
+                break
+            self._store.delete(marker, ignore_errors=True)
+            retries += 1
+            if retries > self.settings.lock_max_retries:
+                raise RuntimeError(
+                    f"Write fence busy: maintenance lock `{path.LOCK}` is "
+                    "held. If a writer crashed, release the fence via "
+                    "`ftm-lakehouse operations unlock`."
+                )
+            time.sleep(retries + random.random())
+        try:
+            yield
+        finally:
+            self._store.delete(marker, ignore_errors=True)
+
+    def _ensure_table(self) -> None:
+        """Create the Delta table (as an empty commit) if it does not exist.
+
+        Runs under the exclusive write lock so two racing first imports
+        cannot both commit version ``0``. Establishing existence here –
+        once, at the first write – lets :meth:`append` always take the
+        shared append fence with ``mode="append"`` instead of
+        special-casing creation inside the hot write path.
+        """
+        if self.exists:
+            return
+        with self._write_lock():
+            if self.exists:  # lost the create race - the table is there now
+                return
+            write_deltalake(
+                str(self.uri),
+                pa.Table.from_pylist([], schema=SHARDED_SCHEMA),
+                partition_by=PARTITIONS,
+                mode="overwrite",
+                storage_options=storage_options(),
+            )
+
+    @contextmanager
+    def _maintenance_fence(self) -> Iterator[None]:
+        """Exclusive fence for partition-rewriting maintenance.
+
+        Acquires the ``.LOCK`` write lock (fencing off other maintenance and
+        new appends), then waits for in-flight append markers to drain so a
+        rewrite never overlaps an append it could tombstone.
+        """
+        with self._write_lock():
+            self._await(
+                lambda: not self._append_markers(),
+                f"append markers under `{path.LOCK_APPENDS}/` are present",
+            )
+            yield
+
     @no_api
     def unlock(self) -> bool:
         """Forcibly release the dataset write fence.
 
         Operator escape hatch for the case where a writer process died
-        with the lock held (or an attacker held it on purpose). The lock
-        is just a file at ``{dataset_root}/.LOCK``; this method deletes
-        it.
+        with the fence held (or an attacker held it on purpose). Releases
+        both sides: the exclusive ``.LOCK`` file and any append markers
+        under ``.LOCK-APPENDS/``.
 
-        **Use sparingly** – breaking a lock that's still held by a live
+        **Use sparingly** – breaking a fence that's still held by a live
         writer can corrupt a write in flight. Confirm no process is
         actively writing before running.
 
         Returns:
-            ``True`` if a lock was released, ``False`` if no lock was
-            held.
+            ``True`` if a lock or marker was released, ``False`` if the
+            fence was clear.
         """
-        if not self._store.exists(path.LOCK):
-            return False
-        self._store.delete(path.LOCK)
-        return True
+        released = False
+        if self._store.exists(path.LOCK):
+            self._store.delete(path.LOCK)
+            released = True
+        for marker in self._append_markers():
+            self._store.delete(marker, ignore_errors=True)
+            released = True
+        return released
 
     @no_api
     def append(self, batch: pa.Table) -> None:
@@ -358,12 +478,18 @@ class ParquetStore(LakehouseApiMixin):
         large profile). Duplicates land as separate rows and are reaped by
         :meth:`merge`.
 
-        Held under the dataset write fence so concurrent :meth:`merge` /
-        :meth:`compact` / :meth:`vacuum` can't tombstone an in-flight append.
-        Each touched ``(shard, bucket, origin)`` partition is stamped with a
-        ``last_updated`` freshness tag *before* the Delta writes so a later
-        :meth:`merge` can skip partitions that didn't change – see
-        :meth:`_mark_updated` for the crash-safety ordering.
+        Held under the *shared* side of the write fence
+        (:meth:`_append_fence`): concurrent appends run in parallel – Delta
+        serializes their commits via optimistic concurrency – while
+        :meth:`merge` / :meth:`compact` / :meth:`vacuum` wait for the append
+        markers to drain before rewriting partitions. Table creation happens
+        once in :meth:`_ensure_table` (under the exclusive lock, so two
+        racing imports can't both commit version ``0``); the write loop
+        itself always appends. Each touched ``(shard, bucket, origin)``
+        partition is stamped with a ``last_updated`` freshness tag *before*
+        the Delta writes so a later :meth:`merge` can skip partitions that
+        didn't change – see :meth:`_mark_updated` for the crash-safety
+        ordering.
 
         Args:
             batch: PyArrow table with the columns of
@@ -393,20 +519,18 @@ class ParquetStore(LakehouseApiMixin):
         )
         with self._tags.touch(tag.STATEMENTS_UPDATED):
             self._mark_updated(batch)
-            mode = "append" if self.exists else "overwrite"
-            for bucket in buckets:
-                sub = batch.filter(pc.equal(batch["bucket"], bucket))
-                with self._write_lock():
+            self._ensure_table()
+            with self._append_fence():
+                for bucket in buckets:
+                    sub = batch.filter(pc.equal(batch["bucket"], bucket))
                     write_deltalake(
                         str(self.uri),
                         sub,
                         partition_by=PARTITIONS,
-                        mode=mode,
+                        mode="append",
                         writer_properties=writer_for_bucket(bucket),
                         storage_options=storage_options(),
                     )
-                    # After the first sub-batch, the table exists for subsequent buckets.
-                    mode = "append"
 
     def _mark_updated(self, batch: pa.Table) -> None:
         """Stamp a ``last_updated`` tag on every partition present in ``batch``.
@@ -444,8 +568,8 @@ class ParquetStore(LakehouseApiMixin):
         latest emission per ``(entity_id, prop, fragment)`` group; fold
         ``first_seen`` to the min; drop tombstones older than the grace
         cutoff) and atomically overwrites that partition via
-        ``partition_filters``. Held under the dataset write fence
-        (``path.LOCK``).
+        ``partition_filters``. Held under the exclusive maintenance fence
+        (``path.LOCK`` + append-marker drain, :meth:`_maintenance_fence`).
 
         Only partitions whose ``last_updated`` freshness tag is newer than
         their ``last_optimized`` tag are rewritten – a partition untouched
@@ -491,7 +615,7 @@ class ParquetStore(LakehouseApiMixin):
         force = force or grace_period_days is not None
         grace_cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         merged = skipped = 0
-        with self._write_lock():
+        with self._maintenance_fence():
             for shard, bucket, origin in self._list_partitions():
                 updated = tag.statements_partition_updated(shard, bucket, origin)
                 optimized = tag.statements_partition_optimized(shard, bucket, origin)
@@ -552,12 +676,12 @@ class ParquetStore(LakehouseApiMixin):
 
         Cheap maintenance – Delta's ``OPTIMIZE compact`` only rewrites small
         files into larger ones; it does not collapse duplicate rows or drop
-        tombstones (use :meth:`merge` for that). Held under the dataset write
-        fence (``path.LOCK``).
+        tombstones (use :meth:`merge` for that). Held under the exclusive
+        maintenance fence (:meth:`_maintenance_fence`).
         """
         if not self.exists:
             return
-        with self._write_lock():
+        with self._maintenance_fence():
             for shard, bucket, origin in self._list_partitions():
                 with Took() as t:
                     self.deltatable.optimize.compact(
@@ -583,8 +707,8 @@ class ParquetStore(LakehouseApiMixin):
 
         Tombstoned files (replaced by :meth:`merge` / :meth:`compact`) become
         orphans on disk; vacuum prunes them once they're past
-        ``retention_hours``. Held under the dataset write fence
-        (``path.LOCK``).
+        ``retention_hours``. Held under the exclusive maintenance fence
+        (:meth:`_maintenance_fence`).
 
         Args:
             retention_hours: Keep files newer than this many hours. ``0``
@@ -592,7 +716,7 @@ class ParquetStore(LakehouseApiMixin):
         """
         if not self.exists:
             return
-        with self._write_lock(), Took() as t:
+        with self._maintenance_fence(), Took() as t:
             self.deltatable.vacuum(
                 retention_hours=retention_hours,
                 dry_run=False,

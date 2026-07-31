@@ -12,11 +12,12 @@ from typing import Annotated, Optional
 
 import typer
 from anystore.io import smart_open
+from anystore.io.read import smart_stream_json
 from anystore.logic.io import stream
 from ftmq.io import smart_read_proxies, smart_write_proxies
 
 from ftm_lakehouse.cli import DatasetContext, cli, settings
-from ftm_lakehouse.cli.io import BULK_ORIGIN, import_entities
+from ftm_lakehouse.cli.io import BULK_ORIGIN, import_entities, import_entities_unsafe
 from ftm_lakehouse.core.conventions import path
 
 entities = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=settings.debug)
@@ -70,6 +71,15 @@ def cli_entities_import(
         Optional[datetime],
         typer.Option(help="Default last_seen timestamp if entity payload has none"),
     ] = None,
+    unsafe: Annotated[
+        bool,
+        typer.Option(
+            "--unsafe",
+            help="Fast path: explode entity JSON straight into parquet rows, "
+            "skipping FtM object construction and validation. Trusted input "
+            "only.",
+        ),
+    ] = False,
 ):
     """
     Bulk-import FtM entities straight into the parquet store, bypassing the
@@ -80,11 +90,21 @@ def cli_entities_import(
     provenance. (Use ``ftmq fragments iterate-fragments -d ...`` for export.)
     """
     with DatasetContext() as dataset:
-        import_entities(
-            dataset,
-            smart_read_proxies(in_uri),
-            origin=origin,
-            override_origin=override_origin,
-            bulk_size=bulk_size,
-            last_seen=last_seen,
-        )
+        if unsafe:
+            import_entities_unsafe(
+                dataset,
+                smart_stream_json(in_uri),
+                origin=origin,
+                override_origin=override_origin,
+                bulk_size=bulk_size,
+                last_seen=last_seen,
+            )
+        else:
+            import_entities(
+                dataset,
+                smart_read_proxies(in_uri),
+                origin=origin,
+                override_origin=override_origin,
+                bulk_size=bulk_size,
+                last_seen=last_seen,
+            )
