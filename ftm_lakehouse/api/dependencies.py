@@ -38,34 +38,6 @@ def get_journal(dataset: str) -> BaseJournalStore:
 Journal = Annotated[BaseJournalStore, Depends(get_journal)]
 
 
-def _validate_query_bounds(q: Query) -> None:
-    """Enforce the API complexity caps on a parsed query.
-
-    The RQL string is opaque to Pydantic, so the semantic DoS caps guard
-    here: total filter-leaf count vs ``max_filter_keys`` and every ``in`` /
-    ``not_in`` value list vs ``max_entity_ids`` – no request can smuggle an
-    unbounded ``IN`` literal (which DuckDB chokes on) or filter fan-out past
-    the boundary by encoding it as RQL instead of body fields.
-
-    Raises:
-        ValueError: When a cap is exceeded (mapped to a 400 by the app's
-            exception handler).
-    """
-    leaves = list(q.q.iter_leaves()) if q.q else []
-    if len(leaves) > api_settings.max_filter_keys:
-        raise ValueError(
-            f"query has {len(leaves)} filter conditions; "
-            f"maximum is {api_settings.max_filter_keys}"
-        )
-    for leaf in leaves:
-        if str(leaf.comparator) in ("in", "not_in"):
-            if len(leaf.value) > api_settings.max_entity_ids:
-                raise ValueError(
-                    f"`{leaf.key}__{leaf.comparator}` has {len(leaf.value)} "
-                    f"values; maximum is {api_settings.max_entity_ids}"
-                )
-
-
 class QueryBody(BaseModel):
     """Pydantic model for ``entities`` / ``statements`` query bodies.
 
@@ -86,7 +58,6 @@ class QueryBody(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    entity_ids: list[str] | None = None
     flush_first: bool = False
     origin: str | None = None
     query: str | None = None
@@ -94,14 +65,40 @@ class QueryBody(BaseModel):
     limit: int | None = None
     offset: int | None = None
 
-    @field_validator("entity_ids")
+    @field_validator("query")
     @classmethod
-    def _cap_entity_ids(cls, v: list[str] | None) -> list[str] | None:
-        if v is not None and len(v) > api_settings.max_entity_ids:
+    def validate_query_body(cls, v: str | None) -> str | None:
+        """Enforce the API complexity caps on a parsed query.
+
+        The RQL string is opaque to Pydantic, so the semantic DoS caps guard
+        here: total filter-leaf count vs ``max_filter_keys`` and every ``in`` /
+        ``not_in`` value list vs ``max_entity_ids`` – no request can smuggle an
+        unbounded ``IN`` literal (which DuckDB chokes on) or filter fan-out past
+        the boundary by encoding it as RQL instead of body fields.
+
+        Raises:
+            ValueError: When a cap is exceeded (mapped to a 422 by the app's
+                exception handler).
+        """
+        if not v:
+            return v
+        try:
+            q = Query.from_rql(v)
+        except RQLError as e:
+            raise ValueError(f"Invalid RQL query: {e}")
+        leaves = list(q.q.iter_leaves()) if q.q else []
+        if len(leaves) > api_settings.query_max_filter_keys:
             raise ValueError(
-                f"entity_ids length {len(v)} exceeds maximum of "
-                f"{api_settings.max_entity_ids}"
+                f"query has {len(leaves)} filter conditions; "
+                f"maximum is {api_settings.query_max_filter_keys}"
             )
+        for leaf in leaves:
+            if str(leaf.comparator) in ("in", "not_in"):
+                if len(leaf.value) > api_settings.query_max_in_values:
+                    raise ValueError(
+                        f"`{leaf.key}__{leaf.comparator}` has {len(leaf.value)} "
+                        f"values; maximum is {api_settings.query_max_in_values}"
+                    )
         return v
 
     def to_query(self) -> Query | None:
@@ -122,7 +119,6 @@ class QueryBody(BaseModel):
                 q = Query.from_rql(self.query)
             except RQLError as e:
                 raise ValueError(f"Invalid RQL query: {e}")
-            _validate_query_bounds(q)
         if self.order_by:
             values = [str(v) for v in self.order_by]
             ascending = not values[0].startswith("-")

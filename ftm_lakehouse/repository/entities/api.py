@@ -1,4 +1,4 @@
-from typing import Any, Iterable
+from typing import Any
 
 import orjson
 from followthemoney import StatementEntity
@@ -58,13 +58,11 @@ class ApiEntityRepository(LakehouseApiMixin):
         self,
         q: Query | None = None,
         *,
-        entity_ids: Iterable[str] | None = None,
         flush_first: bool = False,
         origin: str | None = None,
     ) -> StatementEntities:
         url = self._make_url("query")
         data = {
-            "entity_ids": list(entity_ids) if entity_ids else [],
             "flush_first": flush_first,
             "origin": origin,
             **_serialize_query(q),

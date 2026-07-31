@@ -87,8 +87,8 @@ class ApiSettings(BaseSettings):
     static_headers: dict[str, str] = {}
 
     # DoS limits at the API boundary.
-    max_entity_ids: int = 10_000
+    query_max_in_values: int = 10_000
     """Maximum number of ``entity_ids`` accepted in a single query body."""
 
-    max_filter_keys: int = 20
+    query_max_filter_keys: int = 20
     """Maximum number of ftmq filter keys accepted in a single query body."""

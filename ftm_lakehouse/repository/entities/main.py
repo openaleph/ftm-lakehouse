@@ -287,7 +287,6 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         self,
         q: Query | None = None,
         *,
-        entity_ids: Iterable[str] | None = None,
         flush_first: bool = False,
         origin: str | None = None,
     ) -> StatementEntities:
@@ -295,8 +294,6 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
 
         Args:
             q: ftmq ``Query`` of entity-level filters (schema, properties, ...).
-            entity_ids: Restrict to these entity ids (folded in as
-                ``M(entity_id__in=...)``).
             flush_first: Flush the journal to parquet before querying.
             origin: Restrict to statements of this origin – a storage-level row
                 filter, so an assembled entity carries only that origin's
@@ -307,8 +304,6 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         """
         if flush_first:
             self.flush()
-        if entity_ids:
-            q = (q or Query()).where(M(entity_id__in=list(entity_ids)))
         yield from self._statements.query(q, origin=origin)
 
     @api_delegate("_api_query_statements")
@@ -334,9 +329,8 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         flush_first: bool = False,
     ) -> StatementEntity | None:
         """Get a single entity by ID."""
-        for entity in self.query(
-            entity_ids=[entity_id], flush_first=flush_first, origin=origin
-        ):
+        q = Query().where(M(entity_id=entity_id))
+        for entity in self.query(q, flush_first=flush_first, origin=origin):
             return entity
         return None
 

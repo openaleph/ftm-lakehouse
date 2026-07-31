@@ -10,6 +10,7 @@ philosophy.
 
 import pytest
 from fastapi.testclient import TestClient
+from ftmq.query import M, Query
 
 from ftm_lakehouse.api import dependencies
 from ftm_lakehouse.api.main import get_app
@@ -28,20 +29,12 @@ def _error_messages(response) -> str:
 
 
 def test_entities_query_rejects_too_many_entity_ids(client, monkeypatch) -> None:
-    monkeypatch.setattr(dependencies.api_settings, "max_entity_ids", 5)
-    body = {"entity_ids": [f"e{i}" for i in range(6)]}
+    monkeypatch.setattr(dependencies.api_settings, "query_max_in_values", 5)
+    query = Query().where(M(entity_id__in=[f"e{i}" for i in range(6)]))
+    body = {"query": query.to_rql()}
     response = client.post("/test_ds/_api/entities/query", json=body)
     assert response.status_code == 422
-    assert "entity_ids" in _error_messages(response)
-
-
-def test_entities_query_rejects_non_list_entity_ids(client) -> None:
-    response = client.post(
-        "/test_ds/_api/entities/query", json={"entity_ids": "not-a-list"}
-    )
-    assert response.status_code == 422
-    # Pydantic's auto-generated type error – contract is "non-list rejected".
-    assert "list" in _error_messages(response).lower()
+    assert "entity_id__in" in _error_messages(response)
 
 
 def test_entities_query_rejects_unknown_body_keys(client) -> None:
@@ -59,23 +52,23 @@ def test_entities_query_rejects_unknown_body_keys(client) -> None:
 
 def test_query_rejects_too_many_rql_conditions(client, monkeypatch) -> None:
     """The leaf-count cap applies to the parsed RQL tree, not body keys."""
-    monkeypatch.setattr(dependencies.api_settings, "max_filter_keys", 2)
+    monkeypatch.setattr(dependencies.api_settings, "query_max_filter_keys", 2)
     rql = "and(eq(schema,Person),eq(properties.name,x),eq(countries,de))"
     response = client.post("/test_ds/_api/entities/query", json={"query": rql})
-    assert response.status_code == 400
-    assert "filter conditions" in response.json()["detail"]
+    assert response.status_code == 422
+    assert "filter conditions" in response.json()["detail"][0]["msg"]
 
 
 def test_query_rejects_oversized_rql_id_list(client, monkeypatch) -> None:
     """An `in(entity_id, (...))` list cannot bypass the entity_ids cap by
     riding in the RQL string."""
-    monkeypatch.setattr(dependencies.api_settings, "max_entity_ids", 5)
+    monkeypatch.setattr(dependencies.api_settings, "query_max_in_values", 5)
     ids = ",".join(f"e{i}" for i in range(6))
     response = client.post(
         "/test_ds/_api/entities/query", json={"query": f"in(entity_id,({ids}))"}
     )
-    assert response.status_code == 400
-    assert "maximum" in response.json()["detail"]
+    assert response.status_code == 422
+    assert "maximum" in response.json()["detail"][0]["msg"]
 
 
 def test_query_rejects_malformed_rql(client) -> None:
@@ -84,5 +77,5 @@ def test_query_rejects_malformed_rql(client) -> None:
         response = client.post(
             f"/test_ds/_api/entities/{endpoint}", json={"query": "in(entity_id,"}
         )
-        assert response.status_code == 400, endpoint
-        assert "Invalid RQL" in response.json()["detail"]
+        assert response.status_code == 422, endpoint
+        assert "Invalid RQL" in response.json()["detail"][0]["msg"]
