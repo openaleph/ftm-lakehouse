@@ -220,24 +220,25 @@ def statement_row_unsafe(
 
 
 class RowBuffer:
-    """``(id, fragment)``-keyed packed-row buffer, flushed sorted by shard.
+    """``(id, fragment, origin)``-keyed packed-row buffer, shard-sort flushed.
 
     The unsafe twin of :class:`~ftm_lakehouse.logic.entities.buffer.
     EntityBuffer`: deduplicates re-emissions within one batch by
-    ``(id, fragment)`` – the same id under distinct fragments stays
+    ``(id, fragment, origin)`` – matching the store's per-origin row
+    identity, so the same id under distinct fragments *or* origins stays
     distinct – and yields rows shard-sorted so
     :meth:`EntityRepository.write_rows` can accumulate per-shard parquet
     batches with bounded memory.
     """
 
     def __init__(self) -> None:
-        self._rows: dict[tuple[str, str], SDict] = {}
+        self._rows: dict[tuple[str, str, str], SDict] = {}
 
     def add(self, row: SDict | None) -> None:
         """Buffer a packed row; ``None`` (a skipped input row) is ignored."""
         if row is None:
             return
-        self._rows[(row["id"], row["fragment"])] = row
+        self._rows[(row["id"], row["fragment"], row["origin"])] = row
 
     def flush(self) -> Iterator[SDict]:
         """Yield buffered rows sorted by shard, then clear the buffer."""

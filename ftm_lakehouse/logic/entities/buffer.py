@@ -23,12 +23,14 @@ namespace = Namespace()
 class EntityBuffer:
     """In-memory shard-sorted statement buffer.
 
-    Keys statements by :attr:`LakeStatement.dedupe_key` (deduplicating
-    re-emissions in a single batch; the same id under distinct fragments
-    stays distinct), then yields them sorted by shard on
-    :meth:`flush_buffer` so the consumer (typically
-    :meth:`EntityRepository.write_statements`) can accumulate per-shard
-    parquet batches with bounded memory.
+    Keys statements by ``(dedupe_key, origin)`` – matching the store's
+    per-origin row identity ``(origin, id, fragment)``: re-emissions in a
+    single batch deduplicate, while the same id under distinct fragments
+    *or* distinct origins stays distinct (merge never crosses origin
+    partitions, so collapsing across origins here would silently drop
+    provenance). Rows yield sorted by shard on :meth:`flush_buffer` so the
+    consumer (typically :meth:`EntityRepository.write_statements`) can
+    accumulate per-shard parquet batches with bounded memory.
 
     The buffer is bounded by ``max_rows`` (defaulting to
     :attr:`Settings.max_buffer_rows`, i.e. ``LAKEHOUSE_MAX_BUFFER_ROWS``).
@@ -54,7 +56,7 @@ class EntityBuffer:
         # Default emission timestamp for entities that carry none of their
         # own (:meth:`add_entity` pin chain) - e.g. the CLI ``--last-seen``.
         self.last_seen: str | None = last_seen.isoformat() if last_seen else None
-        self._buffer: dict[str, StatementRow] = {}
+        self._buffer: dict[tuple[str, str], StatementRow] = {}
         self._buffer_size: int = 0
 
     def _check_capacity(self) -> None:
@@ -134,7 +136,7 @@ class EntityBuffer:
             return None
 
         shard = entity_shard(stmt.entity_id, self.shards)
-        self._buffer[stmt.dedupe_key] = StatementRow(shard, stmt, deleted_at)
+        self._buffer[(stmt.dedupe_key, origin)] = StatementRow(shard, stmt, deleted_at)
         self._buffer_size += 1
         return stmt.id
 

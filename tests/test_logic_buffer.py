@@ -61,6 +61,20 @@ def test_add_entity_keeps_statement_origin():
     assert origins["id"] == "importer"
 
 
+def test_add_statement_keeps_distinct_origins():
+    """The same statement content under two origins stays two buffered rows –
+    matching the store's per-origin row identity ``(origin, id, fragment)``;
+    collapsing here would silently drop provenance in one batch."""
+    buffer = EntityBuffer(DATASET, shards=1)
+    buffer.add_statement(_lake_stmt("name", "Acme Inc", T1, "orig_a"))
+    buffer.add_statement(_lake_stmt("name", "Acme Inc", T1, "orig_b"))
+    buffer.add_statement(_lake_stmt("name", "Acme Inc", T1, "orig_b"))  # dedupes
+    stmts = _buffered(buffer)
+    assert len(stmts) == 2
+    assert {s.origin for s in stmts} == {"orig_a", "orig_b"}
+    assert len({s.id for s in stmts}) == 1  # same content-hashed id
+
+
 def test_add_entity_origin_override_wins():
     """An explicit origin argument overrides per-statement provenance."""
     buffer = EntityBuffer(DATASET, shards=1, origin="importer")

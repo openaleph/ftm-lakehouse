@@ -28,10 +28,11 @@ def make_data_checksum(data: Any) -> str:
 
 
 def single_string(value: Any) -> str | None:
-    """A single string from a scalar-or-sequence value, else ``None``"""
-    for v in ensure_list(value):
-        if v or isinstance(v, int):  # v=0 literally
-            return str(v)
+    """A single string from a scalar-or-sequence value that must have length=1,
+    else ``None``"""
+    value = ensure_list(value)
+    if len(value) == 1:
+        return str(value[0])
 
 
 def safe_name(value: str, field: str = "name") -> str:

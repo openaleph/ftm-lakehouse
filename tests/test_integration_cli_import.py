@@ -213,9 +213,9 @@ def test_cli_statements_import_unsafe_roundtrip(tmp_path, cli_runner):
 
 
 def test_cli_entities_import_per_item_origin(tmp_path, cli_runner):
-    """Payload origin applies per item and never sticks to the next one:
-    an origin-less entity after an origin-bearing one gets the CLI default,
-    and a multi-origin payload (ambiguous) falls back to the default too."""
+    """Payload origin applies per item: an origin-less entity gets the CLI
+    default, and a multi-origin payload (ambiguous) falls back to the default
+    too."""
     in_uri = str(tmp_path / "entities.ftm.json")
     rows = [
         {

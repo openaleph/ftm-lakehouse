@@ -258,13 +258,18 @@ def test_row_buffer_dedupes_and_sorts():
     buffer = RowBuffer()
     buffer.add(None)
     assert not buffer
-    buffer.add({"id": "a", "fragment": "", "shard": "1"})
+    buffer.add({"id": "a", "fragment": "", "origin": "x", "shard": "1"})
     buffer.add(
-        {"id": "a", "fragment": "", "shard": "1", "value": 2}
+        {"id": "a", "fragment": "", "origin": "x", "shard": "1", "value": 2}
     )  # re-emission wins
-    buffer.add({"id": "a", "fragment": "f1", "shard": "0"})  # distinct fragment
-    assert len(buffer) == 2
+    buffer.add(
+        {"id": "a", "fragment": "f1", "origin": "x", "shard": "0"}
+    )  # distinct fragment
+    buffer.add(
+        {"id": "a", "fragment": "", "origin": "y", "shard": "1"}
+    )  # distinct origin survives - the store keys rows per origin
+    assert len(buffer) == 3
     rows = list(buffer.flush())
-    assert [r["shard"] for r in rows] == ["0", "1"]
-    assert rows[1]["value"] == 2
+    assert [r["shard"] for r in rows] == ["0", "1", "1"]
+    assert {r.get("value") for r in rows if r["origin"] == "x"} == {None, 2}
     assert not buffer and len(buffer) == 0
