@@ -20,29 +20,6 @@ for entity in aggregate_unsafe(statement_dicts, "my_dataset"):
         heading_level: 3
         show_root_heading: true
 
-## Mapping Processing
-
-Generate entities from FollowTheMoney mapping configurations:
-
-```python
-from ftm_lakehouse.logic import map_entities
-from ftm_lakehouse.model.mapping import DatasetMapping
-
-mapping = DatasetMapping(
-    dataset="my_dataset",
-    content_hash="abc123...",
-    queries=[...]
-)
-
-for entity in map_entities(mapping, csv_path):
-    print(f"{entity.schema.name}: {entity.caption}")
-```
-
-::: ftm_lakehouse.logic.map_entities
-    options:
-        heading_level: 3
-        show_root_heading: true
-
 ## Parquet helpers
 
 The DuckDB config, the `statement` / `statement_raw` view-SQL builders, and the merge-query builder used by `ParquetStore` via ftmq's `LakeStore`.

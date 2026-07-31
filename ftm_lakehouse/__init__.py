@@ -9,7 +9,6 @@ from ftm_lakehouse.lake import (
     get_documents,
     get_entities,
     get_lakehouse,
-    get_mappings,
 )
 
 __version__ = "0.4.0"
@@ -23,5 +22,4 @@ __all__ = [
     "get_archive",
     "get_documents",
     "get_entities",
-    "get_mappings",
 ]

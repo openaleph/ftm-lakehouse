@@ -27,10 +27,8 @@ from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.dataset import Dataset
 from ftm_lakehouse.lake import get_lakehouse
 from ftm_lakehouse.model.dataset import DatasetModel
-from ftm_lakehouse.model.mapping import DatasetMapping
 from ftm_lakehouse.operation import ExportKind, export, make
 from ftm_lakehouse.operation.crawl import crawl
-from ftm_lakehouse.operation.mapping import MappingJob, MappingOperation
 from tests.conftest import (
     LAKEHOUSE_TEST_URL,
     docker_data_path,
@@ -504,59 +502,6 @@ def test_e2e_workflows_is_latest_logic(dataset):
 
     # Statistics is no longer latest
     assert not tags.is_latest(path.EXPORTS_STATISTICS, [tag.STATEMENTS_UPDATED])
-
-
-# ---------------------------------------------------------------------------
-# Mapping workflow
-# ---------------------------------------------------------------------------
-
-
-def test_e2e_workflows_mapping(dataset, fixtures_path):
-    """Test complete mapping workflow: archive -> map -> process -> export."""
-    dataset, base_path = dataset
-
-    # Archive a CSV file
-    csv_file = dataset.get_archive().store(fixtures_path / "src" / "companies.csv")
-    assert csv_file.checksum is not None
-
-    # Create mapping configuration
-    mapping = DatasetMapping(
-        dataset=dataset.name,
-        content_hash=csv_file.checksum,
-        queries=[
-            {
-                "entities": {
-                    "company": {
-                        "schema": "Company",
-                        "keys": ["id"],
-                        "properties": {
-                            "name": {"column": "name"},
-                            "jurisdiction": {"column": "jurisdiction"},
-                        },
-                    }
-                }
-            }
-        ],
-    )
-    dataset.get_mappings().put(mapping)
-
-    # Process the mapping via operation
-    job = MappingJob.make(dataset=dataset.name, content_hash=csv_file.checksum)
-    op = MappingOperation.from_job(job, dataset)
-    result = op.run()
-    assert result.done == 3  # 3 companies in CSV
-
-    # Flush and export
-    make(dataset)
-
-    # Verify entities were created
-    entities = list(dataset.get_entities().query())
-    assert len(entities) == 3
-    assert all(e.schema.name == "Company" for e in entities)
-
-    # Verify provenance
-    for entity in entities:
-        assert csv_file.checksum in entity.get("proof")
 
 
 # ---------------------------------------------------------------------------

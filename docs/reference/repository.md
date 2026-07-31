@@ -33,21 +33,6 @@ dataset.get_entities().query(origin="import")
         heading_level: 3
         show_root_heading: true
 
-## MappingRepository
-
-Mapping configuration storage.
-
-```python
-dataset.get_mappings().put(mapping)
-dataset.get_mappings().get(content_hash)
-dataset.get_mappings().list()
-```
-
-::: ftm_lakehouse.repository.MappingRepository
-    options:
-        heading_level: 3
-        show_root_heading: true
-
 ## JobRepository
 
 Job tracking and status. Job runs are stored per job class – resolve the

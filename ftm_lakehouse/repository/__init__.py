@@ -12,20 +12,16 @@ from ftm_lakehouse.repository.factories import (
     get_documents,
     get_entities,
     get_jobs,
-    get_mappings,
 )
 from ftm_lakehouse.repository.job import JobRepository
-from ftm_lakehouse.repository.mapping import MappingRepository
 
 __all__ = [
     "ArchiveRepository",
     "DocumentRepository",
     "EntityRepository",
     "JobRepository",
-    "MappingRepository",
     "get_archive",
     "get_documents",
     "get_entities",
     "get_jobs",
-    "get_mappings",
 ]

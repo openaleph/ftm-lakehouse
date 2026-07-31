@@ -33,11 +33,6 @@ OP_MAKE = "operations/make/last_run"
 """Last make (full workflow) execution"""
 
 
-def mapping_tag(content_hash: str) -> str:
-    """Get the tag key for a mapping execution."""
-    return f"mappings/{content_hash}/last_processed"
-
-
 def statements_partition_updated(shard: str, bucket: str, origin: str) -> str:
     """Per-partition freshness tag: a ``(shard, bucket, origin)`` was written.
 

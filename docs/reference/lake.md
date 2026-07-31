@@ -12,7 +12,6 @@ catalog = lake.get_lakehouse()
 # Repository shortcuts
 entities = lake.get_entities("my_data")
 archive = lake.get_archive("my_data")
-mappings = lake.get_mappings("my_data")
 ```
 
 ::: ftm_lakehouse.lake.get_lakehouse
@@ -37,10 +36,6 @@ mappings = lake.get_mappings("my_data")
     options:
         heading_level: 3
 
-::: ftm_lakehouse.lake.get_mappings
-    options:
-        heading_level: 3
-
 ## Classes
 
 ::: ftm_lakehouse.catalog.Catalog
@@ -59,7 +54,6 @@ mappings = lake.get_mappings("my_data")
         members:
             - archive
             - entities
-            - mappings
             - jobs
             - model
             - update_model

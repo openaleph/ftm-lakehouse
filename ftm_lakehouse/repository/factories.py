@@ -27,7 +27,6 @@ from ftm_lakehouse.repository.archive import ArchiveRepository
 from ftm_lakehouse.repository.documents import DocumentRepository
 from ftm_lakehouse.repository.entities import EntityRepository
 from ftm_lakehouse.repository.job import J, JobRepository
-from ftm_lakehouse.repository.mapping import MappingRepository
 from ftm_lakehouse.storage.tags import TagStore
 from ftm_lakehouse.storage.versions import VersionStore
 
@@ -105,25 +104,6 @@ def _get_documents(dataset: str, uri: str) -> DocumentRepository:
     return DocumentRepository(dataset, uri)
 
 
-def get_mappings(dataset: str, uri: Uri | None = None) -> MappingRepository:
-    """
-    Get the mappings repository for a dataset.
-
-    Args:
-        dataset: Dataset name
-        uri: Dataset URI override (default: {LAKEHOUSE_URI}/{dataset})
-
-    Returns:
-        MappingRepository instance (cached)
-    """
-    return _get_mappings(dataset, dataset_uri(dataset, uri))
-
-
-@lru_cache(maxsize=LRU_MAX)
-def _get_mappings(dataset: str, uri: str) -> MappingRepository:
-    return MappingRepository(dataset, uri)
-
-
 def get_jobs(dataset: str, model: type[J], uri: Uri | None = None) -> JobRepository[J]:
     """
     Get the job repository for a dataset.
@@ -190,7 +170,6 @@ def clear_caches() -> None:
     _get_archive.cache_clear()
     _get_entities.cache_clear()
     _get_documents.cache_clear()
-    _get_mappings.cache_clear()
     _get_jobs.cache_clear()
     _get_versions.cache_clear()
     _get_tags.cache_clear()

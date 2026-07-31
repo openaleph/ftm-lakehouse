@@ -67,7 +67,6 @@ Pure data structures with no dependencies. Pydantic models and lightweight typed
 ```
 model/
   file.py        # File, Files - archived file metadata
-  mapping.py     # DatasetMapping - CSV transformation configs
   job.py         # JobModel, DatasetJobModel - job execution tracking
   dataset.py     # CatalogModel, DatasetModel - catalog/dataset metadata
   statement.py   # SHARDED_SCHEMA (pyarrow) + TABLE (SQLAlchemy) +
@@ -163,7 +162,6 @@ repository/
   archive.py     # ArchiveRepository - blobs, file metadata, text (via get_store)
   entities.py    # EntityRepository - uses JournalStore + ParquetStore
   documents.py   # DocumentRepository - compiled document metadata CSV + diffs
-  mapping.py     # MappingRepository - uses VersionStore
   job.py         # JobRepository - job tracking (via get_store)
   factories.py   # Cached factory functions (get_archive, get_entities, etc.)
 ```
@@ -187,7 +185,6 @@ operation/
   base.py          # DatasetJobOperation - base class with freshness checks
   export.py        # ExportOperation - all exports, dispatched by ExportKind
   crawl.py         # CrawlOperation - source → files → entities
-  mapping.py       # MappingOperation - config → entities → journal
   maintenance.py   # OptimizeOperation - merge + compact + vacuum in one pass
   make.py          # MakeOperation - flush + all exports + index
   download.py      # DownloadArchiveOperation
@@ -216,13 +213,13 @@ dataset.py       # Dataset class - single dataset interface
 **Key Classes:**
 
 - **Catalog** - Multi-dataset management: `get_dataset()`, `list_datasets()`, `create_dataset()`
-- **Dataset** - Single dataset interface with repository access: `archive`, `entities`, `mappings`, `jobs`
+- **Dataset** - Single dataset interface with repository access: `archive`, `entities`, `jobs`
 
 **Convenience functions in `lake.py`:**
 
 - `get_lakehouse()` - Get the catalog
 - `get_dataset()` / `ensure_dataset()` - Get or create a dataset
-- `get_entities()` / `get_archive()` / `get_mappings()` - Repository shortcuts
+- `get_entities()` / `get_archive()` - Repository shortcuts
 
 See [Lake Reference](reference/lake.md) for API details.
 
@@ -235,7 +232,7 @@ core/
   settings.py           # Configuration from environment (Settings, ApiSettings)
   config.py             # Config loading utilities (load_config)
   conventions/
-    path.py             # Path patterns (archive/, mappings/, exports/, etc.)
+    path.py             # Path patterns (archive/, exports/, etc.)
     tag.py              # Tag keys (journal/last_updated, exports/statements, etc.)
 ```
 
@@ -261,7 +258,6 @@ For detailed usage examples, see:
 - [Quickstart](quickstart.md) - Getting started guide
 - [Working with Entities](usage/entities.md) - Entity/statement operations
 - [Working with Files](usage/archive.md) - File archive operations
-- [Working with Mappings](usage/mappings.md) - CSV mapping operations
 
 ## File Layout
 
@@ -281,7 +277,6 @@ ftm_lakehouse/
 │   ├── archive.py           # `archive` group
 │   ├── entities.py          # `entities` group (iterate/stream/import)
 │   ├── statements.py        # `statements` group (iterate/stream/import)
-│   ├── mappings.py          # `mappings` group
 │   ├── operations.py        # `operations` group + top-level `make`
 │   └── zfs.py               # `zfs` group (agent/init)
 │
@@ -291,7 +286,6 @@ ftm_lakehouse/
 ├── model/
 │   ├── __init__.py          # Exports all models
 │   ├── file.py              # File, Files
-│   ├── mapping.py           # DatasetMapping
 │   ├── job.py               # JobModel, DatasetJobModel
 │   └── dataset.py           # CatalogModel, DatasetModel
 │
@@ -311,7 +305,6 @@ ftm_lakehouse/
 │   ├── base.py              # BaseRepository
 │   ├── archive.py           # ArchiveRepository
 │   ├── entities.py          # EntityRepository
-│   ├── mapping.py           # MappingRepository
 │   ├── job.py               # JobRepository
 │   └── factories.py         # Cached factory functions
 │
@@ -320,7 +313,6 @@ ftm_lakehouse/
 │   ├── base.py              # DatasetJobOperation
 │   ├── export.py            # Export operations
 │   ├── crawl.py             # CrawlOperation
-│   ├── mapping.py           # MappingOperation
 │   ├── maintenance.py       # OptimizeOperation (merge + compact + vacuum)
 │   ├── make.py              # MakeOperation
 │   └── download.py          # DownloadArchiveOperation
@@ -335,7 +327,6 @@ ftm_lakehouse/
 │   ├── __init__.py
 │   ├── entities.py          # Entity logic
 │   ├── parquet.py           # Translog-aware DuckDB query helpers
-│   └── mappings.py          # Mapping logic
 │
 ├── api/
 │   ├── __init__.py

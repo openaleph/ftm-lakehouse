@@ -21,13 +21,6 @@ Pure data structures with no dependencies. Pydantic models for serialization.
         heading_level: 3
         show_root_heading: true
 
-## Mapping Models
-
-::: ftm_lakehouse.model.DatasetMapping
-    options:
-        heading_level: 3
-        show_root_heading: true
-
 ## Job Models
 
 ::: ftm_lakehouse.model.JobModel

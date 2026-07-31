@@ -17,13 +17,11 @@ from ftm_lakehouse.repository import (
     ArchiveRepository,
     DocumentRepository,
     EntityRepository,
-    MappingRepository,
 )
 from ftm_lakehouse.repository.factories import (
     get_archive,
     get_documents,
     get_entities,
-    get_mappings,
     get_versions,
 )
 from ftm_lakehouse.storage.versions import VersionStore
@@ -44,7 +42,6 @@ class Dataset(Generic[DM]):
     - `get_archive()`: File storage (ArchiveRepository)
     - `get_entities()`: Entity/statement operations (EntityRepository)
     - `get_documents()`: Document metadata (DocumentRepository)
-    - `get_mappings()`: Mapping configurations (MappingRepository)
 
     Example:
         ```python
@@ -153,10 +150,6 @@ class Dataset(Generic[DM]):
     def get_documents(self) -> DocumentRepository:
         """Document metadata operations."""
         return get_documents(self.name, self.uri)
-
-    def get_mappings(self) -> MappingRepository:
-        """Mapping configuration storage."""
-        return get_mappings(self.name, self.uri)
 
     # -------------------------------------------------------------------------
     # Lifecycle

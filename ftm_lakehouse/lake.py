@@ -18,7 +18,6 @@ dataset = lake.ensure_dataset("my_data", title="My Dataset")
 # Direct repository access
 entities = lake.get_entities("my_data")
 archive = lake.get_archive("my_data")
-mappings = lake.get_mappings("my_data")
 ```
 """
 
@@ -38,7 +37,6 @@ from ftm_lakehouse.repository.factories import (
     get_archive,
     get_documents,
     get_entities,
-    get_mappings,
 )
 
 log = get_logger(__name__)
@@ -113,7 +111,6 @@ __all__ = [
     "get_archive",
     "get_documents",
     "get_entities",
-    "get_mappings",
     "get_lakehouse",
     "get_dataset",
     "ensure_dataset",

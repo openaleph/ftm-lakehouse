@@ -145,7 +145,6 @@ def cli_datasets(
 from ftm_lakehouse.cli import (  # noqa: E402, F401
     archive,
     entities,
-    mappings,
     operations,
     statements,
     zfs,

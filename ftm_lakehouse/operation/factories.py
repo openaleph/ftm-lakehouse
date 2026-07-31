@@ -31,7 +31,6 @@ from ftm_lakehouse.operation.download import (
 from ftm_lakehouse.operation.export import ExportJob, ExportKind, ExportOperation
 from ftm_lakehouse.operation.maintenance import OptimizeJob, OptimizeOperation
 from ftm_lakehouse.operation.make import MakeJob, MakeOperation
-from ftm_lakehouse.operation.mapping import MappingJob, MappingOperation
 
 
 def export(
@@ -84,26 +83,6 @@ def optimize(
         grace_period_days=grace_period_days,
     )
     return OptimizeOperation.from_job(job, dataset).run(force=force)
-
-
-def run_mapping(
-    dataset: Dataset,
-    content_hash: str,
-    force: bool = False,
-) -> MappingJob:
-    """
-    Run mapping operation to process a CSV file into entities.
-
-    Args:
-        dataset: The dataset containing the mapping
-        content_hash: SHA256 checksum of the CSV file to process
-        force: Force processing even if up-to-date
-
-    Returns:
-        The completed job result
-    """
-    job = MappingJob.make(dataset=dataset.name, content_hash=content_hash)
-    return MappingOperation.from_job(job, dataset).run(force=force)
 
 
 def make(dataset: Dataset, force: bool = False) -> MakeJob:

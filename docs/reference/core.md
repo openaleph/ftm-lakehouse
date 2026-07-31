@@ -31,7 +31,6 @@ Standard paths within the lakehouse.
             - INDEX
             - ARCHIVE
             - STATEMENTS
-            - MAPPINGS
             - EXPORTS
 
 ## Tag Conventions
