@@ -1,14 +1,13 @@
 """EntityRepository - entity/statement operations using JournalStore + ParquetStore."""
 
+import csv
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Generator, Iterable, Iterator, cast
+from typing import IO, Generator, Iterable, Iterator, cast
 
 import orjson
 import pyarrow as pa
-from anystore.io import smart_write_json
-from anystore.io.read import smart_stream_csv
-from anystore.store import get_store
+from anystore.io import smart_open, smart_write_json
 from anystore.types import SDict, Uri
 from anystore.util import Took, mask_uri
 from followthemoney import EntityProxy, Statement, StatementEntity
@@ -24,9 +23,10 @@ from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.exceptions import MalformedStatementError
 from ftm_lakehouse.helpers.statements import unpack_statement
+from ftm_lakehouse.logic.compress import compress_stream, decompress_stream
 from ftm_lakehouse.logic.entities.aggregate import aggregate_unsafe
 from ftm_lakehouse.model.statement import SHARDED_SCHEMA, StatementRow
-from ftm_lakehouse.repository.base import BaseRepository, resolve_shards
+from ftm_lakehouse.repository.base import BaseRepository
 from ftm_lakehouse.repository.diff import ParquetDiffMixin, make_envelope
 from ftm_lakehouse.repository.entities.api import ApiEntityRepository
 from ftm_lakehouse.storage.journal import get_journal
@@ -75,13 +75,14 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         self,
         dataset: str,
         uri: Uri,
-        shards: int | None = None,
     ) -> None:
         super().__init__(dataset, uri)
-        self.shards = shards if shards is not None else resolve_shards(uri)
+        self.shards = self._model.shards
+        self.compression = self._model.compression
         self._journal = get_journal(dataset)
-        self._statements = ParquetStore(uri, dataset, self.shards)
-        self._store = get_store(self._store_uri)
+        self._statements = ParquetStore(uri, dataset, self.shards, self.compression)
+        self.ENTITIES_JSON = path.entities_json(self.compression)
+        self.EXPORTS_STATEMENTS = path.exports_statements(self.compression)
 
     @contextmanager
     def writer(
@@ -339,14 +340,22 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         Stream entities from the exported JSON file.
 
         This reads from the pre-exported entities.ftm.json file,
-        not directly from the parquet store.
+        not directly from the parquet store – decoded with the dataset's
+        codec, since that artifact is written compressed when configured.
         """
-        if self._store.exists(path.ENTITIES_JSON):
-            with self._store.open(path.ENTITIES_JSON) as fh:
-                yield from smart_read_proxies(fh)
+        if self._store.exists(self.ENTITIES_JSON):
+            with (
+                self._store.open(self.ENTITIES_JSON, "rb") as fh,
+                decompress_stream(fh, self.compression) as raw,
+            ):
+                yield from smart_read_proxies(raw)
 
     @no_api
-    def export_entities(self, statements_csv_uri: str | None = None) -> None:
+    def export_entities(
+        self,
+        statements_csv_uri: str | None = None,
+        split: bool = False,
+    ) -> None:
         """Export entities to a JSON lines file without FtM object construction.
 
         Uses :func:`aggregate_unsafe` to bypass Statement/StatementEntity/
@@ -358,24 +367,49 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         DuckDB→Python marshaling – and falls back to the live parquet view
         otherwise.
 
+        Compression comes from :attr:`compression` (the dataset's config), not
+        from the caller.
+
         Args:
             statements_csv_uri: Force a specific sorted statements.csv instead
                 of the freshness-based default.
+            split: Split artifact into chunks (by partitions)
         """
-        self._store.ensure_parent(path.ENTITIES_JSON)
+        self._store.ensure_parent(self.ENTITIES_JSON)
 
         if statements_csv_uri is None:
             statements_csv_uri = self._fresh_statements_csv()
         if statements_csv_uri is not None:
-            rows = smart_stream_csv(statements_csv_uri)
+            rows = self._stream_statements_csv(statements_csv_uri)
         else:
             rows = self._statements._query_statement_data()
 
         entities = aggregate_unsafe(rows, self.dataset)
         entities = (e.to_dict() for e in entities)
 
-        with self._store.open(path.ENTITIES_JSON, "wb") as fh:
-            smart_write_json(fh, entities)
+        with (
+            self._store.open(self.ENTITIES_JSON, "wb") as fh,
+            compress_stream(fh, self.compression) as out,
+        ):
+            smart_write_json(out, entities)
+
+    def _stream_statements_csv(self, uri: str) -> Iterator[SDict]:
+        """Stream the exported ``statements.csv`` as row dicts.
+
+        Applies the dataset's codec on the way in: the CSV this reads is the
+        artifact :meth:`ParquetStore.export_csv` just wrote, so on a
+        compressed dataset it is a codec frame – and anystore's
+        ``smart_stream_csv`` opens in text mode with no notion of
+        compression. ``mode="r"`` asks for the text stream
+        :class:`csv.DictReader` needs; an uncompressed dataset takes the same
+        path, so there is no branch here.
+        """
+        with (
+            # anystore types the handle as IO[Never] without a mode binding
+            smart_open(uri, "rb") as fh,
+            decompress_stream(cast(IO[bytes], fh), self.compression, "r") as raw,
+        ):
+            yield from csv.DictReader(raw)
 
     def _fresh_statements_csv(self) -> str | None:
         """URI of the exported ``statements.csv`` if it's current, else ``None``.
@@ -387,11 +421,11 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         statements.csv is written first, so entity export streams it instead
         of re-scanning parquet.
         """
-        if not self._store.exists(path.EXPORTS_STATEMENTS):
+        if not self._store.exists(self.EXPORTS_STATEMENTS):
             return None
         deps = [tag.STATEMENTS_UPDATED, tag.JOURNAL_UPDATED]
-        if self._tags.is_latest(path.EXPORTS_STATEMENTS, deps):
-            return self._store.to_uri(path.EXPORTS_STATEMENTS)
+        if self._tags.is_latest(self.EXPORTS_STATEMENTS, deps):
+            return self._store.to_uri(self.EXPORTS_STATEMENTS)
         return None
 
     @api_delegate("_api_delete_entity")
@@ -510,9 +544,12 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         self, entity_ids: Iterator[str], since: datetime, ts: datetime, **kwargs
     ) -> str:
         """Write entities as line-based JSON with operation envelopes."""
-        key = path.entities_diff(ts)
-        with self._store.open(key, "wb") as o:
-            smart_write_json(o, self._get_delta_entities(entity_ids, since))
+        key = path.entities_diff(ts, self.compression)
+        with (
+            self._store.open(key, "wb") as o,
+            compress_stream(o, self.compression) as out,
+        ):
+            smart_write_json(out, self._get_delta_entities(entity_ids, since))
         return self._store.to_uri(key)
 
     @no_api
@@ -534,10 +571,21 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
 
     @no_api
     def _write_initial_diff(self, ts: datetime, **kwargs) -> None:
-        """Copy over exported entities.ftm.json to initial diff version"""
-        with self._store.open(path.entities_diff(ts), "wb") as o:
-            for data in self._store.stream(path.ENTITIES_JSON):
+        """Copy over exported entities.ftm.json to initial diff version.
+
+        Both artifacts carry the dataset's codec, so the payload is decoded
+        on the way in and re-encoded on the way out – the envelope is added
+        per line, so this cannot be a byte copy.
+        """
+        with (
+            self._store.open(self.ENTITIES_JSON, "rb") as i,
+            decompress_stream(i, self.compression) as raw,
+            self._store.open(path.entities_diff(ts, self.compression), "wb") as o,
+            compress_stream(o, self.compression) as out,
+        ):
+            for data in raw:
                 line = orjson.dumps(
-                    make_envelope(data), option=orjson.OPT_APPEND_NEWLINE
+                    make_envelope(orjson.loads(data)),
+                    option=orjson.OPT_APPEND_NEWLINE,
                 )
-                o.write(line)
+                out.write(line)

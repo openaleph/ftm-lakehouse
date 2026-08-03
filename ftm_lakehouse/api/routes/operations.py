@@ -58,6 +58,6 @@ async def run_operation(
 
     model_cls, op_cls = OPERATIONS[name]
     job = model_cls.make(dataset=dataset.name, **body)
-    op = op_cls.from_job(job, dataset)
+    op = op_cls(job, dataset.uri)
     result = await asyncio.to_thread(op.run, force=force)
     return JSONResponse(result.model_dump(mode="json"))

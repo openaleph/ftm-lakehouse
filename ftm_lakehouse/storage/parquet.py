@@ -73,6 +73,7 @@ from sqlalchemy import Select, column, or_, select
 from ftm_lakehouse.core.api import LakehouseApiMixin, no_api
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.core.settings import Settings
+from ftm_lakehouse.logic.compress import CompressKind, compress_stream
 from ftm_lakehouse.logic.entities import aggregate_unsafe
 from ftm_lakehouse.logic.entities.aggregate import EntityPayload
 from ftm_lakehouse.logic.parquet import (
@@ -120,12 +121,21 @@ class ParquetStore(LakehouseApiMixin):
     correctness, not just cleanup.
     """
 
-    def __init__(self, uri: Uri, dataset: str, shards: int | None = None) -> None:
+    def __init__(
+        self,
+        uri: Uri,
+        dataset: str,
+        shards: int | None = None,
+        compression: CompressKind | None = None,
+    ) -> None:
         self.uri = join_uri(uri, path.STATEMENTS)
         super().__init__(self.uri)
         self.settings = Settings()
         self.dataset = dataset
         self.shards = shards if shards is not None else DEFAULT_SHARDS
+        # Resolved from the dataset config by the owning repository – exports
+        # never take a runtime codec (see `repository.base.resolve_compression`).
+        self.compression = compression
         self._store = get_store(uri)
         self._tags = TagStore(uri)
         self._lake = LakeStore(
@@ -682,8 +692,8 @@ class ParquetStore(LakehouseApiMixin):
         if not self.exists:
             return
         with self._maintenance_fence():
-            for shard, bucket, origin in self._list_partitions():
-                with Took() as t:
+            with Took() as t:
+                for shard, bucket, origin in self._list_partitions():
                     self.deltatable.optimize.compact(
                         partition_filters=[
                             ("shard", "=", shard),
@@ -693,13 +703,7 @@ class ParquetStore(LakehouseApiMixin):
                         writer_properties=writer_for_bucket(bucket),
                         target_size=TARGET_SIZE,
                     )
-                    self.log.info(
-                        f"Compacted partition `{shard}/{bucket}/{origin}`.",
-                        took=t.took,
-                        shard=shard,
-                        bucket=bucket,
-                        origin=origin,
-                    )
+            self.log.info("Compaction done.", took=t.took)
 
     @no_api
     def vacuum(self, retention_hours: int = 0) -> None:
@@ -734,21 +738,28 @@ class ParquetStore(LakehouseApiMixin):
         Python materialisation. Memory stays bounded per batch and the
         ``ORDER BY entity_id`` sort stays bounded to one partition.
 
+        Compression comes from :attr:`compression` (the dataset's config), not
+        from the caller.
+
         Args:
             q: Optional SQLAlchemy select (default:
                 :func:`~ftm_lakehouse.model.statement.statement_csv_select` –
                 the FtM columns plus ``fragment``, ordered by ``entity_id``).
+            split: Split artifact into chunks (by partitions)
         """
         if not self.exists:
             return
         if q is None:
             q = statement_csv_select()
-        with self._store.open(key, "wb") as fh:
+        with (
+            self._store.open(key, "wb") as fh,
+            compress_stream(fh, self.compression) as out,
+        ):
             writer: CSVWriter | None = None
             for reader in self._execute_partitioned(q):
                 for batch in reader:
                     if writer is None:
-                        writer = CSVWriter(fh, batch.schema)
+                        writer = CSVWriter(out, batch.schema)
                     writer.write(batch)
             if writer is not None:
                 writer.close()

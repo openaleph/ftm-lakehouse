@@ -19,10 +19,9 @@ addressed by name only (settings-derived) or by an explicit uri (str or
 from functools import lru_cache
 
 from anystore.types import Uri
-from anystore.util import ensure_uri, join_uri
 
 from ftm_lakehouse.core.api import ensure_api_uri
-from ftm_lakehouse.core.settings import Settings
+from ftm_lakehouse.dataset import dataset_uri
 from ftm_lakehouse.repository.archive import ArchiveRepository
 from ftm_lakehouse.repository.documents import DocumentRepository
 from ftm_lakehouse.repository.entities import EntityRepository
@@ -32,19 +31,6 @@ from ftm_lakehouse.storage.versions import VersionStore
 
 LRU_MAX = 1024
 """Maximum number of distinct dataset keys retained per factory."""
-
-
-def dataset_uri(dataset: str, uri: Uri | None = None) -> str:
-    """Canonical URI for a dataset – same location, same string, same cache key.
-
-    ``None`` derives ``{LAKEHOUSE_URI}/{dataset}`` exactly like
-    :func:`ftm_lakehouse.lake.get_lakehouse` does for the catalog; explicit
-    values (str or ``Path``) are normalized via ``ensure_uri``.
-    """
-    if uri is not None:
-        return str(ensure_uri(uri))
-    settings = Settings()
-    return str(join_uri(ensure_uri(settings.uri), dataset))
 
 
 def get_archive(dataset: str, uri: Uri | None = None) -> ArchiveRepository:

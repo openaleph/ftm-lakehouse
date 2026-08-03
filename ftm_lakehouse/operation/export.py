@@ -14,7 +14,6 @@ from typing import Any, Callable
 from anystore import get_store
 from anystore.types import HttpUrlStr
 from anystore.util import join_uri, mask_uri
-from ftmq.model.dataset import make_dataset
 from ftmq.model.stats import DatasetStats
 
 from ftm_lakehouse.core.conventions import path, tag
@@ -60,45 +59,46 @@ class ExportJob(DatasetJobModel):
             return render(settings.public_url_prefix, {"dataset": self.dataset})
 
 
-def _export_statements(op: "ExportOperation", run: JobRun, **kwargs: Any) -> None:
+def _export_statements(
+    op: "ExportOperation", run: JobRun[ExportJob], **kwargs: Any
+) -> None:
     op.entities._store.ensure_parent(path.EXPORTS_STATEMENTS)
-    op.entities._statements.export_csv(path.EXPORTS_STATEMENTS)
+    op.entities._statements.export_csv(op.entities.EXPORTS_STATEMENTS)
 
 
-def _export_entities(op: "ExportOperation", run: JobRun, **kwargs: Any) -> None:
+def _export_entities(
+    op: "ExportOperation", run: JobRun[ExportJob], **kwargs: Any
+) -> None:
     # export_entities prefers a fresh statements.csv on its own
     op.entities.export_entities()
     if run.job.make_diff:
         op.entities.export_diff()
 
 
-def _export_documents(op: "ExportOperation", run: JobRun, **kwargs: Any) -> None:
+def _export_documents(
+    op: "ExportOperation", run: JobRun[ExportJob], **kwargs: Any
+) -> None:
     public_prefix = run.job.get_public_prefix()
     op.documents.export_csv(public_prefix)
     if run.job.make_diff:
         op.documents.export_diff(public_url_prefix=public_prefix)
 
 
-def _export_statistics(op: "ExportOperation", run: JobRun, **kwargs: Any) -> None:
+def _export_statistics(
+    op: "ExportOperation", run: JobRun[ExportJob], **kwargs: Any
+) -> None:
     stats = op.entities.get_statistics()
-    op.versions.make(path.EXPORTS_STATISTICS, stats)
+    op._versions.make(path.EXPORTS_STATISTICS, stats)
 
 
 def _export_index(
     op: "ExportOperation",
-    run: JobRun,
+    run: JobRun[ExportJob],
     dataset: DatasetModel | None = None,
     **kwargs: Any,
 ) -> None:
     if dataset is None:
-        # Prefer the bound Dataset's model (set by ``from_job``); fall back
-        # to a stub dataset to patch when the operation was constructed
-        # directly from a uri.
-        bound = getattr(op, "_dataset", None)
-        if bound is not None:
-            dataset = bound.model
-        else:
-            dataset = make_dataset(run.job.dataset, DatasetModel, uri=op.versions.uri)
+        dataset = op._model
 
     store = get_store(dataset.uri)
     public_prefix = dataset.get_public_prefix()
@@ -127,7 +127,7 @@ def _export_index(
     if store.exists(path.EXPORTS_STATISTICS):
         dataset.apply_stats(store.get(path.EXPORTS_STATISTICS, model=DatasetStats))
 
-    op.versions.make(path.INDEX, dataset)
+    op._versions.make(path.INDEX, dataset)
 
 
 @dataclass(frozen=True)
@@ -180,7 +180,7 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
         return list(self.spec.dependencies)
 
     def ensure_flush(self) -> bool:
-        if not self.tags.is_latest(tag.JOURNAL_FLUSHED, [tag.JOURNAL_UPDATED]):
+        if not self._tags.is_latest(tag.JOURNAL_FLUSHED, [tag.JOURNAL_UPDATED]):
             self.entities.flush()
         if not self.entities._statements.exists:
             self.log.info(
@@ -190,7 +190,7 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
             return False
         return True
 
-    def handle(self, run: JobRun, *args: Any, **kwargs: Any) -> None:
+    def handle(self, run: JobRun[ExportJob], *args: Any, **kwargs: Any) -> None:
         has_statements = self.ensure_flush()
         if self.spec.requires_statements and not has_statements:
             return

@@ -104,14 +104,13 @@ class Catalog(Generic[DM]):
     # Dataset management
     # -------------------------------------------------------------------------
 
-    def get_dataset(self, name: str, **data: Any) -> "Dataset[DM]":
+    def get_dataset(self, name: str) -> "Dataset[DM]":
         """
         Get a Dataset instance by name.
 
         Args:
             name: Dataset name. Validated against
                 :func:`ftm_lakehouse.util.validate_dataset_name`.
-            **data: Additional config data (auto-saved to config.yml if dataset exists)
 
         Returns:
             Dataset instance
@@ -128,10 +127,6 @@ class Catalog(Generic[DM]):
             uri=dataset_uri,
             model_class=self._model_class,
         )
-
-        # Auto-save config if data provided and dataset exists
-        if data and dataset.exists():
-            dataset.update_model(**data)
 
         return dataset
 
@@ -159,6 +154,6 @@ class Catalog(Generic[DM]):
         Returns:
             Created Dataset instance
         """
-        dataset = self.get_dataset(name, **data)
+        dataset = self.get_dataset(name)
         dataset.ensure(**data)
         return dataset

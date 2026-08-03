@@ -12,7 +12,6 @@ from ftmq.util import make_entity
 
 from ftm_lakehouse.lake import ensure_dataset, get_lakehouse
 from ftm_lakehouse.model.dataset import DEFAULT_SHARDS
-from ftm_lakehouse.repository.base import resolve_shards
 from ftm_lakehouse.repository.factories import dataset_uri, get_entities
 
 
@@ -45,7 +44,6 @@ def test_factory_resolves_config_shards(tmp_path, monkeypatch):
     dataset = ensure_dataset("sharded", shards=4)
     assert dataset.model.shards == 4
 
-    assert resolve_shards(dataset.uri) == 4
     repo = get_entities("sharded")
     assert repo.shards == 4
     assert repo is dataset.get_entities()

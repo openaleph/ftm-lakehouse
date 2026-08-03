@@ -7,6 +7,7 @@ from anystore.types import HttpUrlStr
 from ftmq.model import Catalog, Dataset
 
 from ftm_lakehouse.core.settings import Settings
+from ftm_lakehouse.logic.compress import CompressKind
 from ftm_lakehouse.util import render
 
 settings = Settings()
@@ -36,6 +37,8 @@ class DatasetModel(Dataset):
     creation for bounded per-partition working sets (e.g.
     ``ensure_dataset("big_leak", shards=8)``). Immutable after first
     write – changing it requires a full rewrite."""
+    compression: CompressKind | None = None
+    """Compress exported artifacts (statements.csv, entities.ftm.json, diffs...)"""
 
     def get_public_prefix(self) -> str | None:
         if self.public_url_prefix:

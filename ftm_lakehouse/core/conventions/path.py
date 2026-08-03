@@ -50,7 +50,7 @@ Dataset Layout
                             origin={origin}/
                                 *.parquet
 
-            entities.ftm.json               # aggregated entities export
+            entities.ftm.json[.zst|gzip]    # aggregated entities export
 
             exports/
                 statistics.json             # entity counts, facets
@@ -236,6 +236,12 @@ ENTITIES_JSON = "entities.ftm.json"
 """aggregated entities file name"""
 
 
+def entities_json(suffix: str | None = None) -> str:
+    if not suffix:
+        return ENTITIES_JSON
+    return f"{ENTITIES_JSON}.{suffix}"
+
+
 STATEMENTS = f"{ENTITIES}/statements"
 """Base path for storing statement data (partitioned by shard, bucket, origin)"""
 
@@ -288,6 +294,13 @@ EXPORTS_CYPHER = f"{EXPORTS}/graph.cypher"
 EXPORTS_STATEMENTS = f"{EXPORTS}/statements.csv"
 """complete sorted statements file path"""
 
+
+def exports_statements(suffix: str | None = None) -> str:
+    if not suffix:
+        return EXPORTS_STATEMENTS
+    return f"{EXPORTS_STATEMENTS}.{suffix}"
+
+
 EXPORTS_DOCUMENTS = f"{EXPORTS}/documents.csv"
 """documents metadata to stream"""
 
@@ -319,7 +332,7 @@ def documents_diff(ts: datetime | None = None) -> str:
     return f"{DIFFS_DOCUMENTS}/{ts_iso}.diff.csv"
 
 
-def entities_diff(ts: datetime | None = None) -> str:
+def entities_diff(ts: datetime | None = None, suffix: str | None = None) -> str:
     """
     Get path for an entities diff export file.
 
@@ -339,7 +352,10 @@ def entities_diff(ts: datetime | None = None) -> str:
     if ts is None:
         ts = datetime.now(timezone.utc)
     ts_iso = ts.strftime(TS_FORMAT)
-    return f"{DIFFS_ENTITIES}/{ts_iso}.delta.json"
+    path = f"{DIFFS_ENTITIES}/{ts_iso}.delta.json"
+    if suffix:
+        path = f"{path}.{suffix}"
+    return path
 
 
 JOBS = "jobs"

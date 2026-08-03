@@ -1,11 +1,13 @@
 """Dataset class for single-dataset management."""
 
-from typing import Any, Generic
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Generic
 
 from anystore.logging import get_logger
 from anystore.store import Store, get_store
 from anystore.types import Uri
-from anystore.util import mask_uri
+from anystore.util import ensure_uri, join_uri, mask_uri
 
 from ftm_lakehouse.core.api import ensure_api_uri
 from ftm_lakehouse.core.config import load_config
@@ -13,18 +15,15 @@ from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.core.zfs import ensure_zfs_dataset
 from ftm_lakehouse.model import DM, DatasetModel
-from ftm_lakehouse.repository import (
-    ArchiveRepository,
-    DocumentRepository,
-    EntityRepository,
-)
-from ftm_lakehouse.repository.factories import (
-    get_archive,
-    get_documents,
-    get_entities,
-    get_versions,
-)
+
+if TYPE_CHECKING:
+    from ftm_lakehouse.repository import (
+        ArchiveRepository,
+        DocumentRepository,
+        EntityRepository,
+    )
 from ftm_lakehouse.storage.versions import VersionStore
+from ftm_lakehouse.util import validate_dataset_name
 
 log = get_logger(__name__)
 
@@ -67,7 +66,7 @@ class Dataset(Generic[DM]):
         uri: Uri,
         model_class: type[DM] = DatasetModel,
     ) -> None:
-        self.name = name
+        self.name = validate_dataset_name(name)
         self.uri = uri
         self._model_class = model_class
         self._settings = Settings()
@@ -93,6 +92,8 @@ class Dataset(Generic[DM]):
     @property
     def _versions(self) -> VersionStore:
         """Version store for snapshots."""
+        from ftm_lakehouse.repository.factories import get_versions
+
         return get_versions(self.name, self.uri)
 
     # -------------------------------------------------------------------------
@@ -141,14 +142,20 @@ class Dataset(Generic[DM]):
 
     def get_archive(self) -> ArchiveRepository:
         """File archive operations."""
+        from ftm_lakehouse.repository.factories import get_archive
+
         return get_archive(self.name, self.uri)
 
     def get_entities(self) -> EntityRepository:
         """Entity/statement operations."""
+        from ftm_lakehouse.repository.factories import get_entities
+
         return get_entities(self.name, self.uri)
 
     def get_documents(self) -> DocumentRepository:
         """Document metadata operations."""
+        from ftm_lakehouse.repository.factories import get_documents
+
         return get_documents(self.name, self.uri)
 
     # -------------------------------------------------------------------------
@@ -170,3 +177,16 @@ class Dataset(Generic[DM]):
         if not self.exists():
             self.update_model(**data)
             self._log.info("Created dataset")
+
+
+def dataset_uri(dataset: str, uri: Uri | None = None) -> str:
+    """Canonical URI for a dataset – same location, same string, same cache key.
+
+    ``None`` derives ``{LAKEHOUSE_URI}/{dataset}`` exactly like
+    :func:`ftm_lakehouse.lake.get_lakehouse` does for the catalog; explicit
+    values (str or ``Path``) are normalized via ``ensure_uri``.
+    """
+    if uri is not None:
+        return str(ensure_uri(uri))
+    settings = Settings()
+    return str(join_uri(ensure_uri(settings.uri), dataset))

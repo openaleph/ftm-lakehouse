@@ -54,9 +54,6 @@ class ArchiveRepository(BaseRepository):
 
     def __init__(self, dataset: str, uri: Uri) -> None:
         super().__init__(dataset, uri)
-        self._store = get_store(
-            self._store_uri, serialization_mode="raw", raise_on_nonexist=True
-        )
         self._files = get_store(self._store_uri, model=File, raise_on_nonexist=True)
         self._txts = get_store(
             self._store_uri, serialization_mode="auto", raise_on_nonexist=False

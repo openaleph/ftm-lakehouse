@@ -8,7 +8,6 @@ from typing import Generator, Iterable, Iterator
 from anystore.io import smart_stream_csv_models, smart_write_csv, smart_write_models
 from anystore.logic.constants import CHUNK_SIZE_LARGE
 from anystore.logic.io import stream
-from anystore.store import get_store
 from anystore.types import Uri
 from anystore.util import join_uri
 from followthemoney import model
@@ -17,7 +16,7 @@ from ftmq.query import M, Query
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.logic.parquet import QUERY_IN_BATCH_SIZE
 from ftm_lakehouse.model.file import Document, Documents
-from ftm_lakehouse.repository.base import BaseRepository, resolve_shards
+from ftm_lakehouse.repository.base import BaseRepository
 from ftm_lakehouse.repository.diff import ParquetDiffMixin
 from ftm_lakehouse.storage.parquet import ParquetStore
 
@@ -40,16 +39,13 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
             print(document.uri)  # use uri to download
     """
 
-    def __init__(self, dataset: str, uri: Uri, shards: int | None = None) -> None:
+    def __init__(self, dataset: str, uri: Uri) -> None:
         super().__init__(dataset, uri)
-        if shards is None:
-            shards = resolve_shards(uri)
-        self._statements = ParquetStore(uri, dataset, shards)
-        self._storage = get_store(self._store_uri, serialization_mode="raw")
+        self._statements = ParquetStore(uri, dataset, self._model.shards)
 
     @property
     def csv_uri(self) -> Uri:
-        return self._storage.to_uri(path.EXPORTS_DOCUMENTS)
+        return self._store.to_uri(path.EXPORTS_DOCUMENTS)
 
     def stream(self) -> Documents:
         yield from smart_stream_csv_models(self.csv_uri, model=Document)
@@ -155,12 +151,12 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
         """Write documents as CSV with op column (``since`` unused here – the
         documents diff still resolves the passed changed-id set per batch)."""
         key = path.documents_diff(ts)
-        with self._storage.open(key, "w") as o:
+        with self._store.open(key, "w") as o:
             smart_write_csv(
                 o,
                 self._get_delta_documents(entity_ids, kwargs.get("public_url_prefix")),
             )
-        return self._storage.to_uri(key)
+        return self._store.to_uri(key)
 
     def _get_delta_documents(
         self, entity_ids: Iterator[str], public_url_prefix: str | None = None
@@ -178,13 +174,13 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
 
     def _write_initial_diff(self, ts: datetime, **kwargs) -> None:
         """Copy over exported documents.csv to initial diff version"""
-        if not self._storage.exists(path.EXPORTS_DOCUMENTS):
+        if not self._store.exists(path.EXPORTS_DOCUMENTS):
             self.log.info(
                 f"Exporting `{path.EXPORTS_DOCUMENTS}` first to create initial diff."
             )
             self.export_csv(kwargs.get("public_url_prefix"))
-        if not self._storage.exists(path.EXPORTS_DOCUMENTS):
+        if not self._store.exists(path.EXPORTS_DOCUMENTS):
             return
-        with self._storage.open(path.EXPORTS_DOCUMENTS, "rb") as i:
-            with self._storage.open(path.documents_diff(ts), "wb") as o:
+        with self._store.open(path.EXPORTS_DOCUMENTS, "rb") as i:
+            with self._store.open(path.documents_diff(ts), "wb") as o:
                 stream(i, o, CHUNK_SIZE_LARGE)

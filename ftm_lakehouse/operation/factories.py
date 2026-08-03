@@ -42,6 +42,10 @@ def export(
     """
     Run a single export operation.
 
+    Compression of the exported artifacts is the dataset's own
+    ``compression`` config value – there is deliberately no runtime
+    argument, so every writer and reader of a dataset agrees on the layout.
+
     Args:
         dataset: The dataset to export from
         kind: What to export – one of ``statements``, ``entities``,
@@ -53,9 +57,11 @@ def export(
         The completed job result
     """
     job = ExportJob.make(
-        dataset=dataset.name, kind=ExportKind(kind), make_diff=make_diff
+        dataset=dataset.name,
+        kind=ExportKind(kind),
+        make_diff=make_diff,
     )
-    return ExportOperation.from_job(job, dataset).run(force=force)
+    return ExportOperation(job, dataset.uri).run(force=force)
 
 
 def optimize(
@@ -82,7 +88,7 @@ def optimize(
         retention_hours=retention_hours,
         grace_period_days=grace_period_days,
     )
-    return OptimizeOperation.from_job(job, dataset).run(force=force)
+    return OptimizeOperation(job, dataset.uri).run(force=force)
 
 
 def make(dataset: Dataset, force: bool = False) -> MakeJob:
@@ -97,7 +103,7 @@ def make(dataset: Dataset, force: bool = False) -> MakeJob:
         The completed job result
     """
     job = MakeJob.make(dataset=dataset.name)
-    return MakeOperation.from_job(job, dataset).run(force=force)
+    return MakeOperation(job, dataset.uri).run(force=force)
 
 
 def download_archive(dataset: Dataset, target: Uri) -> DownloadArchiveJob:
@@ -110,4 +116,4 @@ def download_archive(dataset: Dataset, target: Uri) -> DownloadArchiveJob:
         target: The uri to the target (local or remote)
     """
     job = DownloadArchiveJob.make(dataset=dataset.name, target=target)
-    return DownloadArchiveOperation.from_job(job, dataset).run()
+    return DownloadArchiveOperation(job, dataset.uri).run()

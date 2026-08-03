@@ -17,9 +17,8 @@ class MakeOperation(DatasetJobOperation[MakeJob]):
 
     def handle(self, run: JobRun, *args, **kwargs) -> None:
         force = kwargs.get("force", False)
-        ds = self._dataset
-        ds.get_entities().flush()
+        self.entities.flush()
         for kind in ExportKind:
-            job = ExportJob.make(dataset=ds.name, kind=kind)
-            ExportOperation.from_job(job, ds).run(force=force)
+            job = ExportJob.make(dataset=self.dataset, kind=kind)
+            ExportOperation(job, self.uri).run(force=force)
         run.job.done = 1

@@ -1,26 +1,23 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Generic, Self
+from typing import Generic
 
 from anystore.types import Uri
 
-from ftm_lakehouse.core.api import LakehouseApiMixin, api_delegate, require_api
+from ftm_lakehouse.core.api import api_delegate, require_api
+from ftm_lakehouse.dataset import dataset_uri
 from ftm_lakehouse.model.job import DJ
+from ftm_lakehouse.repository.base import BaseRepository
 from ftm_lakehouse.repository.factories import (
     get_archive,
     get_documents,
     get_entities,
     get_jobs,
-    get_tags,
-    get_versions,
 )
 from ftm_lakehouse.repository.job import JobRun
 
-if TYPE_CHECKING:
-    from ftm_lakehouse.dataset import Dataset
 
-
-class DatasetJobOperation(LakehouseApiMixin, Generic[DJ]):
+class DatasetJobOperation(BaseRepository, Generic[DJ]):
     """
     A (long-running) operation for a specific dataset that updates tags and
     checks dependencies for freshness to be able to skip this operation. The job
@@ -36,35 +33,15 @@ class DatasetJobOperation(LakehouseApiMixin, Generic[DJ]):
 
     target: str = ""  # tag that gets touched after successful run
     dependencies: list[str] = []  # dependencies for freshness check
-    _dataset: Dataset
 
     def __init__(self, job: DJ, uri: Uri | None = None) -> None:
+        super().__init__(job.dataset, dataset_uri(job.dataset, uri))
         self.job = job
         self.log = job.log
-        self.archive = get_archive(job.dataset, uri)
-        self.entities = get_entities(job.dataset, uri)
-        self.documents = get_documents(job.dataset, uri)
+        self.archive = get_archive(self.dataset, self.uri)
+        self.entities = get_entities(self.dataset, self.uri)
+        self.documents = get_documents(job.dataset, self.uri)
         self.jobs = get_jobs(job.dataset, job.__class__, uri)
-        self.tags = get_tags(job.dataset, uri)
-        self.versions = get_versions(job.dataset, uri)
-        super().__init__(uri or self.archive.uri)
-
-    @classmethod
-    def from_job(cls, job: DJ, dataset: Dataset) -> Self:
-        """Create an operation bound to ``dataset``.
-
-        Args:
-            job: The job model instance
-            dataset: The Dataset – provides the storage uri and stays bound
-                as ``_dataset`` for operations that need the full handle
-                (e.g. ``make`` / the index export).
-
-        Returns:
-            Configured operation instance
-        """
-        instance = cls(job, uri=dataset.uri)
-        instance._dataset = dataset
-        return instance
 
     def get_target(self) -> str:
         """Return the target tag. Override for dynamic values."""
@@ -84,7 +61,7 @@ class DatasetJobOperation(LakehouseApiMixin, Generic[DJ]):
 
         if not force:
             if target and dependencies:
-                if self.tags.is_latest(target, dependencies):
+                if self._tags.is_latest(target, dependencies):
                     self.job.log.info(
                         f"Already up-to-date: `{target}`, skipping ...",
                         target=target,
@@ -94,7 +71,7 @@ class DatasetJobOperation(LakehouseApiMixin, Generic[DJ]):
                     return self.job
 
         # Execute: Store target tag and job result on successful context leave
-        with self.jobs.run(self.job) as run, self.tags.touch(target) as now:
+        with self.jobs.run(self.job) as run, self._tags.touch(target) as now:
             self.job.log.info(
                 f"Start `{target}` ...",
                 target=target,

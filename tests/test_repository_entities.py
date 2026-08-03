@@ -316,7 +316,8 @@ def test_repository_entities_query_slice_multi_shard(tmp_path):
     """LIMIT / ORDER BY hold across shards: sliced or sorted queries execute
     globally instead of once per (shard, bucket) partition (which would
     return up to N entities *per partition*)."""
-    repo = EntityRepository("test", tmp_path, shards=4)
+    repo = EntityRepository("test", tmp_path)
+    repo.shards = 4
     with repo.writer() as writer:
         for i in range(8):
             writer.add_entity(

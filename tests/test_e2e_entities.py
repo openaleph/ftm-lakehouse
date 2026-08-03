@@ -1,4 +1,5 @@
 import csv
+import itertools
 from typing import Generator
 
 import pytest
@@ -15,6 +16,7 @@ from ftm_lakehouse.api.main import (
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.dataset import Dataset
 from ftm_lakehouse.lake import get_lakehouse
+from ftm_lakehouse.logic.compress import CompressKind, decompress_stream
 from ftm_lakehouse.operation import ExportKind, export, optimize
 from tests.conftest import (
     LAKEHOUSE_TEST_URL,
@@ -25,22 +27,29 @@ from tests.conftest import (
 from tests.shared import JANE, JANE_FIRSTNAME
 
 
-@pytest.fixture(params=["local", "api", "docker"])
+@pytest.fixture(
+    params=list(
+        itertools.product(
+            ["local", "api", "docker"], [None, CompressKind.gz, CompressKind.zst]
+        )
+    )
+)
 def dataset(request, tmp_path) -> Generator[Dataset, None, None]:
-    if request.param == "local":
+    backend, compression = request.param
+    if backend == "local":
         lake = get_lakehouse(tmp_path)
-        yield lake.get_dataset("test")
-    elif request.param == "api":
+        yield lake.create_dataset("test", compression=compression)
+    elif backend == "api":
         routers = [entities_router, journal_router, operations_router, archive_router]
         with make_test_api(tmp_path, routers) as base_url:
             lake = get_lakehouse(base_url)
-            yield lake.get_dataset("test")
+            yield lake.create_dataset("test", compression=compression)
     else:
         # docker: real nginx fronting the lakehouse Granian UDS. Unique
         # dataset name keeps concurrent / repeated runs isolated.
         skip_unless_docker_mode()
         lake = get_lakehouse(LAKEHOUSE_TEST_URL)
-        yield lake.get_dataset(make_docker_dataset_name())
+        yield lake.create_dataset(make_docker_dataset_name(), compression=compression)
 
 
 def test_entities(dataset):
@@ -87,8 +96,11 @@ def test_entities(dataset):
         bulk.add_entity(john)
     export(dataset, ExportKind.statements)  # Operation's ensure_flush handles flushing
 
-    with entities._store.open(path.EXPORTS_STATEMENTS, "r") as fh:
-        reader = csv.DictReader(fh)
+    with (
+        entities._store.open(entities.EXPORTS_STATEMENTS) as fh,
+        decompress_stream(fh, entities.compression, "r") as out,
+    ):
+        reader = csv.DictReader(out)
         data = [r for r in reader]
     assert len(data) == 6  # 2 jane (default) + 2 jane (update) + 2 john
     stmts = [Statement.from_dict(d) for d in data]
@@ -290,8 +302,11 @@ def test_entity_multi_origin_statements(dataset):
     assert "enrichment" in origins
 
     # Verify statements.csv contains all origins
-    with entities._store.open(path.EXPORTS_STATEMENTS, "r") as fh:
-        reader = csv.DictReader(fh)
+    with (
+        entities._store.open(entities.EXPORTS_STATEMENTS) as fh,
+        decompress_stream(fh, entities.compression, "r") as out,
+    ):
+        reader = csv.DictReader(out)
         rows = [r for r in reader]
 
     stmt_origins = set(r["origin"] for r in rows)

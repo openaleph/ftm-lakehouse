@@ -214,4 +214,4 @@ def crawl(
         make_entities=make_entities,
         existing=existing,
     )
-    return CrawlOperation.from_job(job, dataset).run()
+    return CrawlOperation(job, dataset.uri).run()

@@ -30,7 +30,7 @@ from anystore.util import ensure_uri, mask_uri
 
 from ftm_lakehouse.catalog import Catalog
 from ftm_lakehouse.core.settings import Settings
-from ftm_lakehouse.dataset import DM, Dataset
+from ftm_lakehouse.dataset import DM, Dataset, dataset_uri
 from ftm_lakehouse.model import DatasetModel
 from ftm_lakehouse.repository.factories import (
     LRU_MAX,
@@ -65,26 +65,26 @@ def get_lakehouse(
 
 def get_dataset(
     name: str,
+    uri: Uri | None = None,
     model_class: type[DM] = DatasetModel,
-    **data: Any,
 ) -> Dataset[DM]:
     """
     Get a dataset by name.
 
     Args:
         name: Dataset name
+        uri: Dataset storage root uri, overrides lakehouse default
         model_class: Custom DatasetModel subclass
-        **data: Additional config data (auto-saved if dataset exists)
 
     Returns:
         Dataset instance
     """
-    catalog = get_lakehouse(model_class=model_class)
-    return catalog.get_dataset(name, **data)
+    return Dataset(name, dataset_uri(name, uri), model_class)
 
 
 def ensure_dataset(
     name: str,
+    uri: Uri | None = None,
     model_class: type[DM] = DatasetModel,
     **data: Any,
 ) -> Dataset[DM]:
@@ -96,13 +96,14 @@ def ensure_dataset(
 
     Args:
         name: Dataset name
+        uri: Dataset storage root uri, overrides lakehouse default
         model_class: Custom DatasetModel subclass
         **data: Config data for creation
 
     Returns:
         Dataset instance (created if needed)
     """
-    dataset = get_dataset(name, model_class=model_class, **data)
+    dataset = get_dataset(name, uri, model_class=model_class)
     dataset.ensure(**data)
     return dataset
 

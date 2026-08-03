@@ -126,9 +126,7 @@ class BaseJournalStore(Generic[W]):
 
         Args:
             shards: The dataset's shard count. Callers resolve it from the
-                dataset's config – via ``EntityRepository.shards`` or
-                :func:`ftm_lakehouse.repository.base.resolve_shards`. There
-                is deliberately no environment default.
+                dataset's config
             origin: Origin tag for statements written through this writer.
         """
         return self._writer_cls(self, shards=shards, origin=origin)
