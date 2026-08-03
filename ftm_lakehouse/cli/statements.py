@@ -24,8 +24,8 @@ from ftm_lakehouse.cli.io import (
     import_statements,
     import_statements_unsafe,
 )
-from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.helpers.statements import read_csv_statements
+from ftm_lakehouse.logic.compress import decompress_stream
 
 statements = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=settings.debug)
 cli.add_typer(statements, name="statements", help="Read and write raw FtM statements")
@@ -54,8 +54,13 @@ def cli_statements_stream(
     with DatasetContext() as dataset:
         # we trust our exports so stream byte-to-byte directly instead the
         # python / ftm roundtrip
-        in_uri = dataset._store.to_uri(path.EXPORTS_STATEMENTS)
-        with smart_open(in_uri, "rb") as i, smart_open(out_uri, "wb") as o:
+        entities = dataset.get_entities()
+        in_uri = dataset._store.to_uri(entities.EXPORTS_STATEMENTS)
+        with (
+            smart_open(in_uri, "rb") as fh,
+            decompress_stream(fh, entities.compression) as i,
+            smart_open(out_uri, "wb") as o,
+        ):
             stream(i, o)
 
 

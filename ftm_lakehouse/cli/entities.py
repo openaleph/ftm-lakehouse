@@ -18,7 +18,7 @@ from ftmq.io import smart_read_proxies, smart_write_proxies
 
 from ftm_lakehouse.cli import DatasetContext, cli, settings
 from ftm_lakehouse.cli.io import BULK_ORIGIN, import_entities, import_entities_unsafe
-from ftm_lakehouse.core.conventions import path
+from ftm_lakehouse.logic.compress import decompress_stream
 
 entities = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=settings.debug)
 cli.add_typer(entities, name="entities", help="Read and write FtM entities")
@@ -46,8 +46,13 @@ def cli_entities_stream(
     with DatasetContext() as dataset:
         # we trust our exports so stream byte-to-byte directly instead the
         # python / ftm roundtrip
-        in_uri = dataset._store.to_uri(path.ENTITIES_JSON)
-        with smart_open(in_uri, "rb") as i, smart_open(out_uri, "wb") as o:
+        entities = dataset.get_entities()
+        in_uri = dataset._store.to_uri(entities.ENTITIES_JSON)
+        with (
+            smart_open(in_uri, "rb") as fh,
+            decompress_stream(fh, entities.compression) as i,
+            smart_open(out_uri, "wb") as o,
+        ):
             stream(i, o)
 
 
