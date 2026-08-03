@@ -58,7 +58,7 @@ def make_folders(path: Path, dataset: str | None = None) -> StatementEntities:
             folder = make_folder(parent.name, parent_id, dataset)
             parent_id = folder.id
             yield folder
-    yield make_folder(path.name, parent_id)
+    yield make_folder(path.name, parent_id, dataset)
 
 
 MIME_SCHEMAS = {
