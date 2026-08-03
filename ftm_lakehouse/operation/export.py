@@ -27,6 +27,7 @@ from ftm_lakehouse.helpers.dataset import (
 from ftm_lakehouse.model.dataset import DatasetModel
 from ftm_lakehouse.model.job import DatasetJobModel
 from ftm_lakehouse.operation.base import DatasetJobOperation
+from ftm_lakehouse.repository.factories import get_entities
 from ftm_lakehouse.repository.job import JobRun
 from ftm_lakehouse.util import render
 
@@ -104,14 +105,15 @@ def _export_index(
     public_prefix = dataset.get_public_prefix()
 
     if public_prefix:
-        if store.exists(path.EXPORTS_STATEMENTS):
-            uri = join_uri(dataset.uri, path.EXPORTS_STATEMENTS)
-            public_url = join_uri(public_prefix, path.EXPORTS_STATEMENTS)
+        entities = get_entities(dataset.name, dataset.uri)
+        if store.exists(entities.EXPORTS_STATEMENTS):
+            uri = join_uri(dataset.uri, entities.EXPORTS_STATEMENTS)
+            public_url = join_uri(public_prefix, entities.EXPORTS_STATEMENTS)
             dataset.resources.append(make_statements_resource(uri, public_url))
 
-        if store.exists(path.ENTITIES_JSON):
-            uri = join_uri(dataset.uri, path.ENTITIES_JSON)
-            public_url = join_uri(public_prefix, path.ENTITIES_JSON)
+        if store.exists(entities.ENTITIES_JSON):
+            uri = join_uri(dataset.uri, entities.ENTITIES_JSON)
+            public_url = join_uri(public_prefix, entities.ENTITIES_JSON)
             dataset.resources.append(make_entities_resource(uri, public_url))
 
         if store.exists(path.EXPORTS_DOCUMENTS):
