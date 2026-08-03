@@ -71,6 +71,19 @@ def test_model_file_extra_fields():
     )
     assert file3.extra == {}
 
+    # Test override id
+    file4 = File(
+        id="foo",
+        dataset="test",
+        checksum=FAKE_CHECKSUM,
+        key="test.txt",
+        name="test.txt",
+        store="s3://bucket",
+        size=100,
+    )
+    assert file4.id == "foo"
+    assert file4.to_entity().id == "foo"
+
 
 def test_model_file_entity():
     """Test generation of entities from file"""
