@@ -46,7 +46,7 @@ def cli_make(
     optimize: Annotated[
         Optional[bool],
         typer.Option(help="Optimize parquet store beforehand when using --full"),
-    ] = False,
+    ] = True,
     force: Annotated[
         Optional[bool],
         typer.Option(help="Re-compute full exports pipeline even if up-to-date."),
