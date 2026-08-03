@@ -43,6 +43,10 @@ def cli_make(
             help="Run full update: flush journal, export statements/entities, compute stats"
         ),
     ] = False,
+    optimize: Annotated[
+        Optional[bool],
+        typer.Option(help="Optimize parquet store beforehand when using --full"),
+    ] = False,
     force: Annotated[
         Optional[bool],
         typer.Option(help="Re-compute full exports pipeline even if up-to-date."),
@@ -58,6 +62,8 @@ def cli_make(
             dataset_config = DatasetModel.from_yaml_uri(config)
             dataset.update_model(**dataset_config.model_dump())
         if full:
+            if optimize:
+                op.optimize(dataset)
             op.make(dataset, force=bool(force))
         else:
             dataset.get_entities().flush()
