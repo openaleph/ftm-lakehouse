@@ -1,8 +1,8 @@
 import yaml
-from anystore.io import smart_read, smart_stream_json
+from anystore.io import smart_read
 from anystore.util import ensure_uri
 
-from ftm_lakehouse import get_dataset, get_lakehouse
+from ftm_lakehouse import get_lakehouse
 
 
 def test_config_initialization(fixtures_path, tmp_path):
