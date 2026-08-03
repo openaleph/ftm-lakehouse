@@ -238,7 +238,7 @@ def test_fragment_none_lands_as_empty_string(local_repo, tmp_path):
     fragments = {
         r[0]
         for r in con.execute(
-            f"SELECT fragment FROM delta_scan('{tmp_path}/entities/statements')"
+            f"SELECT fragment FROM delta_scan('{tmp_path}/statements')"
         ).fetchall()
     }
     assert fragments == {"", "row42"}

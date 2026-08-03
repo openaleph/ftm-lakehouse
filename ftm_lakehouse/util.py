@@ -89,7 +89,7 @@ def validate_origin(origin: str) -> str:
     (:func:`ftm_lakehouse.core.conventions.path.statement_origin`).
     Without validation a traversal sequence in ``origin`` escapes the
     archive subtree or writes a parquet partition outside
-    ``entities/statements/``.
+    ``statements/``.
 
     Built on :func:`safe_name`; allows everything ``safe_name`` allows
     (printable, no separators, no traversal), which covers conventional

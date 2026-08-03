@@ -43,12 +43,11 @@ Dataset Layout
                     versions/               # versioned snapshots
                         YYYY/MM/...
 
-            entities/
-                statements/                 # statement store (shard-partitioned)
-                    shard={shard}/
-                        bucket={bucket}/
-                            origin={origin}/
-                                *.parquet
+            statements/                     # statement store (shard-partitioned)
+                shard={shard}/
+                    bucket={bucket}/
+                        origin={origin}/
+                            *.parquet
 
             entities.ftm.json[.zst|gzip]    # aggregated entities export
 
@@ -229,9 +228,6 @@ def mapping(content_hash: str) -> str:
     return f"{MAPPINGS}/{content_hash}/{MAPPING}"
 
 
-ENTITIES = "entities"
-"""Base path for storing entities data"""
-
 ENTITIES_JSON = "entities.ftm.json"
 """aggregated entities file name"""
 
@@ -242,7 +238,7 @@ def entities_json(suffix: str | None = None) -> str:
     return f"{ENTITIES_JSON}.{suffix}"
 
 
-STATEMENTS = f"{ENTITIES}/statements"
+STATEMENTS = "statements"
 """Base path for storing statement data (partitioned by shard, bucket, origin)"""
 
 

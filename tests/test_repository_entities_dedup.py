@@ -33,7 +33,7 @@ def _make_local_repo(tmp_path) -> EntityRepository:
 
 def _row_count(path: str) -> int:
     con = make_duckdb()
-    path = f"{path}/entities/statements"
+    path = f"{path}/statements"
     return con.execute(f"SELECT COUNT(*) FROM delta_scan('{path}')").fetchone()[0]
 
 

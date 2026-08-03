@@ -33,7 +33,7 @@ load-bearing for read correctness, not just cleanup; ``compact`` bin-packs
 small files; ``vacuum`` removes obsolete Delta file versions.
 
 Layout:
-    entities/statements/shard={s}/bucket={b}/origin={o}/part-*.parquet
+    statements/shard={s}/bucket={b}/origin={o}/part-*.parquet
 """
 
 import random

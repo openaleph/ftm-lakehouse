@@ -105,7 +105,10 @@ def cli_ftm_lakehouse(
         catalog = get_lakehouse(uri)
         STATE["catalog"] = catalog
         if dataset:
-            STATE["dataset"] = get_dataset(dataset, dataset_uri)
+            if dataset_uri:
+                STATE["dataset"] = get_dataset(dataset, dataset_uri)
+            else:
+                STATE["dataset"] = STATE["catalog"].get_dataset(dataset)
     except Exception as e:
         if settings_.debug:
             raise

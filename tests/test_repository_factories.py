@@ -76,9 +76,7 @@ def test_config_shards_drive_partitioning(tmp_path, monkeypatch):
             )
     repo.flush()
 
-    shard_dirs = {
-        p.name for p in (tmp_path / "sharded/entities/statements").glob("shard=*")
-    }
+    shard_dirs = {p.name for p in (tmp_path / "sharded/statements").glob("shard=*")}
     assert len(shard_dirs) > 1  # data actually spread across shards
 
     # shard-scoped single-entity lookup

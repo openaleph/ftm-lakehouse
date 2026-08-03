@@ -47,7 +47,7 @@ lakehouse/
         queue/{tenant}/             # task queues
 
         archive/                    # content-addressed file storage
-            # SHA1 checksum split into directory segments:
+            # SHA256 checksum split into directory segments:
             ab/cd/ef/{checksum}/
                 blob                # file blob (stored once per checksum)
                 {file_id}.json      # [optional] metadata (one per source path, keyed by File.id)
@@ -59,18 +59,18 @@ lakehouse/
                 versions/           # versioned snapshots
                     YYYY/MM/...
 
-        entities/
-            statements/             # statement store (partitioned parquet, immutable FtM data)
-                origin={origin}/
-                    *.parquet
-            translog/                # per-statement metadata (mutable, Delta Lake)
-                *.parquet           # tracks first_seen, last_seen, deleted_at
+        statements/                 # statement store (shard-partitioned)
+            shard={shard}/
+                bucket={bucket}/
+                    origin={origin}/
+                        *.parquet
 
-        entities.ftm.json           # aggregated entities export
+        entities.ftm.json[.zst|gz]  # aggregated entities export
 
         exports/
             statistics.json         # entity counts, pre-computed facets
-            statements.csv          # complete sorted statements
+            statements.csv[.zst|gz]          # complete sorted statements
+            documents.csv           # document metadata
             graph.cypher            # neo4j export (optional)
 
         jobs/
