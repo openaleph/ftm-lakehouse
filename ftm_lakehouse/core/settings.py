@@ -60,9 +60,9 @@ class Settings(BaseSettings):
 
 
 class ApiContactSettings(BaseSettings):
-    name: str | None
-    url: str | None
-    email: str | None
+    name: str | None = None
+    url: str | None = None
+    email: str | None = None
 
 
 def get_api_doc() -> str:
@@ -82,9 +82,7 @@ class ApiSettings(BaseSettings):
 
     title: str = "FollowTheMoney Data Lakehouse Api"
     description: str = get_api_doc()
-    contact: ApiContactSettings | None = None
-
-    static_headers: dict[str, str] = {}
+    contact: ApiContactSettings = ApiContactSettings()
 
     # DoS limits at the API boundary.
     query_max_in_values: int = 10_000

@@ -36,17 +36,6 @@ class ZfsEnsureMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
-class StaticHeadersMiddleware(BaseHTTPMiddleware):
-    async def dispatch(
-        self, request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
-        response = await call_next(request)
-        response.headers["X-Lakehouse-Version"] = __version__
-        for key, value in api_settings.static_headers.items():
-            response.headers[key] = value
-        return response
-
-
 async def _not_found_handler(_: Request, exc: Exception) -> JSONResponse:
     return JSONResponse(status_code=404, content={"detail": str(exc)})
 
@@ -57,7 +46,15 @@ async def _bad_request_handler(_: Request, exc: Exception) -> JSONResponse:
 
 def get_app(lake_uri: str | None = None) -> FastAPI:
     uri = ensure_uri(lake_uri or settings.uri)
-    app = FastAPI(docs_url=None, redoc_url="/")
+    app = FastAPI(
+        debug=settings.debug,
+        docs_url=None,
+        redoc_url="/",
+        version=__version__,
+        title=api_settings.title,
+        description=api_settings.description,
+        contact=api_settings.contact.model_dump(),
+    )
     app.state.lake = get_lakehouse(uri)
 
     # lakehouse api
@@ -77,7 +74,6 @@ def get_app(lake_uri: str | None = None) -> FastAPI:
         app.include_router(archive_router)
 
     # middlewares
-    app.add_middleware(StaticHeadersMiddleware)
     if settings.on_zfs and settings.zfs_pool:
         app.add_middleware(ZfsEnsureMiddleware)
 
