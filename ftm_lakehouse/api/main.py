@@ -5,7 +5,6 @@ from anystore.store import get_store
 from anystore.util import ensure_uri, uri_to_path
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
-from followthemoney.dataset.util import dataset_name_check
 from putfs import api as putfs
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
@@ -33,12 +32,7 @@ class ZfsEnsureMiddleware(BaseHTTPMiddleware):
             path = request.url.path.lstrip("/")
             dataset = path.split("/")[0] if path else None
             if dataset:
-                try:
-                    dataset_name_check(dataset)
-                except ValueError:
-                    pass
-                else:
-                    ensure_zfs_dataset(settings.zfs_pool, dataset)
+                ensure_zfs_dataset(settings.zfs_pool, dataset)
         return await call_next(request)
 
 
