@@ -116,7 +116,7 @@ configs:
 
           # Lakehouse API surface – everything under /{dataset}/_api/.
           # Matched before the trailing-slash and root locations.
-          location ~ ^/[^/]+/_api/ {
+          location ~ ^/[^/]+/_api(/|$) {
             proxy_pass http://api;
           }
 
