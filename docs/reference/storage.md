@@ -28,3 +28,12 @@ Key-value freshness tracking.
     options:
         heading_level: 3
         show_root_heading: true
+
+## VersionStore
+
+Timestamped snapshots for config / index files.
+
+::: ftm_lakehouse.storage.versions.VersionStore
+    options:
+        heading_level: 3
+        show_root_heading: true

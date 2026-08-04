@@ -42,8 +42,7 @@ Standard tags for freshness tracking.
         heading_level: 3
         members:
             - JOURNAL_UPDATED
+            - JOURNAL_FLUSHED
             - STATEMENTS_UPDATED
+            - STATEMENTS_OPTIMIZED
             - ARCHIVE_UPDATED
-            - EXPORTS_STATEMENTS
-            - ENTITIES_JSON
-            - STATISTICS

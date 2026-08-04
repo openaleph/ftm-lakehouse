@@ -12,9 +12,7 @@
 
 `ftm-lakehouse` provides a _data standard_ and _archive storage_ for leaked data, private and public document collections and structured [FollowTheMoney](https://followthemoney.tech) data. The concepts and implementations are originally inspired by [mmmeta](https://github.com/simonwoerpel/mmmeta), [Aleph's servicelayer archive](https://github.com/alephdata/servicelayer) and [OpenSanctions](https://opensanctions.org) work on dataset catalog metadata.
 
-`ftm-lakehouse` acts as a multi-tenant storage and retrieval mechanism for structured entity data, documents and their metadata. It provides a high-level interface for generating and sharing document collections and importing them into various search and analysis platforms, such as [_OpenAleph_](https://openaleph.org), [_ICIJ Datashare_](https://datashare.icij.org/) or [_Liquid Investigations_](https://github.com/liquidinvestigations/).
-
-[Read the specification](./rfc.md)
+`ftm-lakehouse` acts as a multi-tenant storage and retrieval mechanism for structured entity data, documents and their metadata. It can be used by _tenants_ to produce and/or consume data such as [investigraph](https://docs.investigraph.dev), [memorious](https://docs.investigraph.dev/lib/memorious/) and the full suites of various search and analysis platforms, such as [_OpenALeph_](https://openaleph.org), [_ICIJ Datashare_](https://datashare.icij.org/) or [_Liquid Investigations_](https://github.com/liquidinvestigations/)
 
 [What is a lakehouse?](https://www.databricks.com/blog/2020/01/30/what-is-a-data-lakehouse.html)
 
@@ -46,21 +44,22 @@ A statement represents a single fact: one property value for one entity from one
 This statement-based storage model makes it possible to merge data from multiple sources while preserving full provenance, perform incremental updates without reprocessing entire datasets, and use standard file-based tools (sorting, filtering) rather than requiring database infrastructure.
 
 ```python
-from ftm_lakehouse import get_dataset, ensure_dataset
+from ftm_lakehouse import ensure_dataset, get_entities
 
-dataset = ensure_dataset("my_dataset")
+ensure_dataset("my_dataset")
+entities = get_entities("my_dataset")
 
 # Write entities through the journal (buffered, then flushed to parquet)
-with dataset.get_entities().writer(origin="import") as writer:
-    for entity in entities:
+with entities.writer(origin="import") as writer:
+    for entity in source:
         writer.add_entity(entity)
-dataset.get_entities().flush()
+entities.flush()
 
 # Read back
-entity = dataset.get_entities().get("entity-id-123")
+entity = entities.get("entity-id-123")
 
 # Live query of the parquet store
-for entity in dataset.get_entities().query(origin="crawl"):
+for entity in entities.query(origin="crawl"):
     process(entity)
 ```
 
@@ -70,20 +69,22 @@ The parquet statement store is partitioned by `(shard, bucket, origin)` and writ
 
 The **archive** interface manages source documents and files:
 
-- **Store files** with content-addressable storage (SHA1 checksums)
+- **Store files** with content-addressable storage (SHA256 checksums)
 - **Retrieve files** by checksum or iterate through all files
 - **Track metadata** including MIME types, sizes, and custom properties
 
 Files are automatically deduplicated across the archive.
 
 ```python
-from ftm_lakehouse import lake
+from ftm_lakehouse import get_archive
+
+archive = get_archive("my_dataset")
 
 # Archive a file
-file = lake.archive_file("my_dataset", "/path/to/document.pdf")
+file = archive.store("/path/to/document.pdf")
 
 # Retrieve file content
-with lake.open_file("my_dataset", file.checksum) as fh:
+with archive.open(file.checksum) as fh:
     content = fh.read()
 ```
 
@@ -110,38 +111,18 @@ Extras combine, e.g. `pip install "ftm-lakehouse[s3,gcs]"`.
 
 [>> Get started here](quickstart.md)
 
-## Development
+## Background
 
-This package uses [poetry](https://python-poetry.org/) for packaging and dependencies management, so first [install it](https://python-poetry.org/docs/#installation).
+The design grew out of the [FollowTheMoney data lake RFC discussion](https://discuss.openaleph.org/t/rfc-followthemoney-data-lake/37) and prior art in [mmmeta](https://github.com/simonwoerpel/mmmeta), [Aleph's servicelayer archive](https://github.com/alephdata/servicelayer), [OpenSanctions](https://opensanctions.org) dataset metadata and [nomenklatura statements](https://followthemoney.tech/docs/statements/).
 
-Clone [this repository](https://github.com/openaleph/ftm-lakehouse) to a local destination.
-
-Within the repo directory, run:
-
-```bash
-poetry install --with dev
-```
-
-This installs development dependencies, including [pre-commit](https://pre-commit.com/) which needs to be registered:
-
-```bash
-poetry run pre-commit install
-```
-
-Before creating a commit, this checks for correct code formatting (isort, black) and other useful checks (see: `.pre-commit-config.yaml`).
-
-### Testing
-
-`ftm-lakehouse` uses [pytest](https://docs.pytest.org/en/stable/) as the testing framework.
-
-```bash
-make test
-```
+For contributing, development setup and testing see the [repository README](https://github.com/openaleph/ftm-lakehouse#development).
 
 ## License and Copyright
 
+`leakrfc` (_predecessor_), (c) 2024 [investigativedata.io](https://investigativedata.io)
+
 `ftm-lakehouse`, (c) 2024 [investigativedata.io](https://investigativedata.io)
 
-`ftm-lakehouse`, (c) 2025 [Data and Research Center - DARC](https://dataresearchcenter.org)
+`ftm-lakehouse`, (c) 2025-2026 [Data and Research Center - DARC](https://dataresearchcenter.org)
 
 `ftm-lakehouse` is licensed under the AGPLv3 or later license.

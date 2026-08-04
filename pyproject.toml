@@ -66,6 +66,7 @@ moto = { extras = ["server"], version = "^5.2.2" }
 pytest-asyncio = ">=1.4.0,<1.5.0"
 rangehttpserver = "^1.4.0"
 mkdocstrings-python = "^2.0.1"
+markdown-exec = "^1.10.0"
 sqlalchemy = "^2.0.50"
 uvicorn = "^0.52.0"
 granian = {extras = ["reload"], version = "^2.7.9"}

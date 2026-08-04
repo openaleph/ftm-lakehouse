@@ -9,11 +9,6 @@ Pure data structures with no dependencies. Pydantic models for serialization.
         heading_level: 3
         show_root_heading: true
 
-::: ftm_lakehouse.model.CatalogModel
-    options:
-        heading_level: 3
-        show_root_heading: true
-
 ## File Model
 
 ::: ftm_lakehouse.model.file.File

@@ -4,22 +4,7 @@ This document describes the layered architecture of `ftm-lakehouse`.
 
 ## Overview
 
-The codebase follows a strict layered architecture with clear separation of concerns:
-
-```
-ftm_lakehouse/
-├── lake.py              # Public convenience functions
-├── catalog.py           # Catalog class (multi-dataset)
-├── dataset.py           # Dataset class (single dataset)
-│
-├── model/               # Layer 1: Pure data structures
-├── storage/             # Layer 2: Single-purpose storage interfaces
-├── repository/          # Layer 3: Domain-specific storage combinations
-├── operation/           # Layer 4: Multi-step workflows (internal)
-│
-└── core/                # Cross-cutting concerns
-    └── conventions/     # Path and tag conventions
-```
+The codebase follows a strict layered architecture with clear separation of concerns – see [Module Layout](#module-layout) for the full tree.
 
 ## Dependency Rules
 
@@ -28,7 +13,7 @@ Layers can only depend on layers below them:
 ```mermaid
 flowchart TD
     subgraph Public["Public API"]
-        API["lake.py / catalog.py / dataset.py"]
+        API["lake.py / catalog.py"]
     end
 
     subgraph Layer4["Layer 4"]
@@ -202,24 +187,28 @@ See [Operation Reference](reference/operation.md) for API details.
 
 ## Layer 5: Public API
 
-The public interface that clients use.
+The public interface that clients use – repositories are the dataset handle, resolved through the LRU-cached factories:
 
 ```
-lake.py          # Convenience functions: get_lakehouse(), get_dataset(), get_archive(), etc.
-catalog.py       # Catalog class - multi-dataset management
-dataset.py       # Dataset class - single dataset interface
+lake.py          # get_lakehouse(), repository shortcuts (re-exports)
+catalog.py       # config.yml lifecycle functions + slim Catalog
 ```
 
-**Key Classes:**
+**Day-to-day access** goes through the repository factories – every path addressing the same dataset shares one cached instance:
 
-- **Catalog** - Multi-dataset management: `get_dataset()`, `list_datasets()`, `create_dataset()`
-- **Dataset** - Single dataset interface with repository access: `archive`, `entities`, `jobs`
+```python
+from ftm_lakehouse import ensure_dataset, get_entities, get_archive
 
-**Convenience functions in `lake.py`:**
+ensure_dataset("my_data", shards=8, compression="zst")   # config recorded at creation
+entities = get_entities("my_data")                       # EntityRepository
+archive = get_archive("my_data")                         # ArchiveRepository
+```
 
-- `get_lakehouse()` - Get the catalog
-- `get_dataset()` / `ensure_dataset()` - Get or create a dataset
-- `get_entities()` / `get_archive()` - Repository shortcuts
+**Config lifecycle** lives in module functions: `ensure_dataset()` (get-or-create), `update_dataset()` (merge-write + versioned snapshot; invalidates the factory caches so newly fetched repositories see the fresh config), `get_dataset_model()` (fresh read), `get_dataset_index()`, `dataset_exists()`. Repositories snapshot their model (`shards`, `compression`) at construction – layout-affecting config must be set at creation.
+
+**Multi-dataset concerns** go through the slim `Catalog` (`get_lakehouse()`): `list_datasets()`, `dataset_uri(name)`. The API server keeps one as `app.state.lake`.
+
+**Custom dataset models**: register a `DatasetModel` subclass process-wide via `set_model_class()` – every config read constructs through it.
 
 See [Lake Reference](reference/lake.md) for API details.
 
@@ -247,7 +236,7 @@ core/
 helpers/                # Domain-specific utilities
   file.py               # File handling (mime_to_schema, etc.)
   statements.py         # Statement pack/unpack for journal
-  dataset.py            # Dataset resource builders
+  dataset.py            # Export resource builders
   serialization.py      # Model serialization utilities
 ```
 
@@ -259,89 +248,114 @@ For detailed usage examples, see:
 - [Working with Entities](usage/entities.md) - Entity/statement operations
 - [Working with Files](usage/archive.md) - File archive operations
 
-## File Layout
-
-Complete directory structure:
+## Module Layout
 
 ```
 ftm_lakehouse/
-├── __init__.py              # Exports: Catalog, Dataset, get_lakehouse, etc.
-├── lake.py                  # get_lakehouse(), get_dataset(), ensure_dataset()
-├── catalog.py               # Catalog class
-├── dataset.py               # Dataset class
-├── util.py                  # General utilities
+├── lake.py                  # get_lakehouse(), repository shortcuts
+├── catalog.py               # config lifecycle fns + slim Catalog
+├── util.py                  # dependency-light primitives (validation, checksums)
 ├── exceptions.py
 │
-├── cli/                     # Typer-based CLI (sub-typer groups)
-│   ├── __init__.py          # Main app + ls/datasets + DatasetContext
-│   ├── archive.py           # `archive` group
-│   ├── entities.py          # `entities` group (iterate/stream/import)
-│   ├── statements.py        # `statements` group (iterate/stream/import)
-│   ├── operations.py        # `operations` group + top-level `make`
-│   └── zfs.py               # `zfs` group (agent/init)
+├── model/                   # Layer 1: Pure data structures
+│   ├── dataset.py           # DatasetModel + set_model_class hook
+│   ├── file.py              # File metadata model
+│   ├── job.py               # Job models
+│   └── statement.py         # SHARDED_SCHEMA, StatementRow
 │
-├── adapters/                # ftmq-compatible adapters on top of EntityRepository
-│   └── fragments.py         # Drop-in for ftmq.store.fragments
+├── storage/                 # Layer 2: Single-purpose storage interfaces
+│   ├── journal/             # SQL write-ahead log (sql.py, api.py, base.py)
+│   ├── parquet.py           # ParquetStore (Delta Lake, write fence, merge)
+│   ├── tags.py              # TagStore (freshness)
+│   └── versions.py          # VersionStore (config / index snapshots)
 │
-├── model/
-│   ├── __init__.py          # Exports all models
-│   ├── file.py              # File, Files
-│   ├── job.py               # JobModel, DatasetJobModel
-│   └── dataset.py           # CatalogModel, DatasetModel
+├── repository/              # Layer 3: Domain-specific storage combinations
+│   ├── base.py              # BaseRepository, dataset_uri(), ensure_zfs()
+│   ├── factories.py         # LRU-cached single instantiation path
+│   ├── entities/            # EntityRepository (main.py) + API delegate (api.py)
+│   ├── archive.py           # ArchiveRepository (content-addressed files)
+│   ├── documents.py         # DocumentRepository
+│   ├── diff.py              # Delta diff export mixin
+│   └── job.py               # JobRepository
 │
-├── storage/
-│   ├── __init__.py          # Exports all stores
-│   ├── parquet.py           # ParquetStore (append / merge / compact / vacuum)
-│   ├── journal/
-│   │   ├── base.py          # BaseJournalStore + JournalRow + flush_statements
-│   │   ├── sql.py           # SqlJournalStore
-│   │   └── api.py           # ApiJournalStore (HTTP forwarding)
-│   ├── tags.py              # TagStore
-│   ├── queue.py             # QueueStore
-│   └── versions.py          # VersionStore
-│
-├── repository/
-│   ├── __init__.py          # Exports all repositories
-│   ├── base.py              # BaseRepository
-│   ├── archive.py           # ArchiveRepository
-│   ├── entities.py          # EntityRepository
-│   ├── job.py               # JobRepository
-│   └── factories.py         # Cached factory functions
-│
-├── operation/
-│   ├── __init__.py          # Exports all operations
-│   ├── base.py              # DatasetJobOperation
-│   ├── export.py            # Export operations
+├── operation/               # Layer 4: Multi-step workflow operations
+│   ├── base.py              # DatasetJobOperation (freshness targets / deps)
+│   ├── factories.py         # export(), optimize(), make(), crawl(), ...
+│   ├── export.py            # ExportOperation (spec table per kind)
+│   ├── maintenance.py       # OptimizeOperation
+│   ├── make.py              # MakeOperation (full workflow)
 │   ├── crawl.py             # CrawlOperation
-│   ├── maintenance.py       # OptimizeOperation (merge + compact + vacuum)
-│   ├── make.py              # MakeOperation
 │   └── download.py          # DownloadArchiveOperation
 │
-├── helpers/
-│   ├── file.py              # File utilities
-│   ├── statements.py        # Statement pack/unpack
-│   ├── dataset.py           # Resource builders
-│   └── serialization.py     # Model serialization
+├── logic/                   # Pure business logic (no storage deps)
+│   ├── entities/            # aggregate.py, buffer.py, explode.py
+│   ├── parquet.py           # DuckDB view / merge SQL builders
+│   ├── compress.py          # Streaming (de)compression (gz / zst)
+│   └── multiprocessing.py
 │
-├── logic/
-│   ├── __init__.py
-│   ├── entities.py          # Entity logic
-│   ├── parquet.py           # Translog-aware DuckDB query helpers
+├── helpers/                 # FtM-domain building blocks
+│   ├── statements.py        # Statement wire format, BASE_ID stub
+│   ├── file.py              # File → entity construction
+│   ├── dataset.py           # Export resource builders
+│   └── serialization.py
 │
-├── api/
-│   ├── __init__.py
-│   ├── main.py              # FastAPI app
-│   ├── auth.py              # Authentication
-│   └── util.py              # API utilities
+├── api/                     # FastAPI REST API
+│   ├── main.py              # App factory, blob mounting
+│   ├── dependencies.py      # DatasetName / Entities / Shards / Journal deps
+│   └── routes/              # entities.py, journal.py, operations.py
 │
-└── core/
-    ├── __init__.py          # Exports: Settings, load_config
-    ├── settings.py          # Settings, ApiSettings
-    ├── config.py            # load_config()
-    └── conventions/
-        ├── __init__.py      # Exports: path, tag modules
-        ├── path.py          # Path conventions
-        └── tag.py           # Tag keys
+├── cli/                     # Typer CLI (sub-typer groups)
+│   ├── __init__.py          # Main app, contexts, ls / datasets
+│   ├── io.py                # Shared bulk-import loop
+│   ├── entities.py          # entities iterate / stream / import
+│   ├── statements.py        # statements iterate / stream / import / sql
+│   ├── archive.py           # archive get / ls / download
+│   ├── operations.py        # make, operations export / optimize / unlock / crawl
+│   └── zfs.py               # zfs agent / init
+│
+└── core/                    # Cross-cutting concerns
+    ├── settings.py          # LAKEHOUSE_* env configuration
+    ├── config.py            # config.yml loading
+    ├── api.py               # API-mode delegation mixin
+    ├── conventions/         # path.py, tag.py
+    └── zfs/                 # helpers.py, agent.py
+```
+
+## Storage Layout & Tags
+
+The on-disk layout of a dataset and the freshness-tag vocabulary are documented in [Conventions](conventions.md).
+
+## Dependency Chain
+
+```mermaid
+flowchart TD
+    A[Tenant writes entities] --> B[(Journal)]
+    A2[Tenant archives files] --> AR[(Archive)]
+    AR -.-> T0[archive/last_updated]
+    AR --> |"create Document"| B
+
+    B --> |"flush()"| C[(Parquet Store)]
+    A3[Tenant bulk imports] --> |"EntityBuffer + write_statements"| C
+
+    C --> |"optimize() – merge + compact + vacuum"| C
+
+    C --> |"export(statements)"| D[statements.csv]
+    C --> |"export(entities)"| E[entities.ftm.json]
+    C --> |"export(statistics)"| F[statistics.json]
+    F --> |"export(index)"| G[index.json]
+
+    B -.-> T1[journal/last_updated]
+    B -.-> T1b[journal/last_flushed]
+    C -.-> T2[statements/last_updated]
+    C -.-> T2a[statements/last_optimized]
+    D -.-> T3[exports/statements]
+    E -.-> T4[exports/entities_json]
+    F -.-> T5[exports/statistics]
+
+    classDef tag fill:#f9f,stroke:#333,stroke-width:1px
+    classDef storage fill:#69b,stroke:#333,stroke-width:2px,color:#fff
+    class T0,T1,T1b,T2,T2a,T3,T4,T5 tag
+    class B,C,AR storage
 ```
 
 ## Key Principles

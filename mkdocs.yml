@@ -4,11 +4,9 @@ repo_url: https://github.com/openaleph/ftm-lakehouse
 nav:
   - Intro: index.md
   - quickstart.md
-  - usage.md
-  - RFC: rfc.md
-  - functionality.md
+  - conventions.md
   - architecture.md
-  - Detailed Usage:
+  - Usage:
     - Working with Entities: usage/entities.md
     - Working with Files: usage/archive.md
     - CLI Reference: usage/cli.md
@@ -83,8 +81,7 @@ markdown_extensions:
 plugins:
   - search
   - autorefs
-  - mkdocs-typer2:
-      pretty: true
+  - markdown-exec
   - mkdocstrings:
       default_handler: python
       handlers:

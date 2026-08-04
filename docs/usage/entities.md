@@ -11,45 +11,33 @@ Entities in `ftm-lakehouse` are stored as **statements** – granular property-l
 - **Incremental updates**: Add new data without reprocessing everything
 - **Simple identity**: entities are keyed on `entity_id`; this is a single-dataset store with no cross-source resolution, so `canonical_id` is not persisted (it always equals `entity_id`)
 
-The underlying storage is a single Delta Lake table per dataset, partitioned by `(shard, bucket, origin)`:
-
-- `shard` – `hash(entity_id) % shards` (the dataset's configured shard count, default a single shard), hex-padded
-- `bucket` – coarse FtM schema group (`thing`, `interval`, `document`, `page`, `pages`, `mention`)
-- `origin` – caller-supplied source tag
-
-Writes are **append-only**. Deduplication, `first_seen` folding, and tombstone reaping happen via the async `optimize` operation (merge + compact + vacuum), guarded by a dataset-wide write fence at `.LOCK`.
+The underlying storage is a single Delta Lake table per dataset, partitioned by `(shard, bucket, origin)` – see [Sharded append-only pattern](../architecture.md#sharded-append-only-pattern) for the partition keys, write fence and merge semantics. Writes are **append-only**: deduplication, `first_seen` folding, and tombstone reaping happen via the async `optimize` operation.
 
 ## Quick Start
 
 ```python
-from ftm_lakehouse import ensure_dataset
+from ftm_lakehouse import ensure_dataset, get_entities
 
-dataset = ensure_dataset("my_dataset")
+ensure_dataset("my_dataset")
+entities = get_entities("my_dataset")
 
 # Write entities
-with dataset.get_entities().writer(origin="import") as writer:
-    for entity in entities:
+with entities.writer(origin="import") as writer:
+    for entity in source:
         writer.add_entity(entity)
 
 # Persist the journal to parquet
-dataset.get_entities().flush()
+entities.flush()
 
 # Read a specific entity
-entity = dataset.get_entities().get("entity-id-123")
+entity = entities.get("entity-id-123")
 
 # Query entities
-for entity in dataset.get_entities().query():
+for entity in entities.query():
     process(entity)
 ```
 
-The repository shortcut:
-
-```python
-from ftm_lakehouse import lake
-
-entities = lake.get_entities("my_dataset")
-entities.add(entity, origin="import")
-```
+The `EntityRepository` handle is resolved through an LRU-cached factory – every path addressing the same dataset (library, CLI, operations, API server) shares one instance.
 
 ## Writing Entities
 
@@ -66,7 +54,7 @@ entity.id = "jane-doe"
 entity.add("name", "Jane Doe")
 entity.add("nationality", "us")
 
-dataset.get_entities().add(entity, origin="manual")
+entities.add(entity, origin="manual")
 ```
 
 ### Bulk Writing (through the journal)
@@ -74,15 +62,15 @@ dataset.get_entities().add(entity, origin="manual")
 For interactive ingestion that wants the journal's per-row dedup and crash-safety guarantees:
 
 ```python
-with dataset.get_entities().writer(origin="bulk_import") as writer:
+with entities.writer(origin="bulk_import") as writer:
     for entity in source_entities:
         writer.add_entity(entity)
 ```
 
-Writes buffer in a SQL journal. Call `dataset.get_entities().flush()` to drain the journal into parquet:
+Writes buffer in a SQL journal. Call `entities.flush()` to drain the journal into parquet:
 
 ```python
-count = dataset.get_entities().flush()
+count = entities.flush()
 print(f"Flushed {count} statements")
 ```
 
@@ -95,8 +83,8 @@ from datetime import datetime, timezone
 from ftmq.io import smart_read_proxies
 from ftm_lakehouse.logic.entities.buffer import EntityBuffer
 
-repo = dataset.get_entities()
-buffer = EntityBuffer(dataset.name, dataset.model.shards, origin="bulk")
+repo = get_entities("my_dataset")
+buffer = EntityBuffer(repo.dataset, repo.shards, origin="bulk")
 now = datetime.now(timezone.utc)
 
 for proxy in smart_read_proxies("entities.ftm.json"):
@@ -120,7 +108,7 @@ The CLI command `ftm-lakehouse entities import` does exactly this.
 ### Get by ID
 
 ```python
-entity = dataset.get_entities().get("jane-doe")
+entity = entities.get("jane-doe")
 if entity:
     print(entity.caption)
 ```
@@ -128,15 +116,15 @@ if entity:
 ### Query with Filters
 
 ```python
-for entity in dataset.get_entities().query(origin="import"):
+for entity in entities.query(origin="import"):
     print(entity.id)
 
 ids = ["jane-doe", "john-smith"]
-for entity in dataset.get_entities().query(entity_ids=ids):
+for entity in entities.query(entity_ids=ids):
     print(entity.caption)
 
 # By schema bucket (thing / interval / document / page / pages / mention)
-for entity in dataset.get_entities().query(bucket="thing"):
+for entity in entities.query(bucket="thing"):
     print(entity.schema.name)
 ```
 
@@ -145,7 +133,7 @@ for entity in dataset.get_entities().query(bucket="thing"):
 For full-dataset iteration, streaming from the pre-exported JSON file is typically faster than running an aggregating query against the parquet store:
 
 ```python
-for entity in dataset.get_entities().stream():
+for entity in entities.stream():
     process(entity)
 ```
 
@@ -156,15 +144,15 @@ for entity in dataset.get_entities().stream():
 `origin` is part of the partition key (alongside `shard` and `bucket`) and tracks where data came from. Useful for filtering, auditing, and partition-scoped re-runs:
 
 ```python
-with dataset.get_entities().writer(origin="source_a") as writer:
+with entities.writer(origin="source_a") as writer:
     for entity in source_a_entities:
         writer.add_entity(entity)
 
-with dataset.get_entities().writer(origin="source_b") as writer:
+with entities.writer(origin="source_b") as writer:
     for entity in source_b_entities:
         writer.add_entity(entity)
 
-for entity in dataset.get_entities().query(origin="source_a"):
+for entity in entities.query(origin="source_a"):
     print(entity.id)
 ```
 
@@ -175,11 +163,11 @@ Every statement is written in one of two modes, decided by the producer per stat
 Passing a `fragment` switches a statement into **supersession** mode (the same capability as the original [followthemoney-store](https://github.com/alephdata/followthemoney-store) `fragment` column): a later emission of the same `(entity_id, prop, fragment)` triple completely replaces the older emission for that triple, even though the changed values produce different content-addressed statement ids.
 
 ```python
-with dataset.get_entities().writer(origin="csv_import") as writer:
+with entities.writer(origin="csv_import") as writer:
     writer.add_entity(company, fragment="row42")
 
 # later, the source row changed – re-emit under the same fragment:
-with dataset.get_entities().writer(origin="csv_import") as writer:
+with entities.writer(origin="csv_import") as writer:
     writer.add_entity(updated_company, fragment="row42")
 
 # after flush, only the updated values are visible – the first emission
@@ -202,10 +190,10 @@ All rows of one logical fragment emission **must share the same `last_seen` time
 
 ```python
 ts = datetime.now(timezone.utc).isoformat()
-with dataset.get_entities().writer(origin="import") as writer:
+with entities.writer(origin="import") as writer:
     for prop, value in row_values:
         writer.add_statement(
-            Statement(entity_id=entity_id, prop=prop, value=value, schema=schema, dataset=dataset.name, last_seen=ts),
+            Statement(entity_id=entity_id, prop=prop, value=value, schema=schema, dataset="my_dataset", last_seen=ts),
             fragment=f"row{row_number}",
         )
 ```
@@ -221,33 +209,33 @@ Deletes are tombstones routed through the journal (or `EntityBuffer` for the bul
 ### Delete an Entity
 
 ```python
-count = dataset.get_entities().delete_entity("jane-doe")
+count = entities.delete_entity("jane-doe")
 print(f"Wrote {count} tombstones")
 
-dataset.get_entities().flush()
-dataset.get_entities().merge()  # collapse live+tombstone → tombstone survives until grace
+entities.flush()
+entities.merge()  # collapse live+tombstone → tombstone survives until grace
 ```
 
 ### Delete a Single Statement
 
 ```python
-stmts = list(dataset.get_entities().query_statements())
+stmts = list(entities.query_statements())
 target = stmts[0]
 
-dataset.get_entities().delete_statement(target)
-dataset.get_entities().flush()
-dataset.get_entities().merge()
+entities.delete_statement(target)
+entities.flush()
+entities.merge()
 ```
 
 ### Re-adding After Delete
 
 ```python
-dataset.get_entities().delete_entity("jane-doe")
-dataset.get_entities().flush()
-dataset.get_entities().merge(grace_period_days=0)  # drop tombstones immediately
+entities.delete_entity("jane-doe")
+entities.flush()
+entities.merge(grace_period_days=0)  # drop tombstones immediately
 
-dataset.get_entities().add(updated_jane, origin="correction")
-dataset.get_entities().flush()
+entities.add(updated_jane, origin="correction")
+entities.flush()
 # jane-doe is alive again with the new data
 ```
 
@@ -258,24 +246,24 @@ dataset.get_entities().flush()
 **Across flushes**: re-flushing the same statement appends a new parquet row. The duplicates only collapse when `merge` runs. `merge` keeps the row with the latest `last_seen` per statement id (per supersession group for fragment rows) and folds `first_seen` to the minimum across the group.
 
 ```python
-dataset.get_entities().add(entity)
-dataset.get_entities().flush()   # one row in parquet
-dataset.get_entities().add(entity)
-dataset.get_entities().flush()   # two rows now; same statement.id
+entities.add(entity)
+entities.flush()   # one row in parquet
+entities.add(entity)
+entities.flush()   # two rows now; same statement.id
 
-dataset.get_entities().merge()   # back to one row, last_seen=now, first_seen=original
+entities.merge()   # back to one row, last_seen=now, first_seen=original
 ```
 
 If you want immediate-effect dedup at write time, use the journal path with `flush()` – the journal upsert dedups within a window – and run `merge` on a schedule.
 
 ## Maintenance
 
-Three independent async operations on the parquet statement store. All three acquire a dataset-wide write fence at `.LOCK`, so they don't race with each other or with appends from `flush` / `write_statements`.
+Three independent async operations on the parquet statement store, held under the exclusive [maintenance fence](../architecture.md#sharded-append-only-pattern) so they never race each other or in-flight appends.
 
 ### Flush (journal → parquet)
 
 ```python
-count = dataset.get_entities().flush()
+count = entities.flush()
 ```
 
 Drains the journal in one shard-sorted pass; each per-shard batch becomes one parquet file per `(shard, bucket, origin)` partition. No dedup happens here – duplicates and tombstones land as new rows for `merge` to collapse later.
@@ -285,7 +273,7 @@ Drains the journal in one shard-sorted pass; each per-shard batch becomes one pa
 Bin-packs small parquet files within each `(shard, bucket, origin)` partition via Delta's `OPTIMIZE compact`. Does not change row contents.
 
 ```python
-dataset.get_entities()._statements.compact()
+entities._statements.compact()
 ```
 
 ### Merge (expensive)
@@ -293,8 +281,8 @@ dataset.get_entities()._statements.compact()
 Per-partition rewrite that collapses duplicates, folds `first_seen` to the min across each group, and drops tombstones whose `deleted_at` is older than the grace cutoff. Non-fragment rows dedupe per statement `id` (`ROW_NUMBER OVER (PARTITION BY id ORDER BY last_seen DESC) = 1`); fragment rows keep the latest emission per `(entity_id, prop, fragment)` group.
 
 ```python
-dataset.get_entities().merge()  # uses default grace from settings
-dataset.get_entities().merge(grace_period_days=0)  # drop all tombstones immediately
+entities.merge()  # uses default grace from settings
+entities.merge(grace_period_days=0)  # drop all tombstones immediately
 ```
 
 Default grace is `LAKEHOUSE_GRACE_PERIOD_DAYS` (30 days).
@@ -304,8 +292,8 @@ Default grace is `LAKEHOUSE_GRACE_PERIOD_DAYS` (30 days).
 Deletes obsolete parquet files that `merge` / `compact` have tombstoned in the Delta log.
 
 ```python
-dataset.get_entities()._statements.vacuum()
-dataset.get_entities()._statements.vacuum(retention_hours=24)
+entities._statements.vacuum()
+entities._statements.vacuum(retention_hours=24)
 ```
 
 ## Complete Example
@@ -333,24 +321,57 @@ def main():
     ]
 
     # Write
-    with dataset.get_entities().writer(origin="manual") as writer:
+    with entities.writer(origin="manual") as writer:
         for person in people:
             writer.add_entity(person)
-    count = dataset.get_entities().flush()
+    count = entities.flush()
     print(f"Flushed {count} statements")
 
     # Maintenance – run on a schedule in production
-    dataset.get_entities()._statements.compact()
-    dataset.get_entities().merge()
+    entities._statements.compact()
+    entities.merge()
 
     # Read back
-    jane = dataset.get_entities().get(people[0].id)
+    jane = entities.get(people[0].id)
     print(f"Found: {jane.caption}")
 
-    for entity in dataset.get_entities().query():
+    for entity in entities.query():
         print(f"  - {entity.caption}")
 
 
 if __name__ == "__main__":
     main()
 ```
+
+## Multiple Datasets
+
+The catalog enumerates all datasets under one storage root:
+
+```python
+from ftm_lakehouse import get_entities, get_lakehouse
+
+catalog = get_lakehouse()
+for name in catalog.list_datasets():
+    print(name, get_entities(name).get_statistics())
+```
+
+## Custom Dataset Models
+
+Downstream applications can extend the dataset config schema by registering a
+[`DatasetModel`](../reference/model.md) subclass process-wide – every config
+read (repository construction, `get_dataset_model`, the index export)
+constructs through it:
+
+```python
+import ftm_lakehouse
+
+class MyModel(ftm_lakehouse.DatasetModel):
+    user_id: int = 0
+
+ftm_lakehouse.set_model_class(MyModel)
+ftm_lakehouse.update_dataset("my_dataset", user_id=17)
+assert ftm_lakehouse.get_dataset_model("my_dataset").user_id == 17
+```
+
+Call `set_model_class()` at process start, before any repository or config
+access.

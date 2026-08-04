@@ -7,9 +7,12 @@ Domain-specific combinations of multiple stores. Each repository owns one domain
 Content-addressed file archive with metadata and extracted text storage.
 
 ```python
-dataset.get_archive().put(uri)
-dataset.get_archive().get(checksum)
-dataset.get_archive().stream(file)
+from ftm_lakehouse import get_archive
+
+archive = get_archive("my_dataset")
+archive.store(uri)
+archive.get_file(checksum)
+archive.stream(checksum)
 ```
 
 ::: ftm_lakehouse.repository.ArchiveRepository
@@ -22,10 +25,13 @@ dataset.get_archive().stream(file)
 Entity/statement operations combining JournalStore and ParquetStore.
 
 ```python
-dataset.get_entities().add(entity, origin="import")
-dataset.get_entities().writer(origin="import")
-dataset.get_entities().flush()
-dataset.get_entities().query(origin="import")
+from ftm_lakehouse import get_entities
+
+entities = get_entities("my_dataset")
+entities.add(entity, origin="import")
+entities.writer(origin="import")
+entities.flush()
+entities.query(origin="import")
 ```
 
 ::: ftm_lakehouse.repository.EntityRepository
@@ -47,6 +53,15 @@ jobs.get(run_id)
 ```
 
 ::: ftm_lakehouse.repository.JobRepository
+    options:
+        heading_level: 3
+        show_root_heading: true
+
+## DocumentRepository
+
+Document metadata assembled from archived files and their entities.
+
+::: ftm_lakehouse.repository.DocumentRepository
     options:
         heading_level: 3
         show_root_heading: true

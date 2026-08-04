@@ -19,6 +19,8 @@
 | `LAKEHOUSE_ZFS_POOL` | ZFS dataset path for the lakehouse root (e.g. `zpools/tank/lakehouse`) | (required when `ON_ZFS` is enabled) |
 | `LAKEHOUSE_ZFS_SOCKET` | Unix socket path for remote ZFS operations (see [ZFS Integration](zfs.md)) | (unset) |
 | `LAKEHOUSE_ZFS_OWNER` | `uid:gid` to chown new ZFS mountpoints to (see [ZFS Integration](zfs.md)) | (unset -- no chown) |
+| `LAKEHOUSE_ZFS_ALLOWED_UID` | UID allowed to connect to the ZFS agent socket (`SO_PEERCRED` check) | (the agent's own UID) |
+| `LAKEHOUSE_API_KEY` / `LAKEHOUSE_API_SECRET` | Client-side auth headers attached to outgoing lakehouse-API requests (authenticate through the reverse proxy in front of the API server) | (unset) |
 | `LAKEHOUSE_PUBLIC_URL_PREFIX` | Public URL prefix for blob URLs (supports `{{ dataset }}` Jinja-style template) | (unset) |
 | `LOG_LEVEL` | Logging level (DEBUG, INFO, WARNING, ERROR) | `INFO` |
 | `DEBUG` | Enable debug mode | `false` |
@@ -48,6 +50,7 @@ Each dataset can have its own `config.yml` file that follows the [ftmq.model.Dat
 name: my_dataset  # also known as "foreign_id"
 title: An Awesome Dataset
 shards: 0  # entity-id hash shards; configure 8+ for huge datasets at creation
+compression: zst  # compress exported artifacts (gz / zst; unset = uncompressed)
 description: >
   A detailed description of this dataset,
   its sources, and contents.
@@ -158,13 +161,13 @@ export LAKEHOUSE_JOURNAL_URI=sqlite:///:memory:
 You can also configure programmatically:
 
 ```python
-from ftm_lakehouse import get_lakehouse, get_dataset
+from ftm_lakehouse import get_entities, get_lakehouse
 
 # Get lakehouse with custom URI
 lake = get_lakehouse(uri="s3://my-bucket/lakehouse")
 
-# Get dataset
-dataset = lake.get_dataset("my_dataset")
+# Repositories per dataset (uri derived from the catalog)
+entities = get_entities("my_dataset", lake.dataset_uri("my_dataset"))
 ```
 
 ## Multi-Dataset Configuration
@@ -173,7 +176,6 @@ A lakehouse can contain multiple datasets, each with different configurations:
 
 ```
 lakehouse/
-  config.yml           # Catalog-level config
   dataset_a/
     config.yml         # Dataset A config
     archive/
@@ -194,17 +196,8 @@ storage:
   uri: s3://remote-bucket/dataset
 ```
 
-## Catalog Configuration
+## Catalog
 
-The lakehouse itself can have a `config.yml`:
-
-```yaml
-name: my-catalog
-title: My Data Catalog
-description: A collection of datasets
-datasets:
-  - name: dataset_a
-  - name: dataset_b
-```
-
-The catalog `index.json` is automatically generated from dataset metadata.
+The catalog is the storage root itself – any directory under the lakehouse uri
+that contains a `config.yml` is a dataset. `get_lakehouse().list_datasets()`
+enumerates them; there is no catalog-level configuration file.

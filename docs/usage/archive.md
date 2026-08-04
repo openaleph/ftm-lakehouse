@@ -21,32 +21,33 @@ The archive stores files using their SHA256 checksum as the key. This design ena
 ## Quick Start
 
 ```python
-from ftm_lakehouse import ensure_dataset
+from ftm_lakehouse import ensure_dataset, get_archive
 
-dataset = ensure_dataset("my_dataset")
+ensure_dataset("my_dataset")
+archive = get_archive("my_dataset")
 
 # Archive a source file, returns File metadata:
-file = dataset.get_archive().store("/path/to/document.pdf")
+file = archive.store("/path/to/document.pdf")
 print(f"Archived: {file.name} ({file.checksum})")
 
 # Archive from HTTP URL
-file = dataset.get_archive().store("https://example.com/report.pdf")
+file = archive.store("https://example.com/report.pdf")
 print(f"Archived: {file.name} ({file.checksum})")
 
 # Retrieve file content
-with dataset.get_archive().open(file.checksum) as fh:
+with archive.open(file.checksum) as fh:
     content = fh.read()
 
 # Stream bytes (memory efficient for large files)
-for chunk in dataset.get_archive().stream(file.checksum):
+for chunk in archive.stream(file.checksum):
     process_chunk(chunk)
 
 # Get file metadata for checksum
-file = dataset.get_archive().get_file("<checksum>")
+file = archive.get_file("<checksum>")
 print(f"Size: {file.size}, Type: {file.mimetype}")
 
 # Check if a blob exists
-if dataset.get_archive().exists("<checksum>"):
+if archive.exists("<checksum>"):
     print("Blob exists")
 ```
 
@@ -64,11 +65,12 @@ file = archive.store("/path/to/document.pdf")
 ### From Local Path
 
 ```python
-from ftm_lakehouse import ensure_dataset
+from ftm_lakehouse import ensure_dataset, get_archive
 
-dataset = ensure_dataset("my_dataset")
+ensure_dataset("my_dataset")
+archive = get_archive("my_dataset")
 
-file = dataset.get_archive().store("/path/to/document.pdf")
+file = archive.store("/path/to/document.pdf")
 print(f"Checksum: {file.checksum}")
 print(f"Size: {file.size}")
 print(f"MIME type: {file.mimetype}")
@@ -77,7 +79,7 @@ print(f"MIME type: {file.mimetype}")
 ### From URL
 
 ```python
-file = dataset.get_archive().store("https://example.com/report.pdf")
+file = archive.store("https://example.com/report.pdf")
 ```
 
 
@@ -86,10 +88,10 @@ file = dataset.get_archive().store("https://example.com/report.pdf")
 ### Open as File-like Handle
 
 ```python
-from ftm_lakehouse import get_dataset
+from ftm_lakehouse import get_archive
 
-dataset = get_dataset("my_dataset")
-with dataset.get_archive().open("<checksum>") as fh:
+archive = get_archive("my_dataset")
+with archive.open("<checksum>") as fh:
     content = fh.read()
 ```
 
@@ -98,7 +100,7 @@ with dataset.get_archive().open("<checksum>") as fh:
 For large files, streaming is more memory efficient:
 
 ```python
-for chunk in dataset.get_archive().stream("<checksum>"):
+for chunk in archive.stream("<checksum>"):
     process_chunk(chunk)
 ```
 
@@ -107,7 +109,7 @@ for chunk in dataset.get_archive().stream("<checksum>"):
 For tools that require a local file path, this downloads the blob into a temporary directory which is cleaned up when leaving the context (except if the archive is local, see warning below).
 
 ```python
-with dataset.get_archive().local_path("<checksum>") as path:
+with archive.local_path("<checksum>") as path:
     # path is a pathlib.Path object
     subprocess.run(["pdftotext", str(path), "output.txt"])
 ```
@@ -120,11 +122,11 @@ with dataset.get_archive().local_path("<checksum>") as path:
 ### Get File Info
 
 ```python
-from ftm_lakehouse import get_dataset
+from ftm_lakehouse import get_archive
 
-dataset = get_dataset("my_dataset")
+archive = get_archive("my_dataset")
 
-file = dataset.get_archive().get_file(checksum)
+file = archive.get_file(checksum)
 if file:
     print(f"Name: {file.name}")
     print(f"Key: {file.key}")
@@ -136,11 +138,11 @@ if file:
 ### Iterate All Files
 
 ```python
-from ftm_lakehouse import get_dataset
+from ftm_lakehouse import get_archive
 
-dataset = get_dataset("my_dataset")
+archive = get_archive("my_dataset")
 
-for file in dataset.get_archive().iterate_files():
+for file in archive.iterate_files():
     print(f"{file.key}: {file.checksum}")
 ```
 
@@ -149,12 +151,13 @@ for file in dataset.get_archive().iterate_files():
 Files can be converted to [FollowTheMoney](https://followthemoney.tech/explorer/schemata/Document/) entities:
 
 ```python
-from ftm_lakehouse import ensure_dataset
+from ftm_lakehouse import ensure_dataset, get_archive
 
-dataset = ensure_dataset("my_dataset")
+ensure_dataset("my_dataset")
+archive = get_archive("my_dataset")
 
 # Archive a file
-file = dataset.get_archive().store("/path/to/document.pdf")
+file = archive.store("/path/to/document.pdf")
 
 # Convert to FtM entity
 entity = file.to_entity()
@@ -162,7 +165,7 @@ print(f"Schema: {entity.schema.name}")  # Document or similar
 print(f"Content hash: {entity.first('contentHash')}")
 
 # Add to entity store
-dataset.get_entities().add(entity, origin="archive")
+get_entities("documents").add(entity, origin="archive")
 ```
 
 ## CLI Usage
@@ -230,26 +233,27 @@ from ftm_lakehouse import ensure_dataset
 
 
 def main():
-    dataset = ensure_dataset("documents")
+    ensure_dataset("documents")
+    archive = get_archive("documents")
 
     # Archive some files
     files = []
     for path in ["/path/to/doc1.pdf", "/path/to/doc2.pdf"]:
-        file = dataset.get_archive().put(path)
+        file = archive.store(path)
         files.append(file)
         print(f"Archived: {file.name} ({file.checksum})")
 
     # Convert to entities
-    with dataset.get_entities().writer(origin="archive") as writer:
+    with get_entities("documents").writer(origin="archive") as writer:
         for file in files:
             entity = file.to_entity()
             writer.add_entity(entity)
 
-    dataset.get_entities().flush()
+    get_entities("documents").flush()
 
     # List all archived files
     print("\nAll files:")
-    for file in dataset.get_archive().iterate_files():
+    for file in archive.iterate_files():
         print(f"  - {file.name}: {file.size} bytes")
 
 

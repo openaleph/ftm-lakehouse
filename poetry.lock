@@ -3338,6 +3338,24 @@ docs = ["mdx_gh_links (>=0.2)", "mkdocs (>=1.6)", "mkdocs-gen-files", "mkdocs-li
 testing = ["coverage", "pyyaml"]
 
 [[package]]
+name = "markdown-exec"
+version = "1.12.3"
+description = "Utilities to execute code blocks in Markdown files."
+optional = false
+python-versions = ">=3.10"
+groups = ["dev"]
+files = [
+    {file = "markdown_exec-1.12.3-py3-none-any.whl", hash = "sha256:48ac12a565f3f4331b1acd9efc48a0773e717eb7ca7c38e23c1d72ee61660de6"},
+    {file = "markdown_exec-1.12.3.tar.gz", hash = "sha256:006b9cac46470a9499797bc9c579305ae4719e0a8e495e5401dfbf1e66ce7fb4"},
+]
+
+[package.dependencies]
+pymdown-extensions = ">=9"
+
+[package.extras]
+ansi = ["pygments-ansi-color (>=0.3)"]
+
+[[package]]
 name = "markdown-it-py"
 version = "4.2.0"
 description = "Python port of markdown-it. Markdown parsing, done right!"
@@ -7552,4 +7570,4 @@ s3 = ["s3fs"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<3.15"
-content-hash = "82dbcc734ac3510f2c1eac2d62633d0704492ca476b26c9868535ff0709357d1"
+content-hash = "640240a09534f4fa697e322c29f43b3d1dfb49acdc4c27b5a2b61bbb4e7babbd"

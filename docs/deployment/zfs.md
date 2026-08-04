@@ -20,7 +20,7 @@ When a new dataset is created, `ftm-lakehouse` calls `zfs create` to set up chil
 |-------------|-----------|-------------|------|---------|
 | `{dataset}/` | (parent defaults) | (parent defaults) | standard | Parent dataset with `atime=off`, `xattr=sa`, `dnodesize=auto` |
 | `{dataset}/archive` | 128K | `zstd-9` | standard | Content-addressed file storage (mixed-entropy blobs) |
-| `{dataset}/entities/statements` | 1M | `off` | standard | Delta Lake parquet – parquet handles compression internally (SNAPPY), ZFS-level compression on top burns CPU per block with no benefit |
+| `{dataset}/statements` | 1M | `off` | standard | Delta Lake parquet – parquet handles compression internally (SNAPPY), ZFS-level compression on top burns CPU per block with no benefit |
 
 ## Mountpoint Ownership
 
@@ -145,10 +145,4 @@ The request payload is then validated:
 
 ## Environment Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `LAKEHOUSE_ON_ZFS` | Enable ZFS dataset creation | `false` |
-| `LAKEHOUSE_ZFS_POOL` | ZFS dataset path for the lakehouse root (e.g. `zpools/tank/lakehouse`) | (required when `ON_ZFS` is enabled) |
-| `LAKEHOUSE_ZFS_SOCKET` | Path to the Unix socket for remote ZFS operations | (unset -- use local subprocess) |
-| `LAKEHOUSE_ZFS_OWNER` | `uid:gid` to chown new dataset mountpoints to (e.g. `1000:1000`) | (unset -- no chown, root owns mountpoints) |
-| `LAKEHOUSE_ZFS_ALLOWED_UID` | UID allowed to connect to the agent socket (`SO_PEERCRED` check) | (the agent's own UID) |
+See the `LAKEHOUSE_ZFS_*` rows in the [configuration reference](configuration.md) – all ZFS settings live there.

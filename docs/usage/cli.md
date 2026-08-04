@@ -6,218 +6,22 @@
 ftm-lakehouse [OPTIONS] <group> <command> [ARGS]
 ```
 
-Groups:
-
 | Group | Purpose |
 |-------|---------|
 | `archive` | Content-addressed file storage |
 | `entities` | Read and write FtM entities |
 | `statements` | Read and write raw FtM statements |
-| `mappings` | CSV-to-entity mapping configurations |
-| `operations` | Dataset pipeline operations (export, compact, merge, vacuum, crawl) |
+| `operations` | Dataset pipeline operations (export, optimize, unlock, crawl) |
 | `zfs` | ZFS dataset management |
 
-Top-level (no group):
+Top-level (no group): `ls` (dataset names), `datasets` (metadata), `make` (build/update a dataset – frequent shortcut, kept top-level).
 
-| Command | Purpose |
-|---------|---------|
-| `ls` | List dataset names in the catalog |
-| `datasets` | Show metadata for all datasets in the catalog |
-| `make` | Make/update a dataset (frequent shortcut, kept top-level) |
-
-## Global Options
-
-| Option | Description |
-|--------|-------------|
-| `--version` | Show version |
-| `--settings` | Print current settings |
-| `--uri` | Lakehouse URI (overrides `LAKEHOUSE_URI`) |
-| `-d, --dataset` | Dataset name (required for most commands) |
-
-## Top-level
-
-### `ls`
-
-```bash
-# List dataset names
-ftm-lakehouse ls
-
-# Output to file
-ftm-lakehouse ls -o datasets.txt
-```
-
-### `datasets`
-
-```bash
-ftm-lakehouse datasets
-ftm-lakehouse datasets -o datasets.jsonl
-```
-
-### `make`
-
-```bash
-# Build or refresh a dataset (flush journal + ensure index.json)
-ftm-lakehouse -d my_dataset make
-
-# Full pipeline: flush + all exports
-ftm-lakehouse -d my_dataset make --full
-
-# Re-run even when freshness tags say it's up-to-date
-ftm-lakehouse -d my_dataset make --full --force
-
-# Apply a config.yml override
-ftm-lakehouse -d my_dataset make -c path/to/config.yml
-```
-
-## `entities`
-
-Read/write FtM entities (aggregated, statement-aware).
-
-```bash
-ftm-lakehouse entities --help
-```
-
-| Command | Purpose |
-|---------|---------|
-| `iterate` | Live read from the parquet store as FtM JSON lines |
-| `stream` | Stream the pre-exported `entities.ftm.json` to stdout |
-| `import` | Bulk import FtM JSON entities straight into the parquet store (bypasses the journal) |
-
-```bash
-# Live read of the parquet store
-ftm-lakehouse -d my_dataset entities iterate
-ftm-lakehouse -d my_dataset entities iterate -o entities.live.json
-
-# Stream the frozen export (entities.ftm.json must exist)
-ftm-lakehouse -d my_dataset entities stream
-ftm-lakehouse -d my_dataset entities stream -o out.json
-
-# Bulk import (the file is shard-sorted in memory then written directly to
-# parquet – journal is bypassed for one-shot loads)
-cat entities.ftm.json | ftm-lakehouse -d my_dataset entities import
-ftm-lakehouse -d my_dataset entities import -i entities.ftm.json --origin bulk
-ftm-lakehouse -d my_dataset entities import -i entities.ftm.json --bulk-size 250000
-
-# Fast path for trusted input: explode entity JSON straight into parquet rows,
-# skipping FtM object construction and validation (several times faster, same
-# statement ids and namespace stripping as the safe path)
-cat entities.ftm.json | ftm-lakehouse -d my_dataset entities import --unsafe
-```
-
-## `statements`
-
-Raw statement-grain read/write, mirroring `entities` at the lower level.
-
-| Command | Purpose |
-|---------|---------|
-| `iterate` | Live read from the parquet store as CSV rows |
-| `stream` | Stream the pre-exported `statements.csv` to stdout |
-| `import` | Bulk import statements (CSV) straight into the parquet store |
-
-```bash
-ftm-lakehouse -d my_dataset statements iterate -o live-statements.csv
-ftm-lakehouse -d my_dataset statements stream -o exported.csv
-cat statements.csv | ftm-lakehouse -d my_dataset statements import
-
-# Fast path for trusted input: map CSV rows straight to parquet rows,
-# skipping Statement object construction
-cat statements.csv | ftm-lakehouse -d my_dataset statements import --unsafe
-```
-
-## `operations`
-
-Pipeline operations on a dataset.
-
-| Command | Purpose |
-|---------|---------|
-| `export <kind>` | Export the dataset: `statements`, `entities`, `documents`, `statistics` or `index` |
-| `optimize` | Merge duplicates / reap expired tombstones, bin-pack small files, delete obsolete files |
-| `unlock` | Forcibly release the dataset write fence |
-| `crawl` | Crawl documents from a local/remote source into the archive |
-
-### Exports
-
-```bash
-ftm-lakehouse -d my_dataset operations export statements   # exports/statements.csv
-ftm-lakehouse -d my_dataset operations export entities     # entities.ftm.json
-ftm-lakehouse -d my_dataset operations export statistics   # exports/statistics.json
-ftm-lakehouse -d my_dataset operations export documents    # exports/documents.csv
-ftm-lakehouse -d my_dataset operations export index        # index.json
-```
-
-### Maintenance (async, on the parquet statement store)
-
-```bash
-# Merge duplicates per (shard, bucket, origin) partition and drop tombstones
-# older than `LAKEHOUSE_GRACE_PERIOD_DAYS`, bin-pack small files, then remove
-# obsolete parquet files – always in one pass.
-ftm-lakehouse -d my_dataset operations optimize
-ftm-lakehouse -d my_dataset operations optimize --retention-hours 24
-```
-
-Each step acquires the exclusive maintenance fence – the dataset-wide `.LOCK` plus a drain of in-flight append markers – so it doesn't race with concurrent maintenance or with append-style writes. Appends themselves don't take `.LOCK`; parallel imports never block each other.
-
-### Crawl
-
-```bash
-ftm-lakehouse -d my_dataset operations crawl /path/to/documents
-ftm-lakehouse -d my_dataset operations crawl https://example.com/files/
-ftm-lakehouse -d my_dataset operations crawl /path --include "*.pdf"
-ftm-lakehouse -d my_dataset operations crawl /path --exclude "*.tmp"
-```
-
-## `archive`
-
-```bash
-# List archived files
-ftm-lakehouse -d my_dataset archive ls
-ftm-lakehouse -d my_dataset archive ls --keys       # paths only
-ftm-lakehouse -d my_dataset archive ls --checksums  # checksums only
-
-# Inspect / fetch
-ftm-lakehouse -d my_dataset archive head <checksum>
-ftm-lakehouse -d my_dataset archive get  <checksum> -o document.pdf
-
-# Bulk download to a local mirror
-ftm-lakehouse -d my_dataset archive download -o /tmp/mirror
-```
-
-## `mappings`
-
-```bash
-# Discover mappings
-ftm-lakehouse -d my_dataset mappings ls
-ftm-lakehouse -d my_dataset mappings get <content_hash>
-
-# Process one mapping, or all mappings in the dataset
-ftm-lakehouse -d my_dataset mappings process <content_hash>
-ftm-lakehouse -d my_dataset mappings process
-```
-
-## `zfs`
-
-```bash
-# Host-side socket agent (creates ZFS datasets on behalf of containerised clients)
-ftm-lakehouse zfs agent --socket /run/zfs.sock --pool zpools/tank/lakehouse
-
-# Manual init of a dataset's ZFS hierarchy
-ftm-lakehouse zfs init my_dataset --pool zpools/tank/lakehouse
-```
-
-The `zfs` group does not require a catalog (it's about provisioning, not data).
-
-## Environment Variables
-
-The CLI reads the same settings as the library. The one you'll always need is `LAKEHOUSE_URI` – the base path to the lakehouse storage; everything else has sensible defaults.
-
-Full settings reference: [Configuration](../deployment/configuration.md). See also [ZFS Integration](../deployment/zfs.md) for ZFS deployments.
+Environment variables configure storage locations and behavior – see the [configuration reference](../deployment/configuration.md).
 
 ## Examples
 
-### End-to-end ingestion
-
 ```bash
-export LAKEHOUSE_URI=./my_lakehouse
+export LAKEHOUSE_URI=./data
 
 # Initialise the dataset
 ftm-lakehouse -d my_dataset make
@@ -226,22 +30,41 @@ ftm-lakehouse -d my_dataset make
 ftm-lakehouse -d my_dataset operations crawl /path/to/documents
 
 # Bulk-load a pre-built entities.ftm.json (skips the journal)
-ftm-lakehouse -d my_dataset entities import -i entities.ftm.json
+cat entities.ftm.json | ftm-lakehouse -d my_dataset entities import
+
+# ... several times faster for trusted input (same statement ids and
+# namespace stripping as the safe path, no FtM object construction):
+cat entities.ftm.json | ftm-lakehouse -d my_dataset entities import --unsafe
 
 # Build all exports
 ftm-lakehouse -d my_dataset make --full
 
-# Maintenance – async, run on a schedule in production
+# Maintenance – async, run on a schedule in production. Merges duplicates per
+# (shard, bucket, origin) partition, drops tombstones older than
+# LAKEHOUSE_GRACE_PERIOD_DAYS, bin-packs small files, removes obsolete ones –
+# always in one pass, held under the dataset write fence.
 ftm-lakehouse -d my_dataset operations optimize
 ```
 
-### S3-backed storage
+## Commands
 
-```bash
-export LAKEHOUSE_URI=s3://my-bucket/lakehouse
-export AWS_ACCESS_KEY_ID=...
-export AWS_SECRET_ACCESS_KEY=...
+The following reference is generated from the CLI itself at docs build time:
 
-ftm-lakehouse ls
-ftm-lakehouse -d my_dataset make --full
+```python exec="on"
+# In-process generation: `python -m typer <module> utils docs` loads the
+# module standalone, so the sub-typer groups (registered by the trailing
+# submodule imports) land on a second module instance and go missing.
+import click
+from typer import cli as typer_cli
+from typer.main import get_command
+
+from ftm_lakehouse.cli import cli as app
+
+command = get_command(app)
+with click.Context(command) as ctx:
+    docs = typer_cli.get_docs_for_click(obj=command, ctx=ctx, name="ftm-lakehouse")
+
+# demote headings one level so the generated tree nests under "## Commands"
+for line in docs.splitlines():
+    print("#" + line if line.startswith("#") else line)
 ```

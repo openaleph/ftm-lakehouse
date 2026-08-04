@@ -10,9 +10,9 @@
 
 # ftm-lakehouse
 
-`ftm-lakehouse` provides a _data standard_ and _archive storage_ for leaked data, private and public document collections. The concepts and implementations are originally inspired by [mmmeta](https://github.com/simonwoerpel/mmmeta) and [Aleph's servicelayer archive](https://github.com/alephdata/servicelayer).
+`ftm-lakehouse` provides a _data standard_ and _archive storage_ for leaked data, private and public document collections and structured [FollowTheMoney](https://followthemoney.tech) data. The concepts and implementations are originally inspired by [mmmeta](https://github.com/simonwoerpel/mmmeta), [Aleph's servicelayer archive](https://github.com/alephdata/servicelayer) and [OpenSanctions](https://opensanctions.org) work on dataset catalog metadata.
 
-`ftm-lakehouse` acts as a multi-tenant storage and retrieval mechanism for structured entity data, documents and their metadata. It provides a high-level interface for generating and sharing document collections and importing them into various search and analysis platforms, such as [_OpenALeph_](https://openaleph.org), [_ICIJ Datashare_](https://datashare.icij.org/) or [_Liquid Investigations_](https://github.com/liquidinvestigations/)
+`ftm-lakehouse` acts as a multi-tenant storage and retrieval mechanism for structured entity data, documents and their metadata. It can be used by _tenants_ to produce and/or consume data such as [investigraph](https://docs.investigraph.dev), [memorious](https://docs.investigraph.dev/lib/memorious/) and the full suites of various search and analysis platforms, such as [_OpenALeph_](https://openaleph.org), [_ICIJ Datashare_](https://datashare.icij.org/) or [_Liquid Investigations_](https://github.com/liquidinvestigations/)
 
 ## Installation
 
@@ -59,10 +59,19 @@ Before creating a commit, this checks for correct code formatting (isort, black)
 
     make test
 
+## Background
+
+The design grew out of the [FollowTheMoney data lake RFC discussion](https://discuss.openaleph.org/t/rfc-followthemoney-data-lake/37) and prior art in [mmmeta](https://github.com/simonwoerpel/mmmeta), [Aleph's servicelayer archive](https://github.com/alephdata/servicelayer), [OpenSanctions](https://opensanctions.org) dataset metadata and [nomenklatura statements](https://followthemoney.tech/docs/statements/).
+
+For contributing, development setup and testing see the [repository README](https://github.com/openaleph/ftm-lakehouse#development).
+
+
 ## License and Copyright
+
+`leakrfc` (_predecessor_), (c) 2024 [investigativedata.io](https://investigativedata.io)
 
 `ftm-lakehouse`, (c) 2024 [investigativedata.io](https://investigativedata.io)
 
-`ftm-lakehouse`, (c) 2025 [Data and Research Center – DARC](https://dataresearchcenter.org)
+`ftm-lakehouse`, (c) 2025-2026 [Data and Research Center – DARC](https://dataresearchcenter.org)
 
 `ftm-lakehouse` is licensed under the AGPLv3 or later license.
