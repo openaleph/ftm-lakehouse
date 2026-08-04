@@ -1,29 +1,25 @@
-"""Factory functions for creating and running operations from a Dataset.
+"""Factory functions for creating and running operations on a dataset.
 
 These factories provide a convenient way to run operations without manually
 constructing Job and Operation instances.
 
 Example:
     ```python
-    from ftm_lakehouse import get_dataset
     from ftm_lakehouse.operation import export, make, optimize
 
-    dataset = get_dataset("my_dataset")
-
     # Run a single export operation
-    export(dataset, "statements")
+    export("my_dataset", "statements")
 
     # Optimize the statement store (merge + compact + vacuum)
-    optimize(dataset)
+    optimize("my_dataset")
 
     # Run the full make workflow (flush + all exports)
-    make(dataset)
+    make("my_dataset")
     ```
 """
 
 from anystore.types import Uri
 
-from ftm_lakehouse.dataset import Dataset
 from ftm_lakehouse.operation.download import (
     DownloadArchiveJob,
     DownloadArchiveOperation,
@@ -34,8 +30,9 @@ from ftm_lakehouse.operation.make import MakeJob, MakeOperation
 
 
 def export(
-    dataset: Dataset,
+    dataset: str,
     kind: ExportKind | str,
+    uri: Uri | None = None,
     force: bool = False,
     make_diff: bool = True,
 ) -> ExportJob:
@@ -47,9 +44,10 @@ def export(
     argument, so every writer and reader of a dataset agrees on the layout.
 
     Args:
-        dataset: The dataset to export from
+        dataset: Name of the dataset to export from
         kind: What to export – one of ``statements``, ``entities``,
             ``documents``, ``statistics``, ``index``
+        uri: Dataset storage root override
         force: Force export even if up-to-date
         make_diff: Also export a delta diff file (``entities`` / ``documents``)
 
@@ -57,15 +55,16 @@ def export(
         The completed job result
     """
     job = ExportJob.make(
-        dataset=dataset.name,
+        dataset=dataset,
         kind=ExportKind(kind),
         make_diff=make_diff,
     )
-    return ExportOperation(job, dataset.uri).run(force=force)
+    return ExportOperation(job, uri).run(force=force)
 
 
 def optimize(
-    dataset: Dataset,
+    dataset: str,
+    uri: Uri | None = None,
     retention_hours: int = 0,
     grace_period_days: int | None = None,
     force: bool = False,
@@ -75,7 +74,8 @@ def optimize(
     bin-pack small files, delete obsolete files.
 
     Args:
-        dataset: The dataset to optimize
+        dataset: Name of the dataset to optimize
+        uri: Dataset storage root override
         retention_hours: Vacuum retains obsolete files newer than this
         grace_period_days: Override ``LAKEHOUSE_GRACE_PERIOD_DAYS`` for merge
         force: Run regardless of freshness state
@@ -84,36 +84,40 @@ def optimize(
         The completed job result
     """
     job = OptimizeJob.make(
-        dataset=dataset.name,
+        dataset=dataset,
         retention_hours=retention_hours,
         grace_period_days=grace_period_days,
     )
-    return OptimizeOperation(job, dataset.uri).run(force=force)
+    return OptimizeOperation(job, uri).run(force=force)
 
 
-def make(dataset: Dataset, force: bool = False) -> MakeJob:
+def make(dataset: str, uri: Uri | None = None, force: bool = False) -> MakeJob:
     """
     Run the full make workflow: flush journal and generate all exports.
 
     Args:
-        dataset: The dataset to process
+        dataset: Name of the dataset to process
+        uri: Dataset storage root override
         force: Force all operations even if up-to-date
 
     Returns:
         The completed job result
     """
-    job = MakeJob.make(dataset=dataset.name)
-    return MakeOperation(job, dataset.uri).run(force=force)
+    job = MakeJob.make(dataset=dataset)
+    return MakeOperation(job, uri).run(force=force)
 
 
-def download_archive(dataset: Dataset, target: Uri) -> DownloadArchiveJob:
+def download_archive(
+    dataset: str, target: Uri, uri: Uri | None = None
+) -> DownloadArchiveJob:
     """
     Download (export) the archive files to a target, rewriting to original
     relative paths.
 
     Args:
-        dataset: The dataset to process
+        dataset: Name of the dataset to process
         target: The uri to the target (local or remote)
+        uri: Dataset storage root override
     """
-    job = DownloadArchiveJob.make(dataset=dataset.name, target=target)
-    return DownloadArchiveOperation(job, dataset.uri).run()
+    job = DownloadArchiveJob.make(dataset=dataset, target=target)
+    return DownloadArchiveOperation(job, uri).run()

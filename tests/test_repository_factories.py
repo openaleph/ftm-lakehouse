@@ -16,18 +16,17 @@ from ftm_lakehouse.repository.factories import dataset_uri, get_entities
 
 
 def test_factories_identity_across_paths(tmp_path, monkeypatch):
-    """Same dataset, same instance – name-only, explicit uri, Dataset method."""
+    """Same dataset, same instance – name-only, explicit uri, catalog uri."""
     monkeypatch.setenv("LAKEHOUSE_URI", str(tmp_path))
     lake = get_lakehouse(tmp_path)
-    dataset = lake.get_dataset("ident")
+    uri = lake.dataset_uri("ident")
 
-    repo = dataset.get_entities()
-    assert repo is get_entities("ident")
-    assert repo is get_entities("ident", dataset.uri)
+    repo = get_entities("ident")
+    assert repo is get_entities("ident", uri)
     assert repo is get_entities("ident", Path(str(tmp_path)) / "ident")
 
     # one ParquetStore (and so one LakeStore / DuckDB connection) per dataset
-    assert dataset.get_entities()._statements is repo._statements
+    assert get_entities("ident", uri)._statements is repo._statements
 
 
 def test_factories_canonical_uri(tmp_path, monkeypatch):
@@ -41,12 +40,11 @@ def test_factories_canonical_uri(tmp_path, monkeypatch):
 def test_factory_resolves_config_shards(tmp_path, monkeypatch):
     """The dataset's recorded shard count wins on every path."""
     monkeypatch.setenv("LAKEHOUSE_URI", str(tmp_path))
-    dataset = ensure_dataset("sharded", shards=4)
-    assert dataset.model.shards == 4
+    model = ensure_dataset("sharded", shards=4)
+    assert model.shards == 4
 
     repo = get_entities("sharded")
     assert repo.shards == 4
-    assert repo is dataset.get_entities()
 
 
 def test_factory_resolves_default_shards_without_config(tmp_path, monkeypatch):

@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from ftm_lakehouse import operation as operation_module
-from ftm_lakehouse.api.dependencies import Dataset
+from ftm_lakehouse.api.dependencies import DatasetName, DatasetUri
 from ftm_lakehouse.model import DatasetJobModel
 from ftm_lakehouse.operation.base import DatasetJobOperation
 
@@ -42,7 +42,7 @@ OPERATIONS = _registry()
 
 @router.post("/{dataset}/_api/operations")
 async def run_operation(
-    dataset: Dataset, request: Request, force: bool = False
+    dataset: DatasetName, uri: DatasetUri, request: Request, force: bool = False
 ) -> JSONResponse:
     """Run a job operation on the given dataset.
 
@@ -57,7 +57,7 @@ async def run_operation(
         raise HTTPException(status_code=400, detail=f"Unknown operation: `{name}`")
 
     model_cls, op_cls = OPERATIONS[name]
-    job = model_cls.make(dataset=dataset.name, **body)
-    op = op_cls(job, dataset.uri)
+    job = model_cls.make(dataset=dataset, **body)
+    op = op_cls(job, uri)
     result = await asyncio.to_thread(op.run, force=force)
     return JSONResponse(result.model_dump(mode="json"))

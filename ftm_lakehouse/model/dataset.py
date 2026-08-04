@@ -1,10 +1,8 @@
-"""Catalog and dataset metadata models."""
-
-from typing import TypeVar
+"""Dataset metadata model + the process-wide model-class hook."""
 
 from anystore.model import StoreModel
 from anystore.types import HttpUrlStr
-from ftmq.model import Catalog, Dataset
+from ftmq.model import Dataset
 
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.logic.compress import CompressKind
@@ -12,18 +10,11 @@ from ftm_lakehouse.util import render
 
 settings = Settings()
 
-DM = TypeVar("DM", bound="DatasetModel")
-
 DEFAULT_SHARDS = 0
 """Hardcoded shard-count default – a single shard. The shard count is
 per-dataset configuration (``config.yml``), set once at creation; there is
 deliberately no environment override so changing environments can't
 mis-shard a dataset."""
-
-
-class CatalogModel(Catalog):
-    storage: StoreModel | None = None
-    """Lakehouse storage base path"""
 
 
 class DatasetModel(Dataset):
@@ -45,3 +36,39 @@ class DatasetModel(Dataset):
             return self.public_url_prefix
         if settings.public_url_prefix:
             return render(settings.public_url_prefix, {"dataset": self.name})
+
+
+_model_class: type[DatasetModel] = DatasetModel
+
+
+def set_model_class(model_class: type[DatasetModel]) -> None:
+    """Register a custom :class:`DatasetModel` subclass process-wide.
+
+    Every config read – repository construction, ``get_dataset_model``,
+    ``update_dataset``, the index export – constructs models via
+    :func:`get_model_class`, so downstream applications extend the dataset
+    config schema with one call at process start:
+
+    ```python
+    import ftm_lakehouse
+
+    class MyModel(ftm_lakehouse.DatasetModel):
+        my_field: str | None = None
+
+    ftm_lakehouse.set_model_class(MyModel)
+    ```
+
+    Call this **before** any repository or config access – repositories
+    snapshot their model at construction and are LRU-cached, so a later
+    switch requires ``repository.factories.clear_caches()``.
+
+    Args:
+        model_class: The :class:`DatasetModel` subclass to use.
+    """
+    global _model_class
+    _model_class = model_class
+
+
+def get_model_class() -> type[DatasetModel]:
+    """The registered :class:`DatasetModel` class (see :func:`set_model_class`)."""
+    return _model_class

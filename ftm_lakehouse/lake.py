@@ -1,37 +1,42 @@
 """
 Public convenience functions for the lakehouse.
 
-This module is the recommended entry point for client applications:
+This module is the recommended entry point for client applications –
+repositories are the dataset handle:
 
 ```python
-from ftm_lakehouse import lake
+from ftm_lakehouse import ensure_dataset, get_entities, get_archive
 
-# Get the lakehouse (catalog)
-catalog = lake.get_lakehouse()
+# Get or create a dataset (config recorded at creation)
+ensure_dataset("my_data", title="My Dataset", shards=8)
 
-# Get a dataset
-dataset = lake.get_dataset("my_data")
+# Repositories per concern
+entities = get_entities("my_data")
+archive = get_archive("my_data")
 
-# Ensure dataset exists
-dataset = lake.ensure_dataset("my_data", title="My Dataset")
+# Multi-dataset concerns go through the catalog
+from ftm_lakehouse import get_lakehouse
 
-# Direct repository access
-entities = lake.get_entities("my_data")
-archive = lake.get_archive("my_data")
+for name in get_lakehouse().list_datasets():
+    print(name)
 ```
 """
 
 from functools import lru_cache
-from typing import Any
 
 from anystore.logging import get_logger
 from anystore.types import Uri
 from anystore.util import ensure_uri, mask_uri
 
-from ftm_lakehouse.catalog import Catalog
+from ftm_lakehouse.catalog import (
+    Catalog,
+    dataset_exists,
+    ensure_dataset,
+    get_dataset_index,
+    get_dataset_model,
+    update_dataset,
+)
 from ftm_lakehouse.core.settings import Settings
-from ftm_lakehouse.dataset import DM, Dataset, dataset_uri
-from ftm_lakehouse.model import DatasetModel
 from ftm_lakehouse.repository.factories import (
     LRU_MAX,
     get_archive,
@@ -43,16 +48,12 @@ log = get_logger(__name__)
 
 
 @lru_cache(maxsize=LRU_MAX)
-def get_lakehouse(
-    uri: Uri | None = None,
-    model_class: type[DM] = DatasetModel,
-) -> Catalog[DM]:
+def get_lakehouse(uri: Uri | None = None) -> Catalog:
     """
     Get a lakehouse catalog.
 
     Args:
         uri: Storage URI (default from LAKEHOUSE_URI setting)
-        model_class: Custom DatasetModel subclass
 
     Returns:
         Catalog instance
@@ -60,59 +61,18 @@ def get_lakehouse(
     settings = Settings()
     storage_uri = ensure_uri(uri or settings.uri)
     log.info("Loading catalog", uri=mask_uri(storage_uri))
-    return Catalog(uri=storage_uri, model_class=model_class)
-
-
-def get_dataset(
-    name: str,
-    uri: Uri | None = None,
-    model_class: type[DM] = DatasetModel,
-) -> Dataset[DM]:
-    """
-    Get a dataset by name.
-
-    Args:
-        name: Dataset name
-        uri: Dataset storage root uri, overrides lakehouse default
-        model_class: Custom DatasetModel subclass
-
-    Returns:
-        Dataset instance
-    """
-    return Dataset(name, dataset_uri(name, uri), model_class)
-
-
-def ensure_dataset(
-    name: str,
-    uri: Uri | None = None,
-    model_class: type[DM] = DatasetModel,
-    **data: Any,
-) -> Dataset[DM]:
-    """
-    Get a dataset and ensure it exists.
-
-    Creates config.yml if the dataset doesn't exist, recording ``data`` at
-    creation (e.g. ``ensure_dataset("big_leak", shards=8)``).
-
-    Args:
-        name: Dataset name
-        uri: Dataset storage root uri, overrides lakehouse default
-        model_class: Custom DatasetModel subclass
-        **data: Config data for creation
-
-    Returns:
-        Dataset instance (created if needed)
-    """
-    dataset = get_dataset(name, uri, model_class=model_class)
-    dataset.ensure(**data)
-    return dataset
+    return Catalog(uri=storage_uri)
 
 
 __all__ = [
+    "Catalog",
+    "dataset_exists",
+    "ensure_dataset",
     "get_archive",
+    "get_dataset_index",
+    "get_dataset_model",
     "get_documents",
     "get_entities",
     "get_lakehouse",
-    "get_dataset",
-    "ensure_dataset",
+    "update_dataset",
 ]

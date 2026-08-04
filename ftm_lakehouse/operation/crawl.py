@@ -177,14 +177,16 @@ class CrawlOperation(DatasetJobOperation[CrawlJob]):
 
 
 def crawl(
-    dataset,
-    uri: Uri,
+    dataset: str,
+    source: Uri,
     prefix: str | None = None,
     exclude_prefix: str | None = None,
     glob: str | None = None,
     exclude_glob: str | None = None,
     make_entities: bool | None = False,
     existing: HandleExistingMode | None = HandleExistingMode.skip_path,
+    *,
+    uri: Uri | None = None,
 ) -> CrawlJob:
     """
     Crawl a local or remote location of documents.
@@ -192,21 +194,23 @@ def crawl(
     This is the main entry point for crawling documents.
 
     Args:
-        dataset: The Dataset to crawl into
-        uri: Source location URI (local path, s3://, http://, etc.)
+        dataset: Name of the dataset to crawl into
+        source: Source location URI (local path, s3://, http://, etc.)
         prefix: Include only keys with this prefix
         exclude_prefix: Exclude keys with this prefix
         glob: Glob pattern for keys to include
         exclude_glob: Glob pattern for keys to exclude
         make_entities: Create file entities from crawled files
         existing: Ignore already existing (by relative path, checksum) or overwrite
+        uri: Dataset storage root override (keyword-only – ``source`` is the
+            crawl origin, this is where the dataset lives)
 
     Returns:
         CrawlJob with completion statistics
     """
     job = CrawlJob.make(
-        uri=uri,
-        dataset=dataset.name,
+        uri=source,
+        dataset=dataset,
         prefix=prefix,
         exclude_prefix=exclude_prefix,
         glob=glob,
@@ -214,4 +218,4 @@ def crawl(
         make_entities=make_entities,
         existing=existing,
     )
-    return CrawlOperation(job, dataset.uri).run()
+    return CrawlOperation(job, uri).run()

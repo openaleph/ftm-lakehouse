@@ -8,7 +8,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Generator
+from typing import Generator, NamedTuple
 
 import boto3
 import pytest
@@ -21,10 +21,9 @@ from fastapi import APIRouter, FastAPI
 from moto.server import ThreadedMotoServer
 
 from ftm_lakehouse.api.main import _not_found_handler
-from ftm_lakehouse.catalog import Catalog
 from ftm_lakehouse.core.api import get_api
-from ftm_lakehouse.dataset import Dataset
 from ftm_lakehouse.lake import get_lakehouse
+from ftm_lakehouse.model.dataset import DatasetModel, set_model_class
 from ftm_lakehouse.repository import factories
 from ftm_lakehouse.repository.entities.main import EntityRepository
 from ftm_lakehouse.storage.journal import get_journal
@@ -103,20 +102,16 @@ def make_docker_repo(
     return repo, docker_data_path(name)
 
 
+class DatasetHandle(NamedTuple):
+    """(name, uri) pair standing in for the removed Dataset class in tests."""
+
+    name: str
+    uri: str
+
+
 @pytest.fixture(scope="session")
 def fixtures_path() -> Path:
     return FIXTURES_PATH
-
-
-@pytest.fixture(scope="function")
-def tmp_catalog(tmp_path) -> Catalog:
-    return get_lakehouse(tmp_path)
-
-
-@pytest.fixture(scope="function")
-def tmp_dataset(tmp_path) -> Dataset:
-    catalog = get_lakehouse(tmp_path)
-    return catalog.get_dataset("tmp_dataset")
 
 
 @pytest.fixture(autouse=True, scope="function")
@@ -126,11 +121,13 @@ def clear_factory_caches():
     factories.clear_caches()
     get_journal.cache_clear()
     get_lakehouse.cache_clear()
+    set_model_class(DatasetModel)
     yield
     # Clear after test
     factories.clear_caches()
     get_journal.cache_clear()
     get_lakehouse.cache_clear()
+    set_model_class(DatasetModel)
 
 
 @pytest.fixture(autouse=True, scope="session")

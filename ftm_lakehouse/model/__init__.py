@@ -1,6 +1,10 @@
 """Data models for ftm_lakehouse."""
 
-from ftm_lakehouse.model.dataset import DM, CatalogModel, DatasetModel
+from ftm_lakehouse.model.dataset import (
+    DatasetModel,
+    get_model_class,
+    set_model_class,
+)
 from ftm_lakehouse.model.file import File, Files
 from ftm_lakehouse.model.job import DatasetJobModel, JobModel
 from ftm_lakehouse.model.statement import (
@@ -11,10 +15,10 @@ from ftm_lakehouse.model.statement import (
 )
 
 __all__ = [
-    # Catalog
-    "CatalogModel",
+    # Dataset
     "DatasetModel",
-    "DM",
+    "get_model_class",
+    "set_model_class",
     # File
     "File",
     "Files",

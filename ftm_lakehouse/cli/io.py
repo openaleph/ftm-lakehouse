@@ -8,7 +8,7 @@ command modules only differ in how they parse their input.
 """
 
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterable, TypeVar
+from typing import Callable, Iterable, TypeVar
 
 from anystore.io import logged_items
 from anystore.types import SDict
@@ -16,7 +16,6 @@ from followthemoney import EntityProxy
 from ftmq.store.lake import LakeStatement
 from rigour.time import iso_datetime
 
-from ftm_lakehouse.dataset import Dataset
 from ftm_lakehouse.exceptions import BufferFullError
 from ftm_lakehouse.logic.entities.buffer import EntityBuffer
 from ftm_lakehouse.logic.entities.explode import (
@@ -24,6 +23,7 @@ from ftm_lakehouse.logic.entities.explode import (
     explode_unsafe,
     statement_row_unsafe,
 )
+from ftm_lakehouse.repository.entities import EntityRepository
 from ftm_lakehouse.util import single_string, validate_origin
 
 BULK_ORIGIN = "bulk"
@@ -57,7 +57,7 @@ def _extract_fragment(i: Item) -> str | None:
 
 
 def _bulk_import(
-    dataset: Dataset[Any],
+    repo: EntityRepository,
     items: Iterable[Item],
     add: Callable[[EntityBuffer, Item], str | None],
     *,
@@ -67,9 +67,8 @@ def _bulk_import(
     last_seen: datetime | None,
     item_name: str,
 ) -> None:
-    repo = dataset.get_entities()
     buffer = EntityBuffer(
-        dataset.name, repo.shards, origin, last_seen=last_seen, max_rows=bulk_size
+        repo.dataset, repo.shards, origin, last_seen=last_seen, max_rows=bulk_size
     )
     now = last_seen or datetime.now(timezone.utc)
 
@@ -77,7 +76,7 @@ def _bulk_import(
         items,
         "Import",
         item_name=item_name,
-        logger=dataset._log,
+        logger=repo.log,
         chunk_size=100_000 if item_name == "Statement" else 10_000,
     ):
         # Per-item provenance: an item's own origin wins unless the caller
@@ -101,7 +100,7 @@ def _bulk_import(
 
 
 def import_entities(
-    dataset: Dataset[Any],
+    repo: EntityRepository,
     proxies: Iterable[EntityProxy],
     *,
     bulk_size: int,
@@ -111,7 +110,7 @@ def import_entities(
 ) -> None:
     """Bulk-import FtM entity proxies straight into the parquet store."""
     _bulk_import(
-        dataset,
+        repo,
         proxies,
         EntityBuffer.add_entity,
         origin=origin,
@@ -123,7 +122,7 @@ def import_entities(
 
 
 def import_statements(
-    dataset: Dataset[Any],
+    repo: EntityRepository,
     statements: Iterable[LakeStatement],
     *,
     origin: str = BULK_ORIGIN,
@@ -133,7 +132,7 @@ def import_statements(
 ) -> None:
     """Bulk-import FtM ``Statement`` objects straight into the parquet store."""
     _bulk_import(
-        dataset,
+        repo,
         statements,
         EntityBuffer.add_statement,
         origin=origin,
@@ -145,7 +144,7 @@ def import_statements(
 
 
 def import_entities_unsafe(
-    dataset: Dataset[Any],
+    repo: EntityRepository,
     payloads: Iterable[SDict],
     *,
     origin: str = BULK_ORIGIN,
@@ -161,7 +160,6 @@ def import_entities_unsafe(
     validation and the per-statement object churn. Trusted input only.
     """
     validate_origin(origin)
-    repo = dataset.get_entities()
     # Parity with _bulk_import: --last-seen doubles as the stamp for rows
     # missing their timestamps, not just the pinned last_seen default.
     now = last_seen or datetime.now(timezone.utc)
@@ -170,11 +168,11 @@ def import_entities_unsafe(
     pinned = iso_datetime(last_seen.isoformat()) if last_seen else None
     buffer = RowBuffer()
     for data in logged_items(
-        payloads, "Import", item_name="Entity", logger=dataset._log, chunk_size=10_000
+        payloads, "Import", item_name="Entity", logger=repo.log, chunk_size=10_000
     ):
         for row in explode_unsafe(
             data,
-            dataset.name,
+            repo.dataset,
             repo.shards,
             now=now,
             origin=origin,
@@ -191,7 +189,7 @@ def import_entities_unsafe(
 
 
 def import_statements_unsafe(
-    dataset: Dataset[Any],
+    repo: EntityRepository,
     rows: Iterable[SDict],
     *,
     origin: str = BULK_ORIGIN,
@@ -207,15 +205,14 @@ def import_statements_unsafe(
     only.
     """
     validate_origin(origin)
-    repo = dataset.get_entities()
     now = last_seen or datetime.now(timezone.utc)
     buffer = RowBuffer()
     for data in logged_items(
-        rows, "Import", item_name="Statement", logger=dataset._log, chunk_size=100_000
+        rows, "Import", item_name="Statement", logger=repo.log, chunk_size=100_000
     ):
         buffer.add(
             statement_row_unsafe(
-                data, dataset.name, repo.shards, now=now, origin=origin
+                data, repo.dataset, repo.shards, now=now, origin=origin
             )
         )
         if len(buffer) >= bulk_size:

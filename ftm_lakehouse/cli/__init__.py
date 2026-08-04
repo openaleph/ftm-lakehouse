@@ -16,10 +16,10 @@ from pydantic import BaseModel
 from rich.console import Console
 
 from ftm_lakehouse import __version__
-from ftm_lakehouse.catalog import Catalog
+from ftm_lakehouse.catalog import Catalog, ensure_dataset, get_dataset_model
 from ftm_lakehouse.core.settings import Settings
-from ftm_lakehouse.dataset import Dataset
-from ftm_lakehouse.lake import get_dataset, get_lakehouse
+from ftm_lakehouse.lake import get_lakehouse
+from ftm_lakehouse.repository.base import dataset_uri as repo_dataset_uri
 
 settings = Settings()
 cli = typer.Typer(
@@ -32,10 +32,11 @@ console = Console(stderr=True)
 
 class State(TypedDict):
     catalog: Catalog | None
-    dataset: Dataset | None
+    dataset: str | None
+    dataset_uri: str | None
 
 
-STATE: State = {"catalog": None, "dataset": None}
+STATE: State = {"catalog": None, "dataset": None, "dataset_uri": None}
 
 
 def write_obj(obj: BaseModel | None, out: str) -> None:
@@ -56,22 +57,32 @@ class CatalogContext(ErrorHandler):
 
 
 class DatasetContext(ErrorHandler):
-    def __enter__(self) -> Dataset:
+    """Yield the ``(name, uri)`` pair of the dataset addressed via ``-d``.
+
+    Ensures the dataset exists (creates ``config.yml`` if needed) on entry –
+    commands resolve repositories themselves via the factories:
+
+        with DatasetContext() as (name, uri):
+            repo = get_entities(name, uri)
+    """
+
+    def __enter__(self) -> tuple[str, str]:
         super().__enter__()
-        if not STATE["dataset"]:
+        name, uri = STATE["dataset"], STATE["dataset_uri"]
+        if not name or not uri:
             e = RuntimeError("Specify dataset name with `-d` option!")
             if settings.debug:
                 raise e
             console.print(f"[red][bold]{e.__class__.__name__}[/bold]: {e}[/red]")
             raise typer.Exit(code=1)
         try:
-            STATE["dataset"].ensure()
+            ensure_dataset(name, uri)
         except Exception as e:
             if settings.debug:
                 raise
             console.print(f"[red][bold]{type(e).__name__}[/bold]: {e}[/red]")
             raise typer.Exit(code=1)
-        return STATE["dataset"]
+        return name, uri
 
 
 # Sub-typer group names whose commands don't need a catalog set up. The
@@ -105,10 +116,14 @@ def cli_ftm_lakehouse(
         catalog = get_lakehouse(uri)
         STATE["catalog"] = catalog
         if dataset:
-            if dataset_uri:
-                STATE["dataset"] = get_dataset(dataset, dataset_uri)
-            else:
-                STATE["dataset"] = STATE["catalog"].get_dataset(dataset)
+            STATE["dataset"] = dataset
+            # normalize + validate either way; --dataset-uri overrides the
+            # catalog-derived location
+            STATE["dataset_uri"] = (
+                repo_dataset_uri(dataset, dataset_uri)
+                if (dataset_uri)
+                else catalog.dataset_uri(dataset)
+            )
     except Exception as e:
         if settings_.debug:
             raise
@@ -124,7 +139,7 @@ def cli_ftm_lakehouse(
 def cli_dataset_names(out_uri: Annotated[str, typer.Option("-o")] = "-"):
     """Show dataset names in the current catalog."""
     with CatalogContext() as catalog:
-        names = [d.name for d in catalog.list_datasets()]
+        names = list(catalog.list_datasets())
         smart_write(out_uri, "\n".join(names) + "\n", "wb")
 
 
@@ -134,7 +149,10 @@ def cli_datasets(
 ):
     """Show metadata for all datasets in the current catalog."""
     with CatalogContext() as catalog:
-        datasets = [d.model for d in catalog.list_datasets()]
+        datasets = [
+            get_dataset_model(name, catalog.dataset_uri(name))
+            for name in catalog.list_datasets()
+        ]
         smart_write_models(out_uri, datasets)
 
 

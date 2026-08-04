@@ -17,10 +17,12 @@ from typing import Annotated, Optional
 import typer
 
 from ftm_lakehouse import operation as op
+from ftm_lakehouse.catalog import get_dataset_index, update_dataset
 from ftm_lakehouse.cli import DatasetContext, cli, console, settings, write_obj
 from ftm_lakehouse.model.dataset import DatasetModel
 from ftm_lakehouse.operation.crawl import HandleExistingMode
 from ftm_lakehouse.operation.export import ExportKind
+from ftm_lakehouse.repository.factories import get_entities
 
 operations = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=settings.debug)
 cli.add_typer(operations, name="operations", help="Dataset pipeline operations")
@@ -57,18 +59,18 @@ def cli_make(
     Use ``--full`` for a complete update including flushing the journal and
     generating all exports.
     """
-    with DatasetContext() as dataset:
+    with DatasetContext() as (name, uri):
         if config:
             dataset_config = DatasetModel.from_yaml_uri(config)
-            dataset.update_model(**dataset_config.model_dump())
+            update_dataset(name, uri, **dataset_config.model_dump())
         if full:
             if optimize:
-                op.optimize(dataset)
-            op.make(dataset, force=bool(force))
+                op.optimize(name, uri)
+            op.make(name, uri, force=bool(force))
         else:
-            dataset.get_entities().flush()
-            op.export(dataset, ExportKind.index, force=bool(force))
-        console.print(dataset.index)
+            get_entities(name, uri).flush()
+            op.export(name, ExportKind.index, uri, force=bool(force))
+        console.print(get_dataset_index(name, uri))
 
 
 # ---------------------------------------------------------------------------
@@ -86,8 +88,8 @@ def cli_export(
     """Export the dataset: ``statements`` (statements.csv), ``entities``
     (entities.ftm.json), ``documents`` (documents.csv), ``statistics``
     (statistics.json) or ``index`` (index.json)."""
-    with DatasetContext() as dataset:
-        res = op.export(dataset, kind, force=bool(force))
+    with DatasetContext() as (name, uri):
+        res = op.export(name, kind, uri, force=bool(force))
         console.print(res)
 
 
@@ -112,9 +114,9 @@ def cli_optimize(
     Tombstones older than ``LAKEHOUSE_GRACE_PERIOD_DAYS`` are dropped. Each
     step is held under the dataset write fence.
     """
-    with DatasetContext() as dataset:
+    with DatasetContext() as (name, uri):
         res = op.optimize(
-            dataset, retention_hours=int(retention_hours or 0), force=bool(force)
+            name, uri, retention_hours=int(retention_hours or 0), force=bool(force)
         )
         console.print(res)
 
@@ -130,8 +132,8 @@ def cli_unlock():
     **Confirm no process is actively writing** before running – breaking
     a held lock can corrupt an in-flight write. No-op if no lock is held.
     """
-    with DatasetContext() as dataset:
-        if dataset.get_entities().unlock():
+    with DatasetContext() as (name, uri):
+        if get_entities(name, uri).unlock():
             console.print("[green]Lock released.[/green]")
         else:
             console.print("[yellow]No lock held.[/yellow]")
@@ -162,13 +164,14 @@ def cli_crawl(
     ] = HandleExistingMode.overwrite,
 ):
     """Crawl documents from local or remote sources into the archive."""
-    with DatasetContext() as dataset:
+    with DatasetContext() as (name, dataset_uri):
         result = op.crawl(
-            dataset,
+            name,
             uri,
             glob=include,
             exclude_glob=exclude,
             make_entities=make_entities,
             existing=existing,
+            uri=dataset_uri,
         )
         write_obj(result, out_uri)

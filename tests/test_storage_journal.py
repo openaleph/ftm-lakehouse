@@ -71,7 +71,7 @@ def _make_api_journal() -> ApiJournalStore:
     # ``app.state.lake`` – mirror the client-side SHARDS so both ends agree.
     lake_path = Path(tempfile.mkdtemp())
     app.state.lake = get_lakehouse(lake_path)
-    app.state.lake.get_dataset(DATASET).ensure(shards=SHARDS)
+    app.state.lake.ensure_dataset(DATASET, shards=SHARDS)
 
     test_client = TestClient(app)
     transport = httpx.MockTransport(

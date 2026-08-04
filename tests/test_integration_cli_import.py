@@ -12,6 +12,7 @@ from ftm_lakehouse.cli.io import import_entities_unsafe
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.lake import get_lakehouse
 from ftm_lakehouse.repository.entities.main import EntityRepository
+from ftm_lakehouse.repository.factories import get_entities
 from tests.shared import JANE, JOHN
 
 
@@ -164,16 +165,16 @@ def test_cli_entities_import_unsafe_parity(tmp_path, cli_runner):
 def test_import_entities_unsafe_bounded_buffer(tmp_path):
     """A payload larger than bulk_size flushes mid-entity instead of growing
     the row buffer unbounded."""
-    dataset = get_lakehouse(str(tmp_path)).get_dataset("ds")
+    lake = get_lakehouse(str(tmp_path))
+    repo = get_entities("ds", lake.dataset_uri("ds"))
     payload = {
         "id": "big",
         "schema": "Person",
         "properties": {"name": [f"Name {i}" for i in range(10)]},
         "last_change": "2024-01-01T00:00:00",
     }
-    import_entities_unsafe(dataset, [payload], bulk_size=3)
+    import_entities_unsafe(repo, [payload], bulk_size=3)
 
-    repo = EntityRepository("ds", tmp_path / "ds")
     rows = list(repo._statements._query_statement_data())
     assert len(rows) == 11  # 10 names + BASE stub
     assert repo.version is not None and repo.version >= 3  # several flushes

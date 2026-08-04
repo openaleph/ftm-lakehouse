@@ -19,6 +19,7 @@ from ftmq.io import smart_read_proxies, smart_write_proxies
 from ftm_lakehouse.cli import DatasetContext, cli, settings
 from ftm_lakehouse.cli.io import BULK_ORIGIN, import_entities, import_entities_unsafe
 from ftm_lakehouse.logic.compress import decompress_stream
+from ftm_lakehouse.repository.factories import get_entities
 
 entities = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=settings.debug)
 cli.add_typer(entities, name="entities", help="Read and write FtM entities")
@@ -34,8 +35,8 @@ def cli_entities_iterate(
     correctness is only guaranteed after ``maintenance optimize``. For the
     frozen pre-exported view use ``stream``.
     """
-    with DatasetContext() as dataset:
-        smart_write_proxies(out_uri, dataset.get_entities().query())
+    with DatasetContext() as (name, uri):
+        smart_write_proxies(out_uri, get_entities(name, uri).query())
 
 
 @entities.command("stream")
@@ -43,11 +44,11 @@ def cli_entities_stream(
     out_uri: Annotated[str, typer.Option("-o")] = "-",
 ):
     """Stream FtM entities from the pre-exported ``entities.ftm.json``."""
-    with DatasetContext() as dataset:
+    with DatasetContext() as (name, uri):
         # we trust our exports so stream byte-to-byte directly instead the
         # python / ftm roundtrip
-        entities = dataset.get_entities()
-        in_uri = dataset._store.to_uri(entities.ENTITIES_JSON)
+        entities = get_entities(name, uri)
+        in_uri = entities._store.to_uri(entities.ENTITIES_JSON)
         with (
             smart_open(in_uri, "rb") as fh,
             decompress_stream(fh, entities.compression) as i,
@@ -94,10 +95,11 @@ def cli_entities_import(
     ``followthemoney-store`` into ``ftm-lakehouse`` keeping fragments and origin
     provenance. (Use ``ftmq fragments iterate-fragments -d ...`` for export.)
     """
-    with DatasetContext() as dataset:
+    with DatasetContext() as (name, uri):
+        repo = get_entities(name, uri)
         if unsafe:
             import_entities_unsafe(
-                dataset,
+                repo,
                 smart_stream_json(in_uri),
                 origin=origin,
                 override_origin=override_origin,
@@ -106,7 +108,7 @@ def cli_entities_import(
             )
         else:
             import_entities(
-                dataset,
+                repo,
                 smart_read_proxies(in_uri),
                 origin=origin,
                 override_origin=override_origin,

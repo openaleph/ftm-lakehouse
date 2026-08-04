@@ -745,7 +745,6 @@ class ParquetStore(LakehouseApiMixin):
             q: Optional SQLAlchemy select (default:
                 :func:`~ftm_lakehouse.model.statement.statement_csv_select` –
                 the FtM columns plus ``fragment``, ordered by ``entity_id``).
-            split: Split artifact into chunks (by partitions)
         """
         if not self.exists:
             return

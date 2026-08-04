@@ -16,32 +16,35 @@ from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.lake import get_lakehouse
 from ftm_lakehouse.logic.compress import CompressKind, decompress_stream
 from ftm_lakehouse.operation import ExportKind, export
+from ftm_lakehouse.repository.factories import get_entities
+from tests.conftest import DatasetHandle
 from tests.shared import JANE, JOHN
 
 MAGIC = {CompressKind.gz: b"\x1f\x8b", CompressKind.zst: b"\x28\xb5\x2f\xfd"}
 
 
 def _seed(tmp_path, name: str, **config):
-    dataset = get_lakehouse(str(tmp_path)).get_dataset(name)
-    dataset.ensure(**config)
-    entities = dataset.get_entities()
+    lake = get_lakehouse(str(tmp_path))
+    lake.ensure_dataset(name, **config)
+    dataset = DatasetHandle(name, lake.dataset_uri(name))
+    entities = get_entities(*dataset)
     with entities.writer() as bulk:
         bulk.add_entity(make_entity(JANE))
         bulk.add_entity(make_entity(JOHN))
     entities.flush()
-    export(dataset, ExportKind.statements)
-    export(dataset, ExportKind.entities)
+    export(dataset.name, ExportKind.statements, dataset.uri)
+    export(dataset.name, ExportKind.entities, dataset.uri)
     return dataset
 
 
 def _read(dataset, key: str) -> bytes:
-    with dataset._store.open(key, "rb") as fh:
+    with get_entities(*dataset)._store.open(key, "rb") as fh:
         return fh.read()
 
 
 def test_export_uncompressed_by_default(tmp_path):
     dataset = _seed(tmp_path, "plain")
-    assert dataset.get_entities().compression is None
+    assert get_entities(*dataset).compression is None
 
     statements = _read(dataset, path.EXPORTS_STATEMENTS)
     entities = _read(dataset, path.ENTITIES_JSON)
@@ -60,9 +63,9 @@ def test_export_compression_from_dataset_config(tmp_path, algorithm):
     """The codec recorded in config.yml drives both exports, with no runtime
     argument anywhere in the export path."""
     dataset = _seed(tmp_path, f"packed_{algorithm.value}", compression=algorithm)
-    assert dataset.get_entities().compression == algorithm
+    assert get_entities(*dataset).compression == algorithm
     # ... and reaches the parquet store that writes statements.csv
-    assert dataset.get_entities()._statements.compression == algorithm
+    assert get_entities(*dataset)._statements.compression == algorithm
 
     statements = _read(dataset, path.exports_statements(algorithm))
     entities = _read(dataset, path.entities_json(algorithm))
@@ -79,7 +82,8 @@ def test_export_compression_from_dataset_config(tmp_path, algorithm):
 
     # the initial diff carries the same codec (it re-encodes per line, since
     # each entity gets an envelope)
-    (diff_key,) = list(dataset._store.iterate_keys(prefix=path.DIFFS_ENTITIES))
+    store = get_entities(*dataset)._store
+    (diff_key,) = list(store.iterate_keys(prefix=path.DIFFS_ENTITIES))
     diff = _read(dataset, diff_key)
     assert diff.startswith(MAGIC[algorithm])
     with decompress_stream(io.BytesIO(diff), algorithm) as fh:
@@ -88,4 +92,4 @@ def test_export_compression_from_dataset_config(tmp_path, algorithm):
     assert {e["op"] for e in envelopes} == {"ADD"}
 
     # and the read-back path decodes it again
-    assert {e.id for e in dataset.get_entities().stream()} == {"jane", "john"}
+    assert {e.id for e in get_entities(*dataset).stream()} == {"jane", "john"}

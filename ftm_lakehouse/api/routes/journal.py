@@ -5,7 +5,7 @@ import asyncio
 from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
-from ftm_lakehouse.api.dependencies import Dataset, Journal
+from ftm_lakehouse.api.dependencies import Journal, Shards
 from ftm_lakehouse.helpers.statements import unpack_statement
 from ftm_lakehouse.storage.journal.api import (
     JSONL_CONTENT_TYPE,
@@ -18,7 +18,7 @@ router = APIRouter()
 
 @router.post("/{dataset}/_api/journal/bulk")
 async def journal_bulk(
-    dataset: Dataset, journal: Journal, request: Request
+    shards: Shards, journal: Journal, request: Request
 ) -> PlainTextResponse:
     """Write JSONL rows into the journal via bulk writer.
 
@@ -28,7 +28,7 @@ async def journal_bulk(
 
     def _write() -> int:
         count = 0
-        with journal.writer(dataset.model.shards) as writer:
+        with journal.writer(shards) as writer:
             for line in body.split(b"\n"):
                 if not line:
                     continue

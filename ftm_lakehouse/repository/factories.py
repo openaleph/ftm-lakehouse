@@ -1,8 +1,8 @@
 """
 Factory functions for the repositories that fall back to the default configured
-settings. These are the single instantiation path for repositories: both
-module-level callers (``get_entities("my_dataset")``) and ``Dataset`` method
-accessors (``dataset.get_entities()``) resolve through the same cache.
+settings. These are the single instantiation path for repositories – every
+caller, from the module-level ``get_entities("my_dataset")`` convenience to
+operations and the API server, resolves through the same cache.
 
 All factories are LRU-cached at :data:`LRU_MAX` entries: generous enough to
 cover any realistic multi-tenant dataset count in a single process, but
@@ -21,13 +21,22 @@ from functools import lru_cache
 from anystore.types import Uri
 
 from ftm_lakehouse.core.api import ensure_api_uri
-from ftm_lakehouse.dataset import dataset_uri
 from ftm_lakehouse.repository.archive import ArchiveRepository
+from ftm_lakehouse.repository.base import dataset_uri
 from ftm_lakehouse.repository.documents import DocumentRepository
 from ftm_lakehouse.repository.entities import EntityRepository
 from ftm_lakehouse.repository.job import J, JobRepository
-from ftm_lakehouse.storage.tags import TagStore
 from ftm_lakehouse.storage.versions import VersionStore
+
+__all__ = [
+    "dataset_uri",
+    "get_archive",
+    "get_entities",
+    "get_documents",
+    "get_jobs",
+    "get_versions",
+    "clear_caches",
+]
 
 LRU_MAX = 1024
 """Maximum number of distinct dataset keys retained per factory."""
@@ -129,33 +138,15 @@ def _get_versions(dataset: str, uri: str) -> VersionStore:
     return VersionStore(ensure_api_uri(uri))
 
 
-def get_tags(
-    dataset: str, uri: Uri | None = None, tenant: str | None = None
-) -> TagStore:
-    """
-    Get the tag store for a dataset.
-
-    Args:
-        dataset: Dataset name
-        uri: Dataset URI override (default: {LAKEHOUSE_URI}/{dataset})
-        tenant: Tag tenant/namespace
-
-    Returns:
-        TagStore instance (cached)
-    """
-    return _get_tags(dataset, dataset_uri(dataset, uri), tenant)
-
-
-@lru_cache(maxsize=LRU_MAX)
-def _get_tags(dataset: str, uri: str, tenant: str | None = None) -> TagStore:
-    return TagStore(ensure_api_uri(uri), tenant)
-
-
 def clear_caches() -> None:
-    """Clear all factory caches – test isolation between runs."""
+    """Clear all factory caches – test isolation and config-write invalidation.
+
+    Called by :func:`ftm_lakehouse.catalog.update_dataset` after a
+    ``config.yml`` write so newly fetched repositories see the fresh model
+    snapshot; repositories held across the write keep their old snapshot.
+    """
     _get_archive.cache_clear()
     _get_entities.cache_clear()
     _get_documents.cache_clear()
     _get_jobs.cache_clear()
     _get_versions.cache_clear()
-    _get_tags.cache_clear()

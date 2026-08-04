@@ -12,6 +12,7 @@ from anystore.util import dump_json_model
 
 from ftm_lakehouse import operation as op
 from ftm_lakehouse.cli import DatasetContext, cli, console, settings
+from ftm_lakehouse.repository.factories import get_archive
 
 archive = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=settings.debug)
 cli.add_typer(archive, name="archive", help="Access the file archive")
@@ -22,10 +23,11 @@ def cli_archive_get(
     content_hash: str, out_uri: Annotated[str, typer.Option("-o")] = "-"
 ):
     """Retrieve a file by content hash and write it to an output URI."""
-    with DatasetContext() as dataset:
-        file = dataset.get_archive().get_file(content_hash)
+    with DatasetContext() as (name, uri):
+        archive_repo = get_archive(name, uri)
+        file = archive_repo.get_file(content_hash)
         with (
-            dataset.get_archive().open(file.checksum) as i,
+            archive_repo.open(file.checksum) as i,
             smart_open(out_uri, "wb") as o,
         ):
             o.write(i.read())
@@ -36,8 +38,8 @@ def cli_archive_head(
     content_hash: str, out_uri: Annotated[str, typer.Option("-o")] = "-"
 ):
     """Retrieve all metadata objects for a content hash and write them out."""
-    with DatasetContext() as dataset:
-        smart_write_models(out_uri, dataset.get_archive().get_all_files(content_hash))
+    with DatasetContext() as (name, uri):
+        smart_write_models(out_uri, get_archive(name, uri).get_all_files(content_hash))
 
 
 @archive.command("ls")
@@ -47,8 +49,8 @@ def cli_archive_ls(
     checksums: Annotated[bool, typer.Option(help="Show only checksums")] = False,
 ):
     """List all files in the dataset archive."""
-    with DatasetContext() as dataset:
-        iterator = dataset.get_archive().iterate_files()
+    with DatasetContext() as (name, uri):
+        iterator = get_archive(name, uri).iterate_files()
         if keys:
             files = (f.key.encode() + b"\n" for f in iterator)
         elif checksums:
@@ -62,6 +64,6 @@ def cli_archive_ls(
 @archive.command("download")
 def cli_archive_download(target: Annotated[str, typer.Option("-o")]):
     """Download all archive files to a local directory."""
-    with DatasetContext() as dataset:
-        res = op.download_archive(dataset, target)
+    with DatasetContext() as (name, uri):
+        res = op.download_archive(name, target, uri)
         console.print(res)

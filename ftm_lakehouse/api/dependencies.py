@@ -1,5 +1,6 @@
 """Shared FastAPI dependencies and constants for API routes."""
 
+from functools import lru_cache
 from typing import Annotated
 
 from fastapi import Body, Depends, Request
@@ -7,8 +8,11 @@ from ftmq.query import Query
 from pydantic import BaseModel, ConfigDict, field_validator
 from pyrql import RQLError
 
+from ftm_lakehouse.catalog import get_dataset_model
 from ftm_lakehouse.core.settings import ApiSettings
-from ftm_lakehouse.dataset import Dataset as _Dataset
+from ftm_lakehouse.repository.entities import EntityRepository
+from ftm_lakehouse.repository.factories import LRU_MAX
+from ftm_lakehouse.repository.factories import get_entities as _get_entities
 from ftm_lakehouse.storage.journal import BaseJournalStore
 from ftm_lakehouse.storage.journal import get_journal as _get_journal
 from ftm_lakehouse.util import validate_dataset_name
@@ -20,13 +24,46 @@ EMBED = Body(embed=True)
 rather than the bare value as the entire body."""
 
 
-def get_dataset(dataset: str, request: Request) -> _Dataset:
-    """Resolve a Dataset from the lakehouse via app state."""
-    validate_dataset_name(dataset)
-    return request.app.state.lake.get_dataset(dataset)
+def get_dataset_name(dataset: str) -> str:
+    """Validate the ``{dataset}`` path parameter."""
+    return validate_dataset_name(dataset)
 
 
-Dataset = Annotated[_Dataset, Depends(get_dataset)]
+DatasetName = Annotated[str, Depends(get_dataset_name)]
+
+
+def get_dataset_uri(dataset: str, request: Request) -> str:
+    """Validated canonical dataset uri under the app's catalog root."""
+    return str(request.app.state.lake.dataset_uri(dataset))
+
+
+DatasetUri = Annotated[str, Depends(get_dataset_uri)]
+
+
+def get_entities_repo(dataset: str, request: Request) -> EntityRepository:
+    """Resolve the entity repository through the LRU-cached factory."""
+    return _get_entities(dataset, get_dataset_uri(dataset, request))
+
+
+Entities = Annotated[EntityRepository, Depends(get_entities_repo)]
+
+
+@lru_cache(maxsize=LRU_MAX)
+def _resolve_shards(dataset: str, uri: str) -> int:
+    return get_dataset_model(dataset, uri).shards
+
+
+def get_dataset_shards(dataset: str, request: Request) -> int:
+    """The dataset's recorded shard count.
+
+    Resolved from the dataset's own ``config.yml`` (never the server's
+    environment) and cached per ``(dataset, uri)`` – the shard count is
+    fixed at dataset creation and must not change, so one read per process
+    suffices."""
+    return _resolve_shards(dataset, get_dataset_uri(dataset, request))
+
+
+Shards = Annotated[int, Depends(get_dataset_shards)]
 
 
 def get_journal(dataset: str) -> BaseJournalStore:

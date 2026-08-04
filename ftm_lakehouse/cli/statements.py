@@ -26,6 +26,7 @@ from ftm_lakehouse.cli.io import (
 )
 from ftm_lakehouse.helpers.statements import read_csv_statements
 from ftm_lakehouse.logic.compress import decompress_stream
+from ftm_lakehouse.repository.factories import get_entities
 
 statements = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=settings.debug)
 cli.add_typer(statements, name="statements", help="Read and write raw FtM statements")
@@ -40,8 +41,8 @@ def cli_statements_iterate(
     Live read – reflects current state of the parquet table. For the frozen
     pre-exported view use ``stream``.
     """
-    with DatasetContext() as dataset:
-        rows = dataset.get_entities()._statements._query_statement_data()
+    with DatasetContext() as (name, uri):
+        rows = get_entities(name, uri)._statements._query_statement_data()
         with smart_open(out_uri, "w") as fh:
             smart_write_csv(fh, rows)
 
@@ -51,11 +52,11 @@ def cli_statements_stream(
     out_uri: Annotated[str, typer.Option("-o")] = "-",
 ):
     """Stream the pre-exported ``statements.csv`` to the output."""
-    with DatasetContext() as dataset:
+    with DatasetContext() as (name, uri):
         # we trust our exports so stream byte-to-byte directly instead the
         # python / ftm roundtrip
-        entities = dataset.get_entities()
-        in_uri = dataset._store.to_uri(entities.EXPORTS_STATEMENTS)
+        entities = get_entities(name, uri)
+        in_uri = entities._store.to_uri(entities.EXPORTS_STATEMENTS)
         with (
             smart_open(in_uri, "rb") as fh,
             decompress_stream(fh, entities.compression) as i,
@@ -96,10 +97,11 @@ def cli_statements_import(
     Bypasses the journal. With ``--unsafe``, rows skip Statement
     construction entirely and map straight to parquet rows.
     """
-    with DatasetContext() as dataset:
+    with DatasetContext() as (name, uri):
+        repo = get_entities(name, uri)
         if unsafe:
             import_statements_unsafe(
-                dataset,
+                repo,
                 smart_stream_csv(in_uri),
                 origin=origin,
                 bulk_size=bulk_size,
@@ -107,7 +109,7 @@ def cli_statements_import(
             )
         else:
             import_statements(
-                dataset,
+                repo,
                 read_csv_statements(in_uri),
                 origin=origin,
                 bulk_size=bulk_size,
@@ -123,8 +125,8 @@ def cli_statements_sql(query: str):
     ``statement_raw`` (physical rows). Results print as a rich table; add a
     ``LIMIT`` when scanning large partitions.
     """
-    with DatasetContext() as dataset:
-        store = dataset.get_entities()._statements._lake
+    with DatasetContext() as (name, uri):
+        store = get_entities(name, uri)._statements._lake
         with store.cursor() as cur:
             with Took() as t:
                 cur.execute(query)

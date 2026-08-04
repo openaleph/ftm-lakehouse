@@ -14,12 +14,13 @@ from ftm_lakehouse.api.main import (
     operations_router,
 )
 from ftm_lakehouse.core.conventions import path
-from ftm_lakehouse.dataset import Dataset
 from ftm_lakehouse.lake import get_lakehouse
 from ftm_lakehouse.logic.compress import CompressKind, decompress_stream
 from ftm_lakehouse.operation import ExportKind, export, optimize
+from ftm_lakehouse.repository.factories import get_entities
 from tests.conftest import (
     LAKEHOUSE_TEST_URL,
+    DatasetHandle,
     make_docker_dataset_name,
     make_test_api,
     skip_unless_docker_mode,
@@ -34,27 +35,31 @@ from tests.shared import JANE, JANE_FIRSTNAME
         )
     )
 )
-def dataset(request, tmp_path) -> Generator[Dataset, None, None]:
+def dataset(request, tmp_path) -> Generator[DatasetHandle, None, None]:
     backend, compression = request.param
     if backend == "local":
         lake = get_lakehouse(tmp_path)
-        yield lake.create_dataset("test", compression=compression)
+        lake.ensure_dataset("test", compression=compression)
+        yield DatasetHandle("test", lake.dataset_uri("test"))
     elif backend == "api":
         routers = [entities_router, journal_router, operations_router, archive_router]
         with make_test_api(tmp_path, routers) as base_url:
             lake = get_lakehouse(base_url)
-            yield lake.create_dataset("test", compression=compression)
+            lake.ensure_dataset("test", compression=compression)
+            yield DatasetHandle("test", lake.dataset_uri("test"))
     else:
         # docker: real nginx fronting the lakehouse Granian UDS. Unique
         # dataset name keeps concurrent / repeated runs isolated.
         skip_unless_docker_mode()
+        name = make_docker_dataset_name()
         lake = get_lakehouse(LAKEHOUSE_TEST_URL)
-        yield lake.create_dataset(make_docker_dataset_name(), compression=compression)
+        lake.ensure_dataset(name, compression=compression)
+        yield DatasetHandle(name, lake.dataset_uri(name))
 
 
 def test_entities(dataset):
     """Test the unified DatasetEntities interface."""
-    entities = dataset.get_entities()
+    entities = get_entities(dataset.name, dataset.uri)
 
     # Initially empty
     assert len([e for e in entities.query()]) == 0
@@ -86,7 +91,7 @@ def test_entities(dataset):
     assert jane.first("firstName") == "Jane"
 
     # Export statements.csv
-    export(dataset, ExportKind.statements)
+    export(dataset.name, ExportKind.statements, dataset.uri)
 
     # Add a new entity to trigger re-export
     john = make_entity(
@@ -94,7 +99,9 @@ def test_entities(dataset):
     )
     with entities.writer() as bulk:
         bulk.add_entity(john)
-    export(dataset, ExportKind.statements)  # Operation's ensure_flush handles flushing
+    export(
+        dataset.name, ExportKind.statements, dataset.uri
+    )  # Operation's ensure_flush handles flushing
 
     with (
         entities._store.open(entities.EXPORTS_STATEMENTS) as fh,
@@ -110,10 +117,10 @@ def test_entities(dataset):
     assert origins == {"update", "default"}
 
     # Merge
-    optimize(dataset)
+    optimize(dataset.name, dataset.uri)
 
     # Statistics
-    export(dataset, ExportKind.statistics)
+    export(dataset.name, ExportKind.statistics, dataset.uri)
     stats: DatasetStats = entities._store.get(
         path.EXPORTS_STATISTICS, model=DatasetStats
     )
@@ -122,7 +129,7 @@ def test_entities(dataset):
 
 def test_entities_export(dataset):
     """Test entity export to JSON."""
-    entities = dataset.get_entities()
+    entities = get_entities(dataset.name, dataset.uri)
     jane = make_entity(JANE)
     jane_fragment = make_entity(JANE_FIRSTNAME)
 
@@ -131,8 +138,10 @@ def test_entities_export(dataset):
     with entities.writer(origin="update") as bulk:
         bulk.add_entity(jane_fragment)
 
-    export(dataset, ExportKind.statements)  # Operation's ensure_flush handles flushing
-    export(dataset, ExportKind.entities)
+    export(
+        dataset.name, ExportKind.statements, dataset.uri
+    )  # Operation's ensure_flush handles flushing
+    export(dataset.name, ExportKind.entities, dataset.uri)
 
     # stream() reads from exported entities.ftm.json
     ents = [e for e in entities.stream()]
@@ -149,7 +158,7 @@ def test_entity_multi_origin_fragments(dataset):
     When the same entity ID is added from multiple origins, the resulting
     entity should contain all properties and track all origins.
     """
-    entities = dataset.get_entities()
+    entities = get_entities(dataset.name, dataset.uri)
 
     # Add same entity ID from three different origins with different properties
     with entities.writer(origin="source_a") as bulk:
@@ -175,8 +184,8 @@ def test_entity_multi_origin_fragments(dataset):
 
     # Flush and export
     entities.flush()
-    export(dataset, ExportKind.statements)
-    export(dataset, ExportKind.entities)
+    export(dataset.name, ExportKind.statements, dataset.uri)
+    export(dataset.name, ExportKind.entities, dataset.uri)
 
     # Query merged entity (all origins)
     merged = entities.get("multi-origin-person")
@@ -215,7 +224,7 @@ def test_entity_multi_origin_statements(dataset):
     Add statements directly via bulk writer from multiple origins
     and verify they merge correctly.
     """
-    entities = dataset.get_entities()
+    entities = get_entities(dataset.name, dataset.uri)
 
     # Create statements directly for the same entity from different origins
     stmts_source_a = [
@@ -277,8 +286,8 @@ def test_entity_multi_origin_statements(dataset):
 
     # Flush and export
     entities.flush()
-    export(dataset, ExportKind.statements)
-    export(dataset, ExportKind.entities)
+    export(dataset.name, ExportKind.statements, dataset.uri)
+    export(dataset.name, ExportKind.entities, dataset.uri)
 
     # Query merged entity
     merged = entities.get("stmt-entity")

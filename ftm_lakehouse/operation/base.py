@@ -5,9 +5,8 @@ from typing import Generic
 from anystore.types import Uri
 
 from ftm_lakehouse.core.api import api_delegate, require_api
-from ftm_lakehouse.dataset import dataset_uri
 from ftm_lakehouse.model.job import DJ
-from ftm_lakehouse.repository.base import BaseRepository
+from ftm_lakehouse.repository.base import BaseRepository, dataset_uri
 from ftm_lakehouse.repository.factories import (
     get_archive,
     get_documents,

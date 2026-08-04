@@ -8,7 +8,7 @@ queries downstream.
 import pytest
 from fastapi.testclient import TestClient
 
-from ftm_lakehouse.api.dependencies import get_dataset as api_get_dataset
+from ftm_lakehouse.api.dependencies import get_dataset_name
 from ftm_lakehouse.api.main import get_app
 from ftm_lakehouse.catalog import Catalog
 from ftm_lakehouse.util import RESERVED_DATASET_NAMES, validate_dataset_name
@@ -54,18 +54,27 @@ def test_validate_dataset_name_rejects_reserved(name: str) -> None:
         validate_dataset_name(name)
 
 
-def test_catalog_get_dataset_rejects_invalid(tmp_path) -> None:
+def test_catalog_dataset_uri_rejects_invalid(tmp_path) -> None:
     catalog = Catalog(uri=str(tmp_path))
     with pytest.raises(ValueError):
-        catalog.get_dataset("../escape")
+        catalog.dataset_uri("../escape")
     with pytest.raises(ValueError):
-        catalog.get_dataset("catalog")
+        catalog.dataset_uri("catalog")
 
 
-def test_api_get_dataset_dependency_rejects_invalid() -> None:
+def test_factories_reject_invalid(tmp_path, monkeypatch) -> None:
+    """The factory path validates too – `dataset_uri` runs the name check,
+    so no caller-supplied name reaches path construction unchecked."""
+    monkeypatch.setenv("LAKEHOUSE_URI", str(tmp_path))
+    from ftm_lakehouse.repository.factories import get_entities
+
     with pytest.raises(ValueError):
-        # request is unused for invalid names — validator raises first
-        api_get_dataset("../etc", request=None)  # type: ignore[arg-type]
+        get_entities("../escape")
+
+
+def test_api_dataset_name_dependency_rejects_invalid() -> None:
+    with pytest.raises(ValueError):
+        get_dataset_name("../etc")
 
 
 def test_api_returns_400_on_invalid_dataset_name(tmp_path) -> None:
