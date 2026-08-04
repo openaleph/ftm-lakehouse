@@ -16,10 +16,7 @@
 | `LAKEHOUSE_DUCKDB_MEMORY_LIMIT` | Per-DuckDB-connection RAM ceiling. Queries exceeding it spill to disk rather than growing toward all available RAM. Format follows DuckDB's `SET memory_limit` (e.g. `8GB`, `512MB`). | `8GB` |
 | `LAKEHOUSE_DUCKDB_TEMP_DIRECTORY` | Spill-to-disk path for queries that overflow `LAKEHOUSE_DUCKDB_MEMORY_LIMIT`. Unset = DuckDB picks the OS temp dir. Point at a fast, capacity-controlled volume for heavy workloads. | (unset) |
 | `LAKEHOUSE_ON_ZFS` | Enable ZFS dataset creation for local storage | `false` |
-| `LAKEHOUSE_ZFS_POOL` | ZFS dataset path for the lakehouse root (e.g. `zpools/tank/lakehouse`) | (required when `ON_ZFS` is enabled) |
-| `LAKEHOUSE_ZFS_SOCKET` | Unix socket path for remote ZFS operations (see [ZFS Integration](zfs.md)) | (unset) |
-| `LAKEHOUSE_ZFS_OWNER` | `uid:gid` to chown new ZFS mountpoints to (see [ZFS Integration](zfs.md)) | (unset -- no chown) |
-| `LAKEHOUSE_ZFS_ALLOWED_UID` | UID allowed to connect to the ZFS agent socket (`SO_PEERCRED` check) | (the agent's own UID) |
+| `LAKEHOUSE_ZFS_POOL` | ZFS dataset path for the lakehouse root (e.g. `zpools/tank/lakehouse`). Transport / agent settings (`ZFS_SOCKET`, `ZFS_OWNER`, ...) belong to the [zfs-agent](https://github.com/dataresearchcenter/zfs-agent) package -- see [ZFS Integration](zfs.md) | (required when `ON_ZFS` is enabled) |
 | `LAKEHOUSE_API_KEY` / `LAKEHOUSE_API_SECRET` | Client-side auth headers attached to outgoing lakehouse-API requests (authenticate through the reverse proxy in front of the API server) | (unset) |
 | `LAKEHOUSE_PUBLIC_URL_PREFIX` | Public URL prefix for blob URLs (supports `{{ dataset }}` Jinja-style template) | (unset) |
 | `LOG_LEVEL` | Logging level (DEBUG, INFO, WARNING, ERROR) | `INFO` |

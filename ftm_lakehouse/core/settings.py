@@ -24,9 +24,9 @@ class Settings(BaseSettings):
     api_secret: str | None = None
     on_zfs: bool = False
     zfs_pool: str | None = None
-    zfs_socket: str | None = None
-    zfs_owner: str | None = None
-    zfs_allowed_uid: int | None = None
+    """ZFS dataset path the lakehouse's tuned datasets are created under.
+    Transport / agent configuration (socket, owner, peer auth) lives in the
+    external ``zfs-agent`` package's own ``ZFS_*`` environment."""
 
     grace_period_days: int = 30
     max_buffer_rows: int = 1_000_000

@@ -311,14 +311,14 @@ ftm_lakehouse/
 │   ├── statements.py        # statements iterate / stream / import / sql
 │   ├── archive.py           # archive get / ls / download
 │   ├── operations.py        # make, operations export / optimize / unlock / crawl
-│   └── zfs.py               # zfs agent / init
+│   └── zfs.py               # zfs init (agent lives in the zfs-agent package)
 │
 └── core/                    # Cross-cutting concerns
     ├── settings.py          # LAKEHOUSE_* env configuration
     ├── config.py            # config.yml loading
     ├── api.py               # API-mode delegation mixin
     ├── conventions/         # path.py, tag.py
-    └── zfs/                 # helpers.py, agent.py
+    └── zfs.py               # ZFS tuning + zfs-agent package caller
 ```
 
 ## Storage Layout & Tags

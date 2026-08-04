@@ -1,6 +1,6 @@
 # ZFS Integration
 
-When running on a ZFS pool, `ftm-lakehouse` can automatically create ZFS datasets with tuned properties for archive and statement storage. For containerized deployments where ZFS tools aren't available inside the container, a socket-based agent proxies ZFS commands to the host.
+When running on a ZFS pool, `ftm-lakehouse` can automatically create ZFS datasets with tuned properties for archive and statement storage. The transport – local `zfs` subprocess vs. a host-side socket agent for containerized deployments – is the external [zfs-agent](https://github.com/dataresearchcenter/zfs-agent) package; `ftm-lakehouse` contributes only the per-storage-type tuning and calls it when datasets are first touched.
 
 ## Local Mode
 
@@ -14,7 +14,7 @@ export LAKEHOUSE_ZFS_POOL=zpools/tank/lakehouse
 
 `LAKEHOUSE_ZFS_POOL` is the ZFS dataset path (without leading slash) under which per-dataset children are created. It must match your actual ZFS pool layout.
 
-When a new dataset is created, `ftm-lakehouse` calls `zfs create` to set up child datasets with optimized properties:
+When a new dataset is created, `ftm-lakehouse` calls `zfs create` (via `zfs-agent`) to set up child datasets with optimized properties:
 
 | ZFS Dataset | recordsize | compression | sync | Purpose |
 |-------------|-----------|-------------|------|---------|
@@ -24,31 +24,29 @@ When a new dataset is created, `ftm-lakehouse` calls `zfs create` to set up chil
 
 ## Mountpoint Ownership
 
-By default ZFS creates mountpoints owned by `root:root`. Set `LAKEHOUSE_ZFS_OWNER` to chown new mountpoints after creation:
+By default ZFS creates mountpoints owned by `root:root`. Set the `zfs-agent` package's `ZFS_OWNER` to chown new mountpoints after creation:
 
 ```bash
-export LAKEHOUSE_ZFS_OWNER=1000:1000
+export ZFS_OWNER=1000:1000
 ```
 
 When unset (the default), no `chown` is performed and mountpoints keep root ownership.
 
-- **Local mode**: `LAKEHOUSE_ZFS_OWNER` is read by `zfs_create()` directly. Set it wherever `ftm-lakehouse` or `ftm-lakehouse zfs init` runs.
-- **Socket mode**: Ownership is controlled by the agent (host-side), not the client. Pass `--owner` to the agent or set `LAKEHOUSE_ZFS_OWNER` where the agent runs. The client does not send ownership information.
+- **Local mode**: `ZFS_OWNER` is read on every create. Set it wherever `ftm-lakehouse` or `ftm-lakehouse zfs init` runs.
+- **Socket mode**: Ownership is controlled by the agent (host-side), not the client. Pass `--owner` to the `zfs-agent` command or set `ZFS_OWNER` where the agent runs. The client does not send ownership information.
 
 ## Socket Agent Mode
 
-In Docker or Swarm deployments the container typically doesn't have ZFS tools installed. Instead of adding ZFS to every container image, a host-side agent listens on a Unix socket and executes `zfs create` on behalf of the container.
-
-### Architecture
+In Docker or Swarm deployments the container typically doesn't have ZFS tools installed. Instead of adding ZFS to every container image, the host runs the standalone agent from the `zfs-agent` package, which listens on a Unix socket and executes `zfs create` on behalf of the container.
 
 ```mermaid
 flowchart LR
     subgraph container["Docker Container"]
-        app["ftm-lakehouse<br/>zfs_create()"]
+        app["ftm-lakehouse<br/>ensure_zfs_dataset()"]
     end
 
     subgraph host["Host"]
-        agent["ftm-lakehouse zfs agent"]
+        agent["zfs-agent"]
         zfs["zfs create ..."]
         agent --> zfs
     end
@@ -56,24 +54,13 @@ flowchart LR
     app -- "JSON over /run/zfs.sock" --> agent
 ```
 
-### Starting the Agent
-
-On the host:
+On the host (requires `pip install zfs-agent`):
 
 ```bash
-ftm-lakehouse zfs agent --socket /run/zfs.sock --pool zpools/tank/lakehouse --owner 1000:1000 --allowed-uid 1000
+zfs-agent --socket /run/zfs.sock --pool zpools/tank/lakehouse --owner 1000:1000 --allowed-uid 1000
 ```
 
-| Option | Description |
-|--------|-------------|
-| `--socket, -s` | Unix socket path to listen on (or set `LAKEHOUSE_ZFS_SOCKET`) |
-| `--pool, -p` | ZFS pool path (or set `LAKEHOUSE_ZFS_POOL`). Required -- the agent only creates datasets under this path. |
-| `--owner, -o` | `uid:gid` to chown new mountpoints to (or set `LAKEHOUSE_ZFS_OWNER`). Optional -- when unset, mountpoints keep root ownership. |
-| `--allowed-uid` | UID allowed to connect (checked via `SO_PEERCRED`; or set `LAKEHOUSE_ZFS_ALLOWED_UID`). Defaults to the agent's own UID, so only the user running the agent can call it. Set to the container/client UID when those run as a different user. |
-
-The socket is created with `0600` permissions and a `SO_PEERCRED`-based UID check, so an unprivileged process on the host cannot connect even if the filesystem ACL is loosened. Both layers must be authorised for a request to reach `zfs create`.
-
-### Configuring the Container
+The agent enforces a `SO_PEERCRED` UID check, `0600` socket permissions, prop allowlisting and pool restriction – see the [zfs-agent documentation](https://github.com/dataresearchcenter/zfs-agent) for the protocol, security gates and its `ZFS_*` environment variables.
 
 Mount the socket into the container and set the environment:
 
@@ -86,15 +73,13 @@ services:
       LAKEHOUSE_URI: /zpools/tank/lakehouse
       LAKEHOUSE_ON_ZFS: "1"
       LAKEHOUSE_ZFS_POOL: zpools/tank/lakehouse
-      LAKEHOUSE_ZFS_SOCKET: /run/zfs.sock
+      ZFS_SOCKET: /run/zfs.sock
     volumes:
       - /run/zfs.sock:/run/zfs.sock
       - /zpools/tank/lakehouse:/zpools/tank/lakehouse
 ```
 
-The container's `user:` UID must match the agent's `--allowed-uid` (or `LAKEHOUSE_ZFS_ALLOWED_UID`) – peer credentials cross the bind-mounted socket unchanged, so the host-side agent sees the container process's UID directly.
-
-When `LAKEHOUSE_ZFS_SOCKET` is set and `LAKEHOUSE_ON_ZFS` is enabled, `zfs_create()` sends requests over the socket instead of calling `zfs` via subprocess.
+The container's `user:` UID must match the agent's `--allowed-uid` – peer credentials cross the bind-mounted socket unchanged, so the host-side agent sees the container process's UID directly. When `ZFS_SOCKET` is set, creates go over the socket instead of a local `zfs` subprocess.
 
 ## Manual Initialization
 
@@ -106,43 +91,6 @@ ftm-lakehouse zfs init my_dataset --pool zpools/tank/lakehouse
 
 This creates the parent, archive, and statements ZFS datasets with tuned properties. The pool can also be set via `LAKEHOUSE_ZFS_POOL`.
 
-## Protocol
-
-The socket agent uses a JSON-lines protocol over Unix domain sockets. Each request and response is a single JSON object terminated by a newline.
-
-**Request:**
-
-```json
-{"action": "create", "dataset": "tank/lakehouse/my_dataset/archive", "props": {"recordsize": "128K", "compression": "zstd-9"}}
-```
-
-**Response (success):**
-
-```json
-{"ok": true}
-```
-
-**Response (error):**
-
-```json
-{"ok": false, "error": "zfs create failed: permission denied"}
-```
-
-`exist_ok` is implicit -- creating an already-existing dataset returns `{"ok": true}`.
-
-## Security
-
-The agent enforces two independent gates on every connection / request:
-
-- **Peer credential check** -- the kernel-reported UID of the connecting process (`SO_PEERCRED`) must equal `--allowed-uid` (default: the agent's own UID). Mismatched peers get an `"unauthorized peer uid"` reply and the request is dropped before any validation runs.
-- **Socket permissions** -- the socket file is created with mode `0600` so the kernel-level check is paired with a filesystem-level one.
-
-The request payload is then validated:
-
-- **Leaf dataset validation** -- the final path component (the FTM dataset name) is checked using `followthemoney.dataset.util.dataset_name_check` (lowercase alphanumeric and underscores only). Parent path components allow standard ZFS naming (alphanumeric, hyphens, dots, underscores).
-- **Path traversal prevention** -- `..` sequences are rejected.
-- **Pool restriction** -- the agent rejects any dataset path that doesn't start with the configured pool path.
-
 ## Environment Variables
 
-See the `LAKEHOUSE_ZFS_*` rows in the [configuration reference](configuration.md) – all ZFS settings live there.
+Lakehouse-side: `LAKEHOUSE_ON_ZFS` and `LAKEHOUSE_ZFS_POOL` – see the [configuration reference](configuration.md). Transport-side (`ZFS_SOCKET`, `ZFS_OWNER`, `ZFS_POOL`, `ZFS_ALLOWED_UID`, `ZFS_EXTRA_PROPS`): the [zfs-agent](https://github.com/dataresearchcenter/zfs-agent) package.

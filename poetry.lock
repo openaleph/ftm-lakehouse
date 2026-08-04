@@ -1912,7 +1912,7 @@ pyarrow = {version = ">=24.0.0,<25.0.0", optional = true}
 pydantic = ">=2.13.3,<3.0.0"
 pyrql = ">=0.7.11,<1.0.0"
 rigour = ">=2.2.3,<3.0.0"
-typer = ">=0.26.8,<0.27.0"
+typer = ">=0.26.8,<1"
 
 [package.extras]
 aleph = ["alephclient (>=2.6.0,<3.0.0)", "furl (>=2.1.4,<3.0.0)"]
@@ -1928,7 +1928,7 @@ sql = ["sqlalchemy (>=2.0.51,<3.0.0)"]
 type = "git"
 url = "https://github.com/dataresearchcenter/ftmq.git"
 reference = "refactor/ql"
-resolved_reference = "048b6ec5c1cd777e609c21a1ab87544548730d1c"
+resolved_reference = "905b6d0c18739ca77202efd7b2471bae1136fafc"
 
 [[package]]
 name = "gcsfs"
@@ -6863,14 +6863,14 @@ test = ["argcomplete (>=3.0.3) ; python_version < \"3.12\"", "argcomplete (>=3.5
 
 [[package]]
 name = "typer"
-version = "0.26.8"
+version = "0.27.1"
 description = "Typer, build great CLIs. Easy to code. Based on Python type hints."
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "typer-0.26.8-py3-none-any.whl", hash = "sha256:3512ca79ac5c11113414b36e80281b872884477722440691c89d1112e321a49c"},
-    {file = "typer-0.26.8.tar.gz", hash = "sha256:c244a6bd558886fe3f8780efb6bdd28bb9aff005a94eedebaa5cb32926fe2f7e"},
+    {file = "typer-0.27.1-py3-none-any.whl", hash = "sha256:53150287edd11baeb4e4722c8e394fcdf8181c0ae89485cba8d25c778d5edd56"},
+    {file = "typer-0.27.1.tar.gz", hash = "sha256:a79bef8469a79c45498e7b814ecf8d603cc7644e9acbd9e19cac0334240b18df"},
 ]
 
 [package.dependencies]
@@ -7560,6 +7560,18 @@ pymdown-extensions = ">=10.21.3"
 pyyaml = ">=6.0.2"
 tomli = ">=2.4.0"
 
+[[package]]
+name = "zfs-agent"
+version = "0.0.1"
+description = "ZFS management for unprivileged user via socket"
+optional = false
+python-versions = "<3.15,>=3.10"
+groups = ["main"]
+files = [
+    {file = "zfs_agent-0.0.1-py3-none-any.whl", hash = "sha256:195fa645250dda296461ba014db0bd83e20faa59382ad318ce350e20ebdc98f8"},
+    {file = "zfs_agent-0.0.1.tar.gz", hash = "sha256:b68e3ece30d8bc41d894706b2d564accfb5b94be21c016accc9d1fc1bd977d71"},
+]
+
 [extras]
 api = ["aiohttp", "fastapi", "granian", "putfs", "uvloop"]
 azure = ["adlfs"]
@@ -7570,4 +7582,4 @@ s3 = ["s3fs"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<3.15"
-content-hash = "640240a09534f4fa697e322c29f43b3d1dfb49acdc4c27b5a2b61bbb4e7babbd"
+content-hash = "cbfb5aa1ef2f01243a729df48505329c32b1409d4329346f61b6902e6e2cb8a1"

@@ -27,6 +27,7 @@ dependencies = [
     "anystore (>=1.2.5,<2.0.0)",
     "httpx (>=0.28.1,<0.29.0)",
     "backports.zstd ; python_version<'3.14'",
+    "zfs-agent (>=0.0.1,<0.0.2)",
 ]
 
 [project.optional-dependencies]
