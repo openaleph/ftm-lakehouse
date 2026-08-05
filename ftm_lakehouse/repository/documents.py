@@ -11,7 +11,7 @@ from anystore.logic.io import stream
 from anystore.types import Uri
 from anystore.util import join_uri
 from followthemoney import model
-from ftmq.query import M, Query
+from ftmq.query import M, P, Query
 
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.logic.parquet import QUERY_IN_BATCH_SIZE
@@ -91,7 +91,7 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
         entity_ids: Iterable[str] | None = None,
     ) -> Documents:
         paths = self.make_paths()
-        nodes = [M(schemata="Document")]
+        nodes = [M(schemata="Document"), P(contentHash__null=False)]
         if entity_ids:
             nodes.append(M(entity_id__in=list(entity_ids)))
         q = self._statements.compile_query(Query().where(*nodes))
