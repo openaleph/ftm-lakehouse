@@ -10,7 +10,7 @@ from anystore.logic.io import stream
 from anystore.store import get_store
 from anystore.store.resource import UriResource
 from anystore.types import BytesGenerator, Uri
-from anystore.util import join_relpaths
+from anystore.util import dict_merge, join_relpaths
 from banal import clean_dict
 
 from ftm_lakehouse.core.conventions import path, tag
@@ -159,9 +159,13 @@ class ArchiveRepository(BaseRepository):
 
         file.checksum = checksum
 
+        # patch File from given file props
+        file_props: dict[str, Any] = {}
         for key in list(metadata.keys()):
             if key in file.__class__.model_fields:
-                setattr(file, key, metadata.pop(key))
+                file_props[key] = metadata.pop(key)
+        file = File(**dict_merge(file.model_dump(), file_props))
+        # add remaining metadata
         file.extra = clean_dict(metadata)
         file.dataset = self.dataset
         file.origin = file.origin or ARCHIVE_ORIGIN
