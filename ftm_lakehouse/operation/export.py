@@ -63,7 +63,6 @@ class ExportJob(DatasetJobModel):
 def _export_statements(
     op: "ExportOperation", run: JobRun[ExportJob], **kwargs: Any
 ) -> None:
-    op.entities._store.ensure_parent(path.EXPORTS_STATEMENTS)
     op.entities._statements.export_csv(op.entities.EXPORTS_STATEMENTS)
 
 
