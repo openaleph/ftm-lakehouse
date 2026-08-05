@@ -146,7 +146,7 @@ class Catalog:
     @cached_property
     def _store(self) -> Store:
         """Raw storage access."""
-        return get_store(uri=self.uri, serialization_mode="raw")
+        return get_store(uri=ensure_api_uri(self.uri), serialization_mode="raw")
 
     def dataset_uri(self, name: str) -> str:
         """Validated canonical uri for ``name`` under this catalog's root.
