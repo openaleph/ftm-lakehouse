@@ -62,9 +62,9 @@ def cli_make(
     with DatasetContext() as (name, uri):
         if config:
             model = get_model_class()
-            dataset_config = model.from_yaml_uri(config).model_dump()
-            dataset_config.pop("name", None)
-            dataset_config.pop("uri", None)
+            dataset_config = model.from_yaml_uri(config).model_dump(
+                exclude={"name", "uri"}
+            )
             update_dataset(name, uri, **dataset_config)
         if full:
             if optimize:
