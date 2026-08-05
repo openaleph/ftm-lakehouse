@@ -34,5 +34,3 @@ COPY ftm_lakehouse /src/ftm_lakehouse
 COPY setup.py pyproject.toml README.md VERSION LICENSE NOTICE /src/
 
 RUN pip install --no-cache-dir --no-deps -q ".[api]"
-
-ENTRYPOINT [""]
