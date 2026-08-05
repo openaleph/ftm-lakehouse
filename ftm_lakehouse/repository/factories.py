@@ -26,6 +26,7 @@ from ftm_lakehouse.repository.base import dataset_uri
 from ftm_lakehouse.repository.documents import DocumentRepository
 from ftm_lakehouse.repository.entities import EntityRepository
 from ftm_lakehouse.repository.job import J, JobRepository
+from ftm_lakehouse.storage.tags import TagStore
 from ftm_lakehouse.storage.versions import VersionStore
 
 __all__ = [
@@ -136,6 +137,27 @@ def get_versions(dataset: str, uri: Uri | None = None) -> VersionStore:
 @lru_cache(maxsize=LRU_MAX)
 def _get_versions(dataset: str, uri: str) -> VersionStore:
     return VersionStore(ensure_api_uri(uri))
+
+
+def get_tags(
+    dataset: str, uri: Uri | None = None, tenant: str | None = None
+) -> TagStore:
+    """
+    Get the version store for a dataset.
+
+    Args:
+        dataset: Dataset name
+        uri: Dataset URI override (default: {LAKEHOUSE_URI}/{dataset})
+
+    Returns:
+        TagStore instance (cached)
+    """
+    return _get_tags(dataset, dataset_uri(dataset, uri), tenant)
+
+
+@lru_cache(maxsize=LRU_MAX)
+def _get_tags(dataset: str, uri: str, tenant: str | None = None) -> TagStore:
+    return TagStore(ensure_api_uri(uri), tenant)
 
 
 def clear_caches() -> None:
