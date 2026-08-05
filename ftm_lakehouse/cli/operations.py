@@ -19,7 +19,7 @@ import typer
 from ftm_lakehouse import operation as op
 from ftm_lakehouse.catalog import get_dataset_index, update_dataset
 from ftm_lakehouse.cli import DatasetContext, cli, console, settings, write_obj
-from ftm_lakehouse.model.dataset import DatasetModel
+from ftm_lakehouse.model.dataset import get_model_class
 from ftm_lakehouse.operation.crawl import HandleExistingMode
 from ftm_lakehouse.operation.export import ExportKind
 from ftm_lakehouse.repository.factories import get_entities
@@ -61,8 +61,11 @@ def cli_make(
     """
     with DatasetContext() as (name, uri):
         if config:
-            dataset_config = DatasetModel.from_yaml_uri(config)
-            update_dataset(name, uri, **dataset_config.model_dump())
+            model = get_model_class()
+            dataset_config = model.from_yaml_uri(config).model_dump()
+            dataset_config.pop("name", None)
+            dataset_config.pop("uri", None)
+            update_dataset(name, uri, **dataset_config)
         if full:
             if optimize:
                 op.optimize(name, uri)
