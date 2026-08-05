@@ -44,6 +44,7 @@ class Settings(BaseSettings):
 
     duckdb_memory_limit: str = "8GB"
     duckdb_temp_directory: str | None = None
+    duckdb_extension_directory: str | None = None
 
     public_url_prefix: str | None = None
 

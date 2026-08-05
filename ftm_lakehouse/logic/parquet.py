@@ -31,13 +31,18 @@ def duckdb_config() -> dict[str, str]:
     (env: ``LAKEHOUSE_DUCKDB_MEMORY_LIMIT``, default ``8GB``); queries
     exceeding the limit spill to :attr:`Settings.duckdb_temp_directory`
     (env: ``LAKEHOUSE_DUCKDB_TEMP_DIRECTORY``) when set, otherwise to
-    the OS temp directory DuckDB picks by default. Passed to
+    the OS temp directory DuckDB picks by default. Extensions (notably
+    ``delta``) are loaded from :attr:`Settings.duckdb_extension_directory`
+    (env: ``LAKEHOUSE_DUCKDB_EXTENSION_DIRECTORY``) when set, otherwise
+    from ``$HOME/.duckdb/extensions``. Passed to
     :class:`~ftmq.store.lake.LakeStore` via the ``duckdb_config`` kwarg.
     """
     settings = Settings()
     config: dict[str, str] = {"memory_limit": settings.duckdb_memory_limit}
     if settings.duckdb_temp_directory:
         config["temp_directory"] = settings.duckdb_temp_directory
+    if settings.duckdb_extension_directory:
+        config["extension_directory"] = settings.duckdb_extension_directory
     return config
 
 
