@@ -292,13 +292,15 @@ trio = ["trio (>=0.32.0)"]
 
 [[package]]
 name = "anystore"
-version = "1.2.5"
+version = "1.2.6"
 description = "Store and cache things anywhere"
 optional = false
-python-versions = ">=3.11,<4"
+python-versions = "<4,>=3.11"
 groups = ["main"]
-files = []
-develop = false
+files = [
+    {file = "anystore-1.2.6-py3-none-any.whl", hash = "sha256:5ea722217fbaab916deec6d7fb0f40d3aca5f785e997a6c94d3b14be112f34ac"},
+    {file = "anystore-1.2.6.tar.gz", hash = "sha256:1683f469aef600f21e9689f21b1d669f421c62e32e19425b5931044b8326bf2f"},
+]
 
 [package.dependencies]
 banal = ">=1.1.2,<2.0.0"
@@ -323,12 +325,6 @@ http = ["fsspec[http] (>2023.10,<2027)"]
 redis = ["fakeredis (>=2.37.0,<3.0.0)", "redis (>=8.1.0)"]
 s3 = ["s3fs (>2023.10,<2027)"]
 sql = ["sqlalchemy (>=2.0.51,<3.0.0)"]
-
-[package.source]
-type = "git"
-url = "https://github.com/dataresearchcenter/anystore.git"
-reference = "HEAD"
-resolved_reference = "4c341bcca141c3be8d565063c607131b397b163d"
 
 [[package]]
 name = "arro3-core"
@@ -1882,7 +1878,7 @@ files = []
 develop = false
 
 [package.dependencies]
-anystore = {git = "https://github.com/dataresearchcenter/anystore.git"}
+anystore = ">=1.2.6,<2.0.0"
 deltalake = {version = ">=1.6.2,<2.0.0", optional = true}
 duckdb = {version = ">=1.5.5,<2.0.0", optional = true}
 followthemoney = ">=4.10.0,<5.0.0"
@@ -1910,7 +1906,7 @@ sql = ["sqlalchemy (>=2.0.51,<3.0.0)"]
 type = "git"
 url = "https://github.com/dataresearchcenter/ftmq.git"
 reference = "refactor/ql"
-resolved_reference = "a66449ba49489f68bf9794cb31a41d85c08293d2"
+resolved_reference = "b92a5775335e181ad0597a221538b3de964fc894"
 
 [[package]]
 name = "gcsfs"
@@ -7552,4 +7548,4 @@ s3 = ["s3fs"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<3.15"
-content-hash = "d7e2b60cae1c40abe57d98de7d1eeeeff2dbd47e8408897672ae74a888cd42a0"
+content-hash = "0ba5196d7a83627eb00c352d7c8d7d70c45e1f9994fd1045c28dc49b8232189a"

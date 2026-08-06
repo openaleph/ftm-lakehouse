@@ -24,7 +24,7 @@ dependencies = [
     "ftmq[lake] @ git+https://github.com/dataresearchcenter/ftmq.git@refactor/ql",
     "jinja2 (>=3.1.5,<4.0.0)",
     "followthemoney (>=4.10.1,<5.0.0)",
-    "anystore @ git+https://github.com/dataresearchcenter/anystore.git",
+    "anystore (>=1.2.6,<2.0.0)",
     "httpx (>=0.28.1,<0.29.0)",
     "backports.zstd ; python_version<'3.14'",
     "zfs-agent (>=0.0.1,<0.0.2)",
