@@ -24,23 +24,24 @@ The fastest way to a working dataset – point `LAKEHOUSE_URI` at a storage loca
 ```bash
 export LAKEHOUSE_URI=./data
 
-# Create (or update) a dataset
-ftm-lakehouse -d my_dataset make
+# Create the dataset – nothing to export yet
+ftm-lakehouse -d my_dataset make --no-exports
 
 # Crawl source documents into the archive
-ftm-lakehouse -d my_dataset operations crawl /path/to/documents
+ftm-lakehouse -d my_dataset crawl /path/to/documents
 
 # Bulk-import FtM entities (bypasses the journal, writes directly to parquet)
 cat entities.ftm.json | ftm-lakehouse -d my_dataset entities import
 
-# Build all exports: statements.csv, entities.ftm.json, statistics, index
-ftm-lakehouse -d my_dataset make --full
+# Update the dataset: flush the journal, optimize the store and build all
+# exports (statements.csv, entities.ftm.json, statistics, index) – all on by default
+ftm-lakehouse -d my_dataset make
 
 # Stream entities back out
 ftm-lakehouse -d my_dataset entities stream
 
 # Maintenance – reads assume an optimized store, run after write batches
-ftm-lakehouse -d my_dataset operations optimize
+ftm-lakehouse -d my_dataset maintenance optimize
 ```
 
 Every group and flag: [CLI Reference](usage/cli.md).

@@ -10,9 +10,9 @@
 |----------|-------------|---------|
 | `LAKEHOUSE_URI` | Base path to lakehouse storage | `./data` |
 | `LAKEHOUSE_JOURNAL_URI` | SQLAlchemy URI for statement journal | `sqlite:///:memory:` |
-| `LAKEHOUSE_GRACE_PERIOD_DAYS` | Default tombstone grace period used by `operations optimize` (rows with `deleted_at` older than this are physically dropped in the merge step) | `30` |
+| `LAKEHOUSE_GRACE_PERIOD_DAYS` | Default tombstone grace period used by `maintenance optimize` (rows with `deleted_at` older than this are physically dropped in the merge step) | `30` |
 | `LAKEHOUSE_MAX_BUFFER_ROWS` | Hard cap on rows held in an in-memory `EntityBuffer` before a flush is required. Bulk-import paths that hit the cap raise `BufferFullError` and the caller flushes + retries. | `1_000_000` |
-| `LAKEHOUSE_LOCK_MAX_RETRIES` | Retry bound for every wait on the dataset write fence: acquiring the exclusive maintenance lock (`.LOCK`), an append backing off while `.LOCK` is held, and maintenance draining in-flight append markers (`.LOCK-APPENDS/`). Retry `n` sleeps `n` + jitter seconds, so the total wait is roughly `N²/2` seconds; the default gives up after ~4.5 minutes with a `RuntimeError` instead of waiting forever. Stale locks or markers from crashed writers need a manual `ftm-lakehouse operations unlock`. | `22` |
+| `LAKEHOUSE_LOCK_MAX_RETRIES` | Retry bound for every wait on the dataset write fence: acquiring the exclusive maintenance lock (`.LOCK`), an append backing off while `.LOCK` is held, and maintenance draining in-flight append markers (`.LOCK-APPENDS/`). Retry `n` sleeps `n` + jitter seconds, so the total wait is roughly `N²/2` seconds; the default gives up after ~4.5 minutes with a `RuntimeError` instead of waiting forever. Stale locks or markers from crashed writers need a manual `ftm-lakehouse maintenance unlock`. | `22` |
 | `LAKEHOUSE_DUCKDB_MEMORY_LIMIT` | Per-DuckDB-connection RAM ceiling. Queries exceeding it spill to disk rather than growing toward all available RAM. Format follows DuckDB's `SET memory_limit` (e.g. `8GB`, `512MB`). | `8GB` |
 | `LAKEHOUSE_DUCKDB_TEMP_DIRECTORY` | Spill-to-disk path for queries that overflow `LAKEHOUSE_DUCKDB_MEMORY_LIMIT`. Unset = DuckDB picks the OS temp dir. Point at a fast, capacity-controlled volume for heavy workloads. | (unset) |
 | `LAKEHOUSE_DUCKDB_EXTENSION_DIRECTORY` | Directory DuckDB loads its extensions from (and auto-installs into when one is missing). Unset = `$HOME/.duckdb/extensions`, which fails in containers running without a writable `HOME` (`Failed to create directory "/.duckdb"`). The shipped Docker image pre-installs the `delta` extension at build time and sets this to `/opt/duckdb/extensions`, so runtime needs neither a writable `HOME` nor network access. | (unset) |
@@ -58,6 +58,8 @@ publisher:
   name: Data and Research Center – DARC
   url: https://dataresearchcenter.org
 ```
+
+Write it with `ftm-lakehouse -d my_dataset configure -c config.yml` (or `update_dataset()` from Python). Both merge – keys absent from the yaml keep their current value – and keep a versioned snapshot of each write.
 
 ## Storage Backends
 

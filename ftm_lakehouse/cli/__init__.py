@@ -16,9 +16,15 @@ from pydantic import BaseModel
 from rich.console import Console
 
 from ftm_lakehouse import __version__
-from ftm_lakehouse.catalog import Catalog, ensure_dataset, get_dataset_model
+from ftm_lakehouse.catalog import (
+    Catalog,
+    ensure_dataset,
+    get_dataset_model,
+    update_dataset,
+)
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.lake import get_lakehouse
+from ftm_lakehouse.model.dataset import DatasetModel, get_model_class
 from ftm_lakehouse.repository.base import dataset_uri as repo_dataset_uri
 
 settings = Settings()
@@ -37,6 +43,30 @@ class State(TypedDict):
 
 
 STATE: State = {"catalog": None, "dataset": None, "dataset_uri": None}
+
+
+def write_config(name: str, uri: str, config: str) -> DatasetModel:
+    """Merge a configuration yaml into the dataset's ``config.yml``.
+
+    Only keys actually present in the yaml are written, so this is a real
+    merge – omitting ``shards`` leaves the configured shard count alone
+    instead of resetting it to the default. The dataset is addressed via
+    ``-d``, so ``name`` and ``uri`` from the yaml are ignored – the name is
+    injected merely to satisfy validation.
+
+    Args:
+        name: Dataset name.
+        uri: Dataset storage root.
+        config: Uri of the configuration yaml to read.
+
+    Returns:
+        The updated dataset model.
+    """
+    model = get_model_class()
+    data = model.from_yaml_uri(config, name=name).model_dump(
+        exclude={"name", "uri"}, exclude_unset=True
+    )
+    return update_dataset(name, uri, **data)
 
 
 def write_obj(obj: BaseModel | None, out: str) -> None:
@@ -156,11 +186,28 @@ def cli_datasets(
         smart_write_models(out_uri, datasets)
 
 
+@cli.command("configure")
+def cli_configure(
+    config: Annotated[
+        str, typer.Option("-c", help="Configuration yml to store as `config.yml`")
+    ],
+) -> None:
+    """Update the dataset configuration from a yaml file.
+
+    Merges into the existing ``config.yml`` and keeps a versioned snapshot.
+    Layout-affecting settings (``shards``) only take effect on a dataset that
+    has not been written to yet.
+    """
+    with DatasetContext() as (name, uri):
+        console.print(write_config(name, uri, config))
+
+
 # Import submodules so their sub-typers and commands get registered on `cli`.
 from ftm_lakehouse.cli import (  # noqa: E402, F401
     archive,
+    crawl,
     entities,
-    operations,
+    maintenance,
     statements,
     zfs,
 )

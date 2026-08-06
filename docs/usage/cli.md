@@ -11,10 +11,10 @@ ftm-lakehouse [OPTIONS] <group> <command> [ARGS]
 | `archive` | Content-addressed file storage |
 | `entities` | Read and write FtM entities |
 | `statements` | Read and write raw FtM statements |
-| `operations` | Dataset pipeline operations (export, optimize, unlock, crawl) |
+| `maintenance` | Storage maintenance (optimize, unlock) |
 | `zfs` | ZFS dataset management |
 
-Top-level (no group): `ls` (dataset names), `datasets` (metadata), `make` (build/update a dataset – frequent shortcut, kept top-level).
+Top-level (no group), as frequently-used shortcuts: `ls` (dataset names), `datasets` (metadata), `configure` (write dataset configuration), `make` (build/update a dataset), `export` (produce a single export kind), `crawl` (ingest documents into the archive).
 
 Environment variables configure storage locations and behavior – see the [configuration reference](../deployment/configuration.md).
 
@@ -23,11 +23,14 @@ Environment variables configure storage locations and behavior – see the [conf
 ```bash
 export LAKEHOUSE_URI=./data
 
-# Initialise the dataset
-ftm-lakehouse -d my_dataset make
+# Initialise the dataset – no data yet, so skip the exports pipeline
+ftm-lakehouse -d my_dataset make --no-exports
+
+# Record its configuration (title, summary, shards, compression, ...)
+ftm-lakehouse -d my_dataset configure -c config.yml
 
 # Crawl some files
-ftm-lakehouse -d my_dataset operations crawl /path/to/documents
+ftm-lakehouse -d my_dataset crawl /path/to/documents
 
 # Bulk-load a pre-built entities.ftm.json (skips the journal)
 cat entities.ftm.json | ftm-lakehouse -d my_dataset entities import
@@ -36,15 +39,37 @@ cat entities.ftm.json | ftm-lakehouse -d my_dataset entities import
 # namespace stripping as the safe path, no FtM object construction):
 cat entities.ftm.json | ftm-lakehouse -d my_dataset entities import --unsafe
 
-# Build all exports
-ftm-lakehouse -d my_dataset make --full
+# Flush the journal, optimize the store and build all exports – the default
+ftm-lakehouse -d my_dataset make
+
+# A single export kind on its own
+ftm-lakehouse -d my_dataset export statistics
 
 # Maintenance – async, run on a schedule in production. Merges duplicates per
 # (shard, bucket, origin) partition, drops tombstones older than
 # LAKEHOUSE_GRACE_PERIOD_DAYS, bin-packs small files, removes obsolete ones –
 # always in one pass, held under the dataset write fence.
-ftm-lakehouse -d my_dataset operations optimize
+ftm-lakehouse -d my_dataset maintenance optimize
 ```
+
+### `configure`
+
+`ftm-lakehouse -d <dataset> configure -c <config.yml>` writes dataset configuration and nothing else – no flush, no exports. The yaml follows the [dataset configuration](../deployment/configuration.md#dataset-configuration) schema; only the keys it actually contains are written, so a partial file leaves everything else (notably `shards`) untouched. `name` and `uri` are taken from `-d` / the catalog and ignored if present in the file. Each write keeps a versioned snapshot.
+
+Layout-affecting settings (`shards`) only take effect on a dataset that has not been written to yet – see [Sharding](../architecture.md#sharding-why-and-how-many-shards).
+
+### `make`
+
+`make` is the whole pipeline in one command; every stage is on by default and can be switched off:
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `-c <config.yml>` | – | Same merge-write as `configure`, before anything else |
+| `--flush` / `--no-flush` | on | Flush outstanding journal statements into the parquet store |
+| `--exports` / `--no-exports` | on | Build statements/entities/documents/statistics exports and diffs. With `--no-exports` only `index.json` is refreshed |
+| `--optimize` / `--no-optimize` | on | Run the [optimize](entities.md#maintenance) pass before exporting (only applies with `--exports`) |
+| `--force-optimize` | off | Optimize even when the store is already up-to-date |
+| `--force-exports` | off | Re-compute the exports pipeline even when the tags say it is fresh |
 
 ## Commands
 

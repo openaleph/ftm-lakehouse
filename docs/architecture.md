@@ -305,12 +305,13 @@ ftm_lakehouse/
 │   └── routes/              # entities.py, journal.py, operations.py
 │
 ├── cli/                     # Typer CLI (sub-typer groups)
-│   ├── __init__.py          # Main app, contexts, ls / datasets
+│   ├── __init__.py          # Main app, contexts, ls / datasets / configure
 │   ├── io.py                # Shared bulk-import loop
 │   ├── entities.py          # entities iterate / stream / import
 │   ├── statements.py        # statements iterate / stream / import / sql
 │   ├── archive.py           # archive get / ls / download
-│   ├── operations.py        # make, operations export / optimize / unlock / crawl
+│   ├── maintenance.py       # make, export, maintenance optimize / unlock
+│   ├── crawl.py             # crawl (top level)
 │   └── zfs.py               # zfs init (agent lives in the zfs-agent package)
 │
 └── core/                    # Cross-cutting concerns

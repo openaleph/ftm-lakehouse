@@ -1,15 +1,14 @@
-"""Dataset operation commands for the CLI.
+"""Dataset maintenance commands for the CLI.
 
-``make`` stays at the top level as a frequently-used shortcut:
+``make`` and ``export`` stay at the top level as frequently-used shortcuts:
 
-    ftm-lakehouse make --full
+    ftm-lakehouse -d <dataset> make
+    ftm-lakehouse -d <dataset> export <kind>
 
-Everything else groups under ``operations``:
+Everything else groups under ``maintenance``:
 
-    ftm-lakehouse operations export <kind>
-    ftm-lakehouse operations optimize
-    ftm-lakehouse operations unlock
-    ftm-lakehouse operations crawl <uri>
+    ftm-lakehouse maintenance optimize
+    ftm-lakehouse maintenance unlock
 """
 
 from typing import Annotated, Optional
@@ -17,15 +16,13 @@ from typing import Annotated, Optional
 import typer
 
 from ftm_lakehouse import operation as op
-from ftm_lakehouse.catalog import get_dataset_index, update_dataset
-from ftm_lakehouse.cli import DatasetContext, cli, console, settings, write_obj
-from ftm_lakehouse.model.dataset import get_model_class
-from ftm_lakehouse.operation.crawl import HandleExistingMode
+from ftm_lakehouse.catalog import get_dataset_index
+from ftm_lakehouse.cli import DatasetContext, cli, console, settings, write_config
 from ftm_lakehouse.operation.export import ExportKind
 from ftm_lakehouse.repository.factories import get_entities
 
-operations = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=settings.debug)
-cli.add_typer(operations, name="operations", help="Dataset pipeline operations")
+maintenance = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=settings.debug)
+cli.add_typer(maintenance, name="maintenance", help="Dataset maintenance operations")
 
 
 # ---------------------------------------------------------------------------
@@ -39,49 +36,55 @@ def cli_make(
         Optional[str],
         typer.Option("-c", help="Configuration yml to store as `config.yml`"),
     ] = None,
-    full: Annotated[
+    flush: Annotated[
+        Optional[bool],
+        typer.Option(help="Flush outstanding journal statements to store"),
+    ] = True,
+    exports: Annotated[
         Optional[bool],
         typer.Option(
-            help="Run full update: flush journal, export statements/entities, compute stats"
+            help="Include export statements/entities and diffs, compute stats"
         ),
-    ] = False,
+    ] = True,
     optimize: Annotated[
         Optional[bool],
-        typer.Option(help="Optimize parquet store beforehand when using --full"),
+        typer.Option(help="Optimize parquet store beforehand when using --exports"),
     ] = True,
-    force: Annotated[
+    force_optimize: Annotated[
+        Optional[bool],
+        typer.Option(help="Re-optimize even if up-to-date."),
+    ] = False,
+    force_exports: Annotated[
         Optional[bool],
         typer.Option(help="Re-compute full exports pipeline even if up-to-date."),
     ] = False,
 ):
     """Make or update a dataset.
 
-    Use ``--full`` for a complete update including flushing the journal and
-    generating all exports.
+    By default this flushes the journal, optimizes the parquet store and
+    regenerates all exports. Use ``--no-exports`` to only flush and refresh
+    ``index.json``, or ``--no-optimize`` to export without the maintenance pass.
     """
     with DatasetContext() as (name, uri):
         if config:
-            model = get_model_class()
-            dataset_config = model.from_yaml_uri(config).model_dump(
-                exclude={"name", "uri"}
-            )
-            update_dataset(name, uri, **dataset_config)
-        if full:
-            if optimize:
-                op.optimize(name, uri)
-            op.make(name, uri, force=bool(force))
-        else:
+            write_config(name, uri, config)
+        if flush:
             get_entities(name, uri).flush()
-            op.export(name, ExportKind.index, uri, force=bool(force))
+        if exports:
+            if optimize:
+                op.optimize(name, uri, force=bool(force_optimize))
+            op.make(name, uri, force=bool(force_exports))
+        else:
+            op.export(name, ExportKind.index, uri, force=bool(force_exports))
         console.print(get_dataset_index(name, uri))
 
 
 # ---------------------------------------------------------------------------
-# Exports
+# Exports (top level cli)
 # ---------------------------------------------------------------------------
 
 
-@operations.command("export")
+@cli.command("export")
 def cli_export(
     kind: Annotated[ExportKind, typer.Argument(help="Which export to produce.")],
     force: Annotated[
@@ -101,7 +104,7 @@ def cli_export(
 # ---------------------------------------------------------------------------
 
 
-@operations.command("optimize")
+@maintenance.command("optimize")
 def cli_optimize(
     retention_hours: Annotated[
         Optional[int],
@@ -124,7 +127,7 @@ def cli_optimize(
         console.print(res)
 
 
-@operations.command("unlock")
+@maintenance.command("unlock")
 def cli_unlock():
     """Forcibly release the dataset write fence.
 
@@ -140,41 +143,3 @@ def cli_unlock():
             console.print("[green]Lock released.[/green]")
         else:
             console.print("[yellow]No lock held.[/yellow]")
-
-
-# ---------------------------------------------------------------------------
-# Crawl
-# ---------------------------------------------------------------------------
-
-
-@operations.command("crawl")
-def cli_crawl(
-    uri: str,
-    out_uri: Annotated[
-        str, typer.Option("-o", help="Write results to this destination")
-    ] = "-",
-    exclude: Annotated[
-        Optional[str], typer.Option(help="Exclude paths glob pattern")
-    ] = None,
-    include: Annotated[
-        Optional[str], typer.Option(help="Include paths glob pattern")
-    ] = None,
-    make_entities: Annotated[
-        Optional[bool], typer.Option(help="Create entities from crawled files")
-    ] = True,
-    existing: Annotated[
-        Optional[HandleExistingMode], typer.Option(help="How to handle existing files")
-    ] = HandleExistingMode.overwrite,
-):
-    """Crawl documents from local or remote sources into the archive."""
-    with DatasetContext() as (name, dataset_uri):
-        result = op.crawl(
-            name,
-            uri,
-            glob=include,
-            exclude_glob=exclude,
-            make_entities=make_entities,
-            existing=existing,
-            uri=dataset_uri,
-        )
-        write_obj(result, out_uri)
