@@ -114,7 +114,9 @@ class File(Stats):
         if extra_fields:
             data = {k: v for k, v in data.items() if k in known_fields}
             data["extra"] = {**extra, **extra_fields}
-        data["id"] = data.get("id") or cls.make_id(data)
+        # an explicitly given id may arrive as a non-string (e.g. a numeric
+        # source id from a crawler payload) – pydantic won't coerce that
+        data["id"] = str(data["id"]) if data.get("id") else cls.make_id(data)
         return data
 
     def to_entity(self) -> StatementEntity:
