@@ -110,17 +110,25 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
                 if self._journal.count() >= 1_000_000:
                     self.flush()
 
-    def add(self, entity: EntityProxy, origin: str | None = None) -> None:
+    def add(
+        self,
+        entity: EntityProxy,
+        origin: str | None = None,
+        fragment: str | None = None,
+    ) -> None:
         """Add a single entity to the journal."""
-        self.add_many([entity], origin)
+        self.add_many([entity], origin, fragment)
 
     def add_many(
-        self, entities: Iterable[EntityProxy], origin: str | None = None
+        self,
+        entities: Iterable[EntityProxy],
+        origin: str | None = None,
+        fragment: str | None = None,
     ) -> None:
         """Add an entity iterator to the journal."""
         with self.writer(origin) as writer:
             for entity in entities:
-                writer.add_entity(entity)
+                writer.add_entity(entity, fragment)
 
     @api_delegate("_api_flush")
     def flush(self) -> int:
