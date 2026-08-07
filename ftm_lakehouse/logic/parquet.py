@@ -13,15 +13,34 @@ All dedupe / fragment-supersession / grace logic lives in one place –
 for the two-branch fragment semantics.
 """
 
+import math
 from datetime import datetime
 
 from deltalake import DeltaTable
 
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.model.statement import TABLE_RAW
-from ftm_lakehouse.util import validate_origin
+from ftm_lakehouse.util import parse_byte_size, validate_origin
 
 QUERY_IN_BATCH_SIZE = 5_000
+
+MERGE_SPILL_FACTOR = 32
+"""Estimated peak DuckDB footprint of the merge pipeline per compressed
+parquet byte – zstd/dictionary decompression blow-up (5–20x on statement
+data) times the concurrent sort materialisations of :func:`_dedupe_sql`
+(window groups + final ``ORDER BY``), padded for headroom. Used by
+:func:`merge_slice_count` to bound each merge slice to the configured
+DuckDB memory limit."""
+
+MERGE_SAMPLE_SIZE = 10_000
+"""Reservoir sample size for :func:`build_bounds_sample_sql`. Bounds the
+slice-boundary resolution – boundary quality only affects load balance
+across slices, never correctness, so a fixed sample is fine."""
+
+FALLBACK_MEMORY_LIMIT = "8GB"
+"""Slice budget when ``LAKEHOUSE_DUCKDB_MEMORY_LIMIT`` is not a parseable
+byte size (e.g. a DuckDB percentage limit) – mirrors the conservative
+:class:`~ftm_lakehouse.core.settings.Settings` default."""
 
 
 def duckdb_config() -> dict[str, str]:
@@ -44,6 +63,11 @@ def duckdb_config() -> dict[str, str]:
     if settings.duckdb_extension_directory:
         config["extension_directory"] = settings.duckdb_extension_directory
     return config
+
+
+def _string_literal(value: str) -> str:
+    """Escape ``value`` for interpolation as a single-quoted SQL literal."""
+    return value.replace("'", "''")
 
 
 def _delta_scan_clause(dt: DeltaTable) -> str:
@@ -236,6 +260,7 @@ def build_merge_sql(
     bucket: str,
     origin: str,
     grace_cutoff: datetime,
+    entity_id_range: tuple[str | None, str | None] = (None, None),
 ) -> str:
     """DuckDB SQL that collapses one partition for physical merge.
 
@@ -256,20 +281,127 @@ def build_merge_sql(
             single quotes are doubled here as defense in depth.
         grace_cutoff: Tombstones with ``deleted_at <= grace_cutoff`` are
             dropped. Typically ``now - LAKEHOUSE_GRACE_PERIOD_DAYS``.
+        entity_id_range: Optional half-open ``[lo, hi)`` bound on
+            ``entity_id`` (``None`` = unbounded on that side) scoping the
+            merge to one range slice (:func:`slice_ranges`). Every dedupe
+            group is a function of a single entity – the non-fragment key
+            ends in the statement ``id`` (owned by exactly one entity),
+            the fragment key contains ``entity_id`` itself – so an
+            ``entity_id`` predicate can never split a group.
 
     Returns:
         Executable DuckDB SQL.
     """
     origin = validate_origin(origin)
+    lo, hi = entity_id_range
+    where = f"WHERE shard = '{shard}' AND bucket = '{bucket}' AND origin = '{origin}'"
+    if lo is not None:
+        where += f" AND entity_id >= '{_string_literal(lo)}'"
+    if hi is not None:
+        where += f" AND entity_id < '{_string_literal(hi)}'"
     return _dedupe_sql(
         source=TABLE_RAW.name,
-        where=(
-            f"WHERE shard = '{shard}' AND bucket = '{bucket}' "
-            f"AND origin = '{origin}'"
-        ),
+        where=where,
         tombstone=(
             "(deleted_at IS NULL OR deleted_at > "
             f"TIMESTAMPTZ '{grace_cutoff.isoformat()}')"
         ),
         order_by="ORDER BY entity_id, fragment, prop, id, last_seen DESC",
     )
+
+
+def build_bounds_sample_sql(
+    shard: str, bucket: str, origin: str, size: int = MERGE_SAMPLE_SIZE
+) -> str:
+    """DuckDB SQL reservoir-sampling ``entity_id`` values from one partition.
+
+    Feeds :func:`slice_ranges` with boundary candidates for a range-sliced
+    merge. The partition filter sits in a subquery because DuckDB applies
+    a query-level ``USING SAMPLE`` *before* the ``WHERE`` clause – sampled
+    directly, most of the sample would come from other partitions.
+
+    The reservoir draw is random, so slice boundaries vary between runs –
+    that only shifts load balance across slices, never the merged output.
+
+    Args:
+        shard: Target shard value (hex-padded).
+        bucket: Target bucket.
+        origin: Target origin tag.
+        size: Number of rows to sample.
+
+    Returns:
+        Executable DuckDB SQL yielding one ``entity_id`` column.
+    """
+    origin = validate_origin(origin)
+    return (
+        f"SELECT entity_id FROM ("
+        f"SELECT entity_id FROM {TABLE_RAW.name} "
+        f"WHERE shard = '{shard}' AND bucket = '{bucket}' AND origin = '{origin}'"
+        f") USING SAMPLE reservoir({int(size)} ROWS)"
+    )
+
+
+def slice_ranges(sample: list[str], slices: int) -> list[tuple[str | None, str | None]]:
+    """Derive contiguous half-open ``entity_id`` ranges from a sample.
+
+    Sorts ``sample`` and picks boundaries at even ranks, so ranges carry
+    roughly equal row counts (entities with many statements are
+    proportionally represented in the sample – weighting by row count is
+    exactly what balances the sort windows). Ranges tile the full key
+    space: the first is unbounded below, the last unbounded above, and
+    consecutive ranges share their boundary (``hi`` of one is ``lo`` of
+    the next), so every entity falls in exactly one range regardless of
+    boundary quality. Duplicate boundaries (skewed sample) collapse, so
+    fewer than ``slices`` ranges may come back.
+
+    Python string sort order matches DuckDB's binary ``VARCHAR``
+    comparison (UTF-8 byte order preserves code-point order), so the
+    ranges partition exactly as the SQL predicates will.
+
+    Args:
+        sample: ``entity_id`` values drawn from the partition
+            (:func:`build_bounds_sample_sql`).
+        slices: Desired number of ranges; clamped to the sample size.
+
+    Returns:
+        List of ``(lo, hi)`` bounds in ascending order, ``None`` for
+        unbounded. ``[(None, None)]`` when no slicing is possible.
+    """
+    if slices <= 1 or not sample:
+        return [(None, None)]
+    ordered = sorted(sample)
+    slices = min(slices, len(ordered))
+    bounds: list[str] = []
+    for i in range(1, slices):
+        bound = ordered[i * len(ordered) // slices]
+        if not bounds or bound > bounds[-1]:
+            bounds.append(bound)
+    return list(zip([None, *bounds], [*bounds, None]))
+
+
+def merge_slice_count(partition_bytes: int, memory_limit: str) -> int:
+    """Number of range slices to merge a partition of ``partition_bytes``.
+
+    Estimates the peak DuckDB footprint of the merge pipeline as
+    :data:`MERGE_SPILL_FACTOR` times the partition's compressed parquet
+    size and slices so each slice's estimate fits within ``memory_limit``
+    – keeping the per-slice sort mostly in RAM instead of exhausting the
+    spill directory. ``1`` means the single-pass merge suffices.
+
+    Args:
+        partition_bytes: Compressed parquet bytes of the partition (from
+            the Delta log's add actions – no data scan).
+        memory_limit: DuckDB memory limit string, typically
+            ``Settings.duckdb_memory_limit``. Unparsable values (e.g. a
+            percentage) fall back to :data:`FALLBACK_MEMORY_LIMIT`.
+
+    Returns:
+        Slice count, at least ``1``.
+    """
+    try:
+        budget = parse_byte_size(memory_limit)
+    except ValueError:
+        budget = parse_byte_size(FALLBACK_MEMORY_LIMIT)
+    if partition_bytes <= 0:
+        return 1
+    return max(1, math.ceil(partition_bytes * MERGE_SPILL_FACTOR / budget))

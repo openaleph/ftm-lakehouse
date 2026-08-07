@@ -10,6 +10,7 @@ from ftmq.store.lake import pack_statement
 
 from ftm_lakehouse.core.conventions import tag
 from ftm_lakehouse.core.conventions.path import entity_shard
+from ftm_lakehouse.logic import parquet as logic_parquet
 from ftm_lakehouse.model.statement import SHARDED_SCHEMA, TABLE_RAW
 from ftm_lakehouse.storage.parquet import ParquetStore
 
@@ -119,6 +120,34 @@ def test_storage_parquet_merge_collapses_duplicates(tmp_path):
     assert len(statements) == 1
     stmt = statements[0]
     assert stmt.last_seen == datetime(2021, 6, 1, tzinfo=timezone.utc)
+
+
+def test_storage_parquet_merge_range_sliced(tmp_path, monkeypatch):
+    """A partition estimated over the memory budget merges in sequential
+    ``entity_id`` range slices – same canonical result as single-pass.
+
+    Forces slicing by inflating the spill-factor estimate so even the tiny
+    test partitions exceed the memory budget; the slice count then clamps
+    to the boundary sample, exercising sampling, range construction and
+    the chained reader end to end.
+    """
+    monkeypatch.setattr(logic_parquet, "MERGE_SPILL_FACTOR", 10**12)
+    store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
+
+    rows = []
+    for i in range(40):
+        stmt = make_statement(f"e{i:02d}", "name", f"Name {i}")
+        rows.append(_pack(stmt))
+        rows.append(_pack(stmt))  # identical duplicate – collapses on merge
+    _flush(store, rows)
+    assert _row_count(store) == 80
+
+    store.merge()
+    assert _row_count(store) == 40
+
+    entities = list(store.query())
+    assert len(entities) == 40
+    assert {e.id for e in entities} == {f"e{i:02d}" for i in range(40)}
 
 
 def test_storage_parquet_soft_delete_hidden_after_merge(tmp_path):

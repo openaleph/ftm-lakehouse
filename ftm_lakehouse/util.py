@@ -164,6 +164,57 @@ def render(tmpl: str, data: dict[str, Any]) -> str:
     return template.render(**data)
 
 
+_BYTE_SIZE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*([a-z]*)", re.IGNORECASE)
+
+_BYTE_UNITS = {
+    "": 1,
+    "b": 1,
+    "k": 10**3,
+    "kb": 10**3,
+    "kib": 2**10,
+    "m": 10**6,
+    "mb": 10**6,
+    "mib": 2**20,
+    "g": 10**9,
+    "gb": 10**9,
+    "gib": 2**30,
+    "t": 10**12,
+    "tb": 10**12,
+    "tib": 2**40,
+    "p": 10**15,
+    "pb": 10**15,
+    "pib": 2**50,
+}
+
+
+def parse_byte_size(value: str) -> int:
+    """Parse a human-readable byte size like ``64GB`` or ``512 MiB`` to bytes.
+
+    Accepts the DuckDB ``memory_limit`` notation – a number followed by an
+    optional unit, decimal (``KB`` / ``MB`` / ``GB`` / ``TB`` / ``PB``,
+    1000-based) or binary (``KiB`` / ``MiB`` / ..., 1024-based), case
+    insensitive. A bare number is bytes.
+
+    Args:
+        value: The size string, e.g. ``"8GB"``, ``"1.5 GiB"``, ``"1024"``.
+
+    Returns:
+        The size in bytes, rounded down to an integer.
+
+    Raises:
+        ValueError: If ``value`` is not a number-with-optional-unit
+            (notably DuckDB percentage limits like ``"80%"``).
+    """
+    match = _BYTE_SIZE_RE.fullmatch(value.strip())
+    if match is None:
+        raise ValueError(f"Invalid byte size: `{value}`")
+    number, unit = match.groups()
+    factor = _BYTE_UNITS.get(unit.lower())
+    if factor is None:
+        raise ValueError(f"Invalid byte size unit: `{value}`")
+    return int(float(number) * factor)
+
+
 def validate_dataset_name(name: str) -> str:
     """Validate a dataset name against FollowTheMoney's naming rules and
     the lakehouse's reserved-name list.

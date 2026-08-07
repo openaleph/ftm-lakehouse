@@ -43,6 +43,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable, Iterator, cast
 from uuid import uuid4
 
+import duckdb
 import pyarrow as pa
 import pyarrow.compute as pc
 from anystore.interface.lock import Lock
@@ -77,11 +78,14 @@ from ftm_lakehouse.logic.compress import CompressKind, compress_stream
 from ftm_lakehouse.logic.entities import aggregate_unsafe
 from ftm_lakehouse.logic.entities.aggregate import EntityPayload
 from ftm_lakehouse.logic.parquet import (
+    build_bounds_sample_sql,
     build_changed_sql,
     build_merge_sql,
     duckdb_config,
     live_view_sql,
+    merge_slice_count,
     raw_view_sql,
+    slice_ranges,
 )
 from ftm_lakehouse.model.dataset import DEFAULT_SHARDS
 from ftm_lakehouse.model.statement import (
@@ -605,6 +609,19 @@ class ParquetStore(LakehouseApiMixin):
         folded – after this runs. Reads assume every touched partition has
         been merged since its last write.
 
+        A partition whose parquet size suggests the merge pipeline would
+        outgrow ``LAKEHOUSE_DUCKDB_MEMORY_LIMIT``
+        (:func:`~ftm_lakehouse.logic.parquet.merge_slice_count`) is merged
+        in contiguous ``entity_id`` range slices instead of one pass: a
+        reservoir sample picks boundaries
+        (:func:`~ftm_lakehouse.logic.parquet.slice_ranges`), one merge
+        query runs per range – strictly sequentially, so only one sort
+        window is materialised at a time – and the slices chain into the
+        single atomic partition overwrite (:meth:`_merge_reader`). No
+        dedupe group spans an ``entity_id`` bound, ranges stream in
+        ascending order, so output content, file sort order and the Delta
+        commit are identical to a single-pass merge.
+
         Args:
             grace_period_days: Override ``settings.grace_period_days``. Pass
                 ``0`` to drop tombstones immediately. An explicit value
@@ -626,6 +643,7 @@ class ParquetStore(LakehouseApiMixin):
         grace_cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         merged = skipped = 0
         with self._maintenance_fence():
+            sizes = self._partition_bytes()
             for shard, bucket, origin in self._list_partitions():
                 updated = tag.statements_partition_updated(shard, bucket, origin)
                 optimized = tag.statements_partition_optimized(shard, bucket, origin)
@@ -640,17 +658,25 @@ class ParquetStore(LakehouseApiMixin):
                 if not self._tags.exists(updated):
                     self._tags.set(updated)
                 with Took() as t, self._tags.touch(optimized):
-                    sql = build_merge_sql(shard, bucket, origin, grace_cutoff)
+                    slices = merge_slice_count(
+                        sizes.get((shard, bucket, origin), 0),
+                        self.settings.duckdb_memory_limit,
+                    )
                     with self._lake.cursor() as cur:
-                        # ``to_arrow_reader`` yields a pyarrow RecordBatchReader
-                        # that DuckDB streams lazily from its execution
-                        # pipeline; ``write_deltalake`` consumes the reader
-                        # batch by batch, so the merge never materialises the
-                        # full partition in Python memory.
-                        reader = cur.execute(sql).to_arrow_reader()
+                        ranges: list[tuple[str | None, str | None]] = [(None, None)]
+                        if slices > 1:
+                            sample_sql = build_bounds_sample_sql(shard, bucket, origin)
+                            sample = [r[0] for r in cur.execute(sample_sql).fetchall()]
+                            ranges = slice_ranges(sample, slices)
+                        sqls = [
+                            build_merge_sql(
+                                shard, bucket, origin, grace_cutoff, entity_id_range=r
+                            )
+                            for r in ranges
+                        ]
                         write_deltalake(
                             str(self.uri),
-                            reader,
+                            self._merge_reader(cur, sqls),
                             mode="overwrite",
                             partition_by=PARTITIONS,
                             predicate=(
@@ -669,6 +695,7 @@ class ParquetStore(LakehouseApiMixin):
                         bucket=bucket,
                         origin=origin,
                         grace_period_days=days,
+                        slices=len(ranges),
                     )
             if merged:
                 # A rewrite changes the store's logical content (duplicates
@@ -679,6 +706,55 @@ class ParquetStore(LakehouseApiMixin):
         self.log.info(
             "Merge complete.", merged=merged, skipped=skipped, grace_period_days=days
         )
+
+    def _merge_reader(
+        self, cur: duckdb.DuckDBPyConnection, sqls: list[str]
+    ) -> pa.RecordBatchReader:
+        """Chain per-slice merge queries into one lazily-executed reader.
+
+        Each query's ``to_arrow_reader`` streams from DuckDB's execution
+        pipeline and ``write_deltalake`` consumes batch by batch, so the
+        merge never materialises a partition in Python memory. The
+        queries execute strictly sequentially – query ``i + 1`` only
+        starts once query ``i`` is exhausted – so at most one slice's
+        sort window lives in DuckDB at a time, which is the point of
+        range slicing. Slices arrive in ascending ``entity_id`` range
+        order and each is internally sorted, so the concatenated stream
+        keeps the global file sort order.
+
+        Args:
+            cur: Open DuckDB cursor – must stay alive until the returned
+                reader is fully consumed.
+            sqls: Per-slice merge queries in range order; a single-pass
+                merge passes exactly one.
+        """
+        first = cur.execute(sqls[0]).to_arrow_reader()
+
+        def batches() -> Iterator[pa.RecordBatch]:
+            yield from first
+            for sql in sqls[1:]:
+                yield from cur.execute(sql).to_arrow_reader()
+
+        return pa.RecordBatchReader.from_batches(first.schema, batches())
+
+    def _partition_bytes(self) -> dict[tuple[str, str, str], int]:
+        """Physical parquet bytes per ``(shard, bucket, origin)`` partition.
+
+        Summed from the Delta log's add actions – file-level metadata,
+        no data scan. Drives the slice count of a range-sliced
+        :meth:`merge`.
+        """
+        actions = pa.table(self.deltatable.get_add_actions(flatten=True))
+        sizes: dict[tuple[str, str, str], int] = {}
+        for size, shard, bucket, origin in zip(
+            actions["size_bytes"].to_pylist(),
+            actions["partition.shard"].to_pylist(),
+            actions["partition.bucket"].to_pylist(),
+            actions["partition.origin"].to_pylist(),
+        ):
+            key = (shard, bucket, origin)
+            sizes[key] = sizes.get(key, 0) + size
+        return sizes
 
     @no_api
     def compact(self) -> None:
