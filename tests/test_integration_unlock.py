@@ -155,7 +155,7 @@ def test_cli_unlock_releases_held_lock(tmp_path, cli_runner) -> None:
     repo = EntityRepository("scratch", tmp_path / "scratch")
     repo._statements._store.touch(path.LOCK)
 
-    result = cli_runner.invoke(cli_app, ["-d", "scratch", "operations", "unlock"])
+    result = cli_runner.invoke(cli_app, ["-d", "scratch", "maintenance", "unlock"])
     assert result.exit_code == 0, result.output
     assert "released" in result.output.lower()
     assert not repo._statements._store.exists(path.LOCK)
@@ -164,6 +164,6 @@ def test_cli_unlock_releases_held_lock(tmp_path, cli_runner) -> None:
 def test_cli_unlock_noop_when_no_lock(tmp_path, cli_runner) -> None:
     EntityRepository("scratch", tmp_path / "scratch")  # initialise dataset dir
 
-    result = cli_runner.invoke(cli_app, ["-d", "scratch", "operations", "unlock"])
+    result = cli_runner.invoke(cli_app, ["-d", "scratch", "maintenance", "unlock"])
     assert result.exit_code == 0, result.output
     assert "no lock" in result.output.lower()
