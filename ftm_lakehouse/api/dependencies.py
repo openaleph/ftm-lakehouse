@@ -98,7 +98,7 @@ class QueryBody(BaseModel):
     flush_first: bool = False
     origin: str | None = None
     query: str | None = None
-    order_by: list[str] | None = None
+    order_by: str | None = None
     limit: int | None = None
     offset: int | None = None
 
@@ -157,9 +157,8 @@ class QueryBody(BaseModel):
             except RQLError as e:
                 raise ValueError(f"Invalid RQL query: {e}")
         if self.order_by:
-            values = [str(v) for v in self.order_by]
-            ascending = not values[0].startswith("-")
-            q = q.order_by(*(v.lstrip("-") for v in values), ascending=ascending)
+            ascending = not self.order_by.startswith("-")
+            q = q.order_by(self.order_by.lstrip("-"), ascending=ascending)
         if self.limit is not None or self.offset:
             start = self.offset or 0
             stop = start + self.limit if self.limit is not None else None

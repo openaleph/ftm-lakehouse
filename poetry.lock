@@ -1959,7 +1959,7 @@ sql = ["sqlalchemy (>=2.0.51,<3.0.0)"]
 type = "git"
 url = "https://github.com/dataresearchcenter/ftmq.git"
 reference = "refactor/ql"
-resolved_reference = "443a49e14f732ca8f10f77ba14a3264c627d9061"
+resolved_reference = "59e17d2657c015c5d2048e4b0e1388128750e765"
 
 [[package]]
 name = "gcsfs"

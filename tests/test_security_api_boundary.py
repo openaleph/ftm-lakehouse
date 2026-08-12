@@ -53,7 +53,7 @@ def test_entities_query_rejects_unknown_body_keys(client) -> None:
 def test_query_rejects_too_many_rql_conditions(client, monkeypatch) -> None:
     """The leaf-count cap applies to the parsed RQL tree, not body keys."""
     monkeypatch.setattr(dependencies.api_settings, "query_max_filter_keys", 2)
-    rql = "and(eq(schema,Person),eq(properties.name,x),eq(countries,de))"
+    rql = "and(eq(schema,Person),eq(properties.name,x),eq(group.countries,de))"
     response = client.post("/test_ds/_api/entities/query", json={"query": rql})
     assert response.status_code == 422
     assert "filter conditions" in response.json()["detail"][0]["msg"]

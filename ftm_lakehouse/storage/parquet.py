@@ -55,9 +55,9 @@ from followthemoney import StatementEntity
 from followthemoney.statement import StatementDict
 from ftmq.model.stats import DatasetStats
 from ftmq.query import Query, Sql, SqlSource
+from ftmq.store.base import View
 from ftmq.store.lake import (
     TARGET_SIZE,
-    LakeQueryView,
     LakeStatement,
     LakeStore,
     get_schema_bucket,
@@ -97,7 +97,7 @@ PARTITIONS = ["shard", "bucket", "origin"]
 STATEMENT_SOURCE = SqlSource(
     TABLE,
     id_column="entity_id",
-    prune={"schema": get_schema_bucket},
+    prune_schema=get_schema_bucket,
     prune_column="bucket",
 )
 """ftmq compile target for the live ``statement`` view.
@@ -105,8 +105,7 @@ STATEMENT_SOURCE = SqlSource(
 The lakehouse sharded table keyed on ``entity_id`` – physical storage carries no
 ``canonical_id`` – with a schema filter folded into a ``bucket IN (...)``
 partition-prune predicate on every compiled query (ftmq's
-:class:`~ftmq.query.SqlSource` ``prune``). Replaces the removed
-``ensure_schema_buckets`` helper and the ``Query.table`` mutation."""
+:class:`~ftmq.query.SqlSource` ``prune_schema``)."""
 
 
 class ParquetStore(LakehouseApiMixin):
@@ -171,7 +170,7 @@ class ParquetStore(LakehouseApiMixin):
         return self._lake.exists
 
     @no_api
-    def view(self) -> LakeQueryView:
+    def view(self) -> View:
         """Get a view for querying statements."""
         return self._lake.default_view()
 
