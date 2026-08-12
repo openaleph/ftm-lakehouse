@@ -1,11 +1,18 @@
 """Tests for the DuckDB merge query in ``ftm_lakehouse.logic.parquet``."""
 
+import math
 from datetime import datetime, timedelta, timezone
 
 import pyarrow as pa
 import pytest
 
-from ftm_lakehouse.logic.parquet import build_changed_sql, build_merge_sql
+from ftm_lakehouse.logic.parquet import (
+    MERGE_SPILL_FACTOR,
+    build_changed_sql,
+    build_merge_sql,
+    merge_slice_count,
+    slice_ranges,
+)
 from ftm_lakehouse.model.statement import SHARDED_SCHEMA, TABLE_RAW
 from tests.duck import make_duckdb
 
@@ -463,6 +470,96 @@ def test_merge_output_sorted_with_fragments(now):
         ("a", "a"),
         ("b", "z"),
     ]
+
+
+def test_merge_range_sliced_parity(now):
+    """Concatenated range-sliced merge output equals single-pass output
+    exactly – content and order – so slicing is invisible downstream."""
+    early = now - timedelta(hours=1)
+    rows = []
+    for i in range(10):
+        eid = f"e{i}"
+        rows.append(_row(now, id=f"s{i}", entity_id=eid, prop="name"))
+        # non-fragment duplicate with earlier timestamps – collapses
+        rows.append(
+            _row(
+                now,
+                id=f"s{i}",
+                entity_id=eid,
+                prop="name",
+                first_seen=early,
+                last_seen=early,
+            )
+        )
+        # fragment row – exercises the supersession branch across slices
+        rows.append(_row(now, id=f"f{i}", entity_id=eid, prop="alias", fragment="r1"))
+    table = _table(rows)
+    con = make_duckdb()
+    con.register(TABLE_RAW.name, table)
+    full = con.execute(build_merge_sql("0", "thing", "ingest", now)).to_arrow_table()
+    ranges = slice_ranges([r["entity_id"] for r in rows], 4)
+    assert len(ranges) == 4
+    sliced = pa.concat_tables(
+        con.execute(
+            build_merge_sql("0", "thing", "ingest", now, entity_id_range=r)
+        ).to_arrow_table()
+        for r in ranges
+    )
+    assert full.num_rows == 20  # 10 collapsed non-fragment + 10 fragment
+    assert sliced.equals(full)
+
+
+def test_merge_range_bound_escapes_quotes(now):
+    """An entity_id boundary carrying a single quote is escaped, not
+    injected."""
+    table = _table(
+        [
+            _row(now, id="s1", entity_id="e'1", prop="name"),
+            _row(now, id="s2", entity_id="f2", prop="name"),
+        ]
+    )
+    con = make_duckdb()
+    con.register(TABLE_RAW.name, table)
+    lower = con.execute(
+        build_merge_sql("0", "thing", "ingest", now, entity_id_range=("e'1", None))
+    ).to_arrow_table()
+    assert {r["entity_id"] for r in lower.to_pylist()} == {"e'1", "f2"}
+    upper = con.execute(
+        build_merge_sql("0", "thing", "ingest", now, entity_id_range=(None, "e'1"))
+    ).to_arrow_table()
+    assert upper.num_rows == 0
+
+
+def test_slice_ranges_tile_key_space():
+    """Ranges are half-open, contiguous and unbounded at both ends – every
+    entity falls in exactly one range."""
+    sample = [f"e{i:03d}" for i in range(100)]
+    ranges = slice_ranges(sample, 4)
+    assert len(ranges) == 4
+    assert ranges[0][0] is None
+    assert ranges[-1][1] is None
+    for (_, hi), (lo, _) in zip(ranges, ranges[1:]):
+        assert hi == lo
+
+
+def test_slice_ranges_degenerate():
+    """Empty / single-value / skewed samples degrade gracefully."""
+    assert slice_ranges([], 4) == [(None, None)]
+    assert slice_ranges(["e1"], 1) == [(None, None)]
+    # more slices than sampled rows: clamped
+    assert len(slice_ranges(["a", "b"], 10)) == 2
+    # all-identical sample: duplicate bounds collapse, tiling still holds
+    ranges = slice_ranges(["e1", "e1", "e1"], 4)
+    assert ranges == [(None, "e1"), ("e1", None)]
+
+
+def test_merge_slice_count():
+    gb = 10**9
+    assert merge_slice_count(0, "8GB") == 1
+    assert merge_slice_count(100, "8GB") == 1
+    assert merge_slice_count(15 * gb, "64GB") == math.ceil(15 * MERGE_SPILL_FACTOR / 64)
+    # unparseable limit (DuckDB percentage) falls back to the 8GB default
+    assert merge_slice_count(gb, "80%") == merge_slice_count(gb, "8GB")
 
 
 def _run_changed(table: pa.Table, *, shard: str, bucket: str, since: datetime):
