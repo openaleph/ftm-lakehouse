@@ -128,7 +128,7 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         """Add an entity iterator to the journal."""
         with self.writer(origin) as writer:
             for entity in entities:
-                writer.add_entity(entity, fragment)
+                writer.add_entity(entity, fragment=fragment)
 
     @api_delegate("_api_flush")
     def flush(self) -> int:
