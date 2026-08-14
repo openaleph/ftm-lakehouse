@@ -71,7 +71,7 @@ from ftmq.util import make_dataset
 from pyarrow.csv import CSVWriter  # type: ignore[attr-defined]  # missing from stubs
 from sqlalchemy import Select, column, or_, select
 
-from ftm_lakehouse.core.api import LakehouseApiMixin, no_api
+from ftm_lakehouse.core.api import LakehouseApiMixin, ensure_api_uri, no_api
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.logic.compress import CompressKind, compress_stream
@@ -139,8 +139,8 @@ class ParquetStore(LakehouseApiMixin):
         # Resolved from the dataset config by the owning repository – exports
         # never take a runtime codec (see `repository.base.resolve_compression`).
         self.compression = compression
-        self._store = get_store(uri)
-        self._tags = TagStore(uri)
+        self._store = get_store(ensure_api_uri(uri))
+        self._tags = TagStore(ensure_api_uri(uri))
         self._lake = LakeStore(
             uri=str(self.uri),
             dataset=self.dataset,
@@ -879,7 +879,6 @@ class ParquetStore(LakehouseApiMixin):
                     seen.add(row.entity_id)
                     yield row.entity_id
 
-    @no_api
     def destroy(self) -> None:
         """
         Destroy the deltalake by removing the transaction log in "_delta_log"
@@ -888,8 +887,9 @@ class ParquetStore(LakehouseApiMixin):
         """
         with Took() as t:
             self.log.warn("🔥 Destroying deltalake store ...")
-            for key in self._lake._backend.iterate_keys("_delta_log"):
-                self._lake._backend.delete(key)
+            prefix = f"{path.STATEMENTS}/_delta_log"
+            for key in self._store.iterate_keys(prefix):
+                self._store.delete(key)
         self.log.info("Deleted statement store.", took=t.took)
 
     def _list_partitions(self) -> list[tuple[str, str, str]]:
