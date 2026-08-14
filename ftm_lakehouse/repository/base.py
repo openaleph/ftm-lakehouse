@@ -66,7 +66,7 @@ class BaseRepository(LakehouseApiMixin):
         self.uri = uri
         self._store_uri = ensure_api_uri(uri)
         self._store = get_store(self._store_uri, serialization_mode="raw")
-        ensure_zfs(self.dataset, self._store, self._api)
+        ensure_zfs(self.dataset, self._store, self._api if self._is_api else None)
         self._model = get_model_class()(**load_config(self._store, name=self.dataset))
         self.log = get_logger(
             f"{self.dataset}.{self.__class__.__name__}",
