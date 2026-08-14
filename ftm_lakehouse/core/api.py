@@ -1,6 +1,6 @@
 """Lakehouse as http api delegation"""
 
-from functools import cache, cached_property, wraps
+from functools import cache, wraps
 from typing import Callable, Generator, TypeVar
 
 import httpx
@@ -67,15 +67,11 @@ class LakehouseApi(UriResource):
             stream.raise_for_status()
             yield from stream.iter_lines()
 
-    def ensure_dataset(self, dataset: str) -> None:
+    def ensure(self) -> None:
         """Trigger ensure zfs dataset endpoint"""
-        url = self.make_url(f"{dataset}/_api/ensure")
-        self.make_request(url)
-
-    @cached_property
-    def version(self) -> str:
-        res = self.make_request("", "HEAD")
-        return res.headers["x-lakehouse-version"]
+        url = self.make_url("_api/ensure")
+        # self.make_request(url, "POST")
+        self.make_request(url, "GET")
 
 
 @cache
@@ -99,9 +95,7 @@ class LakehouseApiMixin:
     def _api(self) -> LakehouseApi:
         """Return the API client. Raises if not in API mode."""
         if self.__api is None:
-            raise RuntimeError(
-                f"`{type(self).__name__}._api` is not available in local mode"
-            )
+            raise RuntimeError(f"`{type(self).__name__}._api` is not available")
         return self.__api
 
 
