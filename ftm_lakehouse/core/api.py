@@ -67,6 +67,11 @@ class LakehouseApi(UriResource):
             stream.raise_for_status()
             yield from stream.iter_lines()
 
+    def ensure_dataset(self, dataset: str) -> None:
+        """Trigger ensure zfs dataset endpoint"""
+        url = self.make_url(f"{dataset}/_api/ensure")
+        self.make_request(url)
+
     @cached_property
     def version(self) -> str:
         res = self.make_request("", "HEAD")

@@ -3,7 +3,7 @@ from anystore.store import Store, get_store
 from anystore.types import Uri
 from anystore.util import ensure_uri, join_uri, mask_uri
 
-from ftm_lakehouse.core.api import LakehouseApiMixin, ensure_api_uri
+from ftm_lakehouse.core.api import LakehouseApiMixin, ensure_api_uri, get_api
 from ftm_lakehouse.core.config import load_config
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.core.zfs import ensure_zfs_dataset
@@ -51,6 +51,10 @@ def ensure_zfs(dataset: str, store: Store) -> None:
         if settings.zfs_pool is None:
             raise RuntimeError("Configure LAKEHOUSE_ZFS_POOL for zfs integration!")
         ensure_zfs_dataset(settings.zfs_pool, dataset)
+    else:  # trigger api
+        api = get_api(store.uri)
+        if api is not None:
+            api.ensure_dataset(dataset)
 
 
 class BaseRepository(LakehouseApiMixin):

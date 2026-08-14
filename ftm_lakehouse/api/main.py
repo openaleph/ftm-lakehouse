@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from putfs import api as putfs
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
+from ftm_lakehouse.api.routes.ensure import router as ensure_router
 from ftm_lakehouse.api.routes.entities import router as entities_router
 from ftm_lakehouse.api.routes.journal import router as journal_router
 from ftm_lakehouse.api.routes.operations import router as operations_router
@@ -58,6 +59,7 @@ def get_app(lake_uri: str | None = None) -> FastAPI:
     app.state.lake = get_lakehouse(uri)
 
     # lakehouse api
+    app.include_router(ensure_router)
     app.include_router(entities_router)
     app.include_router(journal_router)
     app.include_router(operations_router)
