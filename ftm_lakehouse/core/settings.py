@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from anystore.exceptions import DoesNotExist
 from anystore.io import smart_read
 from anystore.settings import BaseSettings
@@ -7,13 +9,16 @@ CHECKSUM_ALGORITHM = "sha256"  # never change this! ;)
 
 __version__ = "0.4.0"
 
+SECRETS_DIR = Path("/run/secrets")
+"""Docker secrets mount"""
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="lakehouse_",
         env_nested_delimiter="__",
         env_file=".env",
-        secrets_dir="/run/secrets",
+        secrets_dir=str(SECRETS_DIR) if SECRETS_DIR.is_dir() else None,
         nested_model_default_partial_update=True,
         extra="ignore",
     )

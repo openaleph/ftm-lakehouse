@@ -81,6 +81,8 @@ build-backend = "poetry.core.masonry.api"
 [tool.pytest.ini_options]
 filterwarnings = [
     "ignore:unclosed database:ResourceWarning",
+    # /run/secrets only exists inside docker – ftmq's settings hardcode it
+    'ignore:directory "/run/secrets" does not exist:UserWarning',
     # Regression gate: naive / local-time datetimes leaking into statements
     # fail the suite instead of warning. pytz's UTC is a false positive in
     # rigour's identity check (it *is* UTC), so that exact variant stays
