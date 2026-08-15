@@ -1,5 +1,3 @@
-from typing import Any
-
 import orjson
 from followthemoney import StatementEntity
 from ftmq.model.stats import DatasetStats
@@ -12,21 +10,6 @@ from ftm_lakehouse.core.api import LakehouseApiMixin, require_api
 from ftm_lakehouse.core.settings import Settings
 
 settings = Settings()
-
-
-def _serialize_query(q: Query | None) -> dict[str, Any]:
-    """Wire form of a ``Query`` for the lakehouse query endpoints.
-
-    The filter tree travels as RQL (``query``); ``to_rql`` does not carry
-    ordering or slicing, so those ride as sibling fields the server
-    recombines (:meth:`ftm_lakehouse.api.dependencies.QueryBody.to_query`).
-    """
-    return {
-        "query": q.to_rql() if q else None,
-        "order_by": q.sort.serialize() if q and q.sort else None,
-        "limit": q.limit if q else None,
-        "offset": q.offset if q else None,
-    }
 
 
 class ApiEntityRepository(LakehouseApiMixin):
@@ -61,17 +44,16 @@ class ApiEntityRepository(LakehouseApiMixin):
         flush_first: bool = False,
     ) -> StatementEntities:
         url = self._make_url("query")
-        data = {
-            "flush_first": flush_first,
-            **_serialize_query(q),
-        }
+        data = {"flush_first": flush_first, "query": q.to_dict() if q else None}
         for line in self._api.stream_request(url, "POST", json=data):
             yield ensure_entity(orjson.loads(line), StatementEntity)
 
     @require_api
     def _api_query_statements(self, q: Query | None = None) -> Statements:
         url = self._make_url("statements/query")
-        for line in self._api.stream_request(url, "POST", json=_serialize_query(q)):
+        for line in self._api.stream_request(
+            url, "POST", json={"query": q.to_dict() if q else None}
+        ):
             yield LakeStatement.from_dict(orjson.loads(line))
 
     @require_api

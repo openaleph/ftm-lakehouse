@@ -72,12 +72,11 @@ def statements_query(entities: Entities, body: QueryBody) -> StreamingResponse:
     """Query statements from parquet store, streamed as NDJSON."""
     # Parse (and thereby validate) the query BEFORE streaming starts.
     query = body.to_query()
-    repo = entities
     if body.flush_first:
-        repo.flush()
+        entities.flush()
 
     def generate():
-        for statement in repo.query_statements(query):
+        for statement in entities.query_statements(query):
             data = {**statement.to_dict(), "fragment": statement.fragment}
             yield orjson.dumps(data, option=orjson.OPT_APPEND_NEWLINE)
 

@@ -86,15 +86,14 @@ def test_repository_entities(repo):
     # Non-existent entity returns None
     assert repo.get("nobody") is None
 
-    # Node-based Query filters (round-trips as RQL through the api variant)
+    # Node-based Query filters (round-trips as json through the api variant)
     named = list(repo.query(Query().where(M(schema="Person"), P(name="Jane Doe"))))
     assert {e.id for e in named} == {"jane"}
     assert not list(repo.query(Query().where(P(name="nobody"))))
     stmts = list(repo.query_statements(Query().where(M(entity_id="john"))))
     assert stmts and {s.entity_id for s in stmts} == {"john"}
 
-    # Pagination + ordering hold end to end (api variant: the wire carries
-    # order_by / limit / offset as sibling fields next to the RQL string)
+    # Pagination + ordering hold end to end
     assert len(list(repo.query(Query()[:2]))) == 2
     assert len(list(repo.query(Query()[:1]))) == 1
     ordered = [e.first("name") for e in repo.query(Query().order_by("name"))]

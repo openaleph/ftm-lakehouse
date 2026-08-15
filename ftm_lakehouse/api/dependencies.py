@@ -3,10 +3,10 @@
 from functools import lru_cache
 from typing import Annotated
 
+from anystore.types import SDict
 from fastapi import Body, Depends, Request
 from ftmq.query import Query
 from pydantic import BaseModel, ConfigDict, field_validator
-from pyrql import RQLError
 
 from ftm_lakehouse.catalog import get_dataset_model
 from ftm_lakehouse.core.settings import ApiSettings
@@ -76,40 +76,33 @@ Journal = Annotated[BaseJournalStore, Depends(get_journal)]
 
 
 class QueryBody(BaseModel):
-    """Pydantic model for ``entities`` / ``statements`` query bodies.
+    """
+    Pydantic model for ``entities`` / ``statements`` query bodies for
+    serializing ``ftmq.Query`` through the wire via ``.from_dict()`` /
+    ``.to_dict()``.
 
-    ``query`` carries the filter tree as an :meth:`RQL <ftmq.Query.to_rql>`
-    string; ``order_by`` / ``limit`` / ``offset`` ride as sibling fields because
-    RQL does not serialize them. Pydantic enforces the type of ``entity_ids`` (a
-    list of strings) and rejects unknown keys (``extra="forbid"`` – the legacy
-    flat filter-kwargs format fails loudly with a 422 instead of silently
-    streaming an unfiltered result); :meth:`to_query` enforces the runtime
-    complexity caps from :class:`ApiSettings` on the parsed query.
+    :meth:`to_query` enforces the runtime complexity caps from
+    :class:`ApiSettings` on the parsed query.
 
     Use as ``body: QueryBody`` in a route signature; FastAPI parses and
-    validates the request body against this model before the handler
-    runs, returning a 422 (Pydantic's standard error shape) on any
-    violation.
+    validates the request body against this model before the handler runs,
+    returning a 422 (Pydantic's standard error shape) on any violation.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     flush_first: bool = False
-    query: str | None = None
-    order_by: str | None = None
-    limit: int | None = None
-    offset: int | None = None
+    query: SDict | None = None
 
     @field_validator("query")
     @classmethod
-    def validate_query_body(cls, v: str | None) -> str | None:
+    def validate_query_body(cls, v: SDict | None) -> SDict | None:
         """Enforce the API complexity caps on a parsed query.
 
-        The RQL string is opaque to Pydantic, so the semantic DoS caps guard
-        here: total filter-leaf count vs ``max_filter_keys`` and every ``in`` /
-        ``not_in`` value list vs ``max_entity_ids`` – no request can smuggle an
-        unbounded ``IN`` literal (which DuckDB chokes on) or filter fan-out past
-        the boundary by encoding it as RQL instead of body fields.
+        The semantic DoS caps guard here: total filter-leaf count vs
+        ``max_filter_keys`` and every ``in`` / ``not_in`` value list vs
+        ``max_entity_ids`` – no request can smuggle an unbounded ``IN`` literal
+        (which DuckDB chokes on) or filter fan-out past the boundary.
 
         Raises:
             ValueError: When a cap is exceeded (mapped to a 422 by the app's
@@ -118,9 +111,12 @@ class QueryBody(BaseModel):
         if not v:
             return v
         try:
-            q = Query.from_rql(v)
-        except RQLError as e:
-            raise ValueError(f"Invalid RQL query: {e}")
+            q = Query.from_dict(v)
+            if not q:
+                # there was payload but not valid query:
+                raise ValueError(f"Could not parse `{v}`")
+        except Exception as e:
+            raise ValueError(f"Invalid query json: `{e}`")
         leaves = list(q.q.iter_leaves()) if q.q else []
         if len(leaves) > api_settings.query_max_filter_keys:
             raise ValueError(
@@ -136,29 +132,16 @@ class QueryBody(BaseModel):
                     )
         return v
 
-    def to_query(self) -> Query | None:
-        """Build the ftmq ``Query`` from the RQL string + sort / slice fields.
-
-        Mirrors :func:`ftm_lakehouse.repository.entities.api._serialize_query`
-        on the client side. Returns ``None`` for an empty body (an unfiltered,
-        unsliced read).
+    def to_query(self) -> Query:
+        """Build the ftmq ``Query`` from the payload.
 
         Raises:
-            ValueError: On malformed RQL (pyrql's ``RQLError`` is re-raised
-                as ``ValueError`` so the app's handler maps it to a 400) or
-                a query exceeding the complexity caps.
+            ValueError: On malformed payload
         """
         q = Query()
         if self.query:
             try:
-                q = Query.from_rql(self.query)
-            except RQLError as e:
-                raise ValueError(f"Invalid RQL query: {e}")
-        if self.order_by:
-            ascending = not self.order_by.startswith("-")
-            q = q.order_by(self.order_by.lstrip("-"), ascending=ascending)
-        if self.limit is not None or self.offset:
-            start = self.offset or 0
-            stop = start + self.limit if self.limit is not None else None
-            q = q[start:stop]
-        return q if q else None
+                q = Query.from_dict(self.query)
+            except Exception as e:
+                raise ValueError(f"Invalid query json: `{e}`")
+        return q
