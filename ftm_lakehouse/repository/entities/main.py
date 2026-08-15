@@ -297,7 +297,6 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         q: Query | None = None,
         *,
         flush_first: bool = False,
-        origin: str | None = None,
     ) -> StatementEntities:
         """Query entities from the parquet store.
 
@@ -313,33 +312,24 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         """
         if flush_first:
             self.flush()
-        yield from self._statements.query(q, origin=origin)
+        yield from self._statements.query(q)
 
     @api_delegate("_api_query_statements")
-    def query_statements(
-        self, q: Query | None = None, origin: str | None = None
-    ) -> Statements:
+    def query_statements(self, q: Query | None = None) -> Statements:
         """Query statements from the parquet store.
 
         Args:
             q: ftmq ``Query`` – filters plus ordering / slicing.
-            origin: Restrict to statements of this origin (storage-level
-                row filter).
 
         Yields:
             :class:`~ftmq.store.lake.LakeStatement` objects.
         """
-        yield from self._statements.query_statements(q, origin=origin)
+        yield from self._statements.query_statements(q)
 
-    def get(
-        self,
-        entity_id: str,
-        origin: str | None = None,
-        flush_first: bool = False,
-    ) -> StatementEntity | None:
+    def get(self, entity_id: str, flush_first: bool = False) -> StatementEntity | None:
         """Get a single entity by ID."""
-        q = Query().where(M(entity_id=entity_id))
-        for entity in self.query(q, flush_first=flush_first, origin=origin):
+        q = Query(M(entity_id=entity_id))
+        for entity in self.query(q, flush_first=flush_first):
             return entity
         return None
 

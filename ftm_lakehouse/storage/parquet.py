@@ -222,9 +222,7 @@ class ParquetStore(LakehouseApiMixin):
             yield cast(StatementDict, vars(row))
 
     @no_api
-    def query(
-        self, q: Query | None = None, origin: str | None = None
-    ) -> StatementEntities:
+    def query(self, q: Query | None = None) -> StatementEntities:
         """Query entities from the store.
 
         Args:
@@ -232,16 +230,11 @@ class ParquetStore(LakehouseApiMixin):
                 ids, ...) plus ordering / slicing – a sorted or sliced query
                 executes globally (:meth:`_needs_global`) so ``LIMIT`` and
                 ``ORDER BY`` hold across partitions.
-            origin: Optional storage-level row filter – restrict to statements
-                of this origin, so an assembled entity carries only that
-                origin's statements.
 
         Yields:
             StatementEntity objects matching the query.
         """
         sel = self.compile_query(q)
-        if origin is not None:
-            sel = sel.where(column("origin") == origin)
         if self._needs_global(q):
             rows = self._global_statement_data(sel)
             for data in aggregate_unsafe(rows, self.dataset):
@@ -251,24 +244,19 @@ class ParquetStore(LakehouseApiMixin):
                 yield data.to_entity()
 
     @no_api
-    def query_statements(
-        self, q: Query | None = None, origin: str | None = None
-    ) -> Statements:
+    def query_statements(self, q: Query | None = None) -> Statements:
         """Query ordered Statements from the store.
 
         Args:
             q: Optional ``Query`` – compiled through :meth:`compile_query`;
                 sorted / sliced queries execute globally
                 (:meth:`_needs_global`).
-            origin: Optional storage-level row filter.
 
         Yields:
             :class:`~ftmq.store.lake.LakeStatement` objects matching the
             query.
         """
         sel = self.compile_query(q)
-        if origin is not None:
-            sel = sel.where(column("origin") == origin)
         if self._needs_global(q):
             for stmt_dict in self._global_statement_data(sel):
                 yield LakeStatement.from_dict(stmt_dict)
@@ -927,7 +915,7 @@ class ParquetStore(LakehouseApiMixin):
                 single-entity lookups skip the other shards.
         """
         seen: set[tuple[str, str]] = set()
-        for s, b, _origin in self._list_partitions():
+        for s, b, _ in self._list_partitions():
             if shard is not None and s != shard:
                 continue
             key = (s, b)

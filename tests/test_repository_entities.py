@@ -9,7 +9,6 @@ from followthemoney import EntityProxy, model
 from ftmq.query import M, P, Query
 from ftmq.util import make_entity
 
-from ftm_lakehouse.api.main import archive_router, entities_router, journal_router
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.repository import EntityRepository
 from tests.conftest import make_docker_repo, make_test_api
@@ -23,8 +22,7 @@ def repo(
     if request.param == "local":
         yield EntityRepository("test", tmp_path), tmp_path
     elif request.param == "api":
-        routers = [entities_router, journal_router, archive_router]
-        with make_test_api(tmp_path, routers) as base_url:
+        with make_test_api(tmp_path) as base_url:
             dataset_url = f"{base_url}/test"
             repo = EntityRepository("test", uri=dataset_url)
             yield repo, tmp_path / "test"
@@ -141,12 +139,7 @@ def test_repository_entities_multi_origin(repo):
     nationalities = merged.get("nationality")
     assert "us" in nationalities
     assert "gb" in nationalities
-
-    # Query by single origin returns only that origin's statements
-    source_a_only = repo.get("multi-origin", origin="source_a")
-    assert source_a_only is not None
-    assert "John Smith" in source_a_only.get("name")
-    assert source_a_only.first("birthDate") is None
+    assert set(merged.to_dict()["origin"]) == {"source_a", "source_b"}
 
 
 def test_repository_entities_export_diff(tmp_path):

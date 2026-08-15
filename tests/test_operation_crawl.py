@@ -1,4 +1,4 @@
-from ftmq.query import M, Query
+from ftmq.query import C, M, Query
 
 from ftm_lakehouse.core.conventions import tag
 from ftm_lakehouse.operation.crawl import CrawlJob, CrawlOperation
@@ -41,11 +41,11 @@ def test_operation_crawl(fixtures_path, tmp_path):
     assert op.entities._statements.stats().entity_count > 0
 
     # Verify entities (no flush needed, CrawlOperation auto-flushes)
-    entities = list(op.entities.query(origin=tag.CRAWL_ORIGIN))
+    entities = list(op.entities.query(Query(C(origin=tag.CRAWL_ORIGIN))))
     assert len(entities) == 5 + 1  # files + folder
 
-    assert len(list(op.entities.query(Query().where(M(schema="Pages"))))) == 1
-    assert len(list(op.entities.query(Query().where(M(schema="Folder"))))) == 1
+    assert len(list(op.entities.query(Query(M(schema="Pages"))))) == 1
+    assert len(list(op.entities.query(Query(M(schema="Folder"))))) == 1
 
 
 def test_operation_crawl_globs(fixtures_path, tmp_path):
@@ -59,7 +59,7 @@ def test_operation_crawl_globs(fixtures_path, tmp_path):
     op = CrawlOperation(job=job, uri=tmp_path)
     res = op.run()
     assert res.done == 4
-    entities = list(op.entities.query(origin=tag.CRAWL_ORIGIN))
+    entities = list(op.entities.query(Query(C(origin=tag.CRAWL_ORIGIN))))
     assert len(entities) == 4 + 1  # files + folder
 
     job = CrawlJob.make(
@@ -68,5 +68,5 @@ def test_operation_crawl_globs(fixtures_path, tmp_path):
     op = CrawlOperation(job=job, uri=tmp_path)
     res = op.run()
     assert res.done == 1
-    entities = list(op.entities.query(origin=tag.CRAWL_ORIGIN))
+    entities = list(op.entities.query(Query(C(origin=tag.CRAWL_ORIGIN))))
     assert len(entities) == 5 + 1  # files + folder

@@ -56,7 +56,7 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
         Returns:
             Mapping of folder ID to complete path (e.g. "root/sub/folder")
         """
-        q = self._statements.compile_query(Query().where(M(schema="Folder")))
+        q = self._statements.compile_query(Query(M(schema="Folder")))
 
         # First pass: collect caption and parent for each folder
         folders: dict[str, tuple[str, str | None]] = {}
@@ -94,7 +94,7 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
         nodes = [M(schemata="Document"), P(contentHash__null=False)]
         if entity_ids:
             nodes.append(M(entity_id__in=list(entity_ids)))
-        q = self._statements.compile_query(Query().where(*nodes))
+        q = self._statements.compile_query(Query(*nodes))
         for d in self._statements._query_data(q):
             d = d.to_dict()
             if d.get("schema") == "Folder":
@@ -121,7 +121,7 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
         # no documents – a single count(DISTINCT entity_id) that file-skips
         # on the schema filter, so a document-free dataset costs one fast query
         # instead of scanning every partition (twice, via the initial diff).
-        count_query = Query().where(M(schemata="Document"))
+        count_query = Query(M(schemata="Document"))
         if self._statements.count(count_query) == 0:
             return
         docs = self.collect(public_url_prefix)

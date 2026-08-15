@@ -16,6 +16,7 @@ from typing import Generator
 import pytest
 from followthemoney import model
 from ftmq.model.stats import DatasetStats
+from ftmq.query import C, Query
 
 from ftm_lakehouse.catalog import get_dataset_model, update_dataset
 from ftm_lakehouse.core.conventions import path, tag
@@ -207,7 +208,7 @@ def test_e2e_workflows_bulk_entity_writing(dataset):
     assert stats.entity_count == 10
 
     # Query entities back
-    entities = list(get_entities(*dataset).query(origin="bulk_test"))
+    entities = list(get_entities(*dataset).query(Query(C(origin="bulk_test"))))
     assert len(entities) == 10
 
 
@@ -233,8 +234,8 @@ def test_e2e_workflows_multiple_origins(dataset):
     make(*dataset)
 
     # Query by origin
-    source_a_entities = list(get_entities(*dataset).query(origin="source_a"))
-    source_b_entities = list(get_entities(*dataset).query(origin="source_b"))
+    source_a_entities = list(get_entities(*dataset).query(Query(C(origin="source_a"))))
+    source_b_entities = list(get_entities(*dataset).query(Query(C(origin="source_b"))))
 
     assert len(source_a_entities) == 5
     assert len(source_b_entities) == 3

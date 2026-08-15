@@ -70,8 +70,7 @@ class LakehouseApi(UriResource):
     def ensure(self) -> None:
         """Trigger ensure zfs dataset endpoint"""
         url = self.make_url("_api/ensure")
-        # self.make_request(url, "POST")
-        self.make_request(url, "GET")
+        self.make_request(url, "POST")
 
 
 @cache

@@ -79,11 +79,10 @@ class QueryBody(BaseModel):
     """Pydantic model for ``entities`` / ``statements`` query bodies.
 
     ``query`` carries the filter tree as an :meth:`RQL <ftmq.Query.to_rql>`
-    string; ``order_by`` / ``limit`` / ``offset`` ride as sibling fields
-    because RQL does not serialize them; ``origin`` scopes reads to one
-    storage origin. Pydantic enforces the type of ``entity_ids`` (a list of
-    strings) and rejects unknown keys (``extra="forbid"`` – the legacy flat
-    filter-kwargs format fails loudly with a 422 instead of silently
+    string; ``order_by`` / ``limit`` / ``offset`` ride as sibling fields because
+    RQL does not serialize them. Pydantic enforces the type of ``entity_ids`` (a
+    list of strings) and rejects unknown keys (``extra="forbid"`` – the legacy
+    flat filter-kwargs format fails loudly with a 422 instead of silently
     streaming an unfiltered result); :meth:`to_query` enforces the runtime
     complexity caps from :class:`ApiSettings` on the parsed query.
 
@@ -96,7 +95,6 @@ class QueryBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     flush_first: bool = False
-    origin: str | None = None
     query: str | None = None
     order_by: str | None = None
     limit: int | None = None

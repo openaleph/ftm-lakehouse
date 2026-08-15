@@ -39,12 +39,10 @@ def entities_query(entities: Entities, body: QueryBody) -> StreamingResponse:
     query = body.to_query()
 
     def generate():
-        for entity in entities.query(
-            query,
-            flush_first=body.flush_first,
-            origin=body.origin,
-        ):
-            yield orjson.dumps(entity.to_dict(), option=orjson.OPT_APPEND_NEWLINE)
+        for entity in entities.query(query, flush_first=body.flush_first):
+            yield orjson.dumps(
+                entity.to_statement_dict(), option=orjson.OPT_APPEND_NEWLINE
+            )
 
     return StreamingResponse(generate(), media_type=NDJSON_CONTENT_TYPE)
 
@@ -71,14 +69,7 @@ def entities_version(entities: Entities) -> PlainTextResponse:
 
 @router.post("/{dataset}/_api/entities/statements/query")
 def statements_query(entities: Entities, body: QueryBody) -> StreamingResponse:
-    """Query statements from parquet store, streamed as NDJSON.
-
-    Honors the full body contract: ``origin`` applies as a storage-level row
-    filter, ``flush_first`` drains the journal before reading. Each line carries
-    the statement's ``fragment`` alongside the followthemoney fields so the
-    supersession group key survives the wire (``Statement.to_dict`` has no
-    notion of it).
-    """
+    """Query statements from parquet store, streamed as NDJSON."""
     # Parse (and thereby validate) the query BEFORE streaming starts.
     query = body.to_query()
     repo = entities
@@ -86,7 +77,7 @@ def statements_query(entities: Entities, body: QueryBody) -> StreamingResponse:
         repo.flush()
 
     def generate():
-        for statement in repo.query_statements(query, origin=body.origin):
+        for statement in repo.query_statements(query):
             data = {**statement.to_dict(), "fragment": statement.fragment}
             yield orjson.dumps(data, option=orjson.OPT_APPEND_NEWLINE)
 

@@ -1,5 +1,6 @@
 import csv
 import itertools
+from collections import Counter
 from typing import Generator
 
 import pytest
@@ -76,12 +77,7 @@ def test_entities(dataset):
     assert jane is not None
     assert jane.first("name") == "Jane Doe"
     assert jane.first("firstName") == "Jane"
-
-    # Filter by origin
-    jane = entities.get("jane", origin="update")
-    assert jane is not None
-    assert jane.first("name") is None
-    assert jane.first("firstName") == "Jane"
+    assert set(jane.to_dict()["origin"]) == {"default", "update"}
 
     # Export statements.csv
     export(dataset.name, ExportKind.statements, dataset.uri)
@@ -104,10 +100,10 @@ def test_entities(dataset):
         data = [r for r in reader]
     assert len(data) == 6  # 2 jane (default) + 2 jane (update) + 2 john
     stmts = [Statement.from_dict(d) for d in data]
-    entity_ids = set(s.entity_id for s in stmts)
-    assert entity_ids == {"jane", "john"}
-    origins = set(s.origin for s in stmts)
-    assert origins == {"update", "default"}
+    entity_ids = dict(Counter(s.entity_id for s in stmts))
+    assert entity_ids == {"jane": 4, "john": 2}
+    origins = dict(Counter(s.origin for s in stmts))
+    assert origins == {"default": 4, "update": 2}
 
     # Merge
     optimize(dataset.name, dataset.uri)
@@ -202,13 +198,6 @@ def test_entity_multi_origin_fragments(dataset):
     assert "source_a" in origins
     assert "source_b" in origins
     assert "source_c" in origins
-
-    # Query by single origin returns only that origin's statements
-    source_a_only = entities.get("multi-origin-person", origin="source_a")
-    assert source_a_only is not None
-    assert "John Smith" in source_a_only.get("name")
-    assert source_a_only.first("birthDate") is None  # From source_b
-    assert source_a_only.first("email") is None  # From source_c
 
 
 def test_entity_multi_origin_statements(dataset):
@@ -311,6 +300,6 @@ def test_entity_multi_origin_statements(dataset):
         reader = csv.DictReader(out)
         rows = [r for r in reader]
 
-    stmt_origins = set(r["origin"] for r in rows)
-    assert stmt_origins == {"registry", "filings", "enrichment"}
+    stmt_origins = dict(Counter(r["origin"] for r in rows))
+    assert stmt_origins == {"registry": 2, "filings": 2, "enrichment": 1}
     assert len(rows) == 5  # 2 + 2 + 1 statements
