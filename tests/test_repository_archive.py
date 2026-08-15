@@ -6,7 +6,6 @@ from anystore.store import get_store
 from moto import mock_aws
 from rigour.mime.types import PLAIN
 
-from ftm_lakehouse.api.main import archive_router
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.repository.archive import ArchiveRepository
 from ftm_lakehouse.util import make_checksum_key
@@ -26,7 +25,7 @@ def repo(
     if request.param == "local":
         yield ArchiveRepository("test", tmp_path), tmp_path
     elif request.param == "api":
-        with make_test_api(tmp_path, [archive_router]) as base_url:
+        with make_test_api(tmp_path) as base_url:
             yield ArchiveRepository("test", f"{base_url}/test"), tmp_path / "test"
     elif request.param == "s3":
         moto_server = request.getfixturevalue("moto_server")

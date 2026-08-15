@@ -19,7 +19,6 @@ import pytest
 from followthemoney import EntityProxy, Statement
 from ftmq.store.lake import LakeStatement
 
-from ftm_lakehouse.api.main import archive_router, entities_router, journal_router
 from ftm_lakehouse.repository.entities import EntityRepository
 from tests.conftest import make_docker_repo, make_test_api
 from tests.duck import make_duckdb
@@ -57,8 +56,7 @@ def repo(
     if request.param == "local":
         yield _make_local_repo(tmp_path), tmp_path
     elif request.param == "api":
-        routers = [entities_router, journal_router, archive_router]
-        with make_test_api(tmp_path, routers) as base_url:
+        with make_test_api(tmp_path) as base_url:
             dataset_url = f"{base_url}/{DATASET}"
             r = EntityRepository(DATASET, uri=dataset_url)
             yield r, tmp_path / DATASET

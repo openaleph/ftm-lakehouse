@@ -17,12 +17,6 @@ import pytest
 from followthemoney import model
 from ftmq.model.stats import DatasetStats
 
-from ftm_lakehouse.api.main import (
-    archive_router,
-    entities_router,
-    journal_router,
-    operations_router,
-)
 from ftm_lakehouse.catalog import get_dataset_model, update_dataset
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.lake import get_lakehouse
@@ -50,8 +44,7 @@ def dataset(
         lake = get_lakehouse(tmp_path)
         yield DatasetHandle(DATASET, lake.dataset_uri(DATASET)), tmp_path / DATASET
     elif request.param == "api":
-        routers = [entities_router, journal_router, operations_router, archive_router]
-        with make_test_api(tmp_path, routers) as base_url:
+        with make_test_api(tmp_path) as base_url:
             lake = get_lakehouse(base_url)
             yield DatasetHandle(DATASET, lake.dataset_uri(DATASET)), tmp_path / DATASET
     else:

@@ -14,13 +14,10 @@ import boto3
 import pytest
 import requests
 import uvicorn
-from anystore.exceptions import DoesNotExist
-from anystore.store import get_store
 from boto3.resources.base import ServiceResource
-from fastapi import APIRouter, FastAPI
 from moto.server import ThreadedMotoServer
 
-from ftm_lakehouse.api.main import _not_found_handler
+from ftm_lakehouse.api.main import get_app
 from ftm_lakehouse.core.api import get_api
 from ftm_lakehouse.lake import get_lakehouse
 from ftm_lakehouse.model.dataset import DatasetModel, set_model_class
@@ -210,26 +207,13 @@ def live_test_api_server(app):
 
 
 @contextmanager
-def make_test_api(
-    tmp_path: Path,
-    routers: list[APIRouter],
-) -> Generator[str, None, None]:
-    """Create a test FastAPI app with the given routers and yield its base URL.
-
-    Sets up app state (store, lake), mounts routers, registers exception
-    handlers, and runs a live uvicorn server.
+def make_test_api(tmp_path: Path) -> Generator[str, None, None]:
+    """Run the production app against ``tmp_path`` and yield its base URL.
 
     Args:
         tmp_path: Root storage directory for the test lake.
-        routers: FastAPI routers to mount (archive_router should be last).
     """
-    app = FastAPI()
-    app.state.store = get_store(tmp_path)
-    app.state.lake = get_lakehouse(tmp_path)
-    for router in routers:
-        app.include_router(router)
-    app.add_exception_handler(DoesNotExist, _not_found_handler)
-    app.add_exception_handler(FileNotFoundError, _not_found_handler)
+    app = get_app(lake_uri=str(tmp_path))
 
     with live_test_api_server(app) as base_url:
         yield base_url

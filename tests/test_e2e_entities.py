@@ -7,12 +7,6 @@ from followthemoney import Statement, model
 from ftmq.model.stats import DatasetStats
 from ftmq.util import make_entity
 
-from ftm_lakehouse.api.main import (
-    archive_router,
-    entities_router,
-    journal_router,
-    operations_router,
-)
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.lake import get_lakehouse
 from ftm_lakehouse.logic.compress import CompressKind, decompress_stream
@@ -42,8 +36,7 @@ def dataset(request, tmp_path) -> Generator[DatasetHandle, None, None]:
         lake.ensure_dataset("test", compression=compression)
         yield DatasetHandle("test", lake.dataset_uri("test"))
     elif backend == "api":
-        routers = [entities_router, journal_router, operations_router, archive_router]
-        with make_test_api(tmp_path, routers) as base_url:
+        with make_test_api(tmp_path) as base_url:
             lake = get_lakehouse(base_url)
             lake.ensure_dataset("test", compression=compression)
             yield DatasetHandle("test", lake.dataset_uri("test"))
