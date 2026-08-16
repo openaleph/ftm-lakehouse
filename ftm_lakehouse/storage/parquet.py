@@ -890,9 +890,9 @@ class ParquetStore(LakehouseApiMixin):
             sql = self._compile_query()
         for s, b in self._iter_shard_buckets():
             scoped = sql.where(column("shard") == s, column("bucket") == b)
-            sql = str(scoped.compile(compile_kwargs={"literal_binds": True}))
+            compiled = str(scoped.compile(compile_kwargs={"literal_binds": True}))
             with self._lake.cursor() as cur:
-                yield cur.execute(sql).to_arrow_reader()
+                yield cur.execute(compiled).to_arrow_reader()
 
     def _query_statement_data(self, q: Query | None = None) -> Iterator[StatementDict]:
         """Query statement dicts from the live view, bypassing FtM construction.

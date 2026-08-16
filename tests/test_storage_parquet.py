@@ -87,6 +87,20 @@ def test_storage_parquet_query_statements(tmp_path):
     assert name_values == {"Jane Doe", "John Smith"}
 
 
+def test_storage_parquet_execute_partitioned_multiple_partitions(tmp_path):
+    store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
+
+    # Two schemas -> two buckets (thing / interval), so at least two
+    # (shard, bucket) partitions regardless of shard assignment.
+    stmts = [
+        make_statement("jane", "name", "Jane Doe"),
+        make_statement("acme-job", "role", "CEO", schema="Membership"),
+    ]
+    _flush(store, [_pack(s) for s in stmts])
+
+    assert set(store.get_entity_ids()) == {"jane", "acme-job"}
+
+
 def test_storage_parquet_append_keeps_duplicates(tmp_path):
     """Append-only: re-flushing the same statement does NOT dedupe on write."""
     store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
