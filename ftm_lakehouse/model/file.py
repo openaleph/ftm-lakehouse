@@ -46,10 +46,7 @@ class Document(BaseModel):
 
     @classmethod
     def from_entity_dict(cls, d: dict[str, Any], public_url: str | None = None) -> Self:
-        """Create a Document from an entity dict (as returned by query_raw).
-
-        Returns None when required fields are missing.
-        """
+        """Create a Document from an entity dict (as returned by query_raw)."""
         props = d.get("properties", {})
         checksums = props.get("contentHash", [])
         if not checksums or not d.get("id"):

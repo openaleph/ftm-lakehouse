@@ -244,7 +244,6 @@ class ArchiveRepository(BaseRepository):
                 ``origin`` is not a safe path component
                 (see :func:`ftm_lakehouse.util.validate_origin`).
         """
-        origin = origin or DEFAULT_ORIGIN
         key = path.archive_txt(checksum, origin)
         self._txts.put(key, text)
 

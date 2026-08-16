@@ -627,13 +627,6 @@ class ParquetStore(LakehouseApiMixin):
                 if not (force or not self._tags.is_latest(optimized, [updated])):
                     skipped += 1
                     continue
-                # Back-fill the dep tag for partitions written before
-                # freshness tracking - stamped before ``touch(optimized)``
-                # captures its (later) timestamp, so the strict `>` in
-                # ``is_latest`` skips this partition next run.
-                # FIXME
-                if not self._tags.exists(updated):
-                    self._tags.set(updated)
                 with Took() as t, self._tags.touch(optimized):
                     slices = merge_slice_count(
                         sizes.get((shard, bucket, origin), 0),
