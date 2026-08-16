@@ -302,9 +302,6 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         Args:
             q: ftmq ``Query`` of entity-level filters (schema, properties, ...).
             flush_first: Flush the journal to parquet before querying.
-            origin: Restrict to statements of this origin – a storage-level row
-                filter, so an assembled entity carries only that origin's
-                statements.
 
         Yields:
             StatementEntity objects matching the query.
@@ -314,15 +311,20 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         yield from self._statements.query(q)
 
     @api_delegate("_api_query_statements")
-    def query_statements(self, q: Query | None = None) -> Statements:
+    def query_statements(
+        self, q: Query | None = None, *, flush_first: bool = False
+    ) -> Statements:
         """Query statements from the parquet store.
 
         Args:
             q: ftmq ``Query`` – filters plus ordering / slicing.
+            flush_first: Flush the journal to parquet before querying.
 
         Yields:
             :class:`~ftmq.store.lake.LakeStatement` objects.
         """
+        if flush_first:
+            self.flush()
         yield from self._statements.query_statements(q)
 
     def get(self, entity_id: str, flush_first: bool = False) -> StatementEntity | None:

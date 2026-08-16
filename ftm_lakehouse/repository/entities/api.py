@@ -45,11 +45,15 @@ class ApiEntityRepository(LakehouseApiMixin):
             yield ensure_entity(orjson.loads(line), StatementEntity)
 
     @require_api
-    def _api_query_statements(self, q: Query | None = None) -> Statements:
+    def _api_query_statements(
+        self,
+        q: Query | None = None,
+        *,
+        flush_first: bool = False,
+    ) -> Statements:
         url = self._make_url("statements/query")
-        for line in self._api.stream_request(
-            url, "POST", json={"query": q.to_dict() if q else None}
-        ):
+        data = {"flush_first": flush_first, "query": q.to_dict() if q else None}
+        for line in self._api.stream_request(url, "POST", json=data):
             yield LakeStatement.from_dict(orjson.loads(line))
 
     @require_api
