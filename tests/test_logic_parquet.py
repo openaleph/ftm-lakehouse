@@ -8,7 +8,6 @@ import pytest
 
 from ftm_lakehouse.logic.parquet import (
     MERGE_SPILL_FACTOR,
-    build_changed_sql,
     build_merge_sql,
     merge_slice_count,
     slice_ranges,
@@ -560,82 +559,6 @@ def test_merge_slice_count():
     assert merge_slice_count(15 * gb, "64GB") == math.ceil(15 * MERGE_SPILL_FACTOR / 64)
     # unparseable limit (DuckDB percentage) falls back to the 8GB default
     assert merge_slice_count(gb, "80%") == merge_slice_count(gb, "8GB")
-
-
-def _run_changed(table: pa.Table, *, shard: str, bucket: str, since: datetime):
-    con = make_duckdb()
-    con.register(TABLE_RAW.name, table)
-    return con.execute(build_changed_sql(shard, bucket, since)).to_arrow_table()
-
-
-def test_changed_sql_deleted_entity_yields_zero_rows(now):
-    """A deleted-but-unmerged entity has no canonical live rows: its
-    tombstones shadow the live rows and are filtered – so the diff can
-    emit a DEL without a merge having run."""
-    deleted = now + timedelta(hours=1)
-    table = _table(
-        [
-            _row(now, id="s1", entity_id="acme", prop="name"),
-            _row(
-                now,
-                id="s1",
-                entity_id="acme",
-                prop="name",
-                last_seen=deleted,
-                deleted_at=deleted,
-            ),
-            # untouched second entity, outside the change window
-            _row(now - timedelta(days=1), id="s2", entity_id="other", prop="name"),
-        ]
-    )
-    out = _run_changed(table, shard="0", bucket="thing", since=now)
-    assert out.num_rows == 0
-
-
-def test_changed_sql_multi_origin_slice_keeps_per_origin_rows(now):
-    """The changed slice spans all origins of a partition: the same id
-    tombstoned in one origin must not shadow its live twin in another."""
-    deleted = now + timedelta(hours=1)
-    table = _table(
-        [
-            _row(now, id="s1", entity_id="acme", prop="name", origin="a"),
-            _row(now, id="s1", entity_id="acme", prop="name", origin="b"),
-            _row(
-                now,
-                id="s1",
-                entity_id="acme",
-                prop="name",
-                origin="a",
-                last_seen=deleted,
-                deleted_at=deleted,
-            ),
-        ]
-    )
-    out = _run_changed(table, shard="0", bucket="thing", since=now)
-    rows = out.to_pylist()
-    assert [(r["origin"], r["id"]) for r in rows] == [("b", "s1")]
-
-
-def test_changed_sql_supersession_applied(now):
-    """The changed slice returns canonical rows: a superseded fragment
-    emission is dropped even though both rows are physically present."""
-    t2 = now + timedelta(hours=1)
-    table = _table(
-        [
-            _row(now, id="h1", entity_id="acme", prop="name", fragment="row1"),
-            _row(
-                now,
-                id="h2",
-                entity_id="acme",
-                prop="name",
-                fragment="row1",
-                first_seen=t2,
-                last_seen=t2,
-            ),
-        ]
-    )
-    out = _run_changed(table, shard="0", bucket="thing", since=now)
-    assert [r["id"] for r in out.to_pylist()] == ["h2"]
 
 
 def test_merge_output_sorted(now):

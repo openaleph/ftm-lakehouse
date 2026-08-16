@@ -55,7 +55,7 @@ from deltalake import DeltaTable, write_deltalake
 from followthemoney import StatementEntity
 from followthemoney.statement import StatementDict
 from ftmq.model.stats import DatasetStats
-from ftmq.query import Query, Sql, SqlSource
+from ftmq.query import M, Query, Sql, SqlSource
 from ftmq.store.base import View
 from ftmq.store.lake import (
     TARGET_SIZE,
@@ -69,7 +69,7 @@ from ftmq.store.lake import (
 from ftmq.types import StatementEntities, Statements
 from ftmq.util import make_dataset
 from pyarrow.csv import CSVWriter  # type: ignore[attr-defined]  # missing from stubs
-from sqlalchemy import Select, column, or_, select
+from sqlalchemy import Select, column
 
 from ftm_lakehouse.core.api import LakehouseApiMixin, ensure_api_uri, no_api
 from ftm_lakehouse.core.conventions import path, tag
@@ -79,7 +79,6 @@ from ftm_lakehouse.logic.entities import aggregate_unsafe
 from ftm_lakehouse.logic.entities.aggregate import EntityPayload
 from ftm_lakehouse.logic.parquet import (
     build_bounds_sample_sql,
-    build_changed_sql,
     build_merge_sql,
     duckdb_config,
     live_view_sql,
@@ -110,6 +109,15 @@ The lakehouse sharded table keyed on ``entity_id`` – physical storage carries 
 ``canonical_id`` – with a schema filter folded into a ``bucket IN (...)``
 partition-prune predicate on every compiled query (ftmq's
 :class:`~ftmq.query.SqlSource` ``prune_schema``)."""
+
+STATEMENT_SOURCE_RAW = SqlSource(
+    TABLE_RAW,
+    id_column="entity_id",
+    prune_schema=get_schema_bucket,
+    prune_column="bucket",
+)
+"""ftmq compile target for the raw ``statement`` view (physical storage, no
+tombstones merge as in ``STATEMENT_SOURCE``)"""
 
 
 class ParquetStore(LakehouseApiMixin):
@@ -185,7 +193,9 @@ class ParquetStore(LakehouseApiMixin):
         if stmts:
             return StatementEntity.from_statements(make_dataset(self.dataset), stmts)
 
-    def compile_query(self, q: Query | None = None) -> Select:
+    def _compile_query(
+        self, q: Query | None = None, *, source: SqlSource = STATEMENT_SOURCE
+    ) -> Select:
         """Compile ``q`` to a statements ``Select`` against the live view.
 
         Compiles through :data:`STATEMENT_SOURCE`, so a schema filter folds into
@@ -194,8 +204,9 @@ class ParquetStore(LakehouseApiMixin):
         partitions instead of scanning all of them. The single entry point every
         lakehouse read funnels its :class:`~ftmq.query.Query` through.
         """
-        q = q or Query()
-        return q.compile(STATEMENT_SOURCE)
+        if q is None:
+            q = Query()
+        return q.compile(source)
 
     @staticmethod
     def _needs_global(q: Query | None) -> bool:
@@ -211,14 +222,14 @@ class ParquetStore(LakehouseApiMixin):
         """
         return q is not None and (q.sort is not None or q.slice is not None)
 
-    def _global_statement_data(self, sel: Select) -> Iterator[StatementDict]:
+    def _global_statement_data(self, q: Query | None = None) -> Iterator[StatementDict]:
         """Execute a compiled select ONCE over the whole live view.
 
         Entity rows stay contiguous for aggregation: ftmq's statement
         selects order by ``entity_id`` (unsorted) or ``(sortable_value,
         id)`` (sorted).
         """
-        for row in self._lake._execute(sel):
+        for row in self._lake._execute(self._compile_query(q)):
             yield cast(StatementDict, vars(row))
 
     @no_api
@@ -234,13 +245,12 @@ class ParquetStore(LakehouseApiMixin):
         Yields:
             StatementEntity objects matching the query.
         """
-        sel = self.compile_query(q)
         if self._needs_global(q):
-            rows = self._global_statement_data(sel)
+            rows = self._global_statement_data(q)
             for data in aggregate_unsafe(rows, self.dataset):
                 yield data.to_entity()
         else:
-            for data in self._query_data(sel):
+            for data in self._query_data(q):
                 yield data.to_entity()
 
     @no_api
@@ -256,12 +266,11 @@ class ParquetStore(LakehouseApiMixin):
             :class:`~ftmq.store.lake.LakeStatement` objects matching the
             query.
         """
-        sel = self.compile_query(q)
         if self._needs_global(q):
-            for stmt_dict in self._global_statement_data(sel):
+            for stmt_dict in self._global_statement_data(q):
                 yield LakeStatement.from_dict(stmt_dict)
         else:
-            for stmt_dict in self._query_statement_data(sel):
+            for stmt_dict in self._query_statement_data(q):
                 yield LakeStatement.from_dict(stmt_dict)
 
     @no_api
@@ -278,7 +287,7 @@ class ParquetStore(LakehouseApiMixin):
         if not self.exists:
             return
         shard = path.entity_shard(entity_id, self.shards)
-        q = select(TABLE).where(TABLE.c.shard == shard, TABLE.c.entity_id == entity_id)
+        q = Query(M(entity_id=entity_id))
         for stmt_dict in self._query_statement_data(q, shard=shard):
             yield LakeStatement.from_dict(stmt_dict)
 
@@ -308,7 +317,8 @@ class ParquetStore(LakehouseApiMixin):
         """
         if not self.exists:
             return 0
-        q = q or Query()
+        if q is None:
+            q = Query()
         for row in self._lake._execute(Sql(q, STATEMENT_SOURCE).count):
             for value in row:
                 return int(value)
@@ -792,7 +802,7 @@ class ParquetStore(LakehouseApiMixin):
             self.log.info("Vacuumed.", took=t.took)
 
     @no_api
-    def export_csv(self, key: str, q: Select | None = None) -> None:
+    def export_csv(self, key: str) -> None:
         """Export statements to a sorted CSV file.
 
         Streams each ``(shard, bucket)`` partition straight from DuckDB as
@@ -803,22 +813,16 @@ class ParquetStore(LakehouseApiMixin):
 
         Compression comes from :attr:`compression` (the dataset's config), not
         from the caller.
-
-        Args:
-            q: Optional SQLAlchemy select (default:
-                :func:`~ftm_lakehouse.model.statement.statement_csv_select` –
-                the FtM columns plus ``fragment``, ordered by ``entity_id``).
         """
         if not self.exists:
             return
-        if q is None:
-            q = statement_csv_select()
+        sql = statement_csv_select()
         with (
             self._store.open(key, "wb") as fh,
             compress_stream(fh, self.compression) as out,
         ):
             writer: CSVWriter | None = None
-            for reader in self._execute_partitioned(q):
+            for reader in self._execute_partitioned(sql):
                 for batch in reader:
                     if writer is None:
                         writer = CSVWriter(out, batch.schema)
@@ -827,45 +831,19 @@ class ParquetStore(LakehouseApiMixin):
                 writer.close()
 
     @no_api
-    def get_changed_entity_ids(
-        self,
-        since: datetime,
-        schemata: list[str] | None = None,
-        prop: str | None = None,
+    def get_entity_ids(
+        self, q: Query | None = None, *, source: SqlSource = STATEMENT_SOURCE
     ) -> Iterator[str]:
-        """Get entity IDs touched since a timestamp.
+        """Get entity IDs for given query. Use ``STATEMENT_SOURCE_RAW`` to
+        target physical storage without tombstones merged"""
 
-        Catches both *new* / *modified* statements (``first_seen >= since``)
-        and *deleted* ones (``deleted_at >= since``) – the latter so the diff
-        consumer can emit DEL ops for entities whose tombstone landed after
-        the last diff state. Targets ``statement_raw`` because the deduped
-        view filters tombstones; we need them visible here.
-        """
         if not self.exists:
             return
 
-        since_truncated = since.replace(microsecond=0)
-        sql = (
-            select(TABLE_RAW)
-            .distinct(TABLE_RAW.c.entity_id)
-            .where(
-                or_(
-                    TABLE_RAW.c.first_seen >= since_truncated,
-                    TABLE_RAW.c.deleted_at >= since_truncated,
-                )
-            )
-        )
-        if schemata:
-            sql = sql.where(TABLE_RAW.c.schema.in_(schemata))
-        if prop:
-            sql = sql.where(TABLE_RAW.c.prop == prop)
-        seen: set[str] = set()
-        for shard, _bucket in self._iter_shard_buckets():
-            scoped = sql.where(TABLE_RAW.c.shard == shard)
-            for row in self._lake._execute(scoped):
-                if row.entity_id not in seen:
-                    seen.add(row.entity_id)
-                    yield row.entity_id
+        sql = Sql(q or Query(), source).canonical_ids
+        for reader in self._execute_partitioned(sql):
+            for batch in reader:
+                yield from batch["entity_id"].to_pylist()
 
     def destroy(self) -> None:
         """
@@ -924,40 +902,43 @@ class ParquetStore(LakehouseApiMixin):
                 yield s, b
 
     def _execute_partitioned(
-        self, q: Select | None = None, *, shard: str | None = None
+        self, sql: Select | None = None, *, shard: str | None = None
     ) -> Iterator[pa.RecordBatchReader]:
         """Yield a streamed Arrow reader per ``(shard, bucket)`` partition.
 
-        Scopes ``q`` with ``shard = ? AND bucket = ?`` per partition – so a
-        full-store ``ORDER BY`` stays bounded to one partition and the
-        predicate pushes through the live ``statement`` view's plain scan to
-        the parquet file statistics – and hands back each partition's result
-        as a lazy :class:`pyarrow.RecordBatchReader` streamed from DuckDB's
-        execution pipeline, so memory stays bounded per batch instead of
-        materialising the partition.
+        Scopes ``sql`` with ``shard = ? AND bucket = ?`` per partition – so a
+        full-store ``ORDER BY`` stays bounded to one partition and the predicate
+        pushes through the live ``statement`` view's plain scan to the parquet
+        file statistics – and hands back each partition's result as a lazy
+        :class:`pyarrow.RecordBatchReader` streamed from DuckDB's execution
+        pipeline, so memory stays bounded per batch instead of materialising the
+        partition.
 
         Consume each reader fully before advancing to the next: the backing
         cursor is held open only across its ``yield`` and closes when the
         generator resumes for the following partition.
 
         Args:
-            q: Optional SQLAlchemy select (default: :meth:`compile_query`).
+            sql: Optional SQLAlchemy select (default: :meth:`compile_query`).
             shard: Optional shard filter to scope iteration to one shard.
 
         Yields:
             One :class:`pyarrow.RecordBatchReader` per ``(shard, bucket)``
             partition.
         """
-        if q is None:
-            q = self.compile_query()
+        if sql is None:
+            sql = self._compile_query()
         for s, b in self._iter_shard_buckets(shard=shard):
-            scoped = q.where(column("shard") == s, column("bucket") == b)
+            scoped = sql.where(column("shard") == s, column("bucket") == b)
             sql = str(scoped.compile(compile_kwargs={"literal_binds": True}))
             with self._lake.cursor() as cur:
                 yield cur.execute(sql).to_arrow_reader()
 
     def _query_statement_data(
-        self, q: Select | None = None, *, shard: str | None = None
+        self,
+        q: Query | None = None,
+        *,
+        shard: str | None = None,
     ) -> Iterator[StatementDict]:
         """Query statement dicts from the live view, bypassing FtM construction.
 
@@ -980,14 +961,13 @@ class ParquetStore(LakehouseApiMixin):
         Yields:
             StatementDict instances.
         """
-        if q is None:
-            q = self.compile_query()
+        sql = self._compile_query(q)
         for s, b in self._iter_shard_buckets(shard=shard):
-            scoped = q.where(column("shard") == s, column("bucket") == b)
+            scoped = sql.where(column("shard") == s, column("bucket") == b)
             for row in self._lake._execute(scoped):
                 yield StatementDict(**vars(row))
 
-    def _query_data(self, q: Select | None = None) -> Iterator[EntityPayload]:
+    def _query_data(self, q: Query | None = None) -> Iterator[EntityPayload]:
         """
         Query entity dicts via aggregate_unsafe(), bypassing FtM object construction.
 
@@ -1000,35 +980,6 @@ class ParquetStore(LakehouseApiMixin):
         if not self.exists:
             return
         yield from aggregate_unsafe(self._query_statement_data(q), self.dataset)
-
-    @no_api
-    def query_changed(self, since: datetime) -> Iterator[EntityPayload]:
-        """Aggregate the canonical state of entities changed since ``since`` –
-        any entity with a statement whose ``first_seen`` or ``deleted_at`` is
-        newer.
-
-        Runs :func:`~ftm_lakehouse.logic.parquet.build_changed_sql` per
-        ``(shard, bucket)`` partition: the raw view scoped by a *semi-join
-        subquery* on the changed entity ids (no huge ``IN (...)`` literal,
-        which segfaults DuckDB on large id sets), pushed through the same
-        two-branch dedupe as physical merge and filtered to live rows. So
-        the result matches a post-merge read **without requiring a merge
-        first** – a deleted-but-unmerged entity yields zero rows (its
-        tombstones shadow the live rows), which is what lets the diff
-        exporter emit ``DEL`` ops on an un-merged store, and an updated
-        entity aggregates only its superseded-away latest values.
-
-        An entity lives in exactly one ``(shard, bucket)``, so its
-        statements are all present per partition and ``aggregate_unsafe``
-        sees each entity contiguous (the ``ORDER BY entity_id`` stays
-        partition-bounded).
-        """
-        if not self.exists:
-            return
-        since_truncated = since.replace(microsecond=0)
-        for s, b in self._iter_shard_buckets():
-            sql = build_changed_sql(s, b, since_truncated)
-            yield from aggregate_unsafe(self._execute_sql(sql), self.dataset)
 
     def _execute_sql(self, sql: str) -> Iterator[StatementDict]:
         """Stream raw-SQL results as ``StatementDict`` rows.

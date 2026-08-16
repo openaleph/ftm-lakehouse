@@ -172,9 +172,6 @@ def test_repository_entities_export_diff(tmp_path):
     # Export entities.ftm.json (required for initial diff)
     smart_write_proxies(repo._store.open(path.ENTITIES_JSON, "wb"), repo.query())
 
-    # Cross second boundary so initial entities are in an earlier second
-    time.sleep(1.1)
-
     # Initial diff - copies entities.ftm.json even though table is at v1
     diff_name_1 = repo.export_diff()
     assert diff_name_1 is not None
@@ -195,9 +192,6 @@ def test_repository_entities_export_diff(tmp_path):
     with repo.writer() as writer:
         writer.add_entity(make_entity(BOB))
     repo.flush()
-
-    # Cross second boundary so BOB's first_seen is before next diff state
-    time.sleep(1.1)
 
     # Incremental diff - captures changes via translog
     diff_name_2 = repo.export_diff()
@@ -278,10 +272,14 @@ def test_repository_entities_export_diff_delete(tmp_path, merge):
     # Delete jane and flush the tombstones to parquet. The merge=True leg
     # additionally collapses the partition (tombstones survive grace); the
     # diff must emit the DEL in both cases.
+    since = datetime.now(timezone.utc)
     repo.delete_entity("jane")
     repo.flush()
     if merge:
         repo.merge()
+
+    # jane is in changed entity ids
+    assert list(repo._get_changed_ids(since)) == ["jane"]
 
     # Incremental diff should contain a DEL for jane
     diff_name_2 = repo.export_diff()
@@ -361,7 +359,6 @@ def test_repository_entities_export_diff_fragment_update_without_merge(tmp_path)
     assert repo.export_diff() is not None
 
     # Re-emit the same fragment with a changed name; no merge before diffing.
-    time.sleep(1.1)
     t2 = datetime.now(timezone.utc).isoformat()
     jane_v2 = EntityProxy.from_dict(
         {

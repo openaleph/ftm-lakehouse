@@ -3,22 +3,23 @@ clients, including diffs"""
 
 from datetime import datetime
 from itertools import chain, islice
-from typing import Generator, Iterable, Iterator
+from typing import Generator, Iterator
 
 from anystore.io import smart_stream_csv_models, smart_write_csv, smart_write_models
 from anystore.logic.constants import CHUNK_SIZE_LARGE
 from anystore.logic.io import stream
 from anystore.types import Uri
 from anystore.util import join_uri
-from followthemoney import model
-from ftmq.query import M, P, Query
+from ftmq.query import C, M, P, Query
 
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.logic.parquet import QUERY_IN_BATCH_SIZE
 from ftm_lakehouse.model.file import Document, Documents
 from ftm_lakehouse.repository.base import BaseRepository
 from ftm_lakehouse.repository.diff import ParquetDiffMixin
-from ftm_lakehouse.storage.parquet import ParquetStore
+from ftm_lakehouse.storage.parquet import STATEMENT_SOURCE_RAW, ParquetStore
+
+Q_DOCUMENTS = [M(schemata="Document"), ~M(schema="Folder"), P(contentHash__null=False)]
 
 
 class DocumentRepository(ParquetDiffMixin, BaseRepository):
@@ -56,11 +57,9 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
         Returns:
             Mapping of folder ID to complete path (e.g. "root/sub/folder")
         """
-        q = self._statements.compile_query(Query(M(schema="Folder")))
-
         # First pass: collect caption and parent for each folder
         folders: dict[str, tuple[str, str | None]] = {}
-        for d in self._statements._query_data(q):
+        for d in self._statements._query_data(Query(M(schema="Folder"))):
             d = d.to_dict()
             props = d.get("properties", {})
             file_names = props.get("fileName", [])
@@ -87,21 +86,17 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
 
     def collect(
         self,
+        q: Query | None = None,
+        *,
         public_url_prefix: str | None = None,
-        entity_ids: Iterable[str] | None = None,
     ) -> Documents:
         paths = self.make_paths()
-        nodes = [M(schemata="Document"), P(contentHash__null=False)]
-        if entity_ids:
-            nodes.append(M(entity_id__in=list(entity_ids)))
-        q = self._statements.compile_query(Query(*nodes))
+        q = (q or Query()).where(*Q_DOCUMENTS)
         for d in self._statements._query_data(q):
             d = d.to_dict()
             if d.get("schema") == "Folder":
                 continue
             document = Document.from_entity_dict(d)
-            if document is None:
-                continue
             if public_url_prefix:
                 document.public_url = join_uri(
                     public_url_prefix, path.archive_blob(document.checksum)
@@ -121,10 +116,10 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
         # no documents – a single count(DISTINCT entity_id) that file-skips
         # on the schema filter, so a document-free dataset costs one fast query
         # instead of scanning every partition (twice, via the initial diff).
-        count_query = Query(M(schemata="Document"))
+        count_query = Query(*Q_DOCUMENTS)
         if self._statements.count(count_query) == 0:
             return
-        docs = self.collect(public_url_prefix)
+        docs = self.collect(public_url_prefix=public_url_prefix)
         first = next(docs, None)
         if first is None:
             return
@@ -136,14 +131,8 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
 
     def _get_changed_ids(self, since: datetime) -> Iterator[str]:
         """Get Document entity IDs with contentHash changes since the given timestamp."""
-        schemata = [
-            s.name
-            for s in model.schemata.values()
-            if s.is_a("Document") and s.name != "Folder"
-        ]
-        return self._statements.get_changed_entity_ids(
-            since, schemata=schemata, prop="contentHash"
-        )
+        q = Query(*Q_DOCUMENTS, (C(first_seen__gte=since) | C(deleted_at__gte=since)))
+        return self._statements.get_entity_ids(q, source=STATEMENT_SOURCE_RAW)
 
     def _write_diff(
         self, entity_ids: Iterator[str], since: datetime, ts: datetime, **kwargs
@@ -166,7 +155,9 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
         it = iter(entity_ids)
         while batch := set(islice(it, QUERY_IN_BATCH_SIZE)):
             original_ids.update(batch)
-            for doc in self.collect(public_url_prefix, entity_ids=batch):
+            for doc in self.collect(
+                Query(M(entity_id__in=batch)), public_url_prefix=public_url_prefix
+            ):
                 seen_ids.add(doc.id)
                 yield {"op": "ADD", **doc.model_dump(by_alias=True, mode="json")}
         for entity_id in original_ids - seen_ids:

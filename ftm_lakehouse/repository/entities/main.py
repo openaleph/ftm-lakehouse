@@ -11,6 +11,7 @@ from anystore.io import smart_open, smart_write_json
 from anystore.types import SDict, Uri
 from anystore.util import Took, mask_uri
 from followthemoney import EntityProxy, Statement, StatementEntity
+from ftmq import C
 from ftmq.io import smart_read_proxies
 from ftmq.model.stats import DatasetStats
 from ftmq.query import M, Query
@@ -32,7 +33,7 @@ from ftm_lakehouse.repository.entities.api import ApiEntityRepository
 from ftm_lakehouse.storage.journal import get_journal
 from ftm_lakehouse.storage.journal.base import BaseJournalWriter
 from ftm_lakehouse.storage.journal.sql import SqlJournalStore
-from ftm_lakehouse.storage.parquet import ParquetStore
+from ftm_lakehouse.storage.parquet import STATEMENT_SOURCE_RAW, ParquetStore
 
 settings = Settings()
 
@@ -535,7 +536,8 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
     @no_api
     def _get_changed_ids(self, since: datetime) -> Iterator[str]:
         """Get entity IDs with statements added since the given timestamp."""
-        return self._statements.get_changed_entity_ids(since)
+        q = Query(C(first_seen__gte=since) | C(deleted_at__gte=since))
+        return self._statements.get_entity_ids(q, source=STATEMENT_SOURCE_RAW)
 
     @no_api
     def _write_diff(
@@ -560,7 +562,8 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         statements are all gone."""
         original_ids: set[str] = set(entity_ids)
         seen_ids: set[str] = set()
-        for entity in self._statements.query_changed(since):
+        q = Query(C(first_seen__gte=since))
+        for entity in self._statements._query_data(q):
             if entity.id:
                 seen_ids.add(entity.id)
             yield make_envelope(entity.to_dict())

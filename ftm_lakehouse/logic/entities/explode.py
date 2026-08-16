@@ -27,7 +27,7 @@ from followthemoney.namespace import Namespace
 from followthemoney.statement.util import NON_LANG_TYPE_NAMES, get_prop_type
 from followthemoney.types import registry
 from ftmq.store.lake import get_schema_bucket
-from rigour.time import iso_datetime
+from ftmq.util import iso_datetime
 
 from ftm_lakehouse.core.conventions.path import entity_shard
 from ftm_lakehouse.helpers.statements import make_base_id_statement
@@ -105,7 +105,7 @@ def explode_unsafe(
         "lang": None,
         "external": False,
         "first_seen": changed or now,
-        "last_seen": changed or last_seen or now.replace(microsecond=0),
+        "last_seen": changed or last_seen or now,
         "fragment": single_string(data.get("fragment")) or "",
         "deleted_at": None,
     }

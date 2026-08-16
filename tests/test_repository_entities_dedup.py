@@ -17,6 +17,7 @@ from typing import Generator
 
 import pytest
 from followthemoney import EntityProxy
+from ftmq import C, Query
 
 from ftm_lakehouse.repository.entities import EntityRepository
 from tests.conftest import make_docker_repo, make_test_api
@@ -108,10 +109,7 @@ def test_query_statements_dedup_after_merge(repo):
     repo.merge()
     first = {s.id: (s.first_seen, s.last_seen) for s in repo.query_statements()}
 
-    # Re-add with a distinct timestamp so last_seen differs across the
-    # two physical rows; sleep keeps the second-resolution last_seen
-    # apart from the first.
-    time.sleep(1.1)
+    # Re-add so last_seen differs across the two physical rows
     repo.add(jane)
     repo.flush()
     repo.merge()  # merge folds first_seen to min and last_seen to max per id
@@ -136,9 +134,6 @@ def test_query_skips_tombstone_after_merge(repo):
     repo.merge()
     assert {e.id for e in repo.query(flush_first=False)} == {"jane"}
 
-    # Sleep keeps the tombstone last_seen strictly greater than the live
-    # row's last_seen so merge picks the tombstone deterministically.
-    time.sleep(1.1)
     repo.delete_entity("jane")
     repo.flush()
     # Merge collapses the id to its tombstone (latest last_seen); the live
@@ -157,7 +152,6 @@ def test_query_re_add_after_delete(repo):
 
     repo.add(jane)
     repo.flush()
-    time.sleep(1.1)
     repo.delete_entity("jane")
     repo.flush()
     repo.merge()
@@ -165,7 +159,6 @@ def test_query_re_add_after_delete(repo):
 
     # Re-add: new live row has last_seen > the tombstone's last_seen, so
     # merge picks the re-add and deleted_at IS NULL keeps it.
-    time.sleep(1.1)
     repo.add(jane)
     repo.flush()
     repo.merge()
@@ -206,7 +199,7 @@ def test_view_query_assembles_entities_without_merge(local_repo):
 
     repo.add(jane)
     repo.flush()
-    time.sleep(1.1)
+
     repo.add(jane)
     repo.flush()
 
@@ -250,14 +243,14 @@ def test_get_changed_entity_ids_sees_tombstones(local_repo):
 
     repo.add(jane)
     repo.flush()
-    time.sleep(1.1)
+
     repo.delete_entity("jane")
     repo.flush()
 
     # Even though the deduped view hides the tombstoned entity from
     # normal reads, the diff path queries statement_raw so it still
     # picks up the deletion timestamp.
-    changed = list(repo._statements.get_changed_entity_ids(since=before))
+    changed = list(repo._statements.get_entity_ids(Query(C(first_seen__gte=before))))
     assert "jane" in changed
 
 

@@ -216,45 +216,6 @@ def live_view_sql(dt: DeltaTable) -> str:
     )
 
 
-def build_changed_sql(shard: str, bucket: str, since: datetime) -> str:
-    """DuckDB SQL for the canonical live rows of entities changed since ``since``.
-
-    :func:`_dedupe_sql` over the raw ``statement_raw`` view, scoped to one
-    ``(shard, bucket)`` partition and semi-joined to the entities with a
-    statement whose ``first_seen`` or ``deleted_at`` is newer than
-    ``since`` – so the result matches what a post-merge read would return
-    for those entities *without* requiring a merge first: supersession
-    applied, tombstones shadowing their live rows and then filtered by
-    the default ``deleted_at IS NULL`` predicate. A fully deleted entity
-    therefore yields **zero** rows, which is what lets the diff exporter
-    emit a ``DEL`` op on an un-merged store. The slice deliberately spans
-    all origins of the partition – ``_dedupe_sql`` keys both branches on
-    ``origin``, so per-origin rows stay isolated exactly as physical
-    merge would leave them.
-
-    Args:
-        shard: Target shard value (hex-padded).
-        bucket: Target bucket.
-        since: Change watermark; compared against ``first_seen`` and
-            ``deleted_at``.
-
-    Returns:
-        Executable DuckDB SQL, ordered by ``entity_id`` so each entity's
-        rows stream contiguously into aggregation.
-    """
-    ts = f"TIMESTAMPTZ '{since.isoformat()}'"
-    return _dedupe_sql(
-        source=TABLE_RAW.name,
-        where=(
-            f"WHERE shard = '{shard}' AND bucket = '{bucket}' AND entity_id IN ("
-            f"SELECT DISTINCT entity_id FROM {TABLE_RAW.name} "
-            f"WHERE shard = '{shard}' AND bucket = '{bucket}' "
-            f"AND (first_seen >= {ts} OR deleted_at >= {ts}))"
-        ),
-        order_by="ORDER BY entity_id",
-    )
-
-
 def build_merge_sql(
     shard: str,
     bucket: str,

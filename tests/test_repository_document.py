@@ -160,9 +160,6 @@ def test_repository_document_export_diff(tmp_path, fixtures_path):
     entities.flush()
     assert entities._statements.version == 2
 
-    # Cross second boundary so initial entities are in an earlier second
-    time.sleep(1.1)
-
     # Create initial diff
     diff_name_1 = repo.export_diff()
     assert diff_name_1 is not None
@@ -182,9 +179,6 @@ def test_repository_document_export_diff(tmp_path, fixtures_path):
     file3.write_text("new content")
     _archive_with_entities(archive, entities, file3)
     entities.flush()
-
-    # Cross second boundary so new file's first_seen is before next diff state
-    time.sleep(1.1)
 
     # Incremental diff - captures changes via translog
     diff_name_2 = repo.export_diff()
