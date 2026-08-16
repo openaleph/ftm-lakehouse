@@ -42,7 +42,12 @@ def cli_statements_iterate(
     pre-exported view use ``stream``.
     """
     with DatasetContext() as (name, uri):
-        rows = get_entities(name, uri)._statements._query_statement_data()
+        entities = get_entities(name, uri)
+        if entities._is_api:
+            rows = (r.to_dict() for r in entities.query_statements())
+        else:
+            # faster as no Statement model serialization
+            rows = entities._statements._query_statement_data()
         with smart_open(out_uri, "w") as fh:
             smart_write_csv(fh, rows)
 

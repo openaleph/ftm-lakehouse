@@ -12,7 +12,6 @@ from enum import StrEnum
 from typing import Any, Callable
 
 from anystore import get_store
-from anystore.types import HttpUrlStr
 from anystore.util import join_uri, mask_uri
 from ftmq.model.stats import DatasetStats
 
@@ -50,12 +49,8 @@ class ExportJob(DatasetJobModel):
     kind: ExportKind
     make_diff: bool = True
     """Also export a delta diff file (``entities`` / ``documents`` kinds)."""
-    public_url_prefix: HttpUrlStr | None = None
-    """Override the public url prefix (``documents`` kind)."""
 
     def get_public_prefix(self) -> str | None:
-        if self.public_url_prefix:
-            return self.public_url_prefix
         if settings.public_url_prefix:
             return render(settings.public_url_prefix, {"dataset": self.dataset})
 

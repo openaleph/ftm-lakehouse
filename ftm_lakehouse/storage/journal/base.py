@@ -131,14 +131,6 @@ class BaseJournalStore(Generic[W]):
         """
         return self._writer_cls(self, shards=shards, origin=origin)
 
-    def iterate(self, *args, **kwargs) -> JournalRows:
-        """Iterate all rows for this dataset, ordered by ``shard``.
-
-        Yields:
-            JournalRow(id, shard, data, deleted_at)
-        """
-        raise NotImplementedError
-
     def flush(self) -> JournalRows:
         """Destructively iterate journal rows in raw packed form.
 

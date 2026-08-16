@@ -197,32 +197,6 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
         self.table = make_journal_table(self.metadata, dataset)
         self.metadata.create_all(self.engine, tables=[self.table], checkfirst=True)
 
-    def iterate(self, *args, **kwargs) -> JournalRows:
-        """Iterate all rows ordered by shard for batch processing.
-
-        If the consumer abandons the generator mid-stream
-        (e.g. ``break``, HTTP client disconnect → ``GeneratorExit``),
-        the ``try / finally`` closes the streaming cursor promptly and
-        the surrounding ``with`` releases the connection. No transaction
-        to roll back here – ``iterate`` is read-only.
-        """
-        q = select(self.table).order_by(self.table.c.shard)
-
-        with self.engine.connect() as conn:
-            cursor = conn.execution_options(stream_results=True).execute(q)
-            try:
-                while rows := cursor.fetchmany(10_000):
-                    for row in rows:
-                        yield JournalRow(
-                            row.id,
-                            row.shard,
-                            row.data,
-                            row.deleted_at,
-                            row.fragment,
-                        )
-            finally:
-                cursor.close()
-
     def flush(self) -> JournalRows:
         """Iterate and delete yielded rows, one shard at a time.
 

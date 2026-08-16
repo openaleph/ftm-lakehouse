@@ -11,6 +11,7 @@ from anystore.io import smart_open, smart_write_json
 from anystore.types import SDict, Uri
 from anystore.util import Took, mask_uri
 from followthemoney import EntityProxy, Statement, StatementEntity
+from followthemoney.statement import StatementDict
 from ftmq import C
 from ftmq.io import smart_read_proxies
 from ftmq.model.stats import DatasetStats
@@ -350,11 +351,7 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
                 yield from smart_read_proxies(raw)
 
     @no_api
-    def export_entities(
-        self,
-        statements_csv_uri: str | None = None,
-        split: bool = False,
-    ) -> None:
+    def export_entities(self) -> None:
         """Export entities to a JSON lines file without FtM object construction.
 
         Uses :func:`aggregate_unsafe` to bypass Statement/StatementEntity/
@@ -368,16 +365,10 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
 
         Compression comes from :attr:`compression` (the dataset's config), not
         from the caller.
-
-        Args:
-            statements_csv_uri: Force a specific sorted statements.csv instead
-                of the freshness-based default.
-            split: Split artifact into chunks (by partitions)
         """
         self._store.ensure_parent(self.ENTITIES_JSON)
 
-        if statements_csv_uri is None:
-            statements_csv_uri = self._fresh_statements_csv()
+        statements_csv_uri = self._fresh_statements_csv()
         if statements_csv_uri is not None:
             rows = self._stream_statements_csv(statements_csv_uri)
         else:
@@ -392,7 +383,7 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         ):
             smart_write_json(out, entities)
 
-    def _stream_statements_csv(self, uri: str) -> Iterator[SDict]:
+    def _stream_statements_csv(self, uri: str) -> Iterator[StatementDict]:
         """Stream the exported ``statements.csv`` as row dicts.
 
         Applies the dataset's codec on the way in: the CSV this reads is the
@@ -408,7 +399,8 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
             smart_open(uri, "rb") as fh,
             decompress_stream(cast(IO[bytes], fh), self.compression, "r") as raw,
         ):
-            yield from csv.DictReader(raw)
+            for row in csv.DictReader(raw):
+                yield cast(StatementDict, row)
 
     def _fresh_statements_csv(self) -> str | None:
         """URI of the exported ``statements.csv`` if it's current, else ``None``.

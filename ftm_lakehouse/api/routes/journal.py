@@ -44,17 +44,6 @@ async def journal_bulk(
     return PlainTextResponse(str(count))
 
 
-@router.get("/{dataset}/_api/journal/iterate")
-def journal_iterate(journal: Journal) -> StreamingResponse:
-    """Stream all journal rows as JSONL."""
-
-    def generate():
-        for row in journal.iterate():
-            yield serialize_row(row) + b"\n"
-
-    return StreamingResponse(generate(), media_type=JSONL_CONTENT_TYPE)
-
-
 @router.post("/{dataset}/_api/journal/flush")
 def journal_flush(journal: Journal) -> StreamingResponse:
     """Stream all journal rows as JSONL and delete from storage"""

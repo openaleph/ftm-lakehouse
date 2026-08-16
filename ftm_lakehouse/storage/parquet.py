@@ -275,9 +275,8 @@ class ParquetStore(LakehouseApiMixin):
         """
         if not self.exists:
             return
-        shard = path.entity_shard(entity_id, self.shards)
         q = Query(M(entity_id=entity_id))
-        for stmt_dict in self._query_statement_data(q, shard=shard):
+        for stmt_dict in self._query_statement_data(q):
             yield LakeStatement.from_dict(stmt_dict)
 
     @no_api
@@ -859,9 +858,7 @@ class ParquetStore(LakehouseApiMixin):
             ).fetchall()
         return [(s, b, o) for s, b, o in rows]
 
-    def _iter_shard_buckets(
-        self, shard: str | None = None
-    ) -> Iterator[tuple[str, str]]:
+    def _iter_shard_buckets(self) -> Iterator[tuple[str, str]]:
         """Yield unique ``(shard, bucket)`` pairs from existing partitions.
 
         Reads (:meth:`_query_statement_data`) iterate per ``(shard,
@@ -871,23 +868,16 @@ class ParquetStore(LakehouseApiMixin):
         ``ORDER BY entity_id`` bounded to one partition and lets the
         predicate push through the live view's plain scan to the parquet
         file statistics.
-
-        Args:
-            shard: Optional shard filter. When given, only ``(shard,
-                bucket)`` pairs for that shard are yielded – lets
-                single-entity lookups skip the other shards.
         """
         seen: set[tuple[str, str]] = set()
         for s, b, _ in self._list_partitions():
-            if shard is not None and s != shard:
-                continue
             key = (s, b)
             if key not in seen:
                 seen.add(key)
                 yield s, b
 
     def _execute_partitioned(
-        self, sql: Select | None = None, *, shard: str | None = None
+        self, sql: Select | None = None
     ) -> Iterator[pa.RecordBatchReader]:
         """Yield a streamed Arrow reader per ``(shard, bucket)`` partition.
 
@@ -905,7 +895,6 @@ class ParquetStore(LakehouseApiMixin):
 
         Args:
             sql: Optional SQLAlchemy select (default: :meth:`compile_query`).
-            shard: Optional shard filter to scope iteration to one shard.
 
         Yields:
             One :class:`pyarrow.RecordBatchReader` per ``(shard, bucket)``
@@ -913,18 +902,13 @@ class ParquetStore(LakehouseApiMixin):
         """
         if sql is None:
             sql = self._compile_query()
-        for s, b in self._iter_shard_buckets(shard=shard):
+        for s, b in self._iter_shard_buckets():
             scoped = sql.where(column("shard") == s, column("bucket") == b)
             sql = str(scoped.compile(compile_kwargs={"literal_binds": True}))
             with self._lake.cursor() as cur:
                 yield cur.execute(sql).to_arrow_reader()
 
-    def _query_statement_data(
-        self,
-        q: Query | None = None,
-        *,
-        shard: str | None = None,
-    ) -> Iterator[StatementDict]:
+    def _query_statement_data(self, q: Query | None = None) -> Iterator[StatementDict]:
         """Query statement dicts from the live view, bypassing FtM construction.
 
         Iterates over ``(shard, bucket)`` partitions, scoping each query with
@@ -939,15 +923,12 @@ class ParquetStore(LakehouseApiMixin):
 
         Args:
             q: Optional SQLAlchemy select (default: :meth:`compile_query`).
-            shard: Optional shard filter passed through to
-                :meth:`_iter_shard_buckets` to scope iteration to one shard –
-                used by single-entity lookups.
 
         Yields:
             StatementDict instances.
         """
         sql = self._compile_query(q)
-        for s, b in self._iter_shard_buckets(shard=shard):
+        for s, b in self._iter_shard_buckets():
             scoped = sql.where(column("shard") == s, column("bucket") == b)
             for row in self._lake._execute(scoped):
                 yield StatementDict(**vars(row))

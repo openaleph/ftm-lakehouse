@@ -73,11 +73,6 @@ class ApiJournalStore(BaseJournalStore[ApiJournalWriter], LakehouseApiMixin):
     def _make_url(self, endpoint: str) -> str:
         return self._api.make_url(f"{self.dataset}/_api/journal/{endpoint}")
 
-    def iterate(self, *args, **kwargs) -> JournalRows:
-        url = self._make_url("iterate")
-        for line in self._api.stream_request(url):
-            yield deserialize_row(line)
-
     def flush(self) -> JournalRows:
         url = self._make_url("flush")
         for line in self._api.stream_request(url, "POST"):
