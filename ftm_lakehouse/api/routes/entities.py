@@ -1,13 +1,11 @@
 """Entity API routes: flush, query, delete, stats, version."""
 
-from typing import Annotated, Optional
-
 import orjson
 from fastapi import APIRouter
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from ftmq.model.stats import DatasetStats
 
-from ftm_lakehouse.api.dependencies import EMBED, Entities, QueryBody
+from ftm_lakehouse.api.dependencies import Entities, QueryBody
 
 NDJSON_CONTENT_TYPE = "application/x-ndjson"
 
@@ -22,12 +20,9 @@ def entities_flush(entities: Entities) -> PlainTextResponse:
 
 
 @router.post("/{dataset}/_api/entities/merge")
-def entities_merge(
-    entities: Entities,
-    grace_period_days: Annotated[Optional[int], EMBED] = None,
-) -> PlainTextResponse:
+def entities_merge(entities: Entities) -> PlainTextResponse:
     """Collapse duplicates and reap expired tombstones from parquet store"""
-    entities.merge(grace_period_days)
+    entities.merge()
     return PlainTextResponse("ok")
 
 

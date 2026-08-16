@@ -176,7 +176,8 @@ def test_storage_parquet_soft_delete_hidden_after_merge(tmp_path):
     assert _row_count(store) == 2
 
     # Merge with grace=0 collapses the id to its tombstone and reaps both rows.
-    store.merge(grace_period_days=0)
+    store.settings.grace_period_days = 0
+    store.merge()
     assert list(store.query_statements()) == []
     assert _row_count(store) == 0
 

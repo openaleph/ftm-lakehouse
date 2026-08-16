@@ -21,8 +21,6 @@ from ftm_lakehouse.repository.job import JobRun
 class OptimizeJob(DatasetJobModel):
     retention_hours: int = 0
     """Vacuum: retain obsolete files newer than this many hours."""
-    grace_period_days: int | None = None
-    """Merge: override ``LAKEHOUSE_GRACE_PERIOD_DAYS`` for tombstone reaping."""
 
 
 class OptimizeOperation(DatasetJobOperation[OptimizeJob]):
@@ -40,7 +38,7 @@ class OptimizeOperation(DatasetJobOperation[OptimizeJob]):
     def handle(self, run: JobRun[OptimizeJob], force: bool = False, **kwargs) -> None:
         self.entities.flush()
         store = self.entities._statements
-        store.merge(run.job.grace_period_days, force)
+        store.merge(force)
         run.job.done += 1
         run.save()
         store.compact()

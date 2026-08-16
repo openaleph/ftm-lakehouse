@@ -559,7 +559,7 @@ class ParquetStore(LakehouseApiMixin):
             self._tags.set(tag.statements_partition_updated(shard, bucket, origin))
 
     @no_api
-    def merge(self, grace_period_days: int | None = None, force: bool = False) -> None:
+    def merge(self, force: bool = False) -> None:
         """Collapse duplicates and reap expired tombstones, partition by partition.
 
         For each ``(shard, bucket, origin)`` partition, runs the merge
@@ -617,16 +617,9 @@ class ParquetStore(LakehouseApiMixin):
         """
         if not self.exists:
             return
-        days = (
-            grace_period_days
-            if grace_period_days is not None
-            else self.settings.grace_period_days
+        grace_cutoff = datetime.now(timezone.utc) - timedelta(
+            days=self.settings.grace_period_days
         )
-        # An explicit grace bound means "re-evaluate every partition now" -
-        # the skip would otherwise leave tombstones in clean partitions
-        # unreaped (a grace=0 purge must physically drop them everywhere).
-        force = force or grace_period_days is not None
-        grace_cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         merged = skipped = 0
         with self._maintenance_fence():
             sizes = self._partition_bytes()
@@ -680,7 +673,7 @@ class ParquetStore(LakehouseApiMixin):
                         shard=shard,
                         bucket=bucket,
                         origin=origin,
-                        grace_period_days=days,
+                        grace_period_days=self.settings.grace_period_days,
                         slices=len(ranges),
                     )
             if merged:
@@ -690,7 +683,10 @@ class ParquetStore(LakehouseApiMixin):
                 # shortcut - must go stale and re-run after an optimize.
                 self._tags.set(tag.STATEMENTS_UPDATED)
         self.log.info(
-            "Merge complete.", merged=merged, skipped=skipped, grace_period_days=days
+            "Merge complete.",
+            merged=merged,
+            skipped=skipped,
+            grace_period_days=self.settings.grace_period_days,
         )
 
     def _merge_reader(

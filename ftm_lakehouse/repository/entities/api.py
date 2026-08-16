@@ -28,13 +28,9 @@ class ApiEntityRepository(LakehouseApiMixin):
         return int(res.text)
 
     @require_api
-    def _api_merge(self, grace_period_days: int | None = None) -> None:
+    def _api_merge(self) -> None:
         url = self._make_url("merge")
-        if grace_period_days is None:
-            grace_period_days = settings.grace_period_days
-        self._api.make_request(
-            url, "POST", json={"grace_period_days": grace_period_days}
-        )
+        self._api.make_request(url, "POST")
 
     @require_api
     def _api_query(

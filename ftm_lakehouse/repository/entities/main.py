@@ -275,9 +275,10 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         return total
 
     @api_delegate("_api_merge")
-    def merge(self, grace_period_days: int | None = None) -> None:
+    def merge(self) -> None:
         """Collapse duplicates and reap expired tombstones from parquet store"""
-        self._statements.merge(grace_period_days)
+        self.flush()
+        self._statements.merge()
 
     @no_api
     def unlock(self) -> bool:
