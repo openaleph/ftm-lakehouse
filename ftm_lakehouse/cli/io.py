@@ -14,7 +14,6 @@ from anystore.io import logged_items
 from anystore.types import SDict
 from followthemoney import EntityProxy
 from ftmq.store.lake import LakeStatement
-from rigour.time import iso_datetime
 
 from ftm_lakehouse.exceptions import BufferFullError
 from ftm_lakehouse.logic.entities.buffer import EntityBuffer
@@ -163,9 +162,6 @@ def import_entities_unsafe(
     # Parity with _bulk_import: --last-seen doubles as the stamp for rows
     # missing their timestamps, not just the pinned last_seen default.
     now = last_seen or datetime.now(timezone.utc)
-    # The pinned value the safe path would write for --last-seen: its
-    # isoformat round-tripped through the second-granularity ISO parse.
-    pinned = iso_datetime(last_seen.isoformat()) if last_seen else None
     buffer = RowBuffer()
     for data in logged_items(
         payloads, "Import", item_name="Entity", logger=repo.log, chunk_size=10_000
@@ -177,7 +173,7 @@ def import_entities_unsafe(
             now=now,
             origin=origin,
             override_origin=override_origin,
-            last_seen=pinned,
+            last_seen=last_seen,
         ):
             buffer.add(row)
             # Checked per row (not per payload) so one pathologically large
