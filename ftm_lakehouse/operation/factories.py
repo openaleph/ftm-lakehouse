@@ -66,7 +66,6 @@ def optimize(
     dataset: str,
     uri: Uri | None = None,
     retention_hours: int = 0,
-    grace_period_days: int | None = None,
     force: bool = False,
 ) -> OptimizeJob:
     """
@@ -77,7 +76,6 @@ def optimize(
         dataset: Name of the dataset to optimize
         uri: Dataset storage root override
         retention_hours: Vacuum retains obsolete files newer than this
-        grace_period_days: Override ``LAKEHOUSE_GRACE_PERIOD_DAYS`` for merge
         force: Run regardless of freshness state
 
     Returns:
@@ -86,7 +84,6 @@ def optimize(
     job = OptimizeJob.make(
         dataset=dataset,
         retention_hours=retention_hours,
-        grace_period_days=grace_period_days,
     )
     return OptimizeOperation(job, uri).run(force=force)
 
