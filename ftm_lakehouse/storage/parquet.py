@@ -11,7 +11,7 @@ file. Two views are registered on the underlying ``LakeStore`` connection –
 view that every read targets (a plain ``WHERE deleted_at IS NULL`` scan), and
 :func:`~ftm_lakehouse.logic.parquet.raw_view_sql` produces ``statement_raw``
 for code paths that need tombstones and pre-merge duplicates visible
-(:meth:`merge`, :meth:`get_changed_entity_ids`).
+(:meth:`merge`, :meth:`get_entity_ids` over :attr:`source_raw`).
 
 **Correctness assumes an optimized store.** The live view has no read-time
 dedupe – it just hides tombstones – so reads are correct only once
@@ -133,8 +133,8 @@ class ParquetStore(LakehouseApiMixin):
         self.settings = Settings()
         self.dataset = dataset
         self.shards = shards if shards is not None else DEFAULT_SHARDS
-        # Resolved from the dataset config by the owning repository – exports
-        # never take a runtime codec (see `repository.base.resolve_compression`).
+        # Resolved from the dataset config (`BaseRepository._model`) by the
+        # owning repository – exports never take a runtime codec.
         self.compression = compression
         self._store = get_store(ensure_api_uri(uri))
         self._tags = TagStore(ensure_api_uri(uri))
@@ -248,7 +248,7 @@ class ParquetStore(LakehouseApiMixin):
         """Query ordered Statements from the store.
 
         Args:
-            q: Optional ``Query`` – compiled through :meth:`compile_query`;
+            q: Optional ``Query`` – compiled through :meth:`_compile_query`;
                 sorted / sliced queries execute globally
                 (:meth:`_needs_global`).
 
@@ -300,7 +300,7 @@ class ParquetStore(LakehouseApiMixin):
         per-partition read iteration), so it's cheap enough to short-circuit an
         export that would otherwise iterate every partition for zero results.
         Compiled through `self.source`, so a schema filter folds into
-        the same ``bucket IN (...)`` prune as :meth:`compile_query` –
+        the same ``bucket IN (...)`` prune as :meth:`_compile_query` –
         non-matching partitions are pruned, not just file-skipped. Like the
         other aggregates it assumes an optimized store.
         """
@@ -575,19 +575,17 @@ class ParquetStore(LakehouseApiMixin):
         their ``last_optimized`` tag are rewritten – a partition untouched
         since its last merge is skipped, so an optimize after a small
         append rewrites only what changed instead of the whole store. Each
-        successful rewrite stamps ``last_optimized`` (and back-fills a
-        missing ``last_updated``, so partitions predating freshness
-        tracking are merged once and then skipped instead of rewritten on
-        every run).
+        successful rewrite stamps ``last_optimized``.
 
         Because a clean partition is never revisited by a *default* merge,
         a tombstone sitting in an otherwise-idle partition is not
         physically reaped once it passes the grace window until the next
         write touches that partition – this only defers disk reclamation;
         read correctness is unaffected (the live view hides tombstones
-        regardless). Passing an explicit ``grace_period_days`` bypasses
-        the skip and re-evaluates every partition, so a purge
-        (``grace_period_days=0``) physically reaps cold tombstones too.
+        regardless). ``force=True`` bypasses the skip and re-evaluates
+        every partition, so a forced merge (with
+        ``LAKEHOUSE_GRACE_PERIOD_DAYS=0`` for an immediate purge)
+        physically reaps cold tombstones too.
 
         Load-bearing for reads: the live ``statement`` view does no
         dedupe, so a partition's rows are only canonical – one row per id,
@@ -609,10 +607,6 @@ class ParquetStore(LakehouseApiMixin):
         commit are identical to a single-pass merge.
 
         Args:
-            grace_period_days: Override ``settings.grace_period_days``. Pass
-                ``0`` to drop tombstones immediately. An explicit value
-                forces every partition to be rewritten (grace is evaluated
-                against all tombstones, not just dirty partitions).
             force: Rewrite every partition regardless of freshness tags.
         """
         if not self.exists:
@@ -886,7 +880,7 @@ class ParquetStore(LakehouseApiMixin):
         generator resumes for the following partition.
 
         Args:
-            sql: Optional SQLAlchemy select (default: :meth:`compile_query`).
+            sql: Optional SQLAlchemy ``Select`` (default: :meth:`_compile_query`).
 
         Yields:
             One :class:`pyarrow.RecordBatchReader` per ``(shard, bucket)``
@@ -914,7 +908,8 @@ class ParquetStore(LakehouseApiMixin):
         applied yet.
 
         Args:
-            q: Optional SQLAlchemy select (default: :meth:`compile_query`).
+            q: Optional ftmq ``Query`` (default: match-all), compiled via
+                :meth:`_compile_query`.
 
         Yields:
             StatementDict instances.
@@ -930,7 +925,8 @@ class ParquetStore(LakehouseApiMixin):
         Query entity dicts via aggregate_unsafe(), bypassing FtM object construction.
 
         Args:
-            q: Optional SQLAlchemy select (default: compile_query())
+            q: Optional ftmq ``Query`` (default: match-all), compiled via
+                :meth:`_compile_query`.
 
         Yields:
             EntityPayload instances

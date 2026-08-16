@@ -122,8 +122,10 @@ entities.flush()
 ### Query Entities
 
 ```python
+from ftmq.query import M, Query
+
 # Query with filters
-for entity in entities.query(origin="import"):
+for entity in entities.query(Query(M(origin="import"))):
     print(entity.caption)
 
 # Stream from exported JSON

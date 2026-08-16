@@ -6,7 +6,7 @@ The live ``statement`` view (:func:`live_view_sql`) is a plain
 canonical by :func:`build_merge_sql` (one row per id, supersession applied,
 timestamps folded). ``statement_raw`` exposes every underlying Delta row for
 code paths that need tombstones / pre-merge duplicates visible (``merge``,
-``get_changed_entity_ids``).
+``get_entity_ids`` over the raw source).
 
 All dedupe / fragment-supersession / grace logic lives in one place –
 :func:`_dedupe_sql`, used only by :func:`build_merge_sql`. See its docstring
@@ -92,7 +92,7 @@ def raw_view_sql(dt: DeltaTable) -> str:
 
     Surfaces every physical row in the Delta table, including
     tombstones and pre-merge duplicates. Used by :func:`build_merge_sql`
-    and :meth:`get_changed_entity_ids` – any path that needs the
+    and raw-source queries (diff exports) – any path that needs the
     physical layout visible.
     """
     return f"SELECT * FROM {_delta_scan_clause(dt)}"

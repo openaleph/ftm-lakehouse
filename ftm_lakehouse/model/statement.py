@@ -82,7 +82,7 @@ TABLE = _sharded_table(nks.STATEMENT_TABLE)
 # on the same LakeStore connection and surfaces the underlying Delta
 # rows unchanged. Targeted by paths that need tombstones and per-row
 # physical layout visible: :func:`build_merge_sql` (grace-period
-# tombstone retention) and :meth:`get_changed_entity_ids` (diff
+# tombstone retention) and raw-source ``get_entity_ids`` queries (diff
 # consumers emit DEL ops).
 TABLE_RAW = _sharded_table(f"{nks.STATEMENT_TABLE}_raw")
 

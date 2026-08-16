@@ -69,7 +69,7 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         repo.flush()
 
         # Query entities
-        for entity in repo.query(origin="import"):
+        for entity in repo.query(Query(M(origin="import"))):
             process(entity)
         ```
     """

@@ -25,13 +25,15 @@ archive.stream(checksum)
 Entity/statement operations combining JournalStore and ParquetStore.
 
 ```python
+from ftmq.query import M, Query
+
 from ftm_lakehouse import get_entities
 
 entities = get_entities("my_dataset")
 entities.add(entity, origin="import")
 entities.writer(origin="import")
 entities.flush()
-entities.query(origin="import")
+entities.query(Query(M(origin="import")))
 ```
 
 ::: ftm_lakehouse.repository.EntityRepository

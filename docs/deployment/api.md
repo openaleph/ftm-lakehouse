@@ -20,7 +20,7 @@
 
     ### Request body size
 
-    The API does not cap request body size. Configure ``client_max_body_size`` (nginx), ``request_body`` (Caddy), or the equivalent in your proxy. Endpoints that semantically constrain content shape (e.g. ``entities/query`` capping ``entity_ids`` length) still validate after the body is parsed.
+    The API does not cap request body size. Configure ``client_max_body_size`` (nginx), ``request_body`` (Caddy), or the equivalent in your proxy. Endpoints that semantically constrain content shape (e.g. ``entities/query`` capping ``in`` / ``not_in`` filter value lists) still validate after the body is parsed.
 
 ## Running the API
 
@@ -92,6 +92,6 @@ API-only settings use the `LAKEHOUSE_API_` prefix:
 | `LAKEHOUSE_API_TITLE` | OpenAPI title | `FollowTheMoney Data Lakehouse Api` |
 | `LAKEHOUSE_API_STATIC_HEADERS` | Extra headers added to every response | `{}` |
 | `LAKEHOUSE_API_QUERY_MAX_IN_VALUES` | Maximum length of an `*__in`/`*__not_in` list in a query body (caps the SQL `IN (…)` clause that DuckDB has to build). | `10_000` |
-| `LAKEHOUSE_API_QUERY_MAX_FILTER_KEYS` | Maximum number of top-level keys (ftmq filter kwargs accepted in a single query body. | `20` |
+| `LAKEHOUSE_API_QUERY_MAX_FILTER_KEYS` | Maximum number of filter leaves in a query body's filter tree. | `20` |
 
 Storage URI, journal URI, shard count, etc. use the regular `LAKEHOUSE_` settings – see [Configuration](configuration.md).

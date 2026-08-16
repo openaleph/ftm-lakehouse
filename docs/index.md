@@ -44,6 +44,8 @@ A statement represents a single fact: one property value for one entity from one
 This statement-based storage model makes it possible to merge data from multiple sources while preserving full provenance, perform incremental updates without reprocessing entire datasets, and use standard file-based tools (sorting, filtering) rather than requiring database infrastructure.
 
 ```python
+from ftmq.query import M, Query
+
 from ftm_lakehouse import ensure_dataset, get_entities
 
 ensure_dataset("my_dataset")
@@ -59,7 +61,7 @@ entities.flush()
 entity = entities.get("entity-id-123")
 
 # Live query of the parquet store
-for entity in entities.query(origin="crawl"):
+for entity in entities.query(Query(M(origin="crawl"))):
     process(entity)
 ```
 

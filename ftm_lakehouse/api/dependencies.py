@@ -100,8 +100,8 @@ class QueryBody(BaseModel):
         """Enforce the API complexity caps on a parsed query.
 
         The semantic DoS caps guard here: total filter-leaf count vs
-        ``max_filter_keys`` and every ``in`` / ``not_in`` value list vs
-        ``max_entity_ids`` – no request can smuggle an unbounded ``IN`` literal
+        ``query_max_filter_keys`` and every ``in`` / ``not_in`` value list vs
+        ``query_max_in_values`` – no request can smuggle an unbounded ``IN`` literal
         (which DuckDB chokes on) or filter fan-out past the boundary.
 
         Raises:

@@ -92,7 +92,8 @@ class ApiSettings(BaseSettings):
 
     # DoS limits at the API boundary.
     query_max_in_values: int = 10_000
-    """Maximum number of ``entity_ids`` accepted in a single query body."""
+    """Maximum number of values per ``in`` / ``not_in`` filter in a single
+    query body."""
 
     query_max_filter_keys: int = 20
-    """Maximum number of ftmq filter keys accepted in a single query body."""
+    """Maximum number of filter leaves accepted in a single query body."""

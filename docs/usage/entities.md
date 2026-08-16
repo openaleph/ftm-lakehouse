@@ -115,16 +115,21 @@ if entity:
 
 ### Query with Filters
 
+Filters are expressed as an ftmq `Query` – built from filter nodes (`M` for statement meta fields like `origin` / `entity_id` / `schema`, `P` for entity properties):
+
 ```python
-for entity in entities.query(origin="import"):
+from ftmq.query import M, Query
+
+for entity in entities.query(Query(M(origin="import"))):
     print(entity.id)
 
 ids = ["jane-doe", "john-smith"]
-for entity in entities.query(entity_ids=ids):
+for entity in entities.query(Query(M(entity_id__in=ids))):
     print(entity.caption)
 
-# By schema bucket (thing / interval / document / page / pages / mention)
-for entity in entities.query(bucket="thing"):
+# By schema – the (shard, bucket) partition prunes are derived from the
+# query (schema → bucket, entity_id → shard)
+for entity in entities.query(Query(M(schema="Person"))):
     print(entity.schema.name)
 ```
 
@@ -152,7 +157,7 @@ with entities.writer(origin="source_b") as writer:
     for entity in source_b_entities:
         writer.add_entity(entity)
 
-for entity in entities.query(origin="source_a"):
+for entity in entities.query(Query(M(origin="source_a"))):
     print(entity.id)
 ```
 
@@ -232,7 +237,7 @@ entities.merge()
 ```python
 entities.delete_entity("jane-doe")
 entities.flush()
-entities.merge(grace_period_days=0)  # drop tombstones immediately
+entities.merge()  # set LAKEHOUSE_GRACE_PERIOD_DAYS=0 to drop tombstones immediately
 
 entities.add(updated_jane, origin="correction")
 entities.flush()
@@ -281,11 +286,10 @@ entities._statements.compact()
 Per-partition rewrite that collapses duplicates, folds `first_seen` to the min across each group, and drops tombstones whose `deleted_at` is older than the grace cutoff. Non-fragment rows dedupe per statement `id` (`ROW_NUMBER OVER (PARTITION BY id ORDER BY last_seen DESC) = 1`); fragment rows keep the latest emission per `(entity_id, prop, fragment)` group.
 
 ```python
-entities.merge()  # uses default grace from settings
-entities.merge(grace_period_days=0)  # drop all tombstones immediately
+entities.merge()
 ```
 
-Default grace is `LAKEHOUSE_GRACE_PERIOD_DAYS` (30 days).
+Grace comes from `LAKEHOUSE_GRACE_PERIOD_DAYS` (default 30 days); set it to `0` to drop all tombstones immediately.
 
 ### Vacuum
 
