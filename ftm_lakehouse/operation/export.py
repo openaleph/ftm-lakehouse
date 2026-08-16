@@ -23,12 +23,10 @@ from ftm_lakehouse.helpers.dataset import (
     make_statements_resource,
     make_statistics_resource,
 )
-from ftm_lakehouse.model.dataset import DatasetModel
 from ftm_lakehouse.model.job import DatasetJobModel
 from ftm_lakehouse.operation.base import DatasetJobOperation
 from ftm_lakehouse.repository.factories import get_entities
 from ftm_lakehouse.repository.job import JobRun
-from ftm_lakehouse.util import render
 
 settings = Settings()
 
@@ -50,14 +48,8 @@ class ExportJob(DatasetJobModel):
     make_diff: bool = True
     """Also export a delta diff file (``entities`` / ``documents`` kinds)."""
 
-    def get_public_prefix(self) -> str | None:
-        if settings.public_url_prefix:
-            return render(settings.public_url_prefix, {"dataset": self.dataset})
 
-
-def _export_statements(
-    op: "ExportOperation", run: JobRun[ExportJob], **kwargs: Any
-) -> None:
+def _export_statements(op: "ExportOperation", *args, **kwargs) -> None:
     op.entities._statements.export_csv(op.entities.EXPORTS_STATEMENTS)
 
 
@@ -73,28 +65,18 @@ def _export_entities(
 def _export_documents(
     op: "ExportOperation", run: JobRun[ExportJob], **kwargs: Any
 ) -> None:
-    public_prefix = run.job.get_public_prefix()
-    op.documents.export_csv(public_prefix)
+    op.documents.export_csv()
     if run.job.make_diff:
-        op.documents.export_diff(public_url_prefix=public_prefix)
+        op.documents.export_diff()
 
 
-def _export_statistics(
-    op: "ExportOperation", run: JobRun[ExportJob], **kwargs: Any
-) -> None:
+def _export_statistics(op: "ExportOperation", *args, **kwargs) -> None:
     stats = op.entities.get_statistics()
     op._versions.make(path.EXPORTS_STATISTICS, stats)
 
 
-def _export_index(
-    op: "ExportOperation",
-    run: JobRun[ExportJob],
-    dataset: DatasetModel | None = None,
-    **kwargs: Any,
-) -> None:
-    if dataset is None:
-        dataset = op._model
-
+def _export_index(op: "ExportOperation", *args, **kwargs) -> None:
+    dataset = op._model
     store = get_store(dataset.uri)
     public_prefix = dataset.get_public_prefix()
 

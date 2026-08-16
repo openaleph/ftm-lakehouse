@@ -4,7 +4,6 @@ from anystore.io import smart_stream_csv_models
 from ftmq.util import make_entity
 
 from ftm_lakehouse.core.conventions import path, tag
-from ftm_lakehouse.model.dataset import DatasetModel
 from ftm_lakehouse.model.file import Document
 from ftm_lakehouse.operation.export import ExportJob, ExportKind, ExportOperation
 from ftm_lakehouse.repository import ArchiveRepository, EntityRepository
@@ -152,9 +151,7 @@ def test_operation_export_index(tmp_path):
         "exports/documents.csv",
     ]
 
-    # Run the export operation (requires dataset model)
-    dataset = DatasetModel(name=DATASET, title="Export Test Dataset")
-    result = op.run(dataset=dataset)
+    result = op.run()
 
     assert result.done == 1
     assert result.running is False

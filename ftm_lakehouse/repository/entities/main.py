@@ -535,7 +535,7 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
 
     @no_api
     def _write_diff(
-        self, entity_ids: Iterator[str], since: datetime, ts: datetime, **kwargs
+        self, entity_ids: Iterator[str], since: datetime, ts: datetime
     ) -> str:
         """Write entities as line-based JSON with operation envelopes."""
         key = path.entities_diff(ts, self.compression)

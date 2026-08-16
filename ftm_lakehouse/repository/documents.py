@@ -84,22 +84,18 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
 
         return paths
 
-    def collect(
-        self,
-        q: Query | None = None,
-        *,
-        public_url_prefix: str | None = None,
-    ) -> Documents:
+    def collect(self, q: Query | None = None) -> Documents:
         paths = self.make_paths()
+        public_prefix = self._model.get_public_prefix()
         q = (q or Query()).where(*Q_DOCUMENTS)
         for d in self._statements._query_data(q):
             d = d.to_dict()
             if d.get("schema") == "Folder":
                 continue
             document = Document.from_entity_dict(d)
-            if public_url_prefix:
+            if public_prefix:
                 document.public_url = join_uri(
-                    public_url_prefix, path.archive_blob(document.checksum)
+                    public_prefix, path.archive_blob(document.checksum)
                 )
             yielded = False
             for parent in d.get("properties", {}).get("parent", []):
@@ -111,7 +107,7 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
             if not yielded:
                 yield document
 
-    def export_csv(self, public_url_prefix: str | None = None) -> None:
+    def export_csv(self) -> None:
         # Short-circuit before the per-partition iteration when the dataset has
         # no documents – a single count(DISTINCT entity_id) that file-skips
         # on the schema filter, so a document-free dataset costs one fast query
@@ -119,7 +115,7 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
         count_query = Query(*Q_DOCUMENTS)
         if self._statements.count(count_query) == 0:
             return
-        docs = self.collect(public_url_prefix=public_url_prefix)
+        docs = self.collect()
         first = next(docs, None)
         if first is None:
             return
@@ -135,41 +131,36 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
         return self._statements.get_entity_ids(q, source=self._statements.source_raw)
 
     def _write_diff(
-        self, entity_ids: Iterator[str], since: datetime, ts: datetime, **kwargs
+        self, entity_ids: Iterator[str], since: datetime, ts: datetime
     ) -> str:
         """Write documents as CSV with op column (``since`` unused here – the
         documents diff still resolves the passed changed-id set per batch)."""
         key = path.documents_diff(ts)
         with self._store.open(key, "w") as o:
-            smart_write_csv(
-                o,
-                self._get_delta_documents(entity_ids, kwargs.get("public_url_prefix")),
-            )
+            smart_write_csv(o, self._get_delta_documents(entity_ids))
         return self._store.to_uri(key)
 
     def _get_delta_documents(
-        self, entity_ids: Iterator[str], public_url_prefix: str | None = None
+        self, entity_ids: Iterator[str]
     ) -> Generator[dict, None, None]:
         original_ids: set[str] = set()
         seen_ids: set[str] = set()
         it = iter(entity_ids)
         while batch := set(islice(it, QUERY_IN_BATCH_SIZE)):
             original_ids.update(batch)
-            for doc in self.collect(
-                Query(M(entity_id__in=batch)), public_url_prefix=public_url_prefix
-            ):
+            for doc in self.collect(Query(M(entity_id__in=batch))):
                 seen_ids.add(doc.id)
                 yield {"op": "ADD", **doc.model_dump(by_alias=True, mode="json")}
         for entity_id in original_ids - seen_ids:
             yield {"op": "DEL", "id": entity_id}
 
-    def _write_initial_diff(self, ts: datetime, **kwargs) -> None:
+    def _write_initial_diff(self, ts: datetime) -> None:
         """Copy over exported documents.csv to initial diff version"""
         if not self._store.exists(path.EXPORTS_DOCUMENTS):
             self.log.info(
                 f"Exporting `{path.EXPORTS_DOCUMENTS}` first to create initial diff."
             )
-            self.export_csv(kwargs.get("public_url_prefix"))
+            self.export_csv()
         if not self._store.exists(path.EXPORTS_DOCUMENTS):
             return
         with self._store.open(path.EXPORTS_DOCUMENTS, "rb") as i:

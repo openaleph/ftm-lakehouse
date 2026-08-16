@@ -45,7 +45,7 @@ class ParquetDiffMixin:
 
     @abstractmethod
     def _write_diff(
-        self, entity_ids: Iterator[str], since: datetime, ts: datetime, **kwargs
+        self, entity_ids: Iterator[str], since: datetime, ts: datetime
     ) -> str:
         """Write the diff file for entities changed since ``since`` and return
         its uri. ``entity_ids`` is the changed set (used to derive deletes);
@@ -54,7 +54,7 @@ class ParquetDiffMixin:
         ...
 
     @abstractmethod
-    def _write_initial_diff(self, ts: datetime, **kwargs) -> None:
+    def _write_initial_diff(self, ts: datetime) -> None:
         """Create initial diff."""
         ...
 
@@ -82,7 +82,7 @@ class ParquetDiffMixin:
         ts_str = ts.strftime(path.TS_FORMAT)
         self._tags.put(self._diff_state_key, f"{ts_str}:{version}")
 
-    def export_diff(self, **kwargs) -> str | None:
+    def export_diff(self) -> str | None:
         """Export only data changed since last diff export using the translog.
 
         Uses the translog's first_seen timestamps to identify changed entities
@@ -102,7 +102,7 @@ class ParquetDiffMixin:
 
             # No prior state – create initial diff
             if state is None:
-                self._write_initial_diff(now, **kwargs)
+                self._write_initial_diff(now)
                 self._set_diff_state(now, current_version)
                 ts_label = now.strftime(path.TS_FORMAT)
                 self.log.info(
@@ -127,9 +127,7 @@ class ParquetDiffMixin:
                 self._set_diff_state(now, current_version)
                 return
 
-            diff_uri = self._write_diff(
-                iter(changed_entity_ids), last_timestamp, now, **kwargs
-            )
+            diff_uri = self._write_diff(iter(changed_entity_ids), last_timestamp, now)
 
             self._set_diff_state(now, current_version)
 

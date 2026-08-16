@@ -44,7 +44,10 @@ def test_repository_document_collect(tmp_path, fixtures_path):
         assert doc.path is None  # root dir
         assert doc.size > 0
         assert doc.mimetype
-        assert doc.public_url is None
+        assert (
+            doc.public_url
+            == f"https://data.example.org/test/{path.archive_blob(doc.checksum)}"
+        )  # pytest-env global prefix var
 
     # Check specific file
     utf_docs = [d for d in documents if d.name == "utf.txt"]
