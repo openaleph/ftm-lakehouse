@@ -11,6 +11,7 @@ from followthemoney.statement.util import BASE_ID
 from followthemoney.util import HASH_ENCODING
 from ftmq.store.base import DEFAULT_ORIGIN
 from ftmq.store.lake import LakeStatement
+from rigour.time import utc_now
 
 from ftm_lakehouse.exceptions import MalformedStatementError
 
@@ -30,7 +31,7 @@ malformed row and rejected.
 def _to_iso(value: datetime | str | None) -> str:
     """Convert a datetime or string to ISO format string, ensuring UTC."""
     if value is None:
-        return datetime.now(timezone.utc).isoformat()
+        return utc_now().isoformat()
     if isinstance(value, datetime):
         if value.tzinfo is None:
             value = value.replace(tzinfo=timezone.utc)

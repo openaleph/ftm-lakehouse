@@ -5,7 +5,7 @@ local or remote file stores into the lakehouse. This just adds (or replaces)
 documents but no processing. Use `ingest-file` or any other client for that.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime
 from enum import Enum
 from fnmatch import fnmatch
 from typing import Generator
@@ -15,6 +15,7 @@ from anystore.store import get_store
 from anystore.types import Uri
 from anystore.util import mask_uri
 from banal import ensure_dict
+from rigour.time import utc_now
 
 from ftm_lakehouse.core.conventions import tag
 from ftm_lakehouse.core.settings import CHECKSUM_ALGORITHM
@@ -122,7 +123,7 @@ class CrawlOperation(DatasetJobOperation[CrawlJob]):
         Returns:
             Timestamp when the task was processed
         """
-        now = datetime.now(timezone.utc)
+        now = utc_now()
 
         self.log.info(f"Crawling `{uri}` ...", source=mask_uri(self.source.uri))
         checksum = None

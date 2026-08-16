@@ -14,7 +14,7 @@ from ftmq.util import make_entity
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.model.job import JobModel
 from ftm_lakehouse.repository import EntityRepository
-from ftm_lakehouse.storage.tags import TagStore, ensure_utc
+from ftm_lakehouse.storage.tags import TagStore
 from tests.shared import JANE
 
 DATASET = "utc_test"
@@ -44,24 +44,6 @@ def test_tagstore_touch_only_persists_on_success(tmp_path):
     except RuntimeError:
         pass
     assert tags.get("failed/tag") is None
-
-
-def test_tagstore_is_latest_tolerates_legacy_naive(tmp_path):
-    """Tags written before the UTC sweep are naive local – comparisons must
-    not raise and must interpret them as host-local time."""
-    tags = TagStore(tmp_path)
-    tags.put("legacy/dep", datetime.now())  # naive, pre-sweep style
-    tags.set("fresh/target")  # aware UTC, now
-
-    assert tags.is_latest("fresh/target", ["legacy/dep"]) is True
-    assert tags.is_latest("legacy/dep", ["fresh/target"]) is False
-
-
-def test_ensure_utc_naive_is_host_local():
-    naive = datetime(2026, 1, 1, 12, 0, 0)
-    coerced = ensure_utc(naive)
-    assert _is_utc(coerced)
-    assert coerced == naive.astimezone(timezone.utc)
 
 
 def test_job_lifecycle_timestamps_are_utc():

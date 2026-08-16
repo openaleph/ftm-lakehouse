@@ -93,7 +93,6 @@ class ParquetDiffMixin:
         """
         with self._tags.touch(self._diff_base_path) as now:
             current_version = self._statements.version
-            current_timestamp = now.astimezone(timezone.utc)
 
             # No table yet - nothing to diff
             if current_version is None:
@@ -103,9 +102,9 @@ class ParquetDiffMixin:
 
             # No prior state – create initial diff
             if state is None:
-                self._write_initial_diff(current_timestamp, **kwargs)
-                self._set_diff_state(current_timestamp, current_version)
-                ts_label = current_timestamp.strftime(path.TS_FORMAT)
+                self._write_initial_diff(now, **kwargs)
+                self._set_diff_state(now, current_version)
+                ts_label = now.strftime(path.TS_FORMAT)
                 self.log.info(
                     f"Exported initial diff for `{self._diff_base_path}`.",
                     version=ts_label,
@@ -125,16 +124,16 @@ class ParquetDiffMixin:
             # ``first_seen`` back), there's no diff content to write.
             changed_entity_ids = list(self._get_changed_ids(last_timestamp))
             if not changed_entity_ids:
-                self._set_diff_state(current_timestamp, current_version)
+                self._set_diff_state(now, current_version)
                 return
 
             diff_uri = self._write_diff(
-                iter(changed_entity_ids), last_timestamp, current_timestamp, **kwargs
+                iter(changed_entity_ids), last_timestamp, now, **kwargs
             )
 
-            self._set_diff_state(current_timestamp, current_version)
+            self._set_diff_state(now, current_version)
 
-            ts_label = current_timestamp.strftime(path.TS_FORMAT)
+            ts_label = now.strftime(path.TS_FORMAT)
             self.log.info(
                 f"Exported {self._diff_base_path} diff.",
                 version=ts_label,

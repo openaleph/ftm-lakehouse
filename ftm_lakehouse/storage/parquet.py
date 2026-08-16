@@ -39,7 +39,7 @@ Layout:
 import random
 import time
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from functools import cache, cached_property
 from typing import Callable, Iterator, cast
 from uuid import uuid4
@@ -68,6 +68,7 @@ from ftmq.store.lake import (
 )
 from ftmq.types import StatementEntities, Statements
 from pyarrow.csv import CSVWriter  # type: ignore[attr-defined]  # missing from stubs
+from rigour.time import utc_now
 from sqlalchemy import Select, column
 
 from ftm_lakehouse.core.api import LakehouseApiMixin, ensure_api_uri, no_api
@@ -616,9 +617,7 @@ class ParquetStore(LakehouseApiMixin):
         """
         if not self.exists:
             return
-        grace_cutoff = datetime.now(timezone.utc) - timedelta(
-            days=self.settings.grace_period_days
-        )
+        grace_cutoff = utc_now() - timedelta(days=self.settings.grace_period_days)
         merged = skipped = 0
         with self._maintenance_fence():
             sizes = self._partition_bytes()

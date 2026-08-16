@@ -1,12 +1,12 @@
 """JobRepository - job run storage."""
 
 import contextlib
-from datetime import datetime, timezone
 from typing import Generator, Generic
 
 from anystore.logging import get_logger
 from anystore.store import get_store
 from anystore.types import Uri
+from rigour.time import utc_now
 
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.model.job import J, JobModel
@@ -24,7 +24,7 @@ class JobRun(Generic[J]):
 
     def start(self) -> None:
         """Mark job as started and save."""
-        self.job.started = datetime.now(timezone.utc)
+        self.job.started = utc_now()
         self.job.running = True
         self.repo.put(self.job)
 

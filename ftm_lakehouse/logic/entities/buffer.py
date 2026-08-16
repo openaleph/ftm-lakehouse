@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime
 
 from followthemoney import EntityProxy, Statement, StatementEntity
 from followthemoney.namespace import Namespace
@@ -6,6 +6,7 @@ from followthemoney.statement.util import BASE_ID
 from ftmq.store.base import DEFAULT_ORIGIN
 from ftmq.store.lake import LakeStatement
 from ftmq.util import ensure_entity
+from rigour.time import utc_now
 
 from ftm_lakehouse.core.conventions.path import entity_shard
 from ftm_lakehouse.core.settings import Settings
@@ -178,10 +179,7 @@ class EntityBuffer:
         # own last_seen (faithful provenance on round-trips) and only fall
         # back to the pinned value when unset.
         last_seen = (
-            e.last_seen
-            or e.last_change
-            or self.last_seen
-            or datetime.now(timezone.utc).isoformat()
+            e.last_seen or e.last_change or self.last_seen or utc_now().isoformat()
         )
         ids: set[str] = set()
         first_seens: set[str] = set()

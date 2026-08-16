@@ -70,10 +70,11 @@ Dataset Layout
                         {timestamp}.json    # job run results
 """
 
-from datetime import datetime, timezone
+from datetime import datetime
 
 from anystore.util import ensure_uuid, join_relpaths
 from banal import hash_data
+from rigour.time import utc_now
 
 from ftm_lakehouse.util import make_checksum_key, safe_name, validate_origin
 
@@ -110,7 +111,7 @@ def version(name: str, ts: str | None = None) -> str:
         Path like "versions/2025/01/20250115T103000/config.yml"
     """
     if ts is None:
-        ts = datetime.now(timezone.utc).strftime(TS_FORMAT)
+        ts = utc_now().strftime(TS_FORMAT)
 
     year = ts[:4]
     month = ts[4:6]
@@ -323,7 +324,7 @@ def documents_diff(ts: datetime | None = None) -> str:
         Path to diff file
     """
     if ts is None:
-        ts = datetime.now(timezone.utc)
+        ts = utc_now()
     ts_iso = ts.strftime(TS_FORMAT)
     return f"{DIFFS_DOCUMENTS}/{ts_iso}.diff.csv"
 
@@ -346,7 +347,7 @@ def entities_diff(ts: datetime | None = None, suffix: str | None = None) -> str:
         Path to delta file
     """
     if ts is None:
-        ts = datetime.now(timezone.utc)
+        ts = utc_now()
     ts_iso = ts.strftime(TS_FORMAT)
     path = f"{DIFFS_ENTITIES}/{ts_iso}.delta.json"
     if suffix:

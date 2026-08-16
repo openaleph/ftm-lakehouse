@@ -1,6 +1,6 @@
 """Job status models."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from functools import cached_property
 from typing import Self, TypeVar
 
@@ -8,6 +8,7 @@ from anystore.logging import get_logger
 from anystore.model import BaseModel
 from anystore.util import ensure_uuid
 from pydantic import computed_field, field_validator
+from rigour.time import utc_now
 from structlog.stdlib import BoundLogger
 
 DEFAULT_USER = "__system__"
@@ -43,11 +44,11 @@ class JobModel(BaseModel):
         return value or ensure_uuid()
 
     def touch(self) -> None:
-        self.last_updated = datetime.now(timezone.utc)
+        self.last_updated = utc_now()
 
     def stop(self, exc: Exception | None = None) -> None:
         self.running = False
-        self.stopped = datetime.now(timezone.utc)
+        self.stopped = utc_now()
         self.exc = str(exc)
         if self.started and self.stopped:
             self.took = self.stopped - self.started

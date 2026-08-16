@@ -7,13 +7,14 @@ bypassing the journal. The loop here is the single implementation; the
 command modules only differ in how they parse their input.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Callable, Iterable, TypeVar
 
 from anystore.io import logged_items
 from anystore.types import SDict
 from followthemoney import EntityProxy
 from ftmq.store.lake import LakeStatement
+from rigour.time import utc_now
 
 from ftm_lakehouse.exceptions import BufferFullError
 from ftm_lakehouse.logic.entities.buffer import EntityBuffer
@@ -69,7 +70,7 @@ def _bulk_import(
     buffer = EntityBuffer(
         repo.dataset, repo.shards, origin, last_seen=last_seen, max_rows=bulk_size
     )
-    now = last_seen or datetime.now(timezone.utc)
+    now = last_seen or utc_now()
 
     for item in logged_items(
         items,
@@ -161,7 +162,7 @@ def import_entities_unsafe(
     validate_origin(origin)
     # Parity with _bulk_import: --last-seen doubles as the stamp for rows
     # missing their timestamps, not just the pinned last_seen default.
-    now = last_seen or datetime.now(timezone.utc)
+    now = last_seen or utc_now()
     buffer = RowBuffer()
     for data in logged_items(
         payloads, "Import", item_name="Entity", logger=repo.log, chunk_size=10_000
@@ -201,7 +202,7 @@ def import_statements_unsafe(
     only.
     """
     validate_origin(origin)
-    now = last_seen or datetime.now(timezone.utc)
+    now = last_seen or utc_now()
     buffer = RowBuffer()
     for data in logged_items(
         rows, "Import", item_name="Statement", logger=repo.log, chunk_size=100_000

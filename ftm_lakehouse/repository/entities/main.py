@@ -2,7 +2,7 @@
 
 import csv
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import IO, Generator, Iterable, Iterator, cast
 
 import orjson
@@ -18,6 +18,7 @@ from ftmq.model.stats import DatasetStats
 from ftmq.query import M, Query
 from ftmq.store.lake import LakeStatement, pack_statement
 from ftmq.types import StatementEntities, Statements, ValueEntities
+from rigour.time import utc_now
 from sqlalchemy import select
 
 from ftm_lakehouse.core.api import api_delegate, no_api
@@ -156,8 +157,9 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         with self._tags.touch(tag.JOURNAL_FLUSHED), Took() as t:
             self.log.info("Flushing journal ...", journal=mask_uri(self._journal.uri))
 
-            now = datetime.now(timezone.utc)
-            total = self.write_statements(self._journal.flush_statements(), now=now)
+            total = self.write_statements(
+                self._journal.flush_statements(), now=utc_now()
+            )
 
             self.log.info(
                 "Flushed statements from journal to lake",
@@ -205,7 +207,7 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
             Number of statements written.
         """
         if now is None:
-            now = datetime.now(timezone.utc)
+            now = utc_now()
 
         def rows() -> Generator[SDict, None, None]:
             for row in statements:
@@ -435,7 +437,7 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         Returns:
             Number of tombstone statements written
         """
-        now = datetime.now(timezone.utc)
+        now = utc_now()
         stmts = self._collect_entity_statements(entity_id)
         if not stmts:
             return 0
@@ -458,7 +460,7 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
                 leave unset otherwise.
         """
         with self._tags.touch(tag.JOURNAL_UPDATED):
-            now = datetime.now(timezone.utc)
+            now = utc_now()
             with self._journal.writer(self.shards) as w:
                 w.add_statement(stmt, deleted_at=now, fragment=fragment)
 

@@ -1,24 +1,15 @@
 """TagStore - key-value freshness tracking."""
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Iterable, Literal
 
 from anystore.interface.tags import Tags as AnyTags
 from anystore.store import Store, get_store
 from anystore.types import Uri
 from anystore.util import join_uri, mask_uri
+from rigour.time import utc_now
 
 from ftm_lakehouse.core.conventions import path
-
-
-def ensure_utc(ts: datetime) -> datetime:
-    """Coerce a timestamp to tz-aware UTC.
-
-    Naive values (legacy tags written before the UTC sweep) are interpreted
-    as the local time of the host that wrote them – ``astimezone`` assumes
-    system-local for naive input.
-    """
-    return ts.astimezone(timezone.utc)
 
 
 class TagStore(AnyTags):
@@ -56,15 +47,14 @@ class TagStore(AnyTags):
         last_updated = self.get(key)
         if last_updated is None:
             return False
-        updated_dependencies = [ensure_utc(i) for i in map(self.get, dependencies) if i]
+        updated_dependencies = [i for i in map(self.get, dependencies) if i]
         if not updated_dependencies:
             return False
-        last_updated = ensure_utc(last_updated)
         return all(last_updated > i for i in updated_dependencies)
 
     def set(self, key: str, timestamp: datetime | None = None) -> datetime:
         """Set a tag to the given timestamp (or now, in UTC)."""
-        ts = timestamp or datetime.now(timezone.utc)
+        ts = timestamp or utc_now()
         self.put(key, ts)
         return ts
 
