@@ -17,7 +17,7 @@ from ftm_lakehouse.logic.parquet import QUERY_IN_BATCH_SIZE
 from ftm_lakehouse.model.file import Document, Documents
 from ftm_lakehouse.repository.base import BaseRepository
 from ftm_lakehouse.repository.diff import ParquetDiffMixin
-from ftm_lakehouse.storage.parquet import STATEMENT_SOURCE_RAW, ParquetStore
+from ftm_lakehouse.storage.parquet import ParquetStore
 
 Q_DOCUMENTS = [M(schemata="Document"), ~M(schema="Folder"), P(contentHash__null=False)]
 
@@ -132,7 +132,7 @@ class DocumentRepository(ParquetDiffMixin, BaseRepository):
     def _get_changed_ids(self, since: datetime) -> Iterator[str]:
         """Get Document entity IDs with contentHash changes since the given timestamp."""
         q = Query(*Q_DOCUMENTS, (C(first_seen__gte=since) | C(deleted_at__gte=since)))
-        return self._statements.get_entity_ids(q, source=STATEMENT_SOURCE_RAW)
+        return self._statements.get_entity_ids(q, source=self._statements.source_raw)
 
     def _write_diff(
         self, entity_ids: Iterator[str], since: datetime, ts: datetime, **kwargs

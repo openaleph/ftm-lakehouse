@@ -33,7 +33,7 @@ from ftm_lakehouse.repository.entities.api import ApiEntityRepository
 from ftm_lakehouse.storage.journal import get_journal
 from ftm_lakehouse.storage.journal.base import BaseJournalWriter
 from ftm_lakehouse.storage.journal.sql import SqlJournalStore
-from ftm_lakehouse.storage.parquet import STATEMENT_SOURCE_RAW, ParquetStore
+from ftm_lakehouse.storage.parquet import ParquetStore
 
 settings = Settings()
 
@@ -294,10 +294,7 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
 
     @api_delegate("_api_query")
     def query(
-        self,
-        q: Query | None = None,
-        *,
-        flush_first: bool = False,
+        self, q: Query | None = None, *, flush_first: bool = False
     ) -> StatementEntities:
         """Query entities from the parquet store.
 
@@ -537,7 +534,7 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
     def _get_changed_ids(self, since: datetime) -> Iterator[str]:
         """Get entity IDs with statements added since the given timestamp."""
         q = Query(C(first_seen__gte=since) | C(deleted_at__gte=since))
-        return self._statements.get_entity_ids(q, source=STATEMENT_SOURCE_RAW)
+        return self._statements.get_entity_ids(q, source=self._statements.source_raw)
 
     @no_api
     def _write_diff(

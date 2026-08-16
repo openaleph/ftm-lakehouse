@@ -16,8 +16,13 @@ for the two-branch fragment semantics.
 import math
 from datetime import datetime
 
+from banal import ensure_list
 from deltalake import DeltaTable
+from ftmq.query import Query
+from ftmq.query.leaves import IdLeaf
+from ftmq.query.sql import PruneFn
 
+from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.model.statement import TABLE_RAW
 from ftm_lakehouse.util import parse_byte_size, validate_origin
@@ -366,3 +371,18 @@ def merge_slice_count(partition_bytes: int, memory_limit: str) -> int:
     if partition_bytes <= 0:
         return 1
     return max(1, math.ceil(partition_bytes * MERGE_SPILL_FACTOR / budget))
+
+
+def make_prune_by_shard(shards: int = 0) -> PruneFn:
+    """Inject shard pruning into `SqlSource`"""
+
+    def prune(q: Query) -> set[str]:
+        values: set[str] = set()
+        for f in q._leaves:
+            if isinstance(f, IdLeaf):
+                if f.comparator in ("eq", "in"):
+                    for v in ensure_list(f.value):
+                        values.add(path.entity_shard(v, shards))
+        return values
+
+    return prune

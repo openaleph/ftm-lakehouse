@@ -5,10 +5,12 @@ from datetime import datetime, timedelta, timezone
 
 import pyarrow as pa
 import pytest
+from ftmq.query import M, P, Query
 
 from ftm_lakehouse.logic.parquet import (
     MERGE_SPILL_FACTOR,
     build_merge_sql,
+    make_prune_by_shard,
     merge_slice_count,
     slice_ranges,
 )
@@ -592,3 +594,20 @@ def test_merge_output_sorted(now):
     out = _run(table, shard="0", bucket="thing", origin="ingest", grace_cutoff=now)
     rows = out.to_pylist()
     assert [r["entity_id"] for r in rows] == ["e1", "e2"]
+
+
+def test_prune_by_shard():
+    q = Query(M(entity_id="jane"))
+    prune = make_prune_by_shard()
+    assert prune(q) == {"0"}
+    prune = make_prune_by_shard(8)
+    assert prune(q) == {"4"}
+
+    prune1 = make_prune_by_shard(1)
+    prune64 = make_prune_by_shard(64)
+    assert prune1(Query()) == set()
+    assert prune64(Query(P(name="jane"))) == set()
+
+    prune = make_prune_by_shard(16)
+    q = Query(M(entity_id__in=["jane", "bob"]))
+    assert prune(q) == {"4", "d"}

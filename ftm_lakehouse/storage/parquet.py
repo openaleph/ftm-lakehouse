@@ -40,6 +40,7 @@ import random
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from functools import cache, cached_property
 from typing import Callable, Iterator, cast
 from uuid import uuid4
 
@@ -52,22 +53,20 @@ from anystore.store import get_store
 from anystore.types import Uri
 from anystore.util import Took, join_uri, mask_uri
 from deltalake import DeltaTable, write_deltalake
-from followthemoney import StatementEntity
 from followthemoney.statement import StatementDict
 from ftmq.model.stats import DatasetStats
 from ftmq.query import M, Query, Sql, SqlSource
 from ftmq.store.base import View
 from ftmq.store.lake import (
+    PRUNE,
     TARGET_SIZE,
     LakeStatement,
     LakeStore,
-    get_schema_bucket,
     setup_duckdb_storage,
     storage_options,
     writer_for_bucket,
 )
 from ftmq.types import StatementEntities, Statements
-from ftmq.util import make_dataset
 from pyarrow.csv import CSVWriter  # type: ignore[attr-defined]  # missing from stubs
 from sqlalchemy import Select, column
 
@@ -82,6 +81,7 @@ from ftm_lakehouse.logic.parquet import (
     build_merge_sql,
     duckdb_config,
     live_view_sql,
+    make_prune_by_shard,
     merge_slice_count,
     raw_view_sql,
     slice_ranges,
@@ -97,27 +97,15 @@ from ftm_lakehouse.storage.tags import TagStore
 
 PARTITIONS = ["shard", "bucket", "origin"]
 
-STATEMENT_SOURCE = SqlSource(
-    TABLE,
-    id_column="entity_id",
-    prune_schema=get_schema_bucket,
-    prune_column="bucket",
-)
-"""ftmq compile target for the live ``statement`` view.
 
-The lakehouse sharded table keyed on ``entity_id`` – physical storage carries no
-``canonical_id`` – with a schema filter folded into a ``bucket IN (...)``
-partition-prune predicate on every compiled query (ftmq's
-:class:`~ftmq.query.SqlSource` ``prune_schema``)."""
-
-STATEMENT_SOURCE_RAW = SqlSource(
-    TABLE_RAW,
-    id_column="entity_id",
-    prune_schema=get_schema_bucket,
-    prune_column="bucket",
-)
-"""ftmq compile target for the raw ``statement`` view (physical storage, no
-tombstones merge as in ``STATEMENT_SOURCE``)"""
+@cache
+def make_source(table: str, shards: int) -> SqlSource:
+    """Create `SqlSource` (live or raw) with configured shards"""
+    config = {
+        "id_column": "entity_id",
+        "prune": {**PRUNE, "shard": make_prune_by_shard(shards)},
+    }
+    return SqlSource(table, **config)
 
 
 class ParquetStore(LakehouseApiMixin):
@@ -186,19 +174,20 @@ class ParquetStore(LakehouseApiMixin):
         """Get a view for querying statements."""
         return self._lake.default_view()
 
-    @no_api
-    def get(self, entity_id: str) -> StatementEntity | None:
-        """Lookup an Entity by its ID"""
-        stmts = list(self.get_statements(entity_id))
-        if stmts:
-            return StatementEntity.from_statements(make_dataset(self.dataset), stmts)
+    @cached_property
+    def source(self) -> SqlSource:
+        return make_source(TABLE, self.shards)
+
+    @cached_property
+    def source_raw(self) -> SqlSource:
+        return make_source(TABLE_RAW, self.shards)
 
     def _compile_query(
-        self, q: Query | None = None, *, source: SqlSource = STATEMENT_SOURCE
+        self, q: Query | None = None, *, source: SqlSource | None = None
     ) -> Select:
         """Compile ``q`` to a statements ``Select`` against the live view.
 
-        Compiles through :data:`STATEMENT_SOURCE`, so a schema filter folds into
+        Compiles through `self.source`, so a schema filter folds into
         a ``bucket IN (...)`` predicate (ftmq's :class:`~ftmq.query.SqlSource`
         ``prune``) and a schema-scoped read prunes to the matching bucket
         partitions instead of scanning all of them. The single entry point every
@@ -206,7 +195,7 @@ class ParquetStore(LakehouseApiMixin):
         """
         if q is None:
             q = Query()
-        return q.compile(source)
+        return q.compile(source or self.source)
 
     @staticmethod
     def _needs_global(q: Query | None) -> bool:
@@ -310,7 +299,7 @@ class ParquetStore(LakehouseApiMixin):
         A single ``count(DISTINCT entity_id)`` aggregate (not the
         per-partition read iteration), so it's cheap enough to short-circuit an
         export that would otherwise iterate every partition for zero results.
-        Compiled through :data:`STATEMENT_SOURCE`, so a schema filter folds into
+        Compiled through `self.source`, so a schema filter folds into
         the same ``bucket IN (...)`` prune as :meth:`compile_query` –
         non-matching partitions are pruned, not just file-skipped. Like the
         other aggregates it assumes an optimized store.
@@ -319,7 +308,7 @@ class ParquetStore(LakehouseApiMixin):
             return 0
         if q is None:
             q = Query()
-        for row in self._lake._execute(Sql(q, STATEMENT_SOURCE).count):
+        for row in self._lake._execute(Sql(q, self.source).count):
             for value in row:
                 return int(value)
         return 0
@@ -832,15 +821,15 @@ class ParquetStore(LakehouseApiMixin):
 
     @no_api
     def get_entity_ids(
-        self, q: Query | None = None, *, source: SqlSource = STATEMENT_SOURCE
+        self, q: Query | None = None, *, source: SqlSource | None = None
     ) -> Iterator[str]:
-        """Get entity IDs for given query. Use ``STATEMENT_SOURCE_RAW`` to
+        """Get entity IDs for given query. Use ``self.source_raw`` to
         target physical storage without tombstones merged"""
 
         if not self.exists:
             return
 
-        sql = Sql(q or Query(), source).canonical_ids
+        sql = Sql(q or Query(), source=source or self.source).canonical_ids
         for reader in self._execute_partitioned(sql):
             for batch in reader:
                 yield from batch["entity_id"].to_pylist()
