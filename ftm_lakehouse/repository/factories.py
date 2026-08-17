@@ -4,19 +4,15 @@ settings. These are the single instantiation path for repositories – every
 caller, from the module-level ``get_entities("my_dataset")`` convenience to
 operations and the API server, resolves through the same cache.
 
-All factories are LRU-cached at :data:`LRU_MAX` entries: generous enough to
-cover any realistic multi-tenant dataset count in a single process, but
-bounded so an attacker that probes many distinct dataset names cannot
-permanently retain a repository (and its SQLAlchemy engine / DuckDB
-connection) per probe.
-
-The cache key is the canonical dataset URI from :func:`dataset_uri` – the
-same storage location always resolves to the same instance, whether
+All factories share one LRU cache of :data:`LRU_MAX` entries, keyed on the
+builder callable plus the canonical dataset URI from :func:`dataset_uri` –
+the same storage location always resolves to the same instance, whether
 addressed by name only (settings-derived) or by an explicit uri (str or
 ``Path``, with or without scheme).
 """
 
 from functools import lru_cache
+from typing import Any, Callable, cast
 
 from anystore.types import Uri
 
@@ -41,45 +37,22 @@ __all__ = [
     "clear_caches",
 ]
 
-LRU_MAX = 1024
-"""Maximum number of distinct dataset keys retained per factory."""
-
-
-def get_archive(dataset: str, uri: Uri | None = None) -> ArchiveRepository:
-    """
-    Get the archive repository for a dataset.
-
-    Args:
-        dataset: Dataset name
-        uri: Dataset URI override (default: {LAKEHOUSE_URI}/{dataset})
-
-    Returns:
-        ArchiveRepository instance (cached)
-    """
-    return _get_archive(dataset, dataset_uri(dataset, uri))
+LRU_MAX = 4096
+"""Maximum number of entries retained across all factory kinds (one shared
+cache): generous enough to cover any realistic multi-tenant dataset count in
+a single process, but bounded so an attacker that probes many distinct
+dataset names cannot permanently retain a repository (and its SQLAlchemy
+engine / DuckDB connection) per probe."""
 
 
 @lru_cache(maxsize=LRU_MAX)
-def _get_archive(dataset: str, uri: str) -> ArchiveRepository:
-    return ArchiveRepository(dataset, uri)
+def _resolve(builder: Callable[..., Any], *args: Any) -> Any:
+    """One shared LRU over ``(builder, canonical args)`` – the builder
+    callable is part of the key, so kinds never collide."""
+    return builder(*args)
 
 
-def get_entities(dataset: str, uri: Uri | None = None) -> EntityRepository:
-    """
-    Get the entity repository for a dataset.
-
-    Args:
-        dataset: Dataset name
-        uri: Dataset URI override (default: {LAKEHOUSE_URI}/{dataset})
-
-    Returns:
-        EntityRepository instance (cached)
-    """
-    return _get_entities(dataset, dataset_uri(dataset, uri))
-
-
-@lru_cache(maxsize=LRU_MAX)
-def _get_entities(dataset: str, uri: str) -> EntityRepository:
+def _build_entities(dataset: str, uri: str) -> EntityRepository:
     # Construction-time api pick, mirroring `get_journal`'s Sql-vs-Api choice
     # - but keyed on the dataset uri, not global settings.
     if get_api(uri) is not None:
@@ -87,83 +60,64 @@ def _get_entities(dataset: str, uri: str) -> EntityRepository:
     return EntityRepository(dataset, uri)
 
 
-def get_documents(dataset: str, uri: Uri | None = None) -> DocumentRepository:
-    """
-    Get the document repository for a dataset.
-
-    Args:
-        dataset: Dataset name
-        uri: Dataset URI override (default: {LAKEHOUSE_URI}/{dataset})
-
-    Returns:
-        DocumentRepository instance (cached)
-    """
-    return _get_documents(dataset, dataset_uri(dataset, uri))
-
-
-@lru_cache(maxsize=LRU_MAX)
-def _get_documents(dataset: str, uri: str) -> DocumentRepository:
-    return DocumentRepository(dataset, uri)
-
-
-def get_jobs(dataset: str, model: type[J], uri: Uri | None = None) -> JobRepository[J]:
-    """
-    Get the job repository for a dataset.
-
-    Args:
-        dataset: Dataset name
-        model: Job model class
-        uri: Dataset URI override (default: {LAKEHOUSE_URI}/{dataset})
-
-    Returns:
-        JobRepository instance (cached)
-    """
-    return _get_jobs(dataset, model, dataset_uri(dataset, uri))
-
-
-@lru_cache(maxsize=LRU_MAX)
-def _get_jobs(dataset: str, model: type[J], uri: str) -> JobRepository[J]:
+def _build_jobs(dataset: str, uri: str, model: type[J]) -> JobRepository[J]:
     return JobRepository(dataset, uri, model)
 
 
-def get_versions(dataset: str, uri: Uri | None = None) -> VersionStore:
-    """
-    Get the version store for a dataset.
-
-    Args:
-        dataset: Dataset name
-        uri: Dataset URI override (default: {LAKEHOUSE_URI}/{dataset})
-
-    Returns:
-        VersionStore instance (cached)
-    """
-    return _get_versions(dataset, dataset_uri(dataset, uri))
-
-
-@lru_cache(maxsize=LRU_MAX)
-def _get_versions(dataset: str, uri: str) -> VersionStore:
+def _build_versions(dataset: str, uri: str) -> VersionStore:
     return VersionStore(ensure_api_uri(uri))
+
+
+def _build_tags(dataset: str, uri: str, tenant: str | None) -> TagStore:
+    return TagStore(ensure_api_uri(uri), tenant)
+
+
+def get_archive(dataset: str, uri: Uri | None = None) -> ArchiveRepository:
+    """Get the archive repository for a dataset (cached)."""
+    return cast(
+        ArchiveRepository,
+        _resolve(ArchiveRepository, dataset, dataset_uri(dataset, uri)),
+    )
+
+
+def get_entities(dataset: str, uri: Uri | None = None) -> EntityRepository:
+    """Get the entity repository for a dataset (cached; the api-mode
+    subclass for http uris)."""
+    return cast(
+        EntityRepository, _resolve(_build_entities, dataset, dataset_uri(dataset, uri))
+    )
+
+
+def get_documents(dataset: str, uri: Uri | None = None) -> DocumentRepository:
+    """Get the document repository for a dataset (cached)."""
+    return cast(
+        DocumentRepository,
+        _resolve(DocumentRepository, dataset, dataset_uri(dataset, uri)),
+    )
+
+
+def get_jobs(dataset: str, model: type[J], uri: Uri | None = None) -> JobRepository[J]:
+    """Get the job repository for a dataset and job model class (cached)."""
+    return cast(
+        JobRepository[J],
+        _resolve(_build_jobs, dataset, dataset_uri(dataset, uri), model),
+    )
+
+
+def get_versions(dataset: str, uri: Uri | None = None) -> VersionStore:
+    """Get the version store for a dataset (cached)."""
+    return cast(
+        VersionStore, _resolve(_build_versions, dataset, dataset_uri(dataset, uri))
+    )
 
 
 def get_tags(
     dataset: str, uri: Uri | None = None, tenant: str | None = None
 ) -> TagStore:
-    """
-    Get the tag store for a dataset.
-
-    Args:
-        dataset: Dataset name
-        uri: Dataset URI override (default: {LAKEHOUSE_URI}/{dataset})
-
-    Returns:
-        TagStore instance (cached)
-    """
-    return _get_tags(dataset, dataset_uri(dataset, uri), tenant)
-
-
-@lru_cache(maxsize=LRU_MAX)
-def _get_tags(dataset: str, uri: str, tenant: str | None = None) -> TagStore:
-    return TagStore(ensure_api_uri(uri), tenant)
+    """Get the tag store for a dataset (cached)."""
+    return cast(
+        TagStore, _resolve(_build_tags, dataset, dataset_uri(dataset, uri), tenant)
+    )
 
 
 def clear_caches() -> None:
@@ -173,9 +127,4 @@ def clear_caches() -> None:
     ``config.yml`` write so newly fetched repositories see the fresh model
     snapshot; repositories held across the write keep their old snapshot.
     """
-    _get_archive.cache_clear()
-    _get_entities.cache_clear()
-    _get_documents.cache_clear()
-    _get_jobs.cache_clear()
-    _get_versions.cache_clear()
-    _get_tags.cache_clear()
+    _resolve.cache_clear()

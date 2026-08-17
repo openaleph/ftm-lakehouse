@@ -12,7 +12,12 @@ from ftmq.util import make_entity
 
 from ftm_lakehouse.lake import ensure_dataset, get_lakehouse
 from ftm_lakehouse.model.dataset import DEFAULT_SHARDS
-from ftm_lakehouse.repository.factories import dataset_uri, get_entities
+from ftm_lakehouse.repository.factories import (
+    clear_caches,
+    dataset_uri,
+    get_archive,
+    get_entities,
+)
 
 
 def test_factories_identity_across_paths(tmp_path, monkeypatch):
@@ -27,6 +32,19 @@ def test_factories_identity_across_paths(tmp_path, monkeypatch):
 
     # one ParquetStore (and so one LakeStore / DuckDB connection) per dataset
     assert get_entities("ident", uri)._statements is repo._statements
+
+
+def test_factories_shared_cache_kinds_and_clear(tmp_path, monkeypatch):
+    """Kinds never collide in the shared resolver cache, and
+    ``clear_caches()`` invalidates."""
+    monkeypatch.setenv("LAKEHOUSE_URI", str(tmp_path))
+    repo = get_entities("ident")
+    archive = get_archive("ident")
+    assert repo is not archive  # type: ignore[comparison-overlap]
+    assert archive is get_archive("ident")
+
+    clear_caches()
+    assert get_entities("ident") is not repo
 
 
 def test_factories_canonical_uri(tmp_path, monkeypatch):
