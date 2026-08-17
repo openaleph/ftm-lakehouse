@@ -11,9 +11,6 @@ from pydantic import computed_field, field_validator
 from rigour.time import utc_now
 from structlog.stdlib import BoundLogger
 
-DEFAULT_USER = "__system__"
-
-
 J = TypeVar("J", bound="JobModel")
 DJ = TypeVar("DJ", bound="DatasetJobModel")
 

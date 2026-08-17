@@ -36,6 +36,7 @@ __all__ = [
     "get_documents",
     "get_jobs",
     "get_versions",
+    "get_tags",
     "clear_caches",
 ]
 
@@ -143,7 +144,7 @@ def get_tags(
     dataset: str, uri: Uri | None = None, tenant: str | None = None
 ) -> TagStore:
     """
-    Get the version store for a dataset.
+    Get the tag store for a dataset.
 
     Args:
         dataset: Dataset name
@@ -172,3 +173,4 @@ def clear_caches() -> None:
     _get_documents.cache_clear()
     _get_jobs.cache_clear()
     _get_versions.cache_clear()
+    _get_tags.cache_clear()

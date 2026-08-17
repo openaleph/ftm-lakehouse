@@ -10,10 +10,6 @@ from ftm_lakehouse.storage.journal.base import (
 )
 from ftm_lakehouse.storage.journal.sql import SqlJournalStore, SqlJournalWriter
 
-# Default implementations
-JournalStore = SqlJournalStore
-JournalWriter = SqlJournalWriter
-
 
 @cache
 def get_journal(dataset: str, uri: str | None = None) -> BaseJournalStore:
@@ -30,8 +26,6 @@ __all__ = [
     "BaseJournalWriter",
     "JournalRow",
     "JournalRows",
-    "JournalStore",
-    "JournalWriter",
     "SqlJournalStore",
     "SqlJournalWriter",
     "ApiJournalStore",
