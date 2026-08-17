@@ -115,7 +115,7 @@ if entity:
 
 ### Query with Filters
 
-Filters are expressed as an ftmq `Query` – built from filter nodes (`M` for statement meta fields like `origin` / `entity_id` / `schema`, `P` for entity properties):
+Filters are expressed as an [ftmq `Query`](https://docs.investigraph.dev/lib/ftmq/query) – built from filter nodes (`M` for statement meta fields like `origin` / `entity_id` / `schema`, `P` for entity properties):
 
 ```python
 from ftmq.query import M, Query
