@@ -218,10 +218,10 @@ name: my_dataset
 public_url_prefix: https://cdn.example.com/my_dataset
 ```
 
-Or globally via environment variable (supports `{{ dataset }}` Jinja-style template):
+Or globally via environment variable (supports a `${dataset}` placeholder):
 
 ```bash
-export LAKEHOUSE_PUBLIC_URL_PREFIX="https://cdn.example.com/{{ dataset }}"
+export LAKEHOUSE_PUBLIC_URL_PREFIX="https://cdn.example.com/\${dataset}"
 ```
 
 Without a prefix, blobs are served by the lakehouse API itself under `/{dataset}/archive/...` – access control is the reverse proxy's concern (see [API deployment](../deployment/api.md)).

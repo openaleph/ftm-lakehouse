@@ -19,7 +19,7 @@
 | `LAKEHOUSE_ON_ZFS` | Enable ZFS dataset creation for local storage | `false` |
 | `LAKEHOUSE_ZFS_POOL` | ZFS dataset path for the lakehouse root (e.g. `zpools/tank/lakehouse`). Transport / agent settings (`ZFS_SOCKET`, `ZFS_OWNER`, ...) belong to the [zfs-agent](https://github.com/dataresearchcenter/zfs-agent) package -- see [ZFS Integration](zfs.md) | (required when `ON_ZFS` is enabled) |
 | `LAKEHOUSE_API_KEY` / `LAKEHOUSE_API_SECRET` | Client-side auth headers attached to outgoing lakehouse-API requests (authenticate through the reverse proxy in front of the API server) | (unset) |
-| `LAKEHOUSE_PUBLIC_URL_PREFIX` | Public URL prefix for blob URLs (supports `{{ dataset }}` Jinja-style template) | (unset) |
+| `LAKEHOUSE_PUBLIC_URL_PREFIX` | Public URL prefix for blob URLs (supports a `${dataset}` placeholder) | (unset) |
 | `LOG_LEVEL` | Logging level (DEBUG, INFO, WARNING, ERROR) | `INFO` |
 | `DEBUG` | Enable debug mode | `false` |
 

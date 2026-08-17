@@ -42,8 +42,6 @@ def test_util():
     with pytest.raises(ValueError):
         util.make_checksum_key("abcde")
 
-    assert util.render("{{ foo }}", {"foo": "bar"}) == "bar"
-
 
 def test_util_parse_byte_size():
     assert util.parse_byte_size("1024") == 1024

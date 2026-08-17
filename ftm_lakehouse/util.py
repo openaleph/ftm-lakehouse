@@ -4,7 +4,6 @@ from typing import Any
 
 from banal import ensure_list
 from followthemoney.dataset.util import dataset_name_check
-from jinja2 import Template
 
 RESERVED_DATASET_NAMES = frozenset({"catalog", "default"})
 
@@ -136,18 +135,6 @@ def make_checksum_key(ch: str) -> str:
     """
     validate_checksum(ch)
     return "/".join((ch[:2], ch[2:4], ch[4:6], ch))
-
-
-def render(tmpl: str, data: dict[str, Any]) -> str:
-    """
-    Shorthand for jinja2 template rendering
-
-    Examples:
-        >>> render("hello: {{ hello }}", {"hello": "world"})
-        "hello: world"
-    """
-    template = Template(tmpl)
-    return template.render(**data)
 
 
 _BYTE_SIZE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*([a-z]*)", re.IGNORECASE)

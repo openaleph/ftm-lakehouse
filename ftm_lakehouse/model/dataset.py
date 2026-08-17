@@ -1,12 +1,13 @@
 """Dataset metadata model + the process-wide model-class hook."""
 
+from string import Template
+
 from anystore.model import StoreModel
 from anystore.types import HttpUrlStr
 from ftmq.model import Dataset
 
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.logic.compress import CompressKind
-from ftm_lakehouse.util import render
 
 settings = Settings()
 
@@ -35,7 +36,11 @@ class DatasetModel(Dataset):
         if self.public_url_prefix:
             return self.public_url_prefix
         if settings.public_url_prefix:
-            return render(settings.public_url_prefix, {"dataset": self.name})
+            # ``${dataset}`` placeholder; safe_substitute so literal ``$``
+            # (and ``%``) in a prefix never breaks
+            return Template(settings.public_url_prefix).safe_substitute(
+                dataset=self.name
+            )
 
 
 _model_class: type[DatasetModel] = DatasetModel
