@@ -137,9 +137,15 @@ def cli_unlock():
 
     **Confirm no process is actively writing** before running – breaking
     a held lock can corrupt an in-flight write. No-op if no lock is held.
+
+    Local-only: the lock is a storage-side file – run this where the
+    storage is directly accessible.
     """
     with DatasetContext() as (name, uri):
-        if get_entities(name, uri).unlock():
+        entities = get_entities(name, uri)
+        if entities._is_api:
+            raise RuntimeError("`maintenance unlock` is not available in API mode")
+        if entities.unlock():
             console.print("[green]Lock released.[/green]")
         else:
             console.print("[yellow]No lock held.[/yellow]")

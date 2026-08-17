@@ -129,9 +129,15 @@ def cli_statements_sql(query: str):
     Queries the registered DuckDB views – ``statement`` (deduped-live) and
     ``statement_raw`` (physical rows). Results print as a rich table; add a
     ``LIMIT`` when scanning large partitions.
+
+    Local-only: raw SQL is deliberately not exposed over the API – run this
+    where the storage is directly accessible.
     """
     with DatasetContext() as (name, uri):
-        store = get_entities(name, uri)._statements._lake
+        entities = get_entities(name, uri)
+        if entities._is_api:
+            raise RuntimeError("`statements sql` is not available in API mode")
+        store = entities._statements._lake
         with store.cursor() as cur:
             with Took() as t:
                 cur.execute(query)
