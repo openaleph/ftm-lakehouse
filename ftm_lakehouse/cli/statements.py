@@ -7,35 +7,39 @@ Sub-typer group, parallel to ``entities`` but at the statement grain:
     ftm-lakehouse statements import    # statements CSV -> parquet (no journal)
 """
 
-from datetime import datetime
-from typing import Annotated, Optional
-
-import typer
-from anystore.io import smart_open, smart_write_csv
+from anystore import smart_open
+from anystore.io import smart_write_csv
 from anystore.io.read import smart_stream_csv
-from anystore.logic.io import stream
 from anystore.util import Took
 from rich.console import Console
 from rich.table import Table
 
-from ftm_lakehouse.cli import DatasetContext, cli, settings
+from ftm_lakehouse.cli import (
+    OPT_BULK_SIZE,
+    OPT_IN,
+    OPT_LAST_SEEN,
+    OPT_ORIGIN,
+    OPT_OUT,
+    OPT_OVERRIDE_ORIGIN,
+    OPT_UNSAFE,
+    DatasetContext,
+    settings,
+    sub_typer,
+)
 from ftm_lakehouse.cli.io import (
     BULK_ORIGIN,
     import_statements,
     import_statements_unsafe,
+    stream_export,
 )
 from ftm_lakehouse.helpers.statements import read_csv_statements
-from ftm_lakehouse.logic.compress import decompress_stream
 from ftm_lakehouse.repository.factories import get_entities
 
-statements = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=settings.debug)
-cli.add_typer(statements, name="statements", help="Read and write raw FtM statements")
+statements = sub_typer("statements", "Read and write raw FtM statements")
 
 
 @statements.command("iterate")
-def cli_statements_iterate(
-    out_uri: Annotated[str, typer.Option("-o")] = "-",
-):
+def cli_statements_iterate(out_uri: OPT_OUT = "-"):
     """Iterate statements from the parquet store as CSV rows.
 
     Live read – reflects current state of the parquet table. For the frozen
@@ -53,44 +57,21 @@ def cli_statements_iterate(
 
 
 @statements.command("stream")
-def cli_statements_stream(
-    out_uri: Annotated[str, typer.Option("-o")] = "-",
-):
+def cli_statements_stream(out_uri: OPT_OUT = "-"):
     """Stream the pre-exported ``statements.csv`` to the output."""
     with DatasetContext() as (name, uri):
-        # we trust our exports so stream byte-to-byte directly instead the
-        # python / ftm roundtrip
-        entities = get_entities(name, uri)
-        in_uri = entities._store.to_uri(entities.EXPORTS_STATEMENTS)
-        with (
-            smart_open(in_uri, "rb") as fh,
-            decompress_stream(fh, entities.compression) as i,
-            smart_open(out_uri, "wb") as o,
-        ):
-            stream(i, o)
+        repo = get_entities(name, uri)
+        stream_export(repo, repo.EXPORTS_STATEMENTS, out_uri)
 
 
 @statements.command("import")
 def cli_statements_import(
-    in_uri: Annotated[str, typer.Option("-i")] = "-",
-    origin: Annotated[str, typer.Option(help="Data origin")] = BULK_ORIGIN,
-    bulk_size: Annotated[
-        int,
-        typer.Option(help="Number of statements buffered before flush to parquet."),
-    ] = settings.max_buffer_rows,
-    last_seen: Annotated[
-        Optional[datetime],
-        typer.Option(help="Default last_seen timestamp if row has none"),
-    ] = None,
-    unsafe: Annotated[
-        bool,
-        typer.Option(
-            "--unsafe",
-            help="Fast path: map CSV rows straight to parquet rows, skipping "
-            "Statement object construction and validation. Trusted input "
-            "only.",
-        ),
-    ] = False,
+    in_uri: OPT_IN = "-",
+    origin: OPT_ORIGIN = BULK_ORIGIN,
+    override_origin: OPT_OVERRIDE_ORIGIN = False,
+    bulk_size: OPT_BULK_SIZE = settings.max_buffer_rows,
+    last_seen: OPT_LAST_SEEN = None,
+    unsafe: OPT_UNSAFE = False,
 ):
     """Bulk-import raw statements (CSV) straight into the parquet store.
 
@@ -109,6 +90,7 @@ def cli_statements_import(
                 repo,
                 smart_stream_csv(in_uri),
                 origin=origin,
+                override_origin=override_origin,
                 bulk_size=bulk_size,
                 last_seen=last_seen,
             )
@@ -117,6 +99,7 @@ def cli_statements_import(
                 repo,
                 read_csv_statements(in_uri),
                 origin=origin,
+                override_origin=override_origin,
                 bulk_size=bulk_size,
                 last_seen=last_seen,
             )

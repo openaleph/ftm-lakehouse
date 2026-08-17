@@ -7,27 +7,35 @@ Sub-typer group:
     ftm-lakehouse entities import    # FtM JSON -> parquet (bypasses journal)
 """
 
-from datetime import datetime
-from typing import Annotated, Optional
-
-import typer
-from anystore.io import smart_open
 from anystore.io.read import smart_stream_json
-from anystore.logic.io import stream
 from ftmq.io import smart_read_proxies, smart_write_proxies
 
-from ftm_lakehouse.cli import DatasetContext, cli, settings
-from ftm_lakehouse.cli.io import BULK_ORIGIN, import_entities, import_entities_unsafe
-from ftm_lakehouse.logic.compress import decompress_stream
+from ftm_lakehouse.cli import (
+    OPT_BULK_SIZE,
+    OPT_IN,
+    OPT_LAST_SEEN,
+    OPT_ORIGIN,
+    OPT_OUT,
+    OPT_OVERRIDE_ORIGIN,
+    OPT_UNSAFE,
+    DatasetContext,
+    settings,
+    sub_typer,
+)
+from ftm_lakehouse.cli.io import (
+    BULK_ORIGIN,
+    import_entities,
+    import_entities_unsafe,
+    stream_export,
+)
 from ftm_lakehouse.repository.factories import get_entities
 
-entities = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=settings.debug)
-cli.add_typer(entities, name="entities", help="Read and write FtM entities")
+entities = sub_typer("entities", "Read and write FtM entities")
 
 
 @entities.command("iterate")
 def cli_entities_iterate(
-    out_uri: Annotated[str, typer.Option("-o")] = "-",
+    out_uri: OPT_OUT = "-",
 ):
     """Iterate entities from the parquet store as FtM JSON lines.
 
@@ -41,51 +49,22 @@ def cli_entities_iterate(
 
 @entities.command("stream")
 def cli_entities_stream(
-    out_uri: Annotated[str, typer.Option("-o")] = "-",
+    out_uri: OPT_OUT = "-",
 ):
     """Stream FtM entities from the pre-exported ``entities.ftm.json``."""
     with DatasetContext() as (name, uri):
-        # we trust our exports so stream byte-to-byte directly instead the
-        # python / ftm roundtrip
-        entities = get_entities(name, uri)
-        in_uri = entities._store.to_uri(entities.ENTITIES_JSON)
-        with (
-            smart_open(in_uri, "rb") as fh,
-            decompress_stream(fh, entities.compression) as i,
-            smart_open(out_uri, "wb") as o,
-        ):
-            stream(i, o)
+        repo = get_entities(name, uri)
+        stream_export(repo, repo.ENTITIES_JSON, out_uri)
 
 
 @entities.command("import")
 def cli_entities_import(
-    in_uri: Annotated[str, typer.Option("-i")] = "-",
-    origin: Annotated[
-        str,
-        typer.Option(
-            help="Default data origin if missing or multiple in entity payload"
-        ),
-    ] = BULK_ORIGIN,
-    override_origin: Annotated[
-        bool, typer.Option(help="Override entity payload origin")
-    ] = False,
-    bulk_size: Annotated[
-        int,
-        typer.Option(help="Number of statements buffered before flush to parquet."),
-    ] = settings.max_buffer_rows,
-    last_seen: Annotated[
-        Optional[datetime],
-        typer.Option(help="Default last_seen timestamp if entity payload has none"),
-    ] = None,
-    unsafe: Annotated[
-        bool,
-        typer.Option(
-            "--unsafe",
-            help="Fast path: explode entity JSON straight into parquet rows, "
-            "skipping FtM object construction and validation. Trusted input "
-            "only.",
-        ),
-    ] = False,
+    in_uri: OPT_IN = "-",
+    origin: OPT_ORIGIN = BULK_ORIGIN,
+    override_origin: OPT_OVERRIDE_ORIGIN = False,
+    bulk_size: OPT_BULK_SIZE = settings.max_buffer_rows,
+    last_seen: OPT_LAST_SEEN = None,
+    unsafe: OPT_UNSAFE = False,
 ):
     """
     Bulk-import FtM entities straight into the parquet store, bypassing the

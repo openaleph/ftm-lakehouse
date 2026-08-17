@@ -155,6 +155,7 @@ def statement_row_unsafe(
     *,
     now: datetime,
     origin: str,
+    override_origin: bool = False,
 ) -> SDict | None:
     """Map one ``statements.csv`` row dict to a packed parquet row.
 
@@ -173,6 +174,7 @@ def statement_row_unsafe(
         shards: The dataset's shard count.
         now: Run-level timestamp for missing ``first_seen`` / ``last_seen``.
         origin: Default origin tag if the row carries none.
+        override_origin: Force ``origin`` over the row's own.
 
     Returns:
         A packed row dict, or ``None`` for rows without entity id, schema
@@ -196,6 +198,7 @@ def statement_row_unsafe(
     stmt_id = Statement.make_key(dataset, entity_id, prop, value, external, lang=lang)
     if stmt_id is None:
         return None
+    row_origin = None if override_origin else row.get("origin")
     first_seen = iso_datetime(row.get("first_seen") or None) or now
     return {
         "shard": entity_shard(entity_id, shards),
@@ -203,7 +206,7 @@ def statement_row_unsafe(
         "entity_id": entity_id,
         "dataset": dataset,
         "bucket": get_schema_bucket(schema),
-        "origin": validate_origin(row.get("origin") or origin),
+        "origin": validate_origin(row_origin or origin),
         "source": None,
         "schema": schema,
         "prop": prop,

@@ -5,6 +5,7 @@ catalog-level commands (``ls``, ``datasets``).  Submodules register their
 own commands by importing the ``cli`` app object from this package.
 """
 
+from datetime import datetime
 from typing import Annotated, Optional, TypedDict
 
 import typer
@@ -34,6 +35,42 @@ cli = typer.Typer(
     name="FollowTheMoney Data Lakehouse",
 )
 console = Console(stderr=True)
+
+
+def sub_typer(name: str, help: str) -> typer.Typer:
+    """Create a sub-command group and register it on the main ``cli`` app."""
+    app = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=settings.debug)
+    cli.add_typer(app, name=name, help=help)
+    return app
+
+
+# Shared command options – import these instead of redeclaring per command.
+OPT_IN = Annotated[str, typer.Option("-i")]
+OPT_OUT = Annotated[str, typer.Option("-o")]
+OPT_ORIGIN = Annotated[
+    str, typer.Option(help="Default data origin if the input carries none")
+]
+OPT_OVERRIDE_ORIGIN = Annotated[
+    bool, typer.Option(help="Force the given origin over input-carried origins")
+]
+OPT_BULK_SIZE = Annotated[
+    int, typer.Option(help="Number of statements buffered before flush to parquet.")
+]
+OPT_LAST_SEEN = Annotated[
+    Optional[datetime],
+    typer.Option(help="Default last_seen timestamp if the input has none"),
+]
+OPT_UNSAFE = Annotated[
+    bool,
+    typer.Option(
+        "--unsafe",
+        help="Fast path: map input straight to parquet rows, skipping FtM "
+        "object construction and validation. Trusted input only.",
+    ),
+]
+OPT_FORCE = Annotated[
+    Optional[bool], typer.Option(help="Run regardless of freshness state.")
+]
 
 
 class State(TypedDict):
@@ -166,7 +203,7 @@ def cli_ftm_lakehouse(
 
 
 @cli.command("ls")
-def cli_dataset_names(out_uri: Annotated[str, typer.Option("-o")] = "-"):
+def cli_dataset_names(out_uri: OPT_OUT = "-"):
     """Show dataset names in the current catalog."""
     with CatalogContext() as catalog:
         names = list(catalog.list_datasets())
@@ -175,7 +212,7 @@ def cli_dataset_names(out_uri: Annotated[str, typer.Option("-o")] = "-"):
 
 @cli.command("datasets")
 def cli_datasets(
-    out_uri: Annotated[str, typer.Option("-o")] = "-",
+    out_uri: OPT_OUT = "-",
 ):
     """Show metadata for all datasets in the current catalog."""
     with CatalogContext() as catalog:

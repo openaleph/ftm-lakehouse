@@ -17,12 +17,18 @@ import typer
 
 from ftm_lakehouse import operation as op
 from ftm_lakehouse.catalog import get_dataset_index
-from ftm_lakehouse.cli import DatasetContext, cli, console, settings, write_config
+from ftm_lakehouse.cli import (
+    OPT_FORCE,
+    DatasetContext,
+    cli,
+    console,
+    sub_typer,
+    write_config,
+)
 from ftm_lakehouse.operation.export import ExportKind
 from ftm_lakehouse.repository.factories import get_entities
 
-maintenance = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=settings.debug)
-cli.add_typer(maintenance, name="maintenance", help="Dataset maintenance operations")
+maintenance = sub_typer("maintenance", "Dataset maintenance operations")
 
 
 # ---------------------------------------------------------------------------
@@ -87,9 +93,7 @@ def cli_make(
 @cli.command("export")
 def cli_export(
     kind: Annotated[ExportKind, typer.Argument(help="Which export to produce.")],
-    force: Annotated[
-        Optional[bool], typer.Option(help="Run regardless of freshness state.")
-    ] = False,
+    force: OPT_FORCE = False,
 ):
     """Export the dataset: ``statements`` (statements.csv), ``entities``
     (entities.ftm.json), ``documents`` (documents.csv), ``statistics``
@@ -110,9 +114,7 @@ def cli_optimize(
         Optional[int],
         typer.Option(help="Vacuum: retain obsolete files newer than this many hours."),
     ] = 0,
-    force: Annotated[
-        Optional[bool], typer.Option(help="Run regardless of freshness state.")
-    ] = False,
+    force: OPT_FORCE = False,
 ):
     """Optimize the statement store: collapse duplicates and reap expired
     tombstones, bin-pack small parquet files, delete obsolete files.

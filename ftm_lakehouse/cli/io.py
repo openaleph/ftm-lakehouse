@@ -10,13 +10,15 @@ command modules only differ in how they parse their input.
 from datetime import datetime
 from typing import Callable, Iterable, TypeVar
 
-from anystore.io import logged_items
+from anystore.io import logged_items, smart_open
+from anystore.logic.io import stream
 from anystore.types import SDict
 from followthemoney import EntityProxy
 from ftmq.store.lake import LakeStatement
 from rigour.time import utc_now
 
 from ftm_lakehouse.exceptions import BufferFullError
+from ftm_lakehouse.logic.compress import decompress_stream
 from ftm_lakehouse.logic.entities.buffer import EntityBuffer
 from ftm_lakehouse.logic.entities.explode import (
     RowBuffer,
@@ -56,10 +58,25 @@ def _extract_fragment(i: Item) -> str | None:
     return i.fragment  # Statement
 
 
+def stream_export(repo: EntityRepository, key: str, out_uri: str) -> None:
+    """Stream a pre-exported artifact byte-to-byte to the output.
+
+    We trust our own exports, so this pipes the raw (decompressed) bytes
+    instead of a python / FtM roundtrip.
+    """
+    in_uri = repo._store.to_uri(key)
+    with (
+        smart_open(in_uri, "rb") as fh,
+        decompress_stream(fh, repo.compression) as i,
+        smart_open(out_uri, "wb") as o,
+    ):
+        stream(i, o)
+
+
 def _bulk_import(
     repo: EntityRepository,
     items: Iterable[Item],
-    add: Callable[[EntityBuffer, Item], str | None],
+    add: Callable[..., str | None],
     *,
     origin: str,
     override_origin: bool,
@@ -143,6 +160,23 @@ def import_statements(
     )
 
 
+def _bulk_import_rows(
+    repo: EntityRepository, rows: Iterable[SDict | None], *, bulk_size: int
+) -> None:
+    """Shared :class:`RowBuffer` loop for the ``--unsafe`` fast paths.
+
+    The cap is checked per row (not per input item) so one pathologically
+    large entity cannot grow the buffer past the ``bulk_size`` memory bound.
+    """
+    buffer = RowBuffer()
+    for row in rows:
+        buffer.add(row)
+        if len(buffer) >= bulk_size:
+            repo.write_rows(buffer.flush(), batch_size=None)
+    if buffer:
+        repo.write_rows(buffer.flush(), batch_size=None)
+
+
 def import_entities_unsafe(
     repo: EntityRepository,
     payloads: Iterable[SDict],
@@ -163,10 +197,11 @@ def import_entities_unsafe(
     # Parity with _bulk_import: --last-seen doubles as the stamp for rows
     # missing their timestamps, not just the pinned last_seen default.
     now = last_seen or utc_now()
-    buffer = RowBuffer()
-    for data in logged_items(
-        payloads, "Import", item_name="Entity", logger=repo.log, chunk_size=10_000
-    ):
+    rows = (
+        row
+        for data in logged_items(
+            payloads, "Import", item_name="Entity", logger=repo.log, chunk_size=10_000
+        )
         for row in explode_unsafe(
             data,
             repo.dataset,
@@ -175,14 +210,9 @@ def import_entities_unsafe(
             origin=origin,
             override_origin=override_origin,
             last_seen=last_seen,
-        ):
-            buffer.add(row)
-            # Checked per row (not per payload) so one pathologically large
-            # entity cannot grow the buffer past the bulk_size memory bound.
-            if len(buffer) >= bulk_size:
-                repo.write_rows(buffer.flush(), batch_size=None)
-    if buffer:
-        repo.write_rows(buffer.flush(), batch_size=None)
+        )
+    )
+    _bulk_import_rows(repo, rows, bulk_size=bulk_size)
 
 
 def import_statements_unsafe(
@@ -190,6 +220,7 @@ def import_statements_unsafe(
     rows: Iterable[SDict],
     *,
     origin: str = BULK_ORIGIN,
+    override_origin: bool = False,
     bulk_size: int,
     last_seen: datetime | None = None,
 ) -> None:
@@ -203,16 +234,17 @@ def import_statements_unsafe(
     """
     validate_origin(origin)
     now = last_seen or utc_now()
-    buffer = RowBuffer()
-    for data in logged_items(
-        rows, "Import", item_name="Statement", logger=repo.log, chunk_size=100_000
-    ):
-        buffer.add(
-            statement_row_unsafe(
-                data, repo.dataset, repo.shards, now=now, origin=origin
-            )
+    packed = (
+        statement_row_unsafe(
+            data,
+            repo.dataset,
+            repo.shards,
+            now=now,
+            origin=origin,
+            override_origin=override_origin,
         )
-        if len(buffer) >= bulk_size:
-            repo.write_rows(buffer.flush(), batch_size=None)
-    if buffer:
-        repo.write_rows(buffer.flush(), batch_size=None)
+        for data in logged_items(
+            rows, "Import", item_name="Statement", logger=repo.log, chunk_size=100_000
+        )
+    )
+    _bulk_import_rows(repo, packed, bulk_size=bulk_size)

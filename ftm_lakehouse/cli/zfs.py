@@ -14,14 +14,13 @@ from typing import Annotated, Optional
 import typer
 from anystore.logging import get_logger
 
-from ftm_lakehouse.cli import cli, console, settings
+from ftm_lakehouse.cli import console, sub_typer
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.core.zfs import ensure_zfs_dataset
 
 log = get_logger(__name__)
 
-zfs = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=settings.debug)
-cli.add_typer(zfs, name="zfs", help="ZFS dataset management for the lakehouse")
+zfs = sub_typer("zfs", "ZFS dataset management for the lakehouse")
 
 
 @zfs.command("init")

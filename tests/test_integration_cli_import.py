@@ -69,6 +69,27 @@ def test_cli_statements_import_roundtrip(tmp_path, cli_runner):
     assert "Jane Doe" in entities["jane"].get("name")
 
 
+def test_cli_statements_import_override_origin(tmp_path, cli_runner):
+    """--override-origin forces the CLI origin over CSV-carried origins – on
+    both the safe and the --unsafe path."""
+    src = _seed_source(tmp_path)
+    src._store.ensure_parent(path.EXPORTS_STATEMENTS)
+    src._statements.export_csv(path.EXPORTS_STATEMENTS)
+    csv_uri = str(tmp_path / "src" / path.EXPORTS_STATEMENTS)
+
+    for dst_name, flags in (("dst_safe", []), ("dst_unsafe", ["--unsafe"])):
+        result = cli_runner.invoke(
+            cli_app,
+            ["-d", dst_name, "statements", "import", "-i", csv_uri]
+            + ["--origin", "forced", "--override-origin"]
+            + flags,
+        )
+        assert result.exit_code == 0, result.output
+        dst = EntityRepository(dst_name, tmp_path / dst_name)
+        origins = {s.origin for s in dst._statements.query_statements()}
+        assert origins == {"forced"}, dst_name
+
+
 def test_cli_entities_import_roundtrip(tmp_path, cli_runner):
     """FtM JSON entities bulk-import straight into the parquet store."""
     in_uri = str(tmp_path / "entities.ftm.json")
