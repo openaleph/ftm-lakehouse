@@ -7,7 +7,7 @@ The logic module contains pure, stateless transformation functions with no infra
 Aggregate a stream of statement dicts into FollowTheMoney entity dicts:
 
 ```python
-from ftm_lakehouse.logic import aggregate_unsafe
+from ftm_lakehouse.logic.entities import aggregate_unsafe
 
 for entity in aggregate_unsafe(statement_dicts, "my_dataset"):
     print(f"{entity['id']}: {entity['caption']}")
@@ -15,7 +15,7 @@ for entity in aggregate_unsafe(statement_dicts, "my_dataset"):
 
 `aggregate_unsafe` assumes the input is pre-sorted by `entity_id` – the parquet store guarantees this for its queries.
 
-::: ftm_lakehouse.logic.aggregate_unsafe
+::: ftm_lakehouse.logic.entities.aggregate.aggregate_unsafe
     options:
         heading_level: 3
         show_root_heading: true
@@ -46,12 +46,7 @@ Both builders emit `delta_scan('<uri>')`, so a view defined from this SQL resolv
         heading_level: 3
         show_root_heading: true
 
-::: ftm_lakehouse.logic.parquet.build_changed_sql
-    options:
-        heading_level: 3
-        show_root_heading: true
-
-Both are executable DuckDB SQL strings over `statement_raw`, sharing the dedupe / fragment-supersession logic: `build_merge_sql` collapses one `(shard, bucket, origin)` partition for physical rewrite, `build_changed_sql` returns the canonical live rows of entities changed since a watermark without requiring a merge first.
+An executable DuckDB SQL string over `statement_raw` holding all dedupe / fragment-supersession logic; it collapses one `(shard, bucket, origin)` partition for physical rewrite. Change-detection for diff exports no longer has its own SQL builder – it is an ftmq `Query` over the raw source (`ParquetStore.get_entity_ids(q, source=store.source_raw)`).
 
 ## Statement Serialization
 
