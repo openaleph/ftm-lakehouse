@@ -2,8 +2,10 @@
 
 import random
 import time
+from typing import Generator
 
 from anystore.logging import get_logger
+from ftmq.store.lake import LakeStatement
 from sqlalchemy import (
     Column,
     DateTime,
@@ -25,6 +27,8 @@ from sqlalchemy.engine import Connection, Engine, Transaction, create_engine
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import NullPool, StaticPool
 
+from ftm_lakehouse.exceptions import MalformedStatementError
+from ftm_lakehouse.helpers.statements import unpack_journal_row
 from ftm_lakehouse.storage.journal.base import (
     BaseJournalStore,
     BaseJournalWriter,
@@ -279,6 +283,27 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
             except BaseException:
                 write_tx.rollback()
                 raise
+
+    def iterate_shard(self, shard: str) -> Generator[LakeStatement, None, None]:
+        """Iterate the live statements of one shard, index-assisted."""
+        q = (
+            select(self.table)
+            .where(self.table.c.shard == shard)
+            .where(self.table.c.deleted_at.is_(None))
+        )
+        with self.engine.connect() as conn:
+            for row in conn.execute(q):
+                try:
+                    stmt = unpack_journal_row(row.data)
+                except MalformedStatementError as exc:
+                    log.warning(
+                        "Skipping malformed journal row",
+                        row_id=row.id,
+                        shard=row.shard,
+                        error=str(exc),
+                    )
+                    continue
+                yield LakeStatement.from_statement(stmt, row.fragment or "")
 
     def count(self) -> int:
         """Count rows for this dataset."""

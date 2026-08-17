@@ -3,6 +3,7 @@
 import csv
 from contextlib import contextmanager
 from datetime import datetime
+from functools import cached_property
 from typing import IO, Generator, Iterable, Iterator, cast
 
 import orjson
@@ -19,13 +20,10 @@ from ftmq.query import M, Query
 from ftmq.store.lake import LakeStatement, pack_statement
 from ftmq.types import StatementEntities, Statements, ValueEntities
 from rigour.time import utc_now
-from sqlalchemy import select
 
 from ftm_lakehouse.core.api import no_api
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.core.settings import Settings
-from ftm_lakehouse.exceptions import MalformedStatementError
-from ftm_lakehouse.helpers.statements import unpack_journal_row
 from ftm_lakehouse.logic.compress import compress_stream, decompress_stream
 from ftm_lakehouse.logic.entities.aggregate import aggregate_unsafe
 from ftm_lakehouse.model.statement import SHARDED_SCHEMA, StatementRow
@@ -33,7 +31,6 @@ from ftm_lakehouse.repository.base import DatasetHandle
 from ftm_lakehouse.repository.diff import ParquetDiffMixin, make_envelope
 from ftm_lakehouse.storage.journal import get_journal
 from ftm_lakehouse.storage.journal.base import BaseJournalWriter
-from ftm_lakehouse.storage.journal.sql import SqlJournalStore
 from ftm_lakehouse.storage.parquet import ParquetStore
 
 settings = Settings()
@@ -73,30 +70,31 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
         ```
     """
 
-    _statements: ParquetStore
-
     def __init__(
         self,
         dataset: str,
         uri: Uri,
     ) -> None:
         super().__init__(dataset, uri)
+        if self._is_api and type(self) is EntityRepository:
+            raise RuntimeError(
+                "`EntityRepository` cannot run against an http uri directly "
+                "– resolve the repository via `get_entities()`"
+            )
         self.shards = self._model.shards
         self.compression = self._model.compression
         self._journal = get_journal(dataset)
         self.ENTITIES_JSON = path.entities_json(self.compression)
         self.EXPORTS_STATEMENTS = path.exports_statements(self.compression)
+
+    @cached_property
+    def _statements(self) -> ParquetStore:
+        """Local parquet store, built lazily – api instances never get one."""
         if self._is_api:
-            if type(self) is EntityRepository:
-                raise RuntimeError(
-                    "`EntityRepository` cannot run against an http uri directly "
-                    "– resolve the repository via `get_entities()`"
-                )
-        else:
-            # Api instances never build local storage: their api-capable
-            # methods are overridden and everything local-only is
-            # ``@no_api``-guarded, so ``_statements`` stays unset there.
-            self._statements = ParquetStore(uri, dataset, self.shards, self.compression)
+            raise RuntimeError(
+                f"`{type(self).__name__}._statements` is not available in API mode"
+            )
+        return ParquetStore(self.uri, self.dataset, self.shards, self.compression)
 
     @contextmanager
     def writer(
@@ -287,10 +285,44 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
         _emit()
         return total
 
-    def merge(self) -> None:
-        """Collapse duplicates and reap expired tombstones from parquet store"""
+    def merge(self, force: bool = False) -> None:
+        """Collapse duplicates and reap expired tombstones from parquet store.
+
+        Flushes the journal first. ``force`` rewrites every partition
+        regardless of freshness tags.
+        """
         self.flush()
-        self._statements.merge()
+        self._statements.merge(force)
+
+    @no_api
+    def compact(self) -> None:
+        """Bin-pack small parquet files within each partition."""
+        self._statements.compact()
+
+    @no_api
+    def vacuum(self, retention_hours: int = 0) -> None:
+        """Delete obsolete parquet files tombstoned in the Delta log."""
+        self._statements.vacuum(retention_hours=retention_hours)
+
+    @no_api
+    def export_statements_csv(self) -> None:
+        """Export the statement store to the ``statements.csv`` artifact."""
+        self._store.ensure_parent(self.EXPORTS_STATEMENTS)
+        self._statements.export_csv(self.EXPORTS_STATEMENTS)
+
+    @property
+    def exists(self) -> bool:
+        """Whether the statement store has been written."""
+        return self._statements.exists
+
+    @no_api
+    def query_statements_data(self, q: Query | None = None) -> Iterator[StatementDict]:
+        """Query raw statement dicts from the parquet store.
+
+        The fast local read: no :class:`~ftmq.store.lake.LakeStatement`
+        construction – use :meth:`query_statements` for model objects.
+        """
+        yield from self._statements._query_statement_data(q)
 
     @no_api
     def unlock(self) -> bool:
@@ -480,7 +512,6 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
         tombstoning purposes.
         """
         stmts_by_key: dict[str, LakeStatement] = {}
-        journal = cast(SqlJournalStore, self._journal)
 
         # Read from parquet store (uses shard partition for pruning)
         for stmt in self._statements.get_statements(entity_id):
@@ -488,32 +519,14 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
             if stmt.id:
                 stmts_by_key[stmt.dedupe_key] = stmt
 
-        # Read from journal (may override parquet entries). Use the shard
-        # index for an index-assisted scan, then filter by entity_id in
-        # the unpacked statement.
+        # Read from journal (may override parquet entries). The shard scan is
+        # index-assisted; filter by entity_id on the unpacked statements.
         shard = path.entity_shard(entity_id, self.shards)
-        q = (
-            select(journal.table)
-            .where(journal.table.c.shard == shard)
-            .where(journal.table.c.deleted_at.is_(None))
-        )
-        with journal.engine.connect() as conn:
-            for row in conn.execute(q):
-                try:
-                    stmt = unpack_journal_row(row.data)
-                except MalformedStatementError as exc:
-                    self.log.warning(
-                        "Skipping malformed journal row in entity collect",
-                        row_id=row.id,
-                        shard=row.shard,
-                        error=str(exc),
-                    )
-                    continue
-                if stmt.entity_id != entity_id:
-                    continue
-                lake_stmt = LakeStatement.from_statement(stmt, row.fragment or "")
-                if lake_stmt.id:
-                    stmts_by_key[lake_stmt.dedupe_key] = lake_stmt
+        for lake_stmt in self._journal.iterate_shard(shard):
+            if lake_stmt.entity_id != entity_id:
+                continue
+            if lake_stmt.id:
+                stmts_by_key[lake_stmt.dedupe_key] = lake_stmt
 
         return list(stmts_by_key.values())
 

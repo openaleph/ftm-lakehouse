@@ -38,9 +38,9 @@ class ApiEntityRepository(EntityRepository):
         res = self._api.make_request(url, "POST")
         return int(res.text)
 
-    def merge(self) -> None:
+    def merge(self, force: bool = False) -> None:
         url = self._make_url("merge")
-        self._api.make_request(url, "POST")
+        self._api.make_request(url, "POST", params={"force": force})
 
     def query(
         self,

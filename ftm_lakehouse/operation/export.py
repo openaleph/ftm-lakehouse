@@ -62,7 +62,7 @@ class ExportJob(DatasetJobModel):
 
 
 def _export_statements(op: "ExportOperation", *args, **kwargs) -> None:
-    op.entities._statements.export_csv(op.entities.EXPORTS_STATEMENTS)
+    op.entities.export_statements_csv()
 
 
 def _export_entities(
@@ -172,10 +172,10 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
     def ensure_flush(self) -> bool:
         if not self._tags.is_latest(tag.JOURNAL_FLUSHED, [tag.JOURNAL_UPDATED]):
             self.entities.flush()
-        if not self.entities._statements.exists:
+        if not self.entities.exists:
             self.log.info(
                 "Statement store empty, skipping ...",
-                uri=mask_uri(self.entities._statements.uri),
+                uri=mask_uri(self.entities.uri),
             )
             return False
         return True

@@ -2,6 +2,7 @@
 clients, including diffs"""
 
 from datetime import datetime
+from functools import cached_property
 from itertools import chain, islice
 from typing import Generator, Iterator
 
@@ -40,9 +41,11 @@ class DocumentRepository(ParquetDiffMixin, DatasetHandle):
             print(document.uri)  # use uri to download
     """
 
-    def __init__(self, dataset: str, uri: Uri) -> None:
-        super().__init__(dataset, uri)
-        self._statements = ParquetStore(uri, dataset, self._model.shards)
+    @cached_property
+    def _statements(self) -> ParquetStore:
+        return ParquetStore(
+            self.uri, self.dataset, self._model.shards, self._model.compression
+        )
 
     @property
     def csv_uri(self) -> Uri:

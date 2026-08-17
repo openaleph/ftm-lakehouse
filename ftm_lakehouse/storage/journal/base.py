@@ -220,6 +220,15 @@ class BaseJournalStore(Generic[W]):
                 r.shard, LakeStatement.from_statement(stmt, r.fragment), r.deleted_at
             )
 
+    def iterate_shard(self, shard: str) -> Generator[LakeStatement, None, None]:
+        """Iterate the live (non-tombstone) statements of one shard.
+
+        Non-destructive read twin of :meth:`flush_statements` – malformed
+        rows are logged and skipped the same way. Backed by the shard index
+        in the SQL journal; not available on the api journal.
+        """
+        raise NotImplementedError
+
     def count(self) -> int:
         """Count rows for this dataset."""
         raise NotImplementedError

@@ -51,7 +51,7 @@ def cli_statements_iterate(out_uri: OPT_OUT = "-"):
             rows = (r.to_dict() for r in entities.query_statements())
         else:
             # faster as no Statement model serialization
-            rows = entities._statements._query_statement_data()
+            rows = entities.query_statements_data()
         with smart_open(out_uri, "w") as fh:
             smart_write_csv(fh, rows)
 

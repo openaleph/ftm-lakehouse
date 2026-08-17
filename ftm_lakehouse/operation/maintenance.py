@@ -36,13 +36,11 @@ class OptimizeOperation(DatasetJobOperation[OptimizeJob]):
     dependencies = [tag.STATEMENTS_UPDATED]
 
     def handle(self, run: JobRun[OptimizeJob], force: bool = False, **kwargs) -> None:
-        self.entities.flush()
-        store = self.entities._statements
-        store.merge(force)
+        self.entities.merge(force)
         run.job.done += 1
         run.save()
-        store.compact()
+        self.entities.compact()
         run.job.done += 1
         run.save()
-        store.vacuum(retention_hours=run.job.retention_hours)
+        self.entities.vacuum(retention_hours=run.job.retention_hours)
         run.job.done += 1

@@ -34,9 +34,13 @@ class ParquetDiffMixin:
 
     log: BoundLogger
     _tags: TagStore
-    _statements: ParquetStore
 
     _diff_base_path: str
+
+    @property
+    def _statements(self) -> ParquetStore:
+        """Provided by the implementing repository (a ``cached_property``)."""
+        raise NotImplementedError
 
     @abstractmethod
     def _get_changed_ids(self, since: datetime) -> Iterator[str]:

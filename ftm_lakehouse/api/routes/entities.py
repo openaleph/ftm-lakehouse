@@ -20,9 +20,9 @@ def entities_flush(entities: Entities) -> PlainTextResponse:
 
 
 @router.post("/{dataset}/_api/entities/merge")
-def entities_merge(entities: Entities) -> PlainTextResponse:
+def entities_merge(entities: Entities, force: bool = False) -> PlainTextResponse:
     """Collapse duplicates and reap expired tombstones from parquet store"""
-    entities.merge()
+    entities.merge(force)
     return PlainTextResponse("ok")
 
 
@@ -58,7 +58,7 @@ def entities_stats(entities: Entities) -> DatasetStats:
 @router.get("/{dataset}/_api/entities/statements/version")
 def entities_version(entities: Entities) -> PlainTextResponse:
     """Return current Delta table version."""
-    v = entities._statements.version
+    v = entities.version
     return PlainTextResponse(str(v or 0))
 
 

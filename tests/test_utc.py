@@ -71,8 +71,7 @@ def test_statement_roundtrip_timestamps_are_utc(tmp_path):
         else:
             assert "+00:00" in last_seen or last_seen.endswith("Z"), last_seen
 
-    repo._store.ensure_parent(path.EXPORTS_STATEMENTS)
-    repo._statements.export_csv(path.EXPORTS_STATEMENTS)
+    repo.export_statements_csv()
     csv_content = (tmp_path / path.EXPORTS_STATEMENTS).read_text()
     header, first_row = csv_content.splitlines()[:2]
     # UTC may be rendered as `+00:00` or the `Z` (Zulu) suffix – both are UTC.

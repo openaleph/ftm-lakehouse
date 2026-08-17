@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Generator
 
@@ -589,3 +590,36 @@ def test_storage_journal_writer_add_row(journal):
     for row in rows:
         assert row.shard == entity_shard("jane", SHARDS)
         assert unpack_journal_row(row.data).value == "Jane Doe"
+
+
+def test_storage_journal_iterate_shard(journal):
+    """``iterate_shard`` yields only the live statements of one shard, skips
+    malformed rows, and is not implemented on the api journal."""
+    with journal.writer(SHARDS) as w:
+        w.add_statement(make_statement("jane", "name", "Jane Doe"))
+        w.add_statement(make_statement("john", "name", "John Smith"))
+        w.add_statement(
+            make_statement("jane", "firstName", "Jane"),
+            datetime.now(timezone.utc),  # tombstone
+        )
+
+    shard = entity_shard("jane", SHARDS)
+    if isinstance(journal, ApiJournalStore):
+        with pytest.raises(NotImplementedError):
+            list(journal.iterate_shard(shard))
+        return
+
+    with journal.engine.connect() as conn:
+        conn.execute(
+            insert(journal.table).values(
+                id="malformed", shard=shard, data="too-short", fragment=""
+            )
+        )
+        conn.commit()
+
+    values = {s.value for s in journal.iterate_shard(shard)}
+    assert "Jane Doe" in values  # live row of the shard
+    assert "Jane" not in values  # tombstoned
+    assert "too-short" not in values  # malformed row skipped, not raised
+    if entity_shard("john", SHARDS) != shard:
+        assert "John Smith" not in values  # other shard

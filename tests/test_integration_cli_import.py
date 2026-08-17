@@ -47,8 +47,7 @@ def test_cli_statements_import_roundtrip(tmp_path, cli_runner):
     and crashed the parquet append (and would have been truthy otherwise).
     """
     src = _seed_source(tmp_path)
-    src._store.ensure_parent(path.EXPORTS_STATEMENTS)
-    src._statements.export_csv(path.EXPORTS_STATEMENTS)
+    src.export_statements_csv()
     csv_uri = str(tmp_path / "src" / path.EXPORTS_STATEMENTS)
 
     result = cli_runner.invoke(
@@ -73,8 +72,7 @@ def test_cli_statements_import_override_origin(tmp_path, cli_runner):
     """--override-origin forces the CLI origin over CSV-carried origins – on
     both the safe and the --unsafe path."""
     src = _seed_source(tmp_path)
-    src._store.ensure_parent(path.EXPORTS_STATEMENTS)
-    src._statements.export_csv(path.EXPORTS_STATEMENTS)
+    src.export_statements_csv()
     csv_uri = str(tmp_path / "src" / path.EXPORTS_STATEMENTS)
 
     for dst_name, flags in (("dst_safe", []), ("dst_unsafe", ["--unsafe"])):
@@ -207,8 +205,7 @@ def test_cli_statements_import_unsafe_roundtrip(tmp_path, cli_runner):
     roots via ``--uri`` – statement ids content-hash under the target
     dataset)."""
     src = _seed_source(tmp_path)
-    src._store.ensure_parent(path.EXPORTS_STATEMENTS)
-    src._statements.export_csv(path.EXPORTS_STATEMENTS)
+    src.export_statements_csv()
     csv_uri = str(tmp_path / "src" / path.EXPORTS_STATEMENTS)
 
     for root, flags in (("root_safe", []), ("root_unsafe", ["--unsafe"])):
@@ -278,8 +275,7 @@ def test_cli_stream_commands(tmp_path, cli_runner):
     with repo.writer(origin="test") as writer:
         writer.add_entity(make_entity(JANE))
     repo.flush()
-    repo._store.ensure_parent(path.EXPORTS_STATEMENTS)
-    repo._statements.export_csv(path.EXPORTS_STATEMENTS)
+    repo.export_statements_csv()
     entities_json = tmp_path / "dst" / path.ENTITIES_JSON
     smart_write_proxies(str(entities_json), repo.query())
 
