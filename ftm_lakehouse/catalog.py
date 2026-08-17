@@ -133,7 +133,7 @@ class Catalog:
 
         catalog = get_lakehouse()
         for name in catalog.list_datasets():
-            print(name, get_entities(name).get_statistics())
+            print(name, get_entities(name).stats())
         ```
     """
 

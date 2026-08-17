@@ -14,6 +14,7 @@ from followthemoney import EntityProxy
 
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.repository.entities import EntityRepository
+from ftm_lakehouse.repository.factories import get_entities
 from tests.conftest import make_docker_repo, make_test_api
 from tests.shared import JANE, JOHN
 
@@ -44,7 +45,7 @@ def repo(
     elif request.param == "api":
         with make_test_api(tmp_path) as base_url:
             dataset_url = f"{base_url}/{DATASET}"
-            r = EntityRepository(DATASET, uri=dataset_url)
+            r = get_entities(DATASET, uri=dataset_url)
             yield r, tmp_path / DATASET
     else:
         yield make_docker_repo()
@@ -73,13 +74,13 @@ def test_delete_entity_filters_from_query_after_merge(repo):
 def test_delete_entity_filters_from_stats_after_merge(repo):
     repo, _ = repo
     _populate(repo)
-    assert repo.get_statistics().entity_count == 2
+    assert repo.stats().entity_count == 2
 
     repo.delete_entity("jane")
     repo.flush()
     repo.merge()
 
-    assert repo.get_statistics().entity_count == 1
+    assert repo.stats().entity_count == 1
 
 
 def test_delete_then_readd_via_merge(repo):

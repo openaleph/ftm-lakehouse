@@ -70,7 +70,6 @@ from pyarrow.csv import CSVWriter  # type: ignore[attr-defined]  # missing from 
 from rigour.time import utc_now
 from sqlalchemy import Select, column
 
-from ftm_lakehouse.core.api import LakehouseApiMixin, ensure_api_uri, no_api
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.logic.compress import CompressKind, compress_stream
@@ -108,7 +107,7 @@ def make_source(table: str, shards: int) -> SqlSource:
     return SqlSource(table, **config)
 
 
-class ParquetStore(LakehouseApiMixin):
+class ParquetStore:
     """Single Delta Lake table (per dataset) partitioned by ``(shard, bucket,
     origin)``.
 
@@ -128,15 +127,14 @@ class ParquetStore(LakehouseApiMixin):
         compression: CompressKind | None = None,
     ) -> None:
         self.uri = join_uri(uri, path.STATEMENTS)
-        super().__init__(self.uri)
         self.settings = Settings()
         self.dataset = dataset
         self.shards = shards if shards is not None else DEFAULT_SHARDS
         # Resolved from the dataset config (`DatasetHandle._model`) by the
         # owning repository – exports never take a runtime codec.
         self.compression = compression
-        self._store = get_store(ensure_api_uri(uri))
-        self._tags = TagStore(ensure_api_uri(uri))
+        self._store = get_store(uri)
+        self._tags = TagStore(uri)
         self._lake = LakeStore(
             uri=str(self.uri),
             dataset=self.dataset,
@@ -169,7 +167,6 @@ class ParquetStore(LakehouseApiMixin):
         """Check existence of deltatable"""
         return self._lake.exists
 
-    @no_api
     def view(self) -> View:
         """Get a view for querying statements."""
         return self._lake.default_view()
@@ -236,7 +233,6 @@ class ParquetStore(LakehouseApiMixin):
         else:
             yield from self._query_statement_data(q)
 
-    @no_api
     def query(self, q: Query | None = None) -> StatementEntities:
         """Query entities from the store.
 
@@ -252,7 +248,6 @@ class ParquetStore(LakehouseApiMixin):
         for data in self._query_data(q):
             yield data.to_entity()
 
-    @no_api
     def query_statements(self, q: Query | None = None) -> Statements:
         """Query ordered Statements from the store.
 
@@ -268,7 +263,6 @@ class ParquetStore(LakehouseApiMixin):
         for stmt_dict in self._statement_data(q):
             yield LakeStatement.from_dict(stmt_dict)
 
-    @no_api
     def get_statements(self, entity_id: str) -> Statements:
         """Query all live statements for a single entity.
 
@@ -285,7 +279,6 @@ class ParquetStore(LakehouseApiMixin):
         for stmt_dict in self._query_statement_data(q):
             yield LakeStatement.from_dict(stmt_dict)
 
-    @no_api
     def stats(self) -> DatasetStats:
         """Compute statistics from the statement store.
 
@@ -297,7 +290,6 @@ class ParquetStore(LakehouseApiMixin):
         """
         return self._lake.default_view().stats()
 
-    @no_api
     def count(self, q: Query | None = None) -> int:
         """Count distinct entities matching ``q``.
 
@@ -450,7 +442,6 @@ class ParquetStore(LakehouseApiMixin):
             )
             yield
 
-    @no_api
     def unlock(self) -> bool:
         """Forcibly release the dataset write fence.
 
@@ -476,7 +467,6 @@ class ParquetStore(LakehouseApiMixin):
             released = True
         return released
 
-    @no_api
     def append(self, batch: pa.Table) -> None:
         """Append a sorted batch of statements.
 
@@ -570,7 +560,6 @@ class ParquetStore(LakehouseApiMixin):
         ):
             self._tags.set(tag.statements_partition_updated(shard, bucket, origin))
 
-    @no_api
     def merge(self, force: bool = False) -> None:
         """Collapse duplicates and reap expired tombstones, partition by partition.
 
@@ -735,7 +724,6 @@ class ParquetStore(LakehouseApiMixin):
             sizes[key] = sizes.get(key, 0) + size
         return sizes
 
-    @no_api
     def compact(self) -> None:
         """Bin-pack small parquet files within each partition.
 
@@ -760,7 +748,6 @@ class ParquetStore(LakehouseApiMixin):
                     )
             self.log.info("Compaction done.", took=t.took)
 
-    @no_api
     def vacuum(self, retention_hours: int = 0) -> None:
         """Delete obsolete parquet files no longer referenced by the Delta log.
 
@@ -783,7 +770,6 @@ class ParquetStore(LakehouseApiMixin):
             )
             self.log.info("Vacuumed.", took=t.took)
 
-    @no_api
     def export_csv(self, key: str) -> None:
         """Export statements to a sorted CSV file.
 
@@ -812,7 +798,6 @@ class ParquetStore(LakehouseApiMixin):
             if writer is not None:
                 writer.close()
 
-    @no_api
     def get_entity_ids(
         self, q: Query | None = None, *, source: SqlSource | None = None
     ) -> Iterator[str]:

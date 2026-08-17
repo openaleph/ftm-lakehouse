@@ -20,11 +20,12 @@ from functools import lru_cache
 
 from anystore.types import Uri
 
-from ftm_lakehouse.core.api import ensure_api_uri
+from ftm_lakehouse.core.api import ensure_api_uri, get_api
 from ftm_lakehouse.repository.archive import ArchiveRepository
 from ftm_lakehouse.repository.base import dataset_uri
 from ftm_lakehouse.repository.documents import DocumentRepository
 from ftm_lakehouse.repository.entities import EntityRepository
+from ftm_lakehouse.repository.entities.api import ApiEntityRepository
 from ftm_lakehouse.repository.job import J, JobRepository
 from ftm_lakehouse.storage.tags import TagStore
 from ftm_lakehouse.storage.versions import VersionStore
@@ -79,6 +80,10 @@ def get_entities(dataset: str, uri: Uri | None = None) -> EntityRepository:
 
 @lru_cache(maxsize=LRU_MAX)
 def _get_entities(dataset: str, uri: str) -> EntityRepository:
+    # Construction-time api pick, mirroring `get_journal`'s Sql-vs-Api choice
+    # - but keyed on the dataset uri, not global settings.
+    if get_api(uri) is not None:
+        return ApiEntityRepository(dataset, uri)
     return EntityRepository(dataset, uri)
 
 

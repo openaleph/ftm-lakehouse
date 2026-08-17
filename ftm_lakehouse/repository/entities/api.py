@@ -1,4 +1,7 @@
+"""Api-mode ``EntityRepository`` – the http twin picked at construction."""
+
 import orjson
+from anystore.types import Uri
 from followthemoney import StatementEntity
 from ftmq.model.stats import DatasetStats
 from ftmq.query import Query
@@ -6,34 +9,40 @@ from ftmq.store.lake import LakeStatement
 from ftmq.types import StatementEntities, Statements
 from ftmq.util import ensure_entity
 
-from ftm_lakehouse.core.api import LakehouseApiMixin, require_api
-from ftm_lakehouse.core.settings import Settings
-
-settings = Settings()
+from ftm_lakehouse.repository.entities.main import EntityRepository
 
 
-class ApiEntityRepository(LakehouseApiMixin):
-    """Patch methods for EntityRepository if running against http api"""
+class ApiEntityRepository(EntityRepository):
+    """``EntityRepository`` against a remote lakehouse api.
 
-    dataset: str
+    Resolved by :func:`ftm_lakehouse.repository.factories.get_entities` for
+    http uris – the same construction-time pick ``get_journal`` does for the
+    journal. Overrides the api-capable methods with their http delegations
+    under the public names; everything ``@no_api`` stays guarded by the
+    inherited decorator.
+    """
 
-    @require_api
+    def __init__(self, dataset: str, uri: Uri) -> None:
+        super().__init__(dataset, uri)
+        if not self._is_api:
+            raise RuntimeError(
+                f"`{type(self).__name__}` requires an http uri – resolve the "
+                "repository via `get_entities()`"
+            )
+
     def _make_url(self, endpoint: str) -> str:
         return self._api.make_url(f"_api/entities/{endpoint}")
 
-    @require_api
-    def _api_flush(self) -> int:
+    def flush(self) -> int:
         url = self._make_url("flush")
         res = self._api.make_request(url, "POST")
         return int(res.text)
 
-    @require_api
-    def _api_merge(self) -> None:
+    def merge(self) -> None:
         url = self._make_url("merge")
         self._api.make_request(url, "POST")
 
-    @require_api
-    def _api_query(
+    def query(
         self,
         q: Query | None = None,
         *,
@@ -44,8 +53,7 @@ class ApiEntityRepository(LakehouseApiMixin):
         for line in self._api.stream_request(url, "POST", json=data):
             yield ensure_entity(orjson.loads(line), StatementEntity)
 
-    @require_api
-    def _api_query_statements(
+    def query_statements(
         self,
         q: Query | None = None,
         *,
@@ -56,20 +64,18 @@ class ApiEntityRepository(LakehouseApiMixin):
         for line in self._api.stream_request(url, "POST", json=data):
             yield LakeStatement.from_dict(orjson.loads(line))
 
-    @require_api
-    def _api_delete_entity(self, entity_id: str) -> int:
+    def delete_entity(self, entity_id: str) -> int:
         url = self._make_url(entity_id)
         res = self._api.make_request(url, "DELETE")
         return int(res.text)
 
-    @require_api
-    def _api_stats(self) -> DatasetStats:
+    def stats(self) -> DatasetStats:
         url = self._make_url("stats")
         res = self._api.make_request(url)
         return DatasetStats(**res.json())
 
-    @require_api
-    def _api_version(self) -> int | None:
+    @property
+    def version(self) -> int | None:
         url = self._make_url("statements/version")
         res = self._api.make_request(url)
         text = res.text.strip()

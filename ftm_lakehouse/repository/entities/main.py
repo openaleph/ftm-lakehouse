@@ -21,7 +21,7 @@ from ftmq.types import StatementEntities, Statements, ValueEntities
 from rigour.time import utc_now
 from sqlalchemy import select
 
-from ftm_lakehouse.core.api import api_delegate, no_api
+from ftm_lakehouse.core.api import no_api
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.exceptions import MalformedStatementError
@@ -31,7 +31,6 @@ from ftm_lakehouse.logic.entities.aggregate import aggregate_unsafe
 from ftm_lakehouse.model.statement import SHARDED_SCHEMA, StatementRow
 from ftm_lakehouse.repository.base import DatasetHandle
 from ftm_lakehouse.repository.diff import ParquetDiffMixin, make_envelope
-from ftm_lakehouse.repository.entities.api import ApiEntityRepository
 from ftm_lakehouse.storage.journal import get_journal
 from ftm_lakehouse.storage.journal.base import BaseJournalWriter
 from ftm_lakehouse.storage.journal.sql import SqlJournalStore
@@ -47,7 +46,7 @@ before :meth:`EntityRepository.write_statements` emits.
 """
 
 
-class EntityRepository(ParquetDiffMixin, DatasetHandle, ApiEntityRepository):
+class EntityRepository(ParquetDiffMixin, DatasetHandle):
     """
     Repository for entity/statement operations.
 
@@ -74,6 +73,8 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle, ApiEntityRepository):
         ```
     """
 
+    _statements: ParquetStore
+
     def __init__(
         self,
         dataset: str,
@@ -83,9 +84,19 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle, ApiEntityRepository):
         self.shards = self._model.shards
         self.compression = self._model.compression
         self._journal = get_journal(dataset)
-        self._statements = ParquetStore(uri, dataset, self.shards, self.compression)
         self.ENTITIES_JSON = path.entities_json(self.compression)
         self.EXPORTS_STATEMENTS = path.exports_statements(self.compression)
+        if self._is_api:
+            if type(self) is EntityRepository:
+                raise RuntimeError(
+                    "`EntityRepository` cannot run against an http uri directly "
+                    "– resolve the repository via `get_entities()`"
+                )
+        else:
+            # Api instances never build local storage: their api-capable
+            # methods are overridden and everything local-only is
+            # ``@no_api``-guarded, so ``_statements`` stays unset there.
+            self._statements = ParquetStore(uri, dataset, self.shards, self.compression)
 
     @contextmanager
     def writer(
@@ -133,7 +144,6 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle, ApiEntityRepository):
             for entity in entities:
                 writer.add_entity(entity, fragment=fragment)
 
-    @api_delegate("_api_flush")
     def flush(self) -> int:
         """Drain the journal into the parquet statement store.
 
@@ -277,7 +287,6 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle, ApiEntityRepository):
         _emit()
         return total
 
-    @api_delegate("_api_merge")
     def merge(self) -> None:
         """Collapse duplicates and reap expired tombstones from parquet store"""
         self.flush()
@@ -296,7 +305,6 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle, ApiEntityRepository):
         """
         return self._statements.unlock()
 
-    @api_delegate("_api_query")
     def query(
         self, q: Query | None = None, *, flush_first: bool = False
     ) -> StatementEntities:
@@ -313,7 +321,6 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle, ApiEntityRepository):
             self.flush()
         yield from self._statements.query(q)
 
-    @api_delegate("_api_query_statements")
     def query_statements(
         self, q: Query | None = None, *, flush_first: bool = False
     ) -> Statements:
@@ -421,7 +428,6 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle, ApiEntityRepository):
             return self._store.to_uri(self.EXPORTS_STATEMENTS)
         return None
 
-    @api_delegate("_api_delete_entity")
     def delete_entity(self, entity_id: str) -> int:
         """Delete all statements for an entity via journal tombstones.
 
@@ -511,16 +517,13 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle, ApiEntityRepository):
 
         return list(stmts_by_key.values())
 
-    @api_delegate("_api_stats")
-    def get_statistics(self) -> DatasetStats:
+    def stats(self) -> DatasetStats:
         """Compute statistics from the parquet store."""
         return self._statements.stats()
 
     @property
     def version(self) -> int | None:
         """Current version of the main Delta table."""
-        if self._is_api:
-            return self._api_version()
         return self._statements.version
 
     # DiffMixin implementation

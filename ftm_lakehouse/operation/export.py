@@ -83,7 +83,7 @@ def _export_documents(
 
 
 def _export_statistics(op: "ExportOperation", *args, **kwargs) -> None:
-    stats = op.entities.get_statistics()
+    stats = op.entities.stats()
     op._versions.make(path.EXPORTS_STATISTICS, stats)
 
 

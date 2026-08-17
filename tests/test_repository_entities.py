@@ -11,6 +11,7 @@ from ftmq.util import make_entity
 
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.repository import EntityRepository
+from ftm_lakehouse.repository.factories import get_entities
 from tests.conftest import make_docker_repo, make_test_api
 from tests.shared import BOB, JANE, JANE_FIRSTNAME, JOHN
 
@@ -24,7 +25,7 @@ def repo(
     elif request.param == "api":
         with make_test_api(tmp_path) as base_url:
             dataset_url = f"{base_url}/test"
-            repo = EntityRepository("test", uri=dataset_url)
+            repo = get_entities("test", uri=dataset_url)
             yield repo, tmp_path / "test"
     else:
         # docker: real nginx + lakehouse UDS; data lives at
@@ -60,14 +61,14 @@ def test_repository_entities(repo):
     # before flush:
     assert not repo._tags.exists(tag.STATEMENTS_UPDATED)
     assert repo._journal.count() > 0
-    assert repo.get_statistics().entity_count == 0
+    assert repo.stats().entity_count == 0
 
     # This auto flushes the journal:
     entities = list(repo.query(flush_first=True))
     # after flush:
     assert len(entities) == 2
     assert repo._journal.count() == 0
-    assert repo.get_statistics().entity_count == 2
+    assert repo.stats().entity_count == 2
     # Tag should be set after flush (triggered by query)
     assert repo._tags.exists(tag.STATEMENTS_UPDATED)
     # Verify actual tag file path (hardcoded to detect convention changes)

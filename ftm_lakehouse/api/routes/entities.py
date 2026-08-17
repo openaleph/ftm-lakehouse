@@ -52,7 +52,7 @@ def entities_delete(entities: Entities, entity_id: str) -> PlainTextResponse:
 @router.get("/{dataset}/_api/entities/stats")
 def entities_stats(entities: Entities) -> DatasetStats:
     """Return dataset statistics from parquet store."""
-    return entities.get_statistics()
+    return entities.stats()
 
 
 @router.get("/{dataset}/_api/entities/statements/version")

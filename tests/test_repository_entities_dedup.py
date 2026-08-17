@@ -20,6 +20,7 @@ from followthemoney import EntityProxy
 from ftmq import C, Query
 
 from ftm_lakehouse.repository.entities import EntityRepository
+from ftm_lakehouse.repository.factories import get_entities
 from tests.conftest import make_docker_repo, make_test_api
 from tests.duck import make_duckdb
 from tests.shared import JANE, JOHN
@@ -46,7 +47,7 @@ def repo(
     elif request.param == "api":
         with make_test_api(tmp_path) as base_url:
             dataset_url = f"{base_url}/{DATASET}"
-            r = EntityRepository(DATASET, uri=dataset_url)
+            r = get_entities(DATASET, uri=dataset_url)
             yield r, tmp_path / DATASET
     else:
         yield make_docker_repo()

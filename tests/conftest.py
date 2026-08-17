@@ -23,6 +23,7 @@ from ftm_lakehouse.lake import get_lakehouse
 from ftm_lakehouse.model.dataset import DatasetModel, set_model_class
 from ftm_lakehouse.repository import factories
 from ftm_lakehouse.repository.entities.main import EntityRepository
+from ftm_lakehouse.repository.factories import get_entities
 from ftm_lakehouse.storage.journal import get_journal
 
 FIXTURES_PATH = (Path(__file__).parent / "fixtures").absolute()
@@ -95,7 +96,7 @@ def make_docker_repo(
     if LAKEHOUSE_TEST_MODE != "docker":
         pytest.skip("docker stack not running (LAKEHOUSE_TEST_MODE != docker)")
     name = dataset_name or make_docker_dataset_name()
-    repo = EntityRepository(name, uri=f"{LAKEHOUSE_TEST_URL}/{name}")
+    repo = get_entities(name, uri=f"{LAKEHOUSE_TEST_URL}/{name}")
     return repo, docker_data_path(name)
 
 

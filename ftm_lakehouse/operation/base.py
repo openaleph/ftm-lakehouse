@@ -5,7 +5,6 @@ from typing import Generic
 
 from anystore.types import Uri
 
-from ftm_lakehouse.core.api import api_delegate, require_api
 from ftm_lakehouse.model.job import DJ
 from ftm_lakehouse.repository.archive import ArchiveRepository
 from ftm_lakehouse.repository.base import DatasetHandle, dataset_uri
@@ -104,13 +103,14 @@ class DatasetJobOperation(DatasetHandle, Generic[DJ]):
         )
         return run.job
 
-    @api_delegate("_api_run")
     def run(self, force: bool | None = False, *args, **kwargs) -> DJ:
         """Execute the handle function, force to run it regardless of freshness
-        dependencies"""
+        dependencies. In api mode the whole job is delegated to the remote
+        operations endpoint (:meth:`_api_run`)."""
+        if self._is_api:
+            return self._api_run(force, *args, **kwargs)
         return self._run_local(force, *args, **kwargs)
 
-    @require_api
     def _api_run(self, force: bool | None = False, *args, **kwargs) -> DJ:
         """Delegate run to remote api"""
         url = self._api.make_url("_api/operations")
