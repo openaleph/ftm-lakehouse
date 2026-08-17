@@ -19,13 +19,13 @@ from ftm_lakehouse.exceptions import MalformedStatementError
 from ftm_lakehouse.helpers.statements import (
     UNIT_SEP,
     UNPACK_MIN_FIELDS,
-    pack_statement,
-    unpack_statement,
+    pack_journal_row,
+    unpack_journal_row,
 )
 from ftm_lakehouse.lake import get_lakehouse
 from ftm_lakehouse.storage.journal import ApiJournalStore, JournalRows, SqlJournalStore
 from ftm_lakehouse.storage.journal import get_journal as _get_journal_factory
-from ftm_lakehouse.storage.journal.base import BaseJournalStore
+from ftm_lakehouse.storage.journal.base import BaseJournalStore, JournalRow
 
 DATASET = "test"
 SHARDS = 8
@@ -51,7 +51,7 @@ def make_statement(
 
 def collect_statements(items: JournalRows) -> list[Statement]:
     """Collect all statements from flush items."""
-    return [unpack_statement(row.data) for row in items]
+    return [unpack_journal_row(row.data) for row in items]
 
 
 def _make_sql_journal() -> SqlJournalStore:
@@ -233,7 +233,7 @@ def test_storage_journal_flush_yields_shard(journal):
     for row in items:
         # 8 shards = single hex char
         assert len(row.shard) == 1
-        stmt = unpack_statement(row.data)
+        stmt = unpack_journal_row(row.data)
         assert row.shard == entity_shard(stmt.entity_id, SHARDS)
         assert stmt.origin in ("source_a", "source_b")
 
@@ -425,7 +425,7 @@ def test_storage_journal_flush_concurrent_write(concurrent_journal):
     flushed_entity_ids: set[str] = set()
     injected = False
     for row in journal.flush():
-        flushed_entity_ids.add(unpack_statement(row.data).entity_id)
+        flushed_entity_ids.add(unpack_journal_row(row.data).entity_id)
 
         # After first row, inject new rows via a separate writer
         if not injected:
@@ -453,7 +453,7 @@ def test_storage_journal_flush_concurrent_write(concurrent_journal):
 # ---------------------------------------------------------------------------
 # Malformed-statement robustness
 #
-# ``unpack_statement`` raises :class:`MalformedStatementError` on a too-short
+# ``unpack_journal_row`` raises :class:`MalformedStatementError` on a too-short
 # packed payload, and ``BaseJournalStore.flush_statements`` catches+logs+skips
 # so one corrupt row can't abort a whole flush.
 # ---------------------------------------------------------------------------
@@ -462,24 +462,24 @@ def test_storage_journal_flush_concurrent_write(concurrent_journal):
 def test_unpack_rejects_short_payload() -> None:
     truncated = UNIT_SEP.join(["a"] * (UNPACK_MIN_FIELDS - 1))
     with pytest.raises(MalformedStatementError):
-        unpack_statement(truncated)
+        unpack_journal_row(truncated)
 
 
 def test_unpack_accepts_canonical_pack_output() -> None:
     stmt = make_statement("jane", "name", "Jane Doe")
-    out = unpack_statement(pack_statement(stmt))
+    out = unpack_journal_row(pack_journal_row(stmt))
     assert out.entity_id == "jane"
     assert out.value == "Jane Doe"
 
 
 def test_unpack_tolerates_extra_trailing_fields() -> None:
-    """``pack_statement`` emits 14 fields (trailing ``prop_type``);
-    ``unpack_statement`` only reads the first 13. Extra trailing fields
+    """``pack_journal_row`` emits 14 fields (trailing ``prop_type``);
+    ``unpack_journal_row`` only reads the first 13. Extra trailing fields
     must not trip the validator."""
-    canonical = pack_statement(make_statement("x", "name", "v"))
+    canonical = pack_journal_row(make_statement("x", "name", "v"))
     parts = canonical.split(UNIT_SEP)
     assert len(parts) >= UNPACK_MIN_FIELDS
-    unpack_statement(canonical)
+    unpack_journal_row(canonical)
 
 
 def test_storage_journal_flush_skips_malformed_rows(request, journal):
@@ -527,7 +527,9 @@ def test_storage_journal_fragment_round_trip(journal):
         w.add_statement(make_statement("john", "name", "John Smith"))
 
     rows = {row.id: row for row in journal.flush()}
-    fragments = {unpack_statement(r.data).entity_id: r.fragment for r in rows.values()}
+    fragments = {
+        unpack_journal_row(r.data).entity_id: r.fragment for r in rows.values()
+    }
     assert fragments == {"jane": "row1", "john": ""}
 
 
@@ -565,3 +567,25 @@ def test_storage_journal_upsert_same_id_fragment(journal):
         w.add_statement(stmt, fragment="row1")
 
     assert journal.count() == 1
+
+
+def test_storage_journal_writer_add_row(journal):
+    """``add_row`` buffers packed rows as-is: id and data are trusted, the
+    shard is re-derived against the writer's shard count, rows dedupe per
+    (id, fragment) within a batch, malformed data is rejected."""
+    packed = pack_journal_row(make_statement("jane", "name", "Jane Doe"))
+    wrong_shard = "99"
+    with journal.writer(SHARDS) as w:
+        w.add_row(JournalRow("row-a", wrong_shard, packed, None, ""))
+        w.add_row(JournalRow("row-a", wrong_shard, packed, None, ""))  # dedupes
+        w.add_row(JournalRow("row-a", wrong_shard, packed, None, "frag"))
+        with pytest.raises(MalformedStatementError):
+            w.add_row(JournalRow("row-b", "0", "too-short", None, ""))
+
+    assert journal.count() == 2
+    rows = list(journal.flush())
+    assert {r.id for r in rows} == {"row-a"}
+    assert sorted(r.fragment for r in rows) == ["", "frag"]
+    for row in rows:
+        assert row.shard == entity_shard("jane", SHARDS)
+        assert unpack_journal_row(row.data).value == "Jane Doe"

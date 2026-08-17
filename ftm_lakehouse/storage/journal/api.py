@@ -44,7 +44,7 @@ def deserialize_row(line: str) -> JournalRow:
 
 class ApiJournalWriter(BaseJournalWriter["ApiJournalStore"]):
     def _upsert_batch(self) -> None:
-        if not self._buffer_size:
+        if not self._pending():
             return
         payload = serialize_rows(self.flush_rows())
         url = self.store._make_url("bulk")

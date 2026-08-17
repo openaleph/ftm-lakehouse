@@ -1,6 +1,6 @@
 from followthemoney import Statement
 
-from ftm_lakehouse.helpers.statements import pack_statement, unpack_statement
+from ftm_lakehouse.helpers.statements import pack_journal_row, unpack_journal_row
 
 
 def test_helpers_statement():
@@ -16,8 +16,8 @@ def test_helpers_statement():
         external=True,
     )
 
-    packed = pack_statement(stmt)
-    unpacked = unpack_statement(packed)
+    packed = pack_journal_row(stmt)
+    unpacked = unpack_journal_row(packed)
 
     assert unpacked.entity_id == stmt.entity_id
     assert unpacked.prop == stmt.prop
@@ -38,13 +38,13 @@ def test_helpers_statement():
         dataset="test",
     )
 
-    packed = pack_statement(stmt)
-    unpacked = unpack_statement(packed)
+    packed = pack_journal_row(stmt)
+    unpacked = unpack_journal_row(packed)
 
     assert unpacked.entity_id == "e1"
     assert unpacked.lang is None
     assert unpacked.origin == "default"  # defaults to DEFAULT_ORIGIN
     assert unpacked.external is False
-    # Timestamps default to current time
+    # Missing timestamps are stamped at pack time (``default_now=True``)
     assert unpacked.first_seen is not None
     assert unpacked.last_seen is not None

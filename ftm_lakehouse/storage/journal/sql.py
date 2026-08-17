@@ -82,7 +82,7 @@ class SqlJournalWriter(BaseJournalWriter["SqlJournalStore"]):
         self.tx: Transaction | None = None
 
     def _upsert_batch(self) -> None:
-        if not self._buffer_size:
+        if not self._pending():
             return
 
         rows = list(self.flush_rows())

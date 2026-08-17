@@ -6,9 +6,15 @@ from typing import Generator, Generic, NamedTuple, Self, TypeAlias, TypeVar
 from anystore.logging import get_logger
 from ftmq.store.lake import LakeStatement
 
+from ftm_lakehouse.core.conventions.path import entity_shard
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.exceptions import MalformedStatementError
-from ftm_lakehouse.helpers.statements import pack_statement, unpack_statement
+from ftm_lakehouse.helpers.statements import (
+    UNIT_SEP,
+    UNPACK_MIN_FIELDS,
+    pack_journal_row,
+    unpack_journal_row,
+)
 from ftm_lakehouse.logic.entities.buffer import EntityBuffer
 from ftm_lakehouse.model.statement import StatementRow, StatementRows
 
@@ -53,25 +59,61 @@ class BaseJournalWriter(EntityBuffer, Generic[S]):
     def __init__(self, store: S, shards: int, origin: str | None = None) -> None:
         super().__init__(store.dataset, shards, origin)
         self.store = store
+        self._raw_rows: dict[tuple[str, str], JournalRow] = {}
 
     def _upsert_batch(self) -> None:
         raise NotImplementedError
 
+    def _pending(self) -> int:
+        """Rows waiting for the next upsert batch, across both add paths."""
+        return self._buffer_size + len(self._raw_rows)
+
     def flush_rows(self) -> JournalRows:
+        yield from self._raw_rows.values()
+        self._raw_rows = {}
         for row in self.flush_buffer():
             yield JournalRow(
                 row.stmt.id,
                 row.shard,
-                pack_statement(row.stmt),
+                pack_journal_row(row.stmt),
                 row.deleted_at,
                 row.stmt.fragment,
             )
 
     def add_statement(self, *args, **kwargs) -> str | None:
         stmt_id = super().add_statement(*args, **kwargs)
-        if self._buffer_size >= WRITE_BATCH_SIZE:
+        if self._pending() >= WRITE_BATCH_SIZE:
             self._upsert_batch()
         return stmt_id
+
+    def add_row(self, row: JournalRow) -> None:
+        """Buffer an already-packed journal row as-is – no unpack / re-pack.
+
+        Fast path for the api bulk route: the sending writer produced the row
+        through this same class, so the statement id is already re-keyed and
+        ``data`` already packed. Only ``shard`` is re-derived – from the
+        packed ``entity_id`` against *this* dataset's shard count – so a
+        client with a stale shard config cannot mis-route a partition. Rows
+        deduplicate per ``(id, fragment)`` within a batch (latest wins), the
+        same key the upsert conflicts on. Do not mix with
+        :meth:`add_statement` in one writer – a key present in both buffers
+        would reach a single multi-values upsert twice.
+
+        Raises:
+            MalformedStatementError: If ``row.data`` has fewer than
+                :data:`~ftm_lakehouse.helpers.statements.UNPACK_MIN_FIELDS`
+                fields.
+        """
+        parts = row.data.split(UNIT_SEP, UNPACK_MIN_FIELDS)
+        if len(parts) < UNPACK_MIN_FIELDS:
+            raise MalformedStatementError(
+                f"Packed statement has {len(parts)} fields; "
+                f"expected at least {UNPACK_MIN_FIELDS}"
+            )
+        shard = entity_shard(parts[1], self.shards)
+        self._raw_rows[(row.id, row.fragment)] = row._replace(shard=shard)
+        if self._pending() >= WRITE_BATCH_SIZE:
+            self._upsert_batch()
 
     def flush(self) -> None:
         """Flush pending rows and commit transaction."""
@@ -154,7 +196,7 @@ class BaseJournalStore(Generic[W]):
         Thin wrapper over :meth:`flush` for consumers (notably
         :meth:`EntityRepository.flush`) that want ``Statement`` objects
         instead of the packed wire format. Malformed rows (failed
-        :func:`unpack_statement`) are logged and skipped so one corrupt
+        :func:`unpack_journal_row`) are logged and skipped so one corrupt
         row can't abort the whole flush.
 
         Yields:
@@ -165,7 +207,7 @@ class BaseJournalStore(Generic[W]):
         """
         for r in self.flush():
             try:
-                stmt = unpack_statement(r.data)
+                stmt = unpack_journal_row(r.data)
             except MalformedStatementError as exc:
                 log.warning(
                     "Skipping malformed journal row",

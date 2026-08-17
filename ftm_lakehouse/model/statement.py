@@ -129,7 +129,7 @@ class StatementRow(NamedTuple):
     Shared currency for both flush paths:
     - ``EntityBuffer.flush_buffer()`` (the bulk-write / direct-to-parquet path)
     - the journal flush path in ``EntityRepository.flush()``, which adapts
-      each ``JournalRow`` into a ``StatementRow`` via ``unpack_statement``.
+      each ``JournalRow`` into a ``StatementRow`` via ``unpack_journal_row``.
 
     ``stmt`` is a :class:`ftmq.store.lake.LakeStatement` – it carries the
     supersession group key ``fragment`` itself (empty string means

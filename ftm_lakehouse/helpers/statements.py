@@ -18,24 +18,27 @@ UNIT_SEP = "\x1f"
 """Field separator used to pack a Statement into the journal ``data`` column."""
 
 UNPACK_MIN_FIELDS = 12
-"""Minimum field count :func:`unpack_statement` requires.
+"""Minimum field count :func:`unpack_journal_row` requires.
 
-:func:`pack_statement` currently emits 13 fields (trailing ``prop_type``);
-``unpack_statement`` only reads the first 12, so extra trailing fields
+:func:`pack_journal_row` currently emits 13 fields (trailing ``prop_type``);
+``unpack_journal_row`` only reads the first 12, so extra trailing fields
 are tolerated for forward compatibility – but anything shorter is a
 malformed row and rejected.
 """
 
 
-def pack_statement(stmt: Statement) -> str:
+def pack_journal_row(stmt: Statement) -> str:
     """
-    Pack a Statement into a unit-separator delimited string.
+    Pack a Statement into the journal's unit-separator delimited ``data`` string.
+
+    Not to be confused with :func:`ftmq.store.lake.pack_statement`, which
+    packs a statement into a parquet row dict.
 
     Format: id, entity_id, prop, schema, value, dataset, lang,
             original_value, external, first_seen, last_seen, origin, prop_type
 
     ``canonical_id`` is not serialised – this store never resolves entities,
-    so :func:`unpack_statement` lets FtM default it to ``entity_id``.
+    so :func:`unpack_journal_row` lets FtM default it to ``entity_id``.
     """
     parts = [
         stmt.id or "",
@@ -47,16 +50,18 @@ def pack_statement(stmt: Statement) -> str:
         stmt.lang or "",
         stmt.original_value or "",
         "1" if stmt.external else "0",
-        datetime_iso(stmt.first_seen),
-        datetime_iso(stmt.last_seen),
+        # Missing timestamps are stamped at pack time – journal rows always
+        # carry concrete seen-timestamps.
+        datetime_iso(stmt.first_seen, default_now=True) or "",
+        datetime_iso(stmt.last_seen, default_now=True) or "",
         stmt.origin or DEFAULT_ORIGIN,
         stmt.prop_type or "",
     ]
     return UNIT_SEP.join(parts)
 
 
-def unpack_statement(data: str) -> Statement:
-    """Unpack a unit-separator delimited string back into a Statement.
+def unpack_journal_row(data: str) -> Statement:
+    """Unpack a journal ``data`` string back into a Statement.
 
     Raises:
         MalformedStatementError: If ``data`` has fewer than

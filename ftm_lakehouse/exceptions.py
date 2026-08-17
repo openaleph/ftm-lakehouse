@@ -13,7 +13,7 @@ class BufferFullError(RuntimeError):
 
 
 class MalformedStatementError(ValueError):
-    """Raised by ``unpack_statement`` when a packed statement string has
+    """Raised by ``unpack_journal_row`` when a packed statement string has
     too few fields to decode.
 
     The journal flush loop catches this, logs the offending row, and

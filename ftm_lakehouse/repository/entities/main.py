@@ -25,7 +25,7 @@ from ftm_lakehouse.core.api import api_delegate, no_api
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.exceptions import MalformedStatementError
-from ftm_lakehouse.helpers.statements import unpack_statement
+from ftm_lakehouse.helpers.statements import unpack_journal_row
 from ftm_lakehouse.logic.compress import compress_stream, decompress_stream
 from ftm_lakehouse.logic.entities.aggregate import aggregate_unsafe
 from ftm_lakehouse.model.statement import SHARDED_SCHEMA, StatementRow
@@ -494,7 +494,7 @@ class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
         with journal.engine.connect() as conn:
             for row in conn.execute(q):
                 try:
-                    stmt = unpack_statement(row.data)
+                    stmt = unpack_journal_row(row.data)
                 except MalformedStatementError as exc:
                     self.log.warning(
                         "Skipping malformed journal row in entity collect",

@@ -6,7 +6,6 @@ from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from ftm_lakehouse.api.dependencies import Journal, Shards
-from ftm_lakehouse.helpers.statements import unpack_statement
 from ftm_lakehouse.storage.journal.api import (
     JSONL_CONTENT_TYPE,
     deserialize_row,
@@ -22,8 +21,10 @@ async def journal_bulk(
 ) -> PlainTextResponse:
     """Write JSONL rows into the journal via bulk writer.
 
-    The writer shards by the dataset's recorded shard count – resolved from
-    its config, never from the server's environment."""
+    Rows are buffered as-is (:meth:`BaseJournalWriter.add_row`) – the sending
+    writer already re-keyed ids and packed the wire format; only ``shard`` is
+    re-derived against the dataset's recorded shard count, resolved from its
+    config, never from the server's environment."""
     body = await request.body()
 
     def _write() -> int:
@@ -32,11 +33,7 @@ async def journal_bulk(
             for line in body.split(b"\n"):
                 if not line:
                     continue
-                # FIXME this is a bit inefficient as the writer will re-pack the
-                # statement again for the journal.
-                row = deserialize_row(line.decode())
-                stmt = unpack_statement(row.data)
-                writer.add_statement(stmt, row.deleted_at, fragment=row.fragment)
+                writer.add_row(deserialize_row(line.decode()))
                 count += 1
         return count
 
