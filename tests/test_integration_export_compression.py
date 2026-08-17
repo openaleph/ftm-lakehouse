@@ -16,8 +16,8 @@ from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.lake import get_lakehouse
 from ftm_lakehouse.logic.compress import CompressKind, decompress_stream
 from ftm_lakehouse.operation import ExportKind, export
+from ftm_lakehouse.repository.base import DatasetRef
 from ftm_lakehouse.repository.factories import get_entities
-from tests.conftest import DatasetHandle
 from tests.shared import JANE, JOHN
 
 MAGIC = {CompressKind.gz: b"\x1f\x8b", CompressKind.zst: b"\x28\xb5\x2f\xfd"}
@@ -26,7 +26,7 @@ MAGIC = {CompressKind.gz: b"\x1f\x8b", CompressKind.zst: b"\x28\xb5\x2f\xfd"}
 def _seed(tmp_path, name: str, **config):
     lake = get_lakehouse(str(tmp_path))
     lake.ensure_dataset(name, **config)
-    dataset = DatasetHandle(name, lake.dataset_uri(name))
+    dataset = DatasetRef(name, lake.dataset_uri(name))
     entities = get_entities(*dataset)
     with entities.writer() as bulk:
         bulk.add_entity(make_entity(JANE))

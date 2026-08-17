@@ -31,7 +31,7 @@ from ftm_lakehouse.core.config import load_config
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.model.dataset import DatasetModel, get_model_class
 from ftm_lakehouse.repository import factories
-from ftm_lakehouse.repository.base import BaseRepository, dataset_uri
+from ftm_lakehouse.repository.base import DatasetHandle, dataset_uri
 
 log = get_logger(__name__)
 
@@ -94,7 +94,7 @@ def update_dataset(name: str, uri: Uri | None = None, **data: Any) -> DatasetMod
     """
     store = _dataset_store(name, uri)
     # FIXME this triggers the ensure zfs
-    BaseRepository(name, dataset_uri(name, uri))
+    DatasetHandle(name, dataset_uri(name, uri))
     model = _load_model(store, name, **data)
     factories.get_versions(name, uri).make(path.CONFIG, model)
     factories.clear_caches()

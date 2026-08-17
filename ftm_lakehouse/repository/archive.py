@@ -19,11 +19,11 @@ from ftm_lakehouse.core.conventions.tag import ARCHIVE_ORIGIN
 from ftm_lakehouse.core.settings import CHECKSUM_ALGORITHM
 from ftm_lakehouse.model import File
 from ftm_lakehouse.model.file import Files
-from ftm_lakehouse.repository.base import BaseRepository
+from ftm_lakehouse.repository.base import DatasetHandle
 from ftm_lakehouse.util import make_checksum, make_checksum_key, validate_checksum
 
 
-class ArchiveRepository(BaseRepository):
+class ArchiveRepository(DatasetHandle):
     """
     Repository for file archive operations.
 

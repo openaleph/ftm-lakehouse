@@ -15,14 +15,14 @@ from ftmq.query import C, M, P, Query
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.logic.parquet import QUERY_IN_BATCH_SIZE
 from ftm_lakehouse.model.file import Document, Documents
-from ftm_lakehouse.repository.base import BaseRepository
+from ftm_lakehouse.repository.base import DatasetHandle
 from ftm_lakehouse.repository.diff import ParquetDiffMixin
 from ftm_lakehouse.storage.parquet import ParquetStore
 
 Q_DOCUMENTS = [M(schemata="Document"), ~M(schema="Folder"), P(contentHash__null=False)]
 
 
-class DocumentRepository(ParquetDiffMixin, BaseRepository):
+class DocumentRepository(ParquetDiffMixin, DatasetHandle):
     """
     Repository for documents to consume for clients.
 

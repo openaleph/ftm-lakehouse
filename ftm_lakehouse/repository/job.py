@@ -10,7 +10,7 @@ from rigour.time import utc_now
 
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.model.job import J, JobModel
-from ftm_lakehouse.repository.base import BaseRepository
+from ftm_lakehouse.repository.base import DatasetHandle
 
 log = get_logger(__name__)
 
@@ -40,7 +40,7 @@ class JobRun(Generic[J]):
         return self.job
 
 
-class JobRepository(BaseRepository, Generic[J]):
+class JobRepository(DatasetHandle, Generic[J]):
     """
     Repository for job run storage.
 

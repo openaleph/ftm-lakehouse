@@ -8,7 +8,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Generator, NamedTuple
+from typing import Generator
 
 import boto3
 import pytest
@@ -97,13 +97,6 @@ def make_docker_repo(
     name = dataset_name or make_docker_dataset_name()
     repo = EntityRepository(name, uri=f"{LAKEHOUSE_TEST_URL}/{name}")
     return repo, docker_data_path(name)
-
-
-class DatasetHandle(NamedTuple):
-    """(name, uri) pair standing in for the removed Dataset class in tests."""
-
-    name: str
-    uri: str
 
 
 @pytest.fixture(scope="session")

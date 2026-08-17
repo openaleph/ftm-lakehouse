@@ -1,3 +1,5 @@
+from typing import NamedTuple
+
 from anystore.logging import get_logger
 from anystore.store import Store, get_store
 from anystore.types import Uri
@@ -15,6 +17,18 @@ from ftm_lakehouse.model.dataset import get_model_class
 from ftm_lakehouse.storage.tags import TagStore
 from ftm_lakehouse.storage.versions import VersionStore
 from ftm_lakehouse.util import validate_dataset_name
+
+
+class DatasetRef(NamedTuple):
+    """A dataset address – the ``(name, uri)`` pair everything resolves from.
+
+    Unpacks like a plain tuple (``name, uri = ref``); repositories are
+    resolved from it via the factories. The rich per-dataset object is
+    :class:`DatasetHandle`.
+    """
+
+    name: str
+    uri: str
 
 
 def dataset_uri(dataset: str, uri: Uri | None = None) -> str:
@@ -59,7 +73,15 @@ def ensure_zfs(dataset: str, store: Store, api: LakehouseApi | None = None) -> N
         api.ensure()
 
 
-class BaseRepository(LakehouseApiMixin):
+class DatasetHandle(LakehouseApiMixin):
+    """Dataset-addressed handle base: identity, config snapshot, store, tags,
+    versions and the api client.
+
+    Combines no storage itself – the repositories layer their storage
+    combinations on top, and :class:`DatasetJobOperation` adds the job
+    lifecycle. Anything that addresses one dataset subclasses this.
+    """
+
     def __init__(self, dataset: str, uri: Uri) -> None:
         super().__init__(uri)
         self.dataset = validate_dataset_name(dataset)

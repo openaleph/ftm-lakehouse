@@ -29,7 +29,7 @@ from ftm_lakehouse.helpers.statements import unpack_journal_row
 from ftm_lakehouse.logic.compress import compress_stream, decompress_stream
 from ftm_lakehouse.logic.entities.aggregate import aggregate_unsafe
 from ftm_lakehouse.model.statement import SHARDED_SCHEMA, StatementRow
-from ftm_lakehouse.repository.base import BaseRepository
+from ftm_lakehouse.repository.base import DatasetHandle
 from ftm_lakehouse.repository.diff import ParquetDiffMixin, make_envelope
 from ftm_lakehouse.repository.entities.api import ApiEntityRepository
 from ftm_lakehouse.storage.journal import get_journal
@@ -47,7 +47,7 @@ before :meth:`EntityRepository.write_statements` emits.
 """
 
 
-class EntityRepository(ParquetDiffMixin, BaseRepository, ApiEntityRepository):
+class EntityRepository(ParquetDiffMixin, DatasetHandle, ApiEntityRepository):
     """
     Repository for entity/statement operations.
 

@@ -24,10 +24,10 @@ from ftm_lakehouse.lake import get_lakehouse
 from ftm_lakehouse.model.dataset import DatasetModel
 from ftm_lakehouse.operation import ExportKind, export, make
 from ftm_lakehouse.operation.crawl import crawl
+from ftm_lakehouse.repository.base import DatasetRef
 from ftm_lakehouse.repository.factories import get_archive, get_entities, get_versions
 from tests.conftest import (
     LAKEHOUSE_TEST_URL,
-    DatasetHandle,
     docker_data_path,
     make_docker_dataset_name,
     make_test_api,
@@ -38,24 +38,22 @@ DATASET = "test"
 
 
 @pytest.fixture(params=["local", "api", "docker"])
-def dataset(
-    request, tmp_path
-) -> Generator[tuple[DatasetHandle, Path | None], None, None]:
+def dataset(request, tmp_path) -> Generator[tuple[DatasetRef, Path | None], None, None]:
     if request.param == "local":
         lake = get_lakehouse(tmp_path)
-        yield DatasetHandle(DATASET, lake.dataset_uri(DATASET)), tmp_path / DATASET
+        yield DatasetRef(DATASET, lake.dataset_uri(DATASET)), tmp_path / DATASET
     elif request.param == "api":
         with make_test_api(tmp_path) as base_url:
             lake = get_lakehouse(base_url)
-            yield DatasetHandle(DATASET, lake.dataset_uri(DATASET)), tmp_path / DATASET
+            yield DatasetRef(DATASET, lake.dataset_uri(DATASET)), tmp_path / DATASET
     else:
         skip_unless_docker_mode()
         name = make_docker_dataset_name()
         lake = get_lakehouse(LAKEHOUSE_TEST_URL)
-        yield DatasetHandle(name, lake.dataset_uri(name)), docker_data_path(name)
+        yield DatasetRef(name, lake.dataset_uri(name)), docker_data_path(name)
 
 
-def count_versions(dataset: DatasetHandle, filename: str) -> int:
+def count_versions(dataset: DatasetRef, filename: str) -> int:
     """Count how many versioned copies of a file exist."""
     return len(
         [

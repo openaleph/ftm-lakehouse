@@ -26,6 +26,7 @@ from ftm_lakehouse.catalog import (
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.lake import get_lakehouse
 from ftm_lakehouse.model.dataset import DatasetModel, get_model_class
+from ftm_lakehouse.repository.base import DatasetRef
 from ftm_lakehouse.repository.base import dataset_uri as repo_dataset_uri
 
 settings = Settings()
@@ -124,7 +125,7 @@ class CatalogContext(ErrorHandler):
 
 
 class DatasetContext(ErrorHandler):
-    """Yield the ``(name, uri)`` pair of the dataset addressed via ``-d``.
+    """Yield the :class:`DatasetRef` of the dataset addressed via ``-d``.
 
     Ensures the dataset exists (creates ``config.yml`` if needed) on entry –
     commands resolve repositories themselves via the factories:
@@ -133,7 +134,7 @@ class DatasetContext(ErrorHandler):
             repo = get_entities(name, uri)
     """
 
-    def __enter__(self) -> tuple[str, str]:
+    def __enter__(self) -> DatasetRef:
         super().__enter__()
         name, uri = STATE["dataset"], STATE["dataset_uri"]
         if not name or not uri:
@@ -149,7 +150,7 @@ class DatasetContext(ErrorHandler):
                 raise
             console.print(f"[red][bold]{type(e).__name__}[/bold]: {e}[/red]")
             raise typer.Exit(code=1)
-        return name, uri
+        return DatasetRef(name, uri)
 
 
 # Sub-typer group names whose commands don't need a catalog set up. The

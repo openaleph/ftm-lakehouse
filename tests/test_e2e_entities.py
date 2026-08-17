@@ -12,10 +12,10 @@ from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.lake import get_lakehouse
 from ftm_lakehouse.logic.compress import CompressKind, decompress_stream
 from ftm_lakehouse.operation import ExportKind, export, optimize
+from ftm_lakehouse.repository.base import DatasetRef
 from ftm_lakehouse.repository.factories import get_entities
 from tests.conftest import (
     LAKEHOUSE_TEST_URL,
-    DatasetHandle,
     make_docker_dataset_name,
     make_test_api,
     skip_unless_docker_mode,
@@ -30,17 +30,17 @@ from tests.shared import JANE, JANE_FIRSTNAME
         )
     )
 )
-def dataset(request, tmp_path) -> Generator[DatasetHandle, None, None]:
+def dataset(request, tmp_path) -> Generator[DatasetRef, None, None]:
     backend, compression = request.param
     if backend == "local":
         lake = get_lakehouse(tmp_path)
         lake.ensure_dataset("test", compression=compression)
-        yield DatasetHandle("test", lake.dataset_uri("test"))
+        yield DatasetRef("test", lake.dataset_uri("test"))
     elif backend == "api":
         with make_test_api(tmp_path) as base_url:
             lake = get_lakehouse(base_url)
             lake.ensure_dataset("test", compression=compression)
-            yield DatasetHandle("test", lake.dataset_uri("test"))
+            yield DatasetRef("test", lake.dataset_uri("test"))
     else:
         # docker: real nginx fronting the lakehouse Granian UDS. Unique
         # dataset name keeps concurrent / repeated runs isolated.
@@ -48,7 +48,7 @@ def dataset(request, tmp_path) -> Generator[DatasetHandle, None, None]:
         name = make_docker_dataset_name()
         lake = get_lakehouse(LAKEHOUSE_TEST_URL)
         lake.ensure_dataset(name, compression=compression)
-        yield DatasetHandle(name, lake.dataset_uri(name))
+        yield DatasetRef(name, lake.dataset_uri(name))
 
 
 def test_entities(dataset):

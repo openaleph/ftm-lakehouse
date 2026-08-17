@@ -143,7 +143,7 @@ Domain-specific combinations of multiple stores. Each repository owns ONE domain
 
 ```
 repository/
-  base.py        # BaseRepository - common repository interface
+  base.py        # DatasetHandle - dataset-addressed handle base
   archive.py     # ArchiveRepository - blobs, file metadata, text (via get_store)
   entities.py    # EntityRepository - uses JournalStore + ParquetStore
   documents.py   # DocumentRepository - compiled document metadata CSV + diffs
@@ -269,7 +269,7 @@ ftm_lakehouse/
 │   └── versions.py          # VersionStore (config / index snapshots)
 │
 ├── repository/              # Layer 3: Domain-specific storage combinations
-│   ├── base.py              # BaseRepository, dataset_uri(), ensure_zfs()
+│   ├── base.py              # DatasetHandle, dataset_uri(), ensure_zfs()
 │   ├── factories.py         # LRU-cached single instantiation path
 │   ├── entities/            # EntityRepository (main.py) + API delegate (api.py)
 │   ├── archive.py           # ArchiveRepository (content-addressed files)

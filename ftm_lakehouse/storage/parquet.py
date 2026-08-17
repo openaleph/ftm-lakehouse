@@ -132,7 +132,7 @@ class ParquetStore(LakehouseApiMixin):
         self.settings = Settings()
         self.dataset = dataset
         self.shards = shards if shards is not None else DEFAULT_SHARDS
-        # Resolved from the dataset config (`BaseRepository._model`) by the
+        # Resolved from the dataset config (`DatasetHandle._model`) by the
         # owning repository – exports never take a runtime codec.
         self.compression = compression
         self._store = get_store(ensure_api_uri(uri))

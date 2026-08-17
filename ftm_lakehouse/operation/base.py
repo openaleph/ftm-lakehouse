@@ -8,7 +8,7 @@ from anystore.types import Uri
 from ftm_lakehouse.core.api import api_delegate, require_api
 from ftm_lakehouse.model.job import DJ
 from ftm_lakehouse.repository.archive import ArchiveRepository
-from ftm_lakehouse.repository.base import BaseRepository, dataset_uri
+from ftm_lakehouse.repository.base import DatasetHandle, dataset_uri
 from ftm_lakehouse.repository.documents import DocumentRepository
 from ftm_lakehouse.repository.entities.main import EntityRepository
 from ftm_lakehouse.repository.factories import (
@@ -20,7 +20,7 @@ from ftm_lakehouse.repository.factories import (
 from ftm_lakehouse.repository.job import JobRepository, JobRun
 
 
-class DatasetJobOperation(BaseRepository, Generic[DJ]):
+class DatasetJobOperation(DatasetHandle, Generic[DJ]):
     """
     A (long-running) operation for a specific dataset that updates tags and
     checks dependencies for freshness to be able to skip this operation. The job
