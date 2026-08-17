@@ -1,19 +1,23 @@
 from __future__ import annotations
 
+from functools import cached_property
 from typing import Generic
 
 from anystore.types import Uri
 
 from ftm_lakehouse.core.api import api_delegate, require_api
 from ftm_lakehouse.model.job import DJ
+from ftm_lakehouse.repository.archive import ArchiveRepository
 from ftm_lakehouse.repository.base import BaseRepository, dataset_uri
+from ftm_lakehouse.repository.documents import DocumentRepository
+from ftm_lakehouse.repository.entities.main import EntityRepository
 from ftm_lakehouse.repository.factories import (
     get_archive,
     get_documents,
     get_entities,
     get_jobs,
 )
-from ftm_lakehouse.repository.job import JobRun
+from ftm_lakehouse.repository.job import JobRepository, JobRun
 
 
 class DatasetJobOperation(BaseRepository, Generic[DJ]):
@@ -37,10 +41,22 @@ class DatasetJobOperation(BaseRepository, Generic[DJ]):
         super().__init__(job.dataset, dataset_uri(job.dataset, uri))
         self.job = job
         self.log = job.log
-        self.archive = get_archive(self.dataset, self.uri)
-        self.entities = get_entities(self.dataset, self.uri)
-        self.documents = get_documents(job.dataset, self.uri)
-        self.jobs = get_jobs(job.dataset, job.__class__, uri)
+
+    @cached_property
+    def archive(self) -> ArchiveRepository:
+        return get_archive(self.dataset, self.uri)
+
+    @cached_property
+    def entities(self) -> EntityRepository:
+        return get_entities(self.dataset, self.uri)
+
+    @cached_property
+    def documents(self) -> DocumentRepository:
+        return get_documents(self.dataset, self.uri)
+
+    @cached_property
+    def jobs(self) -> JobRepository:
+        return get_jobs(self.dataset, self.job.__class__, self.uri)
 
     def get_target(self) -> str:
         """Return the target tag. Override for dynamic values."""
