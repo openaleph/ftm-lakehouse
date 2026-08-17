@@ -1,15 +1,11 @@
 from typing import NamedTuple
 
 from anystore.logging import get_logger
-from anystore.store import Store, get_store
+from anystore.store import get_store
 from anystore.types import Uri
 from anystore.util import ensure_uri, join_uri, mask_uri
 
-from ftm_lakehouse.core.api import (
-    LakehouseApi,
-    LakehouseApiMixin,
-    ensure_api_uri,
-)
+from ftm_lakehouse.core.api import LakehouseApiMixin, ensure_api_uri, get_api
 from ftm_lakehouse.core.config import load_config
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.core.zfs import ensure_zfs_dataset
@@ -52,18 +48,22 @@ def dataset_uri(dataset: str, uri: Uri | None = None) -> str:
     return str(join_uri(ensure_uri(settings.uri), dataset))
 
 
-def ensure_zfs(dataset: str, store: Store, api: LakehouseApi | None = None) -> None:
-    """Provision the dataset's tuned ZFS datasets for local ZFS deployments.
+def ensure_zfs(dataset: str, uri: Uri) -> None:
+    """Provision the dataset's tuned ZFS datasets for its storage location.
 
-    No-op unless ``store`` is local and ``LAKEHOUSE_ON_ZFS`` is set.
-    ``ensure_zfs_dataset`` itself is cached per ``(pool, dataset)``, so this
-    fires actual ``zfs`` commands once per process. Runs at repository
-    construction – the replacement for the former ``Dataset.__init__`` side
-    effect.
+    Resolves the store and api client from ``uri`` (both cached upstream, so
+    this is free for callers that hold them anyway). No-op unless the store
+    is local and ``LAKEHOUSE_ON_ZFS`` is set; for http uris the remote
+    ``_api/ensure`` endpoint is triggered instead. ``ensure_zfs_dataset``
+    itself is cached per ``(pool, dataset)``, so this fires actual ``zfs``
+    commands once per process. Runs at repository construction and on
+    catalog config writes.
 
     Raises:
         RuntimeError: When ZFS mode is on but no pool is configured.
     """
+    store = get_store(ensure_api_uri(uri), serialization_mode="raw")
+    api = get_api(uri)
     settings = Settings()
     if store.is_local and settings.on_zfs:
         if settings.zfs_pool is None:
@@ -88,7 +88,7 @@ class DatasetHandle(LakehouseApiMixin):
         self.uri = uri
         self._store_uri = ensure_api_uri(uri)
         self._store = get_store(self._store_uri, serialization_mode="raw")
-        ensure_zfs(self.dataset, self._store, self._api if self._is_api else None)
+        ensure_zfs(self.dataset, uri)
         self._model = get_model_class()(**load_config(self._store, name=self.dataset))
         self.log = get_logger(
             f"{self.dataset}.{self.__class__.__name__}",
