@@ -5,7 +5,6 @@ entities from statement streams.
 """
 
 from collections import defaultdict
-from datetime import datetime
 from typing import Any, Iterator, TypedDict
 
 from followthemoney import Schema, Statement, StatementEntity, model
@@ -13,7 +12,7 @@ from followthemoney.exc import InvalidData
 from followthemoney.statement import StatementDict
 from followthemoney.statement.util import BASE_ID
 from ftmq.aggregate import common_ancestor
-from ftmq.util import DEFAULT_DATASET, make_dataset
+from ftmq.util import DEFAULT_DATASET, datetime_iso, make_dataset
 
 
 def _merge_schema(s1: str | Schema, s2: str | Schema) -> Schema:
@@ -26,15 +25,6 @@ def _merge_schema(s1: str | Schema, s2: str | Schema) -> Schema:
         return model.common_schema(s1, s2)
     except InvalidData:
         return common_ancestor(_s1, _s2)
-
-
-def _ts_str(value: str | datetime | None) -> str | None:
-    """Normalize a timestamp to ISO string, handling both str and datetime."""
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value.isoformat()
-    return value
 
 
 class EntityData(TypedDict):
@@ -96,8 +86,8 @@ class EntityPayload:
             if entity_id and entity_id != self.id:
                 data["referents"].add(entity_id)
 
-            first_seen = _ts_str(s.get("first_seen"))
-            last_seen = _ts_str(s.get("last_seen"))
+            first_seen = datetime_iso(s.get("first_seen"))
+            last_seen = datetime_iso(s.get("last_seen"))
 
             if s["prop"] == BASE_ID:
                 # last_change = max of BASE_ID statement first_seen values

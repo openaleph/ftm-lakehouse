@@ -4,6 +4,7 @@ from datetime import datetime
 
 import orjson
 from anystore.logging import get_logger
+from ftmq.util import datetime_iso
 
 from ftm_lakehouse.core.api import LakehouseApiMixin
 from ftm_lakehouse.storage.journal.base import (
@@ -24,17 +25,9 @@ def _from_iso(value: str) -> datetime | None:
     return datetime.fromisoformat(value)
 
 
-def _to_iso(value: str | datetime | None) -> str:
-    if not value:
-        return ""
-    if isinstance(value, str):
-        return value
-    return value.isoformat()
-
-
 def serialize_row(row: JournalRow) -> bytes:
     return orjson.dumps(
-        [row.id, row.shard, row.data, _to_iso(row.deleted_at), row.fragment]
+        [row.id, row.shard, row.data, datetime_iso(row.deleted_at), row.fragment]
     )
 
 

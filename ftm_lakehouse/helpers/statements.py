@@ -1,6 +1,5 @@
 """Statement serialization logic."""
 
-from datetime import datetime, timezone
 from hashlib import sha1
 from typing import Generator, Iterable
 
@@ -11,7 +10,7 @@ from followthemoney.statement.util import BASE_ID
 from followthemoney.util import HASH_ENCODING
 from ftmq.store.base import DEFAULT_ORIGIN
 from ftmq.store.lake import LakeStatement
-from rigour.time import utc_now
+from ftmq.util import datetime_iso
 
 from ftm_lakehouse.exceptions import MalformedStatementError
 
@@ -26,19 +25,6 @@ UNPACK_MIN_FIELDS = 12
 are tolerated for forward compatibility – but anything shorter is a
 malformed row and rejected.
 """
-
-
-def _to_iso(value: datetime | str | None) -> str:
-    """Convert a datetime or string to ISO format string, ensuring UTC."""
-    if value is None:
-        return utc_now().isoformat()
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        else:
-            value = value.astimezone(timezone.utc)
-        return value.isoformat()
-    return value
 
 
 def pack_statement(stmt: Statement) -> str:
@@ -61,8 +47,8 @@ def pack_statement(stmt: Statement) -> str:
         stmt.lang or "",
         stmt.original_value or "",
         "1" if stmt.external else "0",
-        _to_iso(stmt.first_seen),
-        _to_iso(stmt.last_seen),
+        datetime_iso(stmt.first_seen),
+        datetime_iso(stmt.last_seen),
         stmt.origin or DEFAULT_ORIGIN,
         stmt.prop_type or "",
     ]
