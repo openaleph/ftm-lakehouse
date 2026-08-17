@@ -53,7 +53,7 @@ Pure data structures with no dependencies. Pydantic models and lightweight typed
 model/
   file.py        # File, Files - archived file metadata
   job.py         # JobModel, DatasetJobModel - job execution tracking
-  dataset.py     # CatalogModel, DatasetModel - catalog/dataset metadata
+  dataset.py     # DatasetModel - dataset metadata / config
   statement.py   # SHARDED_SCHEMA (pyarrow) + TABLE (SQLAlchemy) +
                  # StatementRow (NamedTuple) – schema for the parquet
                  # statement store and shared currency between buffer
@@ -236,7 +236,6 @@ core/
 helpers/                # Domain-specific utilities
   file.py               # File handling (mime_to_schema, etc.)
   statements.py         # Statement pack/unpack for journal
-  dataset.py            # Export resource builders
   serialization.py      # Model serialization utilities
 ```
 
@@ -290,13 +289,11 @@ ftm_lakehouse/
 ├── logic/                   # Pure business logic (no storage deps)
 │   ├── entities/            # aggregate.py, buffer.py, explode.py
 │   ├── parquet.py           # DuckDB view / merge SQL builders
-│   ├── compress.py          # Streaming (de)compression (gz / zst)
-│   └── multiprocessing.py
+│   └── compress.py          # Streaming (de)compression (gz / zst)
 │
 ├── helpers/                 # FtM-domain building blocks
 │   ├── statements.py        # Statement wire format, BASE_ID stub
 │   ├── file.py              # File → entity construction
-│   ├── dataset.py           # Export resource builders
 │   └── serialization.py
 │
 ├── api/                     # FastAPI REST API
