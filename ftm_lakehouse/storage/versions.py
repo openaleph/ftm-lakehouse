@@ -7,11 +7,12 @@ from anystore.logging import get_logger
 from anystore.model.base import BaseModel
 from anystore.store import get_store
 from anystore.types import M, Uri
+from anystore.util import make_data_checksum
 
 from ftm_lakehouse.core.conventions import path
+from ftm_lakehouse.core.settings import CHECKSUM_ALGORITHM
 from ftm_lakehouse.helpers.serialization import dump_model, load_model
 from ftm_lakehouse.storage.tags import TagStore
-from ftm_lakehouse.util import make_data_checksum
 
 log = get_logger(__name__)
 
@@ -54,7 +55,7 @@ class VersionedModelStore(Generic[M]):
             Path to the versioned copy (new or most recent existing)
         """
         raw = dump_model(key, data)
-        checksum = make_data_checksum(raw)
+        checksum = make_data_checksum(raw, algorithm=CHECKSUM_ALGORITHM)
         checksum_tag = f"{key}-{checksum}"
         if self._tags.exists(checksum_tag):
             log.debug("Already up-to-date", key=key, checksum=checksum)

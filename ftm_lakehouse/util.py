@@ -1,30 +1,16 @@
 import re
 from functools import lru_cache
-from typing import Any, BinaryIO
+from typing import Any
 
-from anystore.util import make_checksum as _make_checksum
-from anystore.util import make_data_checksum as _make_data_checksum
 from banal import ensure_list
 from followthemoney.dataset.util import dataset_name_check
 from jinja2 import Template
-
-from ftm_lakehouse.core.settings import CHECKSUM_ALGORITHM
 
 RESERVED_DATASET_NAMES = frozenset({"catalog", "default"})
 
 SAFE_NAME_MAX_LEN = 255
 _SAFE_NAME_FORBIDDEN = re.compile(r"[\x00-\x1f\x7f/\\]")
 _CHECKSUM_RE = re.compile(r"\A[0-9a-f]{64}\Z")
-
-
-def make_checksum(io: BinaryIO) -> str:
-    """Compute checksum using SHA256."""
-    return _make_checksum(io, algorithm=CHECKSUM_ALGORITHM)
-
-
-def make_data_checksum(data: Any) -> str:
-    """Compute data checksum using SHA256."""
-    return _make_data_checksum(data, algorithm=CHECKSUM_ALGORITHM)
 
 
 def single_string(value: Any) -> str | None:

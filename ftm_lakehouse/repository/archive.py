@@ -10,7 +10,7 @@ from anystore.logic.io import stream
 from anystore.store import get_store
 from anystore.store.resource import UriResource
 from anystore.types import BytesGenerator, Uri
-from anystore.util import dict_merge, join_relpaths
+from anystore.util import dict_merge, join_relpaths, make_checksum
 from banal import clean_dict
 from ftmq.store.base import DEFAULT_ORIGIN
 
@@ -20,7 +20,7 @@ from ftm_lakehouse.core.settings import CHECKSUM_ALGORITHM
 from ftm_lakehouse.model import File
 from ftm_lakehouse.model.file import Files
 from ftm_lakehouse.repository.base import DatasetHandle
-from ftm_lakehouse.util import make_checksum, make_checksum_key, validate_checksum
+from ftm_lakehouse.util import make_checksum_key, validate_checksum
 
 
 class ArchiveRepository(DatasetHandle):
@@ -215,7 +215,7 @@ class ArchiveRepository(DatasetHandle):
             self.log.debug("Blob already exists, skipping", checksum=checksum)
             return checksum
         if not checksum:
-            checksum = make_checksum(fh)
+            checksum = make_checksum(fh, algorithm=CHECKSUM_ALGORITHM)
             if self.exists(checksum):
                 self.log.debug("Blob already exists, skipping", checksum=checksum)
                 return checksum

@@ -2,12 +2,13 @@ from functools import cache, lru_cache
 from pathlib import Path
 from typing import Iterable
 
+from anystore.util import make_data_checksum
 from followthemoney import Schema, StatementEntity, model
 from ftmq.types import StatementEntities
 from ftmq.util import make_entity
 from rigour.mime import normalize_mimetype, types
 
-from ftm_lakehouse.util import make_data_checksum
+from ftm_lakehouse.core.settings import CHECKSUM_ALGORITHM
 
 MAX_LRU = 10_000
 
@@ -17,7 +18,7 @@ def make_file_id(path: str, checksum: str) -> str:
     Compute a file id based on (relative) path and its checksum. This is used
     for Document Entity ids.
     """
-    return f"file-{make_data_checksum((path, checksum))}"
+    return f"file-{make_data_checksum((path, checksum), algorithm=CHECKSUM_ALGORITHM)}"
 
 
 def make_folder_id(name: str, parent_id: str | None = None) -> str:
@@ -28,7 +29,7 @@ def make_folder_id(name: str, parent_id: str | None = None) -> str:
     key = name
     if parent_id:
         key = (parent_id, name)
-    return f"folder-{make_data_checksum(key)}"
+    return f"folder-{make_data_checksum(key, algorithm=CHECKSUM_ALGORITHM)}"
 
 
 @lru_cache(MAX_LRU)
