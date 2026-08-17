@@ -12,23 +12,35 @@ from enum import StrEnum
 from typing import Any, Callable
 
 from anystore import get_store
+from anystore.store.resource import UriResource
 from anystore.util import join_uri, mask_uri
+from followthemoney.dataset import DataResource
 from ftmq.model.stats import DatasetStats
+from rigour.mime.types import CSV, FTM, JSON
 
 from ftm_lakehouse.core.conventions import path, tag
-from ftm_lakehouse.core.settings import Settings
-from ftm_lakehouse.helpers.dataset import (
-    make_documents_resource,
-    make_entities_resource,
-    make_statements_resource,
-    make_statistics_resource,
-)
+from ftm_lakehouse.core.settings import CHECKSUM_ALGORITHM, Settings
 from ftm_lakehouse.model.job import DatasetJobModel
 from ftm_lakehouse.operation.base import DatasetJobOperation
 from ftm_lakehouse.repository.factories import get_entities
 from ftm_lakehouse.repository.job import JobRun
 
 settings = Settings()
+
+
+def make_resource(
+    uri: str, mime_type: str | None = None, public_url: str | None = None
+) -> DataResource:
+    res = UriResource(uri)
+    info = res.info()
+    return DataResource(
+        name=res.name,
+        url=public_url or uri,
+        checksum=res.checksum(algorithm=CHECKSUM_ALGORITHM),
+        timestamp=info.created_at,
+        mime_type=mime_type or info.mimetype,
+        size=info.size,
+    )
 
 
 class ExportKind(StrEnum):
@@ -85,22 +97,22 @@ def _export_index(op: "ExportOperation", *args, **kwargs) -> None:
         if store.exists(entities.EXPORTS_STATEMENTS):
             uri = join_uri(dataset.uri, entities.EXPORTS_STATEMENTS)
             public_url = join_uri(public_prefix, entities.EXPORTS_STATEMENTS)
-            dataset.resources.append(make_statements_resource(uri, public_url))
+            dataset.resources.append(make_resource(uri, CSV, public_url))
 
         if store.exists(entities.ENTITIES_JSON):
             uri = join_uri(dataset.uri, entities.ENTITIES_JSON)
             public_url = join_uri(public_prefix, entities.ENTITIES_JSON)
-            dataset.resources.append(make_entities_resource(uri, public_url))
+            dataset.resources.append(make_resource(uri, FTM, public_url))
 
         if store.exists(path.EXPORTS_DOCUMENTS):
             uri = join_uri(dataset.uri, path.EXPORTS_DOCUMENTS)
             public_url = join_uri(public_prefix, path.EXPORTS_DOCUMENTS)
-            dataset.resources.append(make_documents_resource(uri, public_url))
+            dataset.resources.append(make_resource(uri, CSV, public_url))
 
         if store.exists(path.EXPORTS_STATISTICS):
             uri = join_uri(dataset.uri, path.EXPORTS_STATISTICS)
             public_url = join_uri(public_prefix, path.EXPORTS_STATISTICS)
-            dataset.resources.append(make_statistics_resource(uri, public_url))
+            dataset.resources.append(make_resource(uri, JSON, public_url))
 
     if store.exists(path.EXPORTS_STATISTICS):
         dataset.apply_stats(store.get(path.EXPORTS_STATISTICS, model=DatasetStats))
