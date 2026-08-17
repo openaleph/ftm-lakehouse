@@ -12,9 +12,10 @@ from anystore.store.resource import UriResource
 from anystore.types import BytesGenerator, Uri
 from anystore.util import dict_merge, join_relpaths
 from banal import clean_dict
+from ftmq.store.base import DEFAULT_ORIGIN
 
 from ftm_lakehouse.core.conventions import path, tag
-from ftm_lakehouse.core.conventions.tag import ARCHIVE_ORIGIN, DEFAULT_ORIGIN
+from ftm_lakehouse.core.conventions.tag import ARCHIVE_ORIGIN
 from ftm_lakehouse.core.settings import CHECKSUM_ALGORITHM
 from ftm_lakehouse.model import File
 from ftm_lakehouse.model.file import Files

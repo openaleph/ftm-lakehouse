@@ -67,9 +67,6 @@ def statements_partition_optimized(shard: str, bucket: str, origin: str) -> str:
     return f"statements/{shard}/{bucket}/{origin}/last_optimized"
 
 
-DEFAULT_ORIGIN = "default"
-"""Default origin identifier"""
-
 CRAWL_ORIGIN = "crawl"
 """Default origin identifier for crawled files."""
 
