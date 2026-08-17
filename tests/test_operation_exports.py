@@ -1,7 +1,10 @@
 """Tests for the ExportOperation kinds - statements, entities, statistics, documents, index."""
 
+import json
+
 from anystore.io import smart_stream_csv_models
 from ftmq.util import make_entity
+from rigour.mime.types import CSV, FTM, JSON
 
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.model.file import Document
@@ -159,6 +162,20 @@ def test_operation_export_index(tmp_path):
 
     # Verify tag exists at hardcoded path after run
     assert (tmp_path / target_path).exists()
+
+    # Resource mime types are pinned so they can't drift silently –
+    # statements.csv is a CSV artifact (FTM_STMT would claim JSON).
+    make_op(ExportKind.statements, tmp_path).run()
+    make_op(ExportKind.index, tmp_path).run(force=True)
+    index = json.loads((tmp_path / path.INDEX).read_text())
+    mimes = {
+        r["name"].rsplit("/", 1)[-1]: r.get("mime_type")
+        for r in index.get("resources", [])
+    }
+    assert mimes["statements.csv"] == CSV
+    assert mimes["entities.ftm.json"] == FTM
+    assert mimes["statistics.json"] == JSON
+    assert "documents.csv" not in mimes  # no documents export in this test
 
     # Verify output file exists (versioned, so check versions dir)
     versions = list((tmp_path / "versions").rglob("index.json"))
