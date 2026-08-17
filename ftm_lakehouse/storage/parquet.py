@@ -36,8 +36,6 @@ Layout:
     statements/shard={s}/bucket={b}/origin={o}/part-*.parquet
 """
 
-import random
-import time
 from contextlib import contextmanager
 from datetime import timedelta
 from functools import cache, cached_property
@@ -47,6 +45,7 @@ from uuid import uuid4
 import duckdb
 import pyarrow as pa
 import pyarrow.compute as pc
+from anystore.decorators import error_handler
 from anystore.interface.lock import Lock
 from anystore.logging import get_logger
 from anystore.store import get_store
@@ -222,6 +221,21 @@ class ParquetStore(LakehouseApiMixin):
         for row in self._lake._execute(self._compile_query(q)):
             yield cast(StatementDict, vars(row))
 
+    def _statement_data(self, q: Query | None = None) -> Iterator[StatementDict]:
+        """Statement dicts for ``q``, choosing the execution strategy.
+
+        One global query when sort / slice demand it (:meth:`_needs_global`),
+        else the per-partition iteration (:meth:`_query_statement_data`).
+        Rows stay entity-contiguous either way, so aggregation can run over
+        the stream directly. Empty for a store that has never been written.
+        """
+        if not self.exists:
+            return
+        if self._needs_global(q):
+            yield from self._global_statement_data(q)
+        else:
+            yield from self._query_statement_data(q)
+
     @no_api
     def query(self, q: Query | None = None) -> StatementEntities:
         """Query entities from the store.
@@ -235,20 +249,15 @@ class ParquetStore(LakehouseApiMixin):
         Yields:
             StatementEntity objects matching the query.
         """
-        if self._needs_global(q):
-            rows = self._global_statement_data(q)
-            for data in aggregate_unsafe(rows, self.dataset):
-                yield data.to_entity()
-        else:
-            for data in self._query_data(q):
-                yield data.to_entity()
+        for data in self._query_data(q):
+            yield data.to_entity()
 
     @no_api
     def query_statements(self, q: Query | None = None) -> Statements:
         """Query ordered Statements from the store.
 
         Args:
-            q: Optional ``Query`` – compiled through :meth:`_compile_query`;
+            q: Optional ``Query`` – executed via :meth:`_statement_data`;
                 sorted / sliced queries execute globally
                 (:meth:`_needs_global`).
 
@@ -256,12 +265,8 @@ class ParquetStore(LakehouseApiMixin):
             :class:`~ftmq.store.lake.LakeStatement` objects matching the
             query.
         """
-        if self._needs_global(q):
-            for stmt_dict in self._global_statement_data(q):
-                yield LakeStatement.from_dict(stmt_dict)
-        else:
-            for stmt_dict in self._query_statement_data(q):
-                yield LakeStatement.from_dict(stmt_dict)
+        for stmt_dict in self._statement_data(q):
+            yield LakeStatement.from_dict(stmt_dict)
 
     @no_api
     def get_statements(self, entity_id: str) -> Statements:
@@ -330,7 +335,7 @@ class ParquetStore(LakehouseApiMixin):
         ``RuntimeError`` when the fence stays busy, so contended writers fail
         instead of pinning a thread forever. A lock left behind by a crashed
         writer must be released manually via :meth:`unlock`
-        (``ftm-lakehouse operations unlock``).
+        (``ftm-lakehouse maintenance unlock``).
         """
         return Lock(
             self._store, key=path.LOCK, max_retries=self.settings.lock_max_retries
@@ -339,22 +344,27 @@ class ParquetStore(LakehouseApiMixin):
     def _await(self, ready: Callable[[], bool], what: str) -> None:
         """Block until ``ready()`` is true, with the fence's retry bound.
 
-        Linear backoff matching the ``Lock`` acquisition semantics
-        (anystore's ``error_handler`` with ``backoff_random``): attempt
-        ``N`` sleeps ``N`` seconds plus up to one second of jitter – so
-        concurrent waiters don't wake in lockstep – and
-        ``settings.lock_max_retries`` retries wait roughly ``N²/2`` seconds
-        in total before raising ``RuntimeError``.
+        The retry policy is anystore's ``error_handler`` with
+        ``backoff_factor=1`` – the same engine ``Lock`` acquisition composes:
+        attempt ``N`` sleeps ``N`` seconds plus up to one second of jitter
+        (so concurrent waiters don't wake in lockstep), and
+        ``settings.lock_max_retries`` attempts wait roughly ``N²/2`` seconds
+        in total before the ``RuntimeError`` propagates (``do_raise=True`` –
+        without it a still-busy fence would silently pass).
         """
-        retries = 0
-        while not ready():
-            retries += 1
-            if retries > self.settings.lock_max_retries:
+
+        def check() -> None:
+            if not ready():
                 raise RuntimeError(
                     f"Write fence busy: {what}. If a writer crashed, release "
-                    "the fence via `ftm-lakehouse operations unlock`."
+                    "the fence via `ftm-lakehouse maintenance unlock`."
                 )
-            time.sleep(retries + random.random())
+
+        error_handler(
+            max_retries=self.settings.lock_max_retries,
+            backoff_factor=1,
+            do_raise=True,
+        )(check)()
 
     def _append_markers(self) -> list[str]:
         """Keys of all currently registered append markers."""
@@ -379,23 +389,25 @@ class ParquetStore(LakehouseApiMixin):
         are blind appends that delta-rs serializes via optimistic commit
         retries. A marker left behind by a crashed appender blocks
         maintenance until released via :meth:`unlock`
-        (``ftm-lakehouse operations unlock``).
+        (``ftm-lakehouse maintenance unlock``).
         """
         marker = f"{path.LOCK_APPENDS}/{uuid4().hex}"
-        retries = 0
-        while True:
+
+        def register() -> None:
             self._store.touch(marker)
-            if not self._store.exists(path.LOCK):
-                break
-            self._store.delete(marker, ignore_errors=True)
-            retries += 1
-            if retries > self.settings.lock_max_retries:
+            if self._store.exists(path.LOCK):
+                self._store.delete(marker, ignore_errors=True)
                 raise RuntimeError(
                     f"Write fence busy: maintenance lock `{path.LOCK}` is "
                     "held. If a writer crashed, release the fence via "
-                    "`ftm-lakehouse operations unlock`."
+                    "`ftm-lakehouse maintenance unlock`."
                 )
-            time.sleep(retries + random.random())
+
+        error_handler(
+            max_retries=self.settings.lock_max_retries,
+            backoff_factor=1,
+            do_raise=True,
+        )(register)()
         try:
             yield
         finally:
@@ -862,18 +874,28 @@ class ParquetStore(LakehouseApiMixin):
                 seen.add(key)
                 yield s, b
 
+    def _scoped_partition_sql(self, sql: Select) -> Iterator[Select]:
+        """Yield ``sql`` scoped with ``WHERE shard = ? AND bucket = ?`` per
+        ``(shard, bucket)`` partition.
+
+        The per-partition scoping keeps a full-store ``ORDER BY entity_id``
+        bounded to one partition (an entity lives in one ``(shard, bucket)``)
+        and lets every filter push through the live ``statement`` view's plain
+        ``deleted_at IS NULL`` scan to ``delta_scan``'s per-file statistics.
+        """
+        for s, b in self._iter_shard_buckets():
+            yield sql.where(column("shard") == s, column("bucket") == b)
+
     def _execute_partitioned(
         self, sql: Select | None = None
     ) -> Iterator[pa.RecordBatchReader]:
         """Yield a streamed Arrow reader per ``(shard, bucket)`` partition.
 
-        Scopes ``sql`` with ``shard = ? AND bucket = ?`` per partition – so a
-        full-store ``ORDER BY`` stays bounded to one partition and the predicate
-        pushes through the live ``statement`` view's plain scan to the parquet
-        file statistics – and hands back each partition's result as a lazy
+        Hands back each partition's result (scoped via
+        :meth:`_scoped_partition_sql`) as a lazy
         :class:`pyarrow.RecordBatchReader` streamed from DuckDB's execution
-        pipeline, so memory stays bounded per batch instead of materialising the
-        partition.
+        pipeline, so memory stays bounded per batch instead of materialising
+        the partition.
 
         Consume each reader fully before advancing to the next: the backing
         cursor is held open only across its ``yield`` and closes when the
@@ -888,8 +910,7 @@ class ParquetStore(LakehouseApiMixin):
         """
         if sql is None:
             sql = self._compile_query()
-        for s, b in self._iter_shard_buckets():
-            scoped = sql.where(column("shard") == s, column("bucket") == b)
+        for scoped in self._scoped_partition_sql(sql):
             compiled = str(scoped.compile(compile_kwargs={"literal_binds": True}))
             with self._lake.cursor() as cur:
                 yield cur.execute(compiled).to_arrow_reader()
@@ -897,15 +918,10 @@ class ParquetStore(LakehouseApiMixin):
     def _query_statement_data(self, q: Query | None = None) -> Iterator[StatementDict]:
         """Query statement dicts from the live view, bypassing FtM construction.
 
-        Iterates over ``(shard, bucket)`` partitions, scoping each query with
-        ``WHERE shard = ? AND bucket = ?`` so a full-store ``ORDER BY
-        entity_id`` stays bounded to one partition (an entity lives in one
-        ``(shard, bucket)``). The live ``statement`` view is a plain
-        ``deleted_at IS NULL`` scan, so any ftmq filter (``schema`` / ``prop``
-        / ``entity_id``) pushes straight through to ``delta_scan``'s per-file
-        statistics. Correctness assumes an optimized store – on an un-merged
-        store this can surface duplicate ids and rows whose delete has not been
-        applied yet.
+        Iterates ``(shard, bucket)`` partitions via
+        :meth:`_scoped_partition_sql`. Correctness assumes an optimized store –
+        on an un-merged store this can surface duplicate ids and rows whose
+        delete has not been applied yet.
 
         Args:
             q: Optional ftmq ``Query`` (default: match-all), compiled via
@@ -914,9 +930,7 @@ class ParquetStore(LakehouseApiMixin):
         Yields:
             StatementDict instances.
         """
-        sql = self._compile_query(q)
-        for s, b in self._iter_shard_buckets():
-            scoped = sql.where(column("shard") == s, column("bucket") == b)
+        for scoped in self._scoped_partition_sql(self._compile_query(q)):
             for row in self._lake._execute(scoped):
                 yield StatementDict(**vars(row))
 
@@ -925,15 +939,13 @@ class ParquetStore(LakehouseApiMixin):
         Query entity dicts via aggregate_unsafe(), bypassing FtM object construction.
 
         Args:
-            q: Optional ftmq ``Query`` (default: match-all), compiled via
-                :meth:`_compile_query`.
+            q: Optional ftmq ``Query`` (default: match-all), executed via
+                :meth:`_statement_data`.
 
         Yields:
             EntityPayload instances
         """
-        if not self.exists:
-            return
-        yield from aggregate_unsafe(self._query_statement_data(q), self.dataset)
+        yield from aggregate_unsafe(self._statement_data(q), self.dataset)
 
     def _execute_sql(self, sql: str) -> Iterator[StatementDict]:
         """Stream raw-SQL results as ``StatementDict`` rows.
