@@ -17,8 +17,11 @@ from ftm_lakehouse.cli import (
     OPT_ORIGIN,
     OPT_OUT,
     OPT_OVERRIDE_ORIGIN,
+    OPT_QUERY,
+    OPT_RQL,
     OPT_UNSAFE,
     DatasetContext,
+    parse_query,
     settings,
     sub_typer,
 )
@@ -36,15 +39,22 @@ entities = sub_typer("entities", "Read and write FtM entities")
 @entities.command("iterate")
 def cli_entities_iterate(
     out_uri: OPT_OUT = "-",
+    query: OPT_QUERY = None,
+    rql: OPT_RQL = None,
 ):
     """Iterate entities from the parquet store as FtM JSON lines.
 
     Live read – reflects current state of the parquet table post-flush, but
     correctness is only guaranteed after ``maintenance optimize``. For the
     frozen pre-exported view use ``stream``.
+
+    Filter with either ``-q`` (Aleph filter params) or ``--rql`` (nested RQL),
+    as in ``ftmq q``.
     """
     with DatasetContext() as (name, uri):
-        smart_write_proxies(out_uri, get_entities(name, uri).query())
+        smart_write_proxies(
+            out_uri, get_entities(name, uri).query(parse_query(query, rql))
+        )
 
 
 @entities.command("stream")

@@ -13,6 +13,7 @@ from anystore.cli import ErrorHandler
 from anystore.io import smart_write, smart_write_models
 from anystore.logging import configure_logging
 from anystore.util import dump_json_model
+from ftmq.query import Query
 from pydantic import BaseModel
 from rich.console import Console
 
@@ -72,6 +73,23 @@ OPT_UNSAFE = Annotated[
 OPT_FORCE = Annotated[
     Optional[bool], typer.Option(help="Run regardless of freshness state.")
 ]
+OPT_QUERY = Annotated[
+    Optional[str],
+    typer.Option(
+        "-q",
+        "--query",
+        help="Filter query string, e.g. "
+        "'filter:schema=Person&filter:group.countries=de'",
+    ),
+]
+OPT_RQL = Annotated[
+    Optional[str],
+    typer.Option(
+        "--rql",
+        help="RQL query string (nested & | ~), e.g. "
+        "'and(eq(schema,Person),or(eq(group.countries,de),eq(group.countries,at)))'",
+    ),
+]
 
 
 class State(TypedDict):
@@ -105,6 +123,32 @@ def write_config(name: str, uri: str, config: str) -> DatasetModel:
         exclude={"name", "uri"}, exclude_unset=True
     )
     return update_dataset(name, uri, **data)
+
+
+def parse_query(query: str | None = None, rql: str | None = None) -> Query | None:
+    """Build an ftmq :class:`~ftmq.query.Query` from a CLI query string.
+
+    ``-q`` takes the flat Aleph filter grammar, ``--rql`` the nested RQL one –
+    they are alternatives, not combinable. Either string is a whole query: it
+    carries sort and slice as well, not just filters.
+
+    Args:
+        query: Aleph-style filter query string.
+        rql: RQL query string.
+
+    Returns:
+        The parsed ``Query``, or ``None`` if no query string was given.
+
+    Raises:
+        ValueError: if both ``query`` and ``rql`` are given.
+    """
+    if query and rql:
+        raise ValueError("Use either `-q` or `--rql`, not both.")
+    if query:
+        return Query.from_string(query)
+    if rql:
+        return Query.from_rql(rql)
+    return None
 
 
 def write_obj(obj: BaseModel | None, out: str) -> None:

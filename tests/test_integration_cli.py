@@ -1,8 +1,12 @@
+import orjson
+from ftmq.util import make_entity
 from typer.testing import CliRunner
 
 from ftm_lakehouse.catalog import get_dataset_model
 from ftm_lakehouse.cli import cli
+from ftm_lakehouse.repository.entities.main import EntityRepository
 from tests.conftest import make_test_api
+from tests.shared import JANE
 
 runner = CliRunner()
 
@@ -95,3 +99,48 @@ def test_cli_maintenance_unlock_api_guard(tmp_path):
         assert isinstance(res.exception, RuntimeError)
         assert "Lock released" not in res.output
         assert "No lock held" not in res.output
+
+
+def test_cli_entities_iterate_query(tmp_path):
+    """``-q`` / ``--rql`` filter the live parquet read; they exclude each other."""
+    lake, name = str(tmp_path / "lake"), "query_dataset"
+    acme = {
+        "id": "acme",
+        "schema": "Company",
+        "properties": {"name": ["Acme Inc"], "country": ["de"]},
+    }
+    repo = EntityRepository(name, f"{lake}/{name}")
+    with repo.writer(origin="test") as writer:
+        writer.add_entity(make_entity(JANE))
+        writer.add_entity(make_entity(acme))
+    repo.flush()
+
+    def ids(*args: str) -> set[str]:
+        res = runner.invoke(
+            cli, ["--uri", lake, "-d", name, "entities", "iterate", *args]
+        )
+        assert res.exit_code == 0, res.output
+        return {orjson.loads(line)["id"] for line in res.stdout.splitlines() if line}
+
+    assert ids() == {"jane", "acme"}
+    assert ids("-q", "filter:schema=Person") == {"jane"}
+    assert ids("-q", "filter:group.countries=de") == {"acme"}
+    assert ids("--rql", "or(eq(schema,Company),eq(entity_id,jane))") == {"jane", "acme"}
+
+    # the two query surfaces are alternatives, not combinable
+    res = runner.invoke(
+        cli,
+        [
+            "--uri",
+            lake,
+            "-d",
+            name,
+            "entities",
+            "iterate",
+            "-q",
+            "filter:schema=Person",
+            "--rql",
+            "eq(entity_id,acme)",
+        ],
+    )
+    assert res.exit_code != 0
