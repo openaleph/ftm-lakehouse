@@ -54,7 +54,7 @@ from anystore.util import Took, join_uri, mask_uri
 from deltalake import DeltaTable, write_deltalake
 from followthemoney.statement import StatementDict
 from ftmq.model.stats import DatasetStats
-from ftmq.query import M, Query, Sql, SqlSource
+from ftmq.query import Query, Sql, SqlSource
 from ftmq.store.base import View
 from ftmq.store.lake import (
     PRUNE,
@@ -261,22 +261,6 @@ class ParquetStore:
             query.
         """
         for stmt_dict in self._statement_data(q):
-            yield LakeStatement.from_dict(stmt_dict)
-
-    def get_statements(self, entity_id: str) -> Statements:
-        """Query all live statements for a single entity.
-
-        Scopes :meth:`_query_statement_data` iteration to the entity's
-        own shard so single-entity lookups don't fan out to every
-        ``(shard, bucket)`` pair. Yields
-        :class:`ftmq.store.lake.LakeStatement` so the ``fragment`` group
-        key stays visible – tombstone writers rely on it so a delete
-        lands in the same supersession group as the live row.
-        """
-        if not self.exists:
-            return
-        q = Query(M(entity_id=entity_id))
-        for stmt_dict in self._query_statement_data(q):
             yield LakeStatement.from_dict(stmt_dict)
 
     def stats(self) -> DatasetStats:

@@ -17,6 +17,7 @@ from typing import Generator
 
 import pytest
 from followthemoney import EntityProxy, Statement
+from ftmq.query import M, Query
 from ftmq.store.lake import LakeStatement
 
 from ftm_lakehouse.repository.entities import EntityRepository
@@ -220,7 +221,7 @@ def test_read_statements_expose_fragment(local_repo):
         w.add_statement(_stmt("country", "de", T1))
     local_repo.flush()
 
-    stmts = list(local_repo._statements.get_statements("acme"))
+    stmts = list(local_repo.query_statements(Query(M(entity_id="acme"))))
     assert all(isinstance(s, LakeStatement) for s in stmts)
     assert {s.prop: s.fragment for s in stmts} == {"name": "row42", "country": ""}
 

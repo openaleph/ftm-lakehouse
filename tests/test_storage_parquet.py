@@ -5,8 +5,10 @@ from datetime import datetime, timezone
 
 import pyarrow as pa
 from followthemoney import Statement
+from ftmq.query import M, Query
 from ftmq.store.base import DEFAULT_ORIGIN
 from ftmq.store.lake import pack_statement
+from ftmq.types import Statements
 
 from ftm_lakehouse.core.conventions import tag
 from ftm_lakehouse.core.conventions.path import entity_shard
@@ -63,6 +65,11 @@ def _row_count(store: ParquetStore) -> int:
     tombstones included (the live view only hides tombstones)."""
     with store._lake.cursor() as cur:
         return cur.execute(f"SELECT COUNT(*) FROM {TABLE_RAW.name}").fetchone()[0]
+
+
+def _get_statements(store: ParquetStore, entity_id: str) -> Statements:
+    q = Query(M(entity_id=entity_id))
+    yield from store.query_statements(q)
 
 
 def test_storage_parquet_query_statements(tmp_path):
@@ -272,9 +279,9 @@ def test_storage_parquet_get_statements_uses_shard(tmp_path):
     # different shards per entity
     assert entity_shard("e-jane", SHARDS) != entity_shard("e-john", SHARDS)
 
-    jane = list(store.get_statements("e-jane"))
-    john = list(store.get_statements("e-john"))
-    nobody = list(store.get_statements("nobody"))
+    jane = list(_get_statements(store, "e-jane"))
+    john = list(_get_statements(store, "e-john"))
+    nobody = list(_get_statements(store, "nobody"))
     assert len(jane) == 1 and jane[0].entity_id == "e-jane"
     assert len(john) == 1 and john[0].entity_id == "e-john"
     assert nobody == []

@@ -510,8 +510,8 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
         """
         stmts_by_key: dict[str, LakeStatement] = {}
 
-        # Read from parquet store (uses shard partition for pruning)
-        for stmt in self._statements.get_statements(entity_id):
+        q = Query(M(entity_id=entity_id))
+        for stmt in self.query_statements(q):
             stmt = cast(LakeStatement, stmt)
             if stmt.id:
                 stmts_by_key[stmt.dedupe_key] = stmt

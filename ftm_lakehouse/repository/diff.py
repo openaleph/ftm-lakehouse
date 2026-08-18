@@ -2,6 +2,7 @@
 
 from abc import abstractmethod
 from datetime import datetime, timezone
+from functools import cached_property
 from typing import Iterator
 
 from anystore.types import SDict
@@ -37,7 +38,7 @@ class ParquetDiffMixin:
 
     _diff_base_path: str
 
-    @property
+    @cached_property
     def _statements(self) -> ParquetStore:
         """Provided by the implementing repository (a ``cached_property``)."""
         raise NotImplementedError
