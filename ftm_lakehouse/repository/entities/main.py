@@ -118,9 +118,6 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
                 writer.flush()
             finally:
                 writer.close()
-                # keep journal not too full
-                if self._journal.count() >= 1_000_000:
-                    self.flush()
 
     def add(
         self,
