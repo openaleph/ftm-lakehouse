@@ -79,4 +79,4 @@ repos:
     rev: 1.10.0
     hooks:
       - id: poetry-export
-        args: ["--without-hashes", "--extras", "api", "-o", "requirements.txt"]
+        args: ["--without-hashes", "--extras", "api", "--extras", "postgres", "-o", "requirements.txt"]

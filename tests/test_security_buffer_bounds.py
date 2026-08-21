@@ -15,7 +15,7 @@ from followthemoney import Statement, model
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.exceptions import BufferFullError
 from ftm_lakehouse.logic.entities.buffer import EntityBuffer
-from ftm_lakehouse.model.statement import SHARDED_SCHEMA, StatementRow
+from ftm_lakehouse.model.statement import SHARDED_SCHEMA, LakehouseStatement
 from ftm_lakehouse.repository.entities.main import (
     WRITE_SHARD_BATCH,
     EntityRepository,
@@ -32,6 +32,11 @@ def _stmt(i: int) -> Statement:
         dataset="test",
         origin="default",
     )
+
+
+def _sharded(i: int) -> LakehouseStatement:
+    """A statement carrying its storage facts, as the buffer hands them over."""
+    return LakehouseStatement.from_statement(_stmt(i))
 
 
 # --- EntityBuffer cap -------------------------------------------------------
@@ -106,7 +111,7 @@ def test_write_statements_emits_interim_within_shard(tmp_path) -> None:
 
     def stream():
         for i in range(n):
-            yield StatementRow("0", _stmt(i), None)
+            yield _sharded(i)
 
     total = repo.write_statements(stream(), now=datetime.now(timezone.utc))
 
@@ -130,7 +135,7 @@ def test_write_statements_single_shard_below_batch_emits_once(tmp_path) -> None:
 
     def stream():
         for i in range(n):
-            yield StatementRow("0", _stmt(i), None)
+            yield _sharded(i)
 
     total = repo.write_statements(stream(), now=datetime.now(timezone.utc))
     assert total == n

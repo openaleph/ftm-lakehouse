@@ -108,7 +108,12 @@ def test_delete_then_readd_via_merge(repo):
 
 
 def test_delete_entity_in_journal_only(repo):
-    """Add + delete inside the same journal window: nothing surfaces in parquet."""
+    """Add + delete inside the same journal window: both rows flush, merge collapses.
+
+    The journal is append-only – it no longer collapses a tombstone over the
+    live row it shadows – so the pair reaches parquet and ``merge`` applies
+    the delete, exactly as for a delete in a later window.
+    """
     repo, _ = repo
 
     jane = EntityProxy.from_dict(
@@ -121,7 +126,7 @@ def test_delete_entity_in_journal_only(repo):
     with repo.writer() as writer:
         writer.add_entity(jane)
     repo.delete_entity("jane")
-    repo.flush()
+    repo.merge()
 
     assert list(repo.query()) == []
 

@@ -47,7 +47,7 @@ def _read_back_entity() -> StatementEntity:
 
 
 def _buffered(buffer: EntityBuffer) -> list[LakeStatement]:
-    return [row.stmt for row in buffer._buffer.values()]
+    return list(s for b in buffer._buffer.values() for s in b.values())
 
 
 def test_add_entity_keeps_statement_origin():

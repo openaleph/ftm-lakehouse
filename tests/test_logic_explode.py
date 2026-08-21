@@ -24,6 +24,7 @@ from ftm_lakehouse.logic.entities.explode import (
     statement_row_unsafe,
     strip_namespace,
 )
+from ftm_lakehouse.model.statement import SHARDED_SCHEMA
 
 NOW = datetime(2026, 7, 31, 12, 0, 0, 123456, tzinfo=timezone.utc)
 PIN = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
@@ -67,12 +68,12 @@ def _safe_rows(tmp_path, datas, shards: int) -> list[dict]:
             proxy, origin=_extract_origin(proxy), fragment=_extract_fragment(proxy)
         )
     rows = []
-    for row in buffer.flush_buffer():
-        data = pack_statement(row.stmt)
+    for stmt in buffer.flush_buffer():
+        data = pack_statement(stmt)
         data["first_seen"] = data.get("first_seen") or NOW
-        data["deleted_at"] = row.deleted_at
-        data["last_seen"] = row.deleted_at or data.get("last_seen") or NOW
-        data["shard"] = row.shard
+        data["deleted_at"] = stmt.deleted_at
+        data["last_seen"] = stmt.deleted_at or data.get("last_seen") or NOW
+        data["shard"] = stmt.shard
         data.pop("canonical_id", None)
         rows.append(data)
     return rows
@@ -239,12 +240,12 @@ def test_statement_row_unsafe_parity_with_safe_path():
             fragment=row["fragment"],
         )
     )
-    (safe_row,) = list(buffer.flush_buffer())
-    safe = pack_statement(safe_row.stmt)
+    (safe_stmt,) = list(buffer.flush_buffer())
+    safe = pack_statement(safe_stmt)
     safe["first_seen"] = safe.get("first_seen") or NOW
-    safe["deleted_at"] = safe_row.deleted_at
-    safe["last_seen"] = safe_row.deleted_at or safe.get("last_seen") or NOW
-    safe["shard"] = safe_row.shard
+    safe["deleted_at"] = safe_stmt.deleted_at
+    safe["last_seen"] = safe_stmt.deleted_at or safe.get("last_seen") or NOW
+    safe["shard"] = safe_stmt.shard
     safe.pop("canonical_id", None)
 
     unsafe = statement_row_unsafe(row, "dst", 1, now=NOW, origin="bulk")
@@ -260,7 +261,7 @@ def test_row_buffer_dedupes_and_sorts():
     assert not buffer
     buffer.add({"id": "a", "fragment": "", "origin": "x", "shard": "1"})
     buffer.add(
-        {"id": "a", "fragment": "", "origin": "x", "shard": "1", "value": 2}
+        {"id": "a", "fragment": "", "origin": "x", "shard": "1", "value": "v2"}
     )  # re-emission wins
     buffer.add(
         {"id": "a", "fragment": "f1", "origin": "x", "shard": "0"}
@@ -269,7 +270,10 @@ def test_row_buffer_dedupes_and_sorts():
         {"id": "a", "fragment": "", "origin": "y", "shard": "1"}
     )  # distinct origin survives - the store keys rows per origin
     assert len(buffer) == 3
-    rows = list(buffer.flush())
+
+    table = buffer.flush()
+    assert table.schema.equals(SHARDED_SCHEMA)
+    rows = table.to_pylist()
     assert [r["shard"] for r in rows] == ["0", "1", "1"]
-    assert {r.get("value") for r in rows if r["origin"] == "x"} == {None, 2}
+    assert {r["value"] for r in rows if r["origin"] == "x"} == {None, "v2"}
     assert not buffer and len(buffer) == 0

@@ -1,16 +1,17 @@
-"""Journal API routes: bulk write, iterate, flush, count, clear."""
+"""Journal API routes: bulk write, count, clear.
+
+There is no flush route: a journal is drained by the store that holds it,
+and a repository in api mode delegates its whole flush to the server
+(``/entities/flush``) rather than streaming rows out to a local writer.
+"""
 
 import asyncio
 
+import pyarrow as pa
 from fastapi import APIRouter, Request
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import PlainTextResponse
 
 from ftm_lakehouse.api.dependencies import Journal, Shards
-from ftm_lakehouse.storage.journal.api import (
-    JSONL_CONTENT_TYPE,
-    deserialize_row,
-    serialize_row,
-)
 
 router = APIRouter()
 
@@ -19,37 +20,27 @@ router = APIRouter()
 async def journal_bulk(
     shards: Shards, journal: Journal, request: Request
 ) -> PlainTextResponse:
-    """Write JSONL rows into the journal via bulk writer.
+    """Write an Arrow IPC stream of statement rows into the journal.
 
-    Rows are buffered as-is (:meth:`BaseJournalWriter.add_row`) – the sending
-    writer already re-keyed ids and packed the wire format; only ``shard`` is
-    re-derived against the dataset's recorded shard count, resolved from its
-    config, never from the server's environment."""
+    Rows are buffered as-is (:meth:`BaseJournalWriter.add_batch`) – the
+    sending writer already re-keyed ids and packed every column; only
+    ``shard`` is re-derived against the dataset's recorded shard count,
+    resolved from its config, never from the server's environment."""
     body = await request.body()
+    if not body:
+        return PlainTextResponse("0")
 
     def _write() -> int:
-        count = 0
+        batch = pa.ipc.open_stream(pa.py_buffer(body)).read_all()
         with journal.writer(shards) as writer:
-            for line in body.split(b"\n"):
-                if not line:
-                    continue
-                writer.add_row(deserialize_row(line.decode()))
-                count += 1
-        return count
+            writer.add_batch(batch)
+        return int(batch.num_rows)
 
-    count = await asyncio.to_thread(_write)
+    try:
+        count = await asyncio.to_thread(_write)
+    except KeyError as exc:  # a column the statement schema requires
+        raise ValueError(f"Missing statement column: {exc}")
     return PlainTextResponse(str(count))
-
-
-@router.post("/{dataset}/_api/journal/flush")
-def journal_flush(journal: Journal) -> StreamingResponse:
-    """Stream all journal rows as JSONL and delete from storage"""
-
-    def generate():
-        for row in journal.flush():
-            yield serialize_row(row) + b"\n"
-
-    return StreamingResponse(generate(), media_type=JSONL_CONTENT_TYPE)
 
 
 @router.get("/{dataset}/_api/journal/count")

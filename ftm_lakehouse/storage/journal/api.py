@@ -1,62 +1,35 @@
-"""ApiJournalStore - HTTP API journal backed by JSONL wire format."""
+"""ApiJournalStore - HTTP API journal speaking the Arrow IPC stream format."""
 
-from datetime import datetime
-
-import orjson
+import pyarrow as pa
 from anystore.logging import get_logger
-from ftmq.util import datetime_iso
 
 from ftm_lakehouse.core.api import LakehouseApiMixin
-from ftm_lakehouse.storage.journal.base import (
-    BaseJournalStore,
-    BaseJournalWriter,
-    JournalRow,
-    JournalRows,
-)
+from ftm_lakehouse.core.arrow import ARROW_CONTENT_TYPE, serialize_table
+from ftm_lakehouse.storage.journal.base import BaseJournalStore, BaseJournalWriter
 
 log = get_logger(__name__)
 
-JSONL_CONTENT_TYPE = "application/x-ndjson"
-
-
-def _from_iso(value: str) -> datetime | None:
-    if not value:
-        return None
-    return datetime.fromisoformat(value)
-
-
-def serialize_row(row: JournalRow) -> bytes:
-    return orjson.dumps(
-        [row.id, row.shard, row.data, datetime_iso(row.deleted_at), row.fragment]
-    )
-
-
-def serialize_rows(rows: JournalRows) -> bytes:
-    """Serialize journal rows as JSONL."""
-    return b"\n".join(map(serialize_row, rows))
-
-
-def deserialize_row(line: str) -> JournalRow:
-    """Deserialize a JSONL line into a JournalRow."""
-    id, shard, data, deleted_at, fragment = orjson.loads(line)
-    return JournalRow(id, shard, data, _from_iso(deleted_at), fragment)
-
 
 class ApiJournalWriter(BaseJournalWriter["ApiJournalStore"]):
-    def _upsert_batch(self) -> None:
-        if not self._pending():
-            return
-        payload = serialize_rows(self.flush_rows())
+    def _insert(self, batch: pa.Table) -> None:
         url = self.store._make_url("bulk")
         self.store._api.make_request(
             url,
             "POST",
-            content=payload,
-            headers={"Content-Type": JSONL_CONTENT_TYPE},
+            content=serialize_table(batch),
+            headers={"Content-Type": ARROW_CONTENT_TYPE},
         )
 
 
-class ApiJournalStore(BaseJournalStore[ApiJournalWriter], LakehouseApiMixin):
+class ApiJournalStore(LakehouseApiMixin, BaseJournalStore[ApiJournalWriter]):
+    """The client side of a remote journal – writes, counts, clears.
+
+    Flushing is not part of it: the store that holds the rows drains them
+    (:meth:`BaseJournalStore.flush_batches` is ``@no_api``), and a repository
+    in api mode delegates its whole flush to the server. The mixin comes
+    first so its ``_is_api`` wins over the base's default.
+    """
+
     _writer_cls = ApiJournalWriter
 
     def __init__(self, dataset: str, uri: str | None = None) -> None:
@@ -65,11 +38,6 @@ class ApiJournalStore(BaseJournalStore[ApiJournalWriter], LakehouseApiMixin):
 
     def _make_url(self, endpoint: str) -> str:
         return self._api.make_url(f"{self.dataset}/_api/journal/{endpoint}")
-
-    def flush(self) -> JournalRows:
-        url = self._make_url("flush")
-        for line in self._api.stream_request(url, "POST"):
-            yield deserialize_row(line)
 
     def count(self) -> int:
         url = self._make_url("count")

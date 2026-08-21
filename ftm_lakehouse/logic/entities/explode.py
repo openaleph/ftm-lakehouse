@@ -19,6 +19,7 @@ from datetime import datetime
 from operator import itemgetter
 from typing import Iterator
 
+import pyarrow as pa
 from anystore.types import SDict
 from banal import ensure_list
 from followthemoney import Statement, model
@@ -31,6 +32,7 @@ from ftmq.util import iso_datetime
 
 from ftm_lakehouse.core.conventions.path import entity_shard
 from ftm_lakehouse.helpers.statements import make_base_id_statement
+from ftm_lakehouse.model.statement import SHARDED_SCHEMA
 from ftm_lakehouse.util import single_string, validate_origin
 
 
@@ -223,15 +225,16 @@ def statement_row_unsafe(
 
 
 class RowBuffer:
-    """``(id, fragment, origin)``-keyed packed-row buffer, shard-sort flushed.
+    """``(id, fragment, origin)``-keyed packed-row buffer, flushed as Arrow.
 
     The unsafe twin of :class:`~ftm_lakehouse.logic.entities.buffer.
     EntityBuffer`: deduplicates re-emissions within one batch by
     ``(id, fragment, origin)`` – matching the store's per-origin row
     identity, so the same id under distinct fragments *or* origins stays
-    distinct – and yields rows shard-sorted so
-    :meth:`EntityRepository.write_rows` can accumulate per-shard parquet
-    batches with bounded memory.
+    distinct – and flushes a shard-sorted :data:`SHARDED_SCHEMA` table, the
+    same currency the journal drain hands to
+    :meth:`EntityRepository.write_batches`. Memory is bounded by the caller,
+    which flushes every ``bulk_size`` rows.
     """
 
     def __init__(self) -> None:
@@ -243,11 +246,11 @@ class RowBuffer:
             return
         self._rows[(row["id"], row["fragment"], row["origin"])] = row
 
-    def flush(self) -> Iterator[SDict]:
-        """Yield buffered rows sorted by shard, then clear the buffer."""
-        for row in sorted(self._rows.values(), key=itemgetter("shard")):
-            yield row
+    def flush(self) -> pa.Table:
+        """Pack the buffered rows shard-sorted, then clear the buffer."""
+        rows = sorted(self._rows.values(), key=itemgetter("shard"))
         self._rows = {}
+        return pa.Table.from_pylist(rows, schema=SHARDED_SCHEMA)
 
     def __len__(self) -> int:
         return len(self._rows)

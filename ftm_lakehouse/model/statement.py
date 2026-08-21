@@ -1,8 +1,11 @@
 """Schema definitions for the sharded statement store.
 
-Single source of truth for the parquet ``SHARDED_SCHEMA`` (pyarrow) and the
+Single source of truth for the parquet ``SHARDED_SCHEMA`` (pyarrow), the
 matching SQLAlchemy ``sharded_table()`` factory used to compose queries that
-execute against DuckDB views over the parquet data.
+execute against DuckDB views over the parquet data, the physical
+``journal_table()`` DDL (the journal buffers exactly these rows), and
+``statements_to_arrow()``, the one packer both statement write paths use, and
+``LakehouseStatement``, the statement those paths pass around.
 
 The schema is: ``shard`` (entity-id hash bucket, hex-padded) prepended to
 ftmq's ``ARROW_SCHEMA`` (all statement columns, including ``fragment`` – the
@@ -18,44 +21,83 @@ working unchanged.
 """
 
 from datetime import datetime
-from typing import Any, Generator, NamedTuple, TypeAlias
+from typing import Any, Generator, Iterable, TypeAlias
 
 import pyarrow as pa
-from ftmq.store.lake import ARROW_SCHEMA, LakeStatement
+import pyarrow.compute as pc
+from ftmq.store.lake import ARROW_SCHEMA, LakeStatement, statements_to_table
 from nomenklatura import settings as nks
-from sqlalchemy import Boolean, DateTime, Select, TableClause, column, select, table
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    MetaData,
+    Select,
+    Table,
+    TableClause,
+    Text,
+    column,
+    select,
+    table,
+)
 
 PA_TS = pa.timestamp("us", tz="UTC")
 """Timezone-aware microsecond timestamp type for metadata columns."""
 
-# ftmq derives first_seen / last_seen from SQLAlchemy ``DateTime`` which yields
-# tz-naive ``pa.timestamp("us")``. Override to tz-aware UTC so the entire
-# timestamp surface (first_seen, last_seen, deleted_at) is consistent.
-_TZ_AWARE_FIELDS = {"first_seen", "last_seen"}
+REQUIRED_COLUMNS = frozenset(
+    {
+        "shard",
+        "id",
+        "entity_id",
+        "dataset",
+        "bucket",
+        "origin",
+        "schema",
+        "prop",
+        "value",
+        "external",
+        "first_seen",
+        "last_seen",
+        "fragment",
+    }
+)
+"""Columns a statement row must carry, used by every ingress:
+:func:`statements_to_arrow` casts into it, the api bulk route's
+:meth:`BaseJournalWriter.add_batch` casts the client's batch into it, and
+:func:`journal_table` derives ``NOT NULL`` from it.
+"""
 
 SHARDED_SCHEMA = pa.schema(
     [
-        pa.field("shard", pa.string()),
+        pa.field("shard", pa.string(), nullable=False),
         *(
-            pa.field(f.name, PA_TS) if f.name in _TZ_AWARE_FIELDS else f
+            f.with_nullable(False) if f.name in REQUIRED_COLUMNS else f
             for f in ARROW_SCHEMA
             if f.name != "canonical_id"
         ),
         pa.field("deleted_at", PA_TS),
     ]
 )
-"""Parquet schema: ``shard`` + ftmq ``ARROW_SCHEMA`` (with tz-aware
-timestamps, minus ``canonical_id``) + ``deleted_at``.
+"""Parquet schema: ``shard`` + ftmq ``ARROW_SCHEMA`` (minus ``canonical_id``)
++ ``deleted_at``.
 
 ``fragment`` (part of ``ARROW_SCHEMA``) uses the empty string – never
 NULL – as the "no fragment" sentinel; :class:`ftmq.store.lake.LakeStatement`
 guarantees it on every write path."""
 
-_PA_TO_SA = {
-    pa.bool_(): Boolean,
-    PA_TS: DateTime,
-    pa.timestamp("us"): DateTime,
+_PA_TO_SA: dict[Any, Any] = {
+    pa.bool_(): Boolean(),
+    PA_TS: DateTime(timezone=True),
 }
+"""Column type per pyarrow type – strings fall through to ``Text``.
+
+Serves both SQLAlchemy shapes built from :data:`SHARDED_SCHEMA`: the
+``table()`` clause queries compile against, and the physical journal DDL.
+"""
+
+
+def _sa_type(field: pa.Field) -> Any:
+    return _PA_TO_SA.get(field.type, Text())
 
 
 def _sharded_table(name: str) -> TableClause:
@@ -65,11 +107,7 @@ def _sharded_table(name: str) -> TableClause:
     and execute against a registered view of the same name. Column types
     are derived from the pyarrow schema so the two stay in lockstep.
     """
-    cols = []
-    for field in SHARDED_SCHEMA:
-        sa_type = _PA_TO_SA.get(field.type)
-        cols.append(column(field.name, sa_type) if sa_type else column(field.name))
-    return table(name, *cols)
+    return table(name, *(column(f.name, _sa_type(f)) for f in SHARDED_SCHEMA))
 
 
 # Default view name (``"statement"``) – this is the one the LakeStore
@@ -85,6 +123,33 @@ TABLE = _sharded_table(nks.STATEMENT_TABLE)
 # tombstone retention) and raw-source ``get_entity_ids`` queries (diff
 # consumers emit DEL ops).
 TABLE_RAW = _sharded_table(f"{nks.STATEMENT_TABLE}_raw")
+
+
+def journal_table(metadata: MetaData, name: str) -> Table:
+    """Physical journal table named ``name``, mirroring :data:`SHARDED_SCHEMA`.
+
+    The journal buffers exactly the rows the parquet store persists, so its
+    DDL is derived from the same pyarrow schema – a journal row needs no
+    packing to become a statement row, and a segment can be streamed
+    straight into :meth:`ParquetStore.append` as Arrow.
+
+    No primary key, no unique constraint, no index: the journal is an
+    append-only heap – but the schema's own ``NOT NULL`` columns
+    (:data:`REQUIRED_COLUMNS`) still hold, so a row that could not be read
+    back never lands. Re-emissions accumulate as extra rows and
+    :meth:`ParquetStore.merge` collapses them, which is where dedup lives
+    anyway – and without a key, row identity ``(origin, id, fragment)``
+    survives the journal instead of collapsing to ``(id, fragment)``.
+
+    Args:
+        metadata: The ``MetaData`` to attach the table to.
+        name: Table name – the live journal or one of its segments.
+
+    Returns:
+        The SQLAlchemy ``Table``.
+    """
+    cols = (Column(f.name, _sa_type(f), nullable=f.nullable) for f in SHARDED_SCHEMA)
+    return Table(name, metadata, *cols)
 
 
 STATEMENT_CSV_COLUMNS = [
@@ -123,22 +188,82 @@ def statement_csv_select() -> Select[Any]:
     return select(_STATEMENT_CSV_TABLE).order_by(_STATEMENT_CSV_TABLE.c.entity_id)
 
 
-class StatementRow(NamedTuple):
-    """In-memory statement row passed between the buffer and the parquet writer.
+class LakehouseStatement(LakeStatement):
+    """A statement carrying the two columns the lakehouse adds to the schema.
 
-    Shared currency for both flush paths:
-    - ``EntityBuffer.flush_buffer()`` (the bulk-write / direct-to-parquet path)
-    - the journal flush path in ``EntityRepository.flush()``, which adapts
-      each ``JournalRow`` into a ``StatementRow`` via ``unpack_journal_row``.
+    ``shard`` is the entity-id hash bucket the row is partitioned into and
+    ``deleted_at`` is the tombstone marker – both are storage facts about a
+    statement rather than statement content, and both are lakehouse-only
+    (ftmq's lake store partitions by dataset and deletes physically). They
+    live here for the same reason ``fragment`` lives on
+    :class:`ftmq.store.lake.LakeStatement`: so the write path can pass
+    statements around instead of ``(shard, stmt, deleted_at)`` tuples.
 
-    ``stmt`` is a :class:`ftmq.store.lake.LakeStatement` – it carries the
-    supersession group key ``fragment`` itself (empty string means
-    non-fragment, content-addressed dedup by ``id``).
+    ``shard`` defaults to the single-shard sentinel – :class:`EntityBuffer`
+    is the one producer that knows the dataset's shard count, and it always
+    sets it.
     """
 
-    shard: str
-    stmt: LakeStatement
-    deleted_at: datetime | None = None
+    __slots__ = ["shard", "deleted_at"]
+
+    def __init__(
+        self,
+        *args: Any,
+        shard: str = "0",
+        deleted_at: datetime | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.shard = shard
+        self.deleted_at = deleted_at
 
 
-StatementRows: TypeAlias = Generator[StatementRow, None, None]
+LakehouseStatements: TypeAlias = Generator[LakehouseStatement, None, None]
+
+
+def statements_to_arrow(
+    statements: Iterable[LakehouseStatement], now: datetime
+) -> pa.Table:
+    """Pack a stream of statements into a :data:`SHARDED_SCHEMA` table.
+
+    ftmq's :func:`~ftmq.store.lake.statements_to_table` packs the statement
+    columns columnwise; this adds the two columns the lakehouse stores on top
+    (``shard``, ``deleted_at``), drops ``canonical_id`` (this store never
+    resolves entities), and applies the two rules both write paths share:
+
+    - ``first_seen`` / ``last_seen`` fall back to ``now`` when the statement
+      carries none,
+    - tombstones (``deleted_at`` set) bump ``last_seen`` to the delete
+      timestamp so they win the ``ROW_NUMBER() OVER (... ORDER BY last_seen
+      DESC)`` tiebreak in :meth:`ParquetStore.merge`.
+
+    Both rules are vectorized fills over the packed columns rather than
+    per-row branches, and every column swap below is zero-copy. The closing
+    cast is what makes the result *be* :data:`SHARDED_SCHEMA` – including
+    its ``NOT NULL`` columns, so a statement missing one is rejected here
+    rather than by a reader later.
+
+    Args:
+        statements: Statements, typically shard-sorted from
+            :meth:`EntityBuffer.flush_buffer`.
+        now: Default timestamp for missing ``first_seen`` / ``last_seen``.
+
+    Returns:
+        A table with exactly :data:`SHARDED_SCHEMA`.
+    """
+    statements = list(statements)  # needs materialization before
+    table = statements_to_table(statements)
+    stamp = pa.scalar(now, PA_TS)
+    deleted_at = pa.array([s.deleted_at for s in statements], PA_TS)
+    first_seen = pc.fill_null(table.column("first_seen"), stamp)
+    last_seen = pc.coalesce(deleted_at, pc.fill_null(table.column("last_seen"), stamp))
+    return (
+        table.set_column(
+            table.schema.get_field_index("first_seen"), "first_seen", first_seen
+        )
+        .set_column(table.schema.get_field_index("last_seen"), "last_seen", last_seen)
+        .append_column("shard", pa.array([s.shard for s in statements], pa.string()))
+        .append_column("deleted_at", deleted_at)
+        .select(SHARDED_SCHEMA.names)
+        .cast(SHARDED_SCHEMA)
+    )

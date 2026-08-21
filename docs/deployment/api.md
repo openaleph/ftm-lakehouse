@@ -38,11 +38,11 @@ All lakehouse-specific routes are scoped to a dataset and namespaced under `/{da
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/{dataset}/_api/journal/bulk` | Write JSONL rows into the journal |
-| `GET` | `/{dataset}/_api/journal/iterate` | Stream all journal rows as JSONL |
-| `POST` | `/{dataset}/_api/journal/flush` | Stream and delete journal rows as JSONL |
+| `POST` | `/{dataset}/_api/journal/bulk` | Write statement rows into the journal |
 | `GET` | `/{dataset}/_api/journal/count` | Get journal row count |
 | `DELETE` | `/{dataset}/_api/journal/clear` | Delete all journal rows |
+
+The bulk endpoint carries an Arrow IPC stream (`application/vnd.apache.arrow.stream`) of the statement schema – the same batches the stores hold, so no repacking happens on either side of the hop. There is no flush endpoint: a journal is drained by the store that holds it, so a repository in api mode flushes through `/entities/flush` instead.
 
 ### Entities
 

@@ -59,7 +59,7 @@ entities.add(entity, origin="manual")
 
 ### Bulk Writing (through the journal)
 
-For interactive ingestion that wants the journal's per-row dedup and crash-safety guarantees:
+For interactive ingestion that wants the journal's crash-safety guarantees:
 
 ```python
 with entities.writer(origin="bulk_import") as writer:
@@ -67,7 +67,7 @@ with entities.writer(origin="bulk_import") as writer:
         writer.add_entity(entity)
 ```
 
-Writes buffer in a SQL journal. Call `entities.flush()` to drain the journal into parquet:
+Writes buffer in a SQL journal – an append-only table carrying the same columns as the parquet store. Call `entities.flush()` to drain it into parquet:
 
 ```python
 count = entities.flush()
@@ -185,7 +185,7 @@ The typical use is one fragment per source row in a CSV-style ingest (or per doc
 
 - **Scope is per `(entity_id, prop, fragment)`**, not per fragment as a whole. If the first emission had `name`, `address` and `country` and the re-emission only has `name` and `address`, the old `country` value survives – no newer row exists in its group. If you want whole-fragment replacement, emit explicit tombstones for the dropped props: statements read back from the store are `ftmq.store.lake.LakeStatement`s carrying their own fragment, so `delete_statement(stmt)` shadows the right group; the `fragment=` override is only needed for hand-built plain statements.
 - **Multi-valued props survive together.** All rows of one emission share a `last_seen`, so all values of the latest emission are kept (ties at the group maximum), and all values of older emissions go.
-- **The two modes are isolated.** A non-fragment row never supersedes a fragment row or vice versa, even with identical content. The same statement can legitimately exist under multiple fragments (and additionally without one) – `fragment` is part of the journal's primary key, but not part of the statement `id`.
+- **The two modes are isolated.** A non-fragment row never supersedes a fragment row or vice versa, even with identical content. The same statement can legitimately exist under multiple fragments (and additionally without one) – `fragment` is part of the stored row identity, but not part of the statement `id`.
 - **Origins are isolated too.** The same fragment written under two different origins forms two independent supersession groups, matching the `(shard, bucket, origin)` partition scope of `merge`.
 - **Tombstones participate.** A tombstone written with the fragment supersedes its group like any emission; the group disappears from queries immediately and is physically reaped once the tombstone passes the grace period. `delete_entity` handles this automatically – it reads each live row's fragment and writes fragment-matched tombstones.
 
@@ -246,7 +246,7 @@ entities.flush()
 
 ## Deduplication
 
-**On write**: identical statements within the same journal window are de-duplicated by primary key (`id, fragment`); the journal's `ON CONFLICT (id, fragment) DO UPDATE` collapses re-emissions.
+**On write**: identical statements collapse only inside one writer batch, where the in-memory buffer keys rows by `(id, fragment, origin)`. The journal itself is append-only and keyless – re-emissions accumulate as rows.
 
 **Across flushes**: re-flushing the same statement appends a new parquet row. The duplicates only collapse when `merge` runs. `merge` keeps the row with the latest `last_seen` per statement id (per supersession group for fragment rows) and folds `first_seen` to the minimum across the group.
 
@@ -259,7 +259,7 @@ entities.flush()   # two rows now; same statement.id
 entities.merge()   # back to one row, last_seen=now, first_seen=original
 ```
 
-If you want immediate-effect dedup at write time, use the journal path with `flush()` – the journal upsert dedups within a window – and run `merge` on a schedule.
+Dedup is `merge`'s job alone – there is no write-time collapse to lean on, so run `merge` on a schedule (or via `optimize`) and treat queries as accurate on an optimized store.
 
 ## Maintenance
 
@@ -271,7 +271,7 @@ Three independent async operations on the parquet statement store, held under th
 count = entities.flush()
 ```
 
-Drains the journal in one shard-sorted pass; each per-shard batch becomes one parquet file per `(shard, bucket, origin)` partition. No dedup happens here – duplicates and tombstones land as new rows for `merge` to collapse later.
+Claims the journal by rotating it away, then streams the rotated segment into parquet as Arrow batches, shard-ordered; each batch becomes one parquet file per `(shard, bucket, origin)` partition. Writers keep going against the fresh journal table throughout. No dedup happens here – duplicates and tombstones land as new rows for `merge` to collapse later.
 
 ### Compact (cheap)
 

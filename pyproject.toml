@@ -38,6 +38,10 @@ api = [
     "putfs (>=0.3.3,<0.4.0)",
 ]
 http = ["aiohttp (!=4.0.0a0,!=4.0.0a1)"]
+postgres = [
+    "adbc-driver-postgresql (>=1.12,<2)",
+    "psycopg2-binary (>=2.9,<3)",
+]
 s3 = ["s3fs (>2024.2.0)"]
 gcs = ["gcsfs (>2024.2.0)"]
 azure = ["adlfs"]

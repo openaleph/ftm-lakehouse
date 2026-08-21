@@ -50,21 +50,4 @@ An executable DuckDB SQL string over `statement_raw` holding all dedupe / fragme
 
 ## Statement Serialization
 
-Pack and unpack statements for compact storage in the journal `data` column (not to be confused with `ftmq.store.lake.pack_statement`, which packs a statement into a parquet row dict):
-
-```python
-from ftm_lakehouse.helpers.statements import pack_journal_row, unpack_journal_row
-
-packed = pack_journal_row(stmt)     # unit-separator delimited string
-stmt   = unpack_journal_row(packed) # back to Statement
-```
-
-::: ftm_lakehouse.helpers.statements.pack_journal_row
-    options:
-        heading_level: 3
-        show_root_heading: true
-
-::: ftm_lakehouse.helpers.statements.unpack_journal_row
-    options:
-        heading_level: 3
-        show_root_heading: true
+Statements are packed once, columnwise, by `ftm_lakehouse.model.statement.statements_to_arrow` – see [Model](model.md#statement-schema).

@@ -14,8 +14,7 @@ RUN apt-get update && \
 WORKDIR /src
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install --no-cache-dir psycopg2-binary
+RUN pip install --no-cache-dir --no-deps -r requirements.txt
 
 # DuckDB auto-installs the `delta` extension into `$HOME/.duckdb` on first
 # `delta_scan`, which fails for a container running without a writable HOME.
@@ -33,4 +32,4 @@ FROM deps AS app
 COPY ftm_lakehouse /src/ftm_lakehouse
 COPY setup.py pyproject.toml README.md VERSION LICENSE NOTICE /src/
 
-RUN pip install --no-cache-dir --no-deps -q ".[api]"
+RUN pip install --no-cache-dir --no-deps -q .

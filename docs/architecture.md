@@ -55,7 +55,8 @@ model/
   job.py         # JobModel, DatasetJobModel - job execution tracking
   dataset.py     # DatasetModel - dataset metadata / config
   statement.py   # SHARDED_SCHEMA (pyarrow) + TABLE (SQLAlchemy) +
-                 # StatementRow (NamedTuple) – schema for the parquet
+                 # LakehouseStatement (LakeStatement + shard, deleted_at)
+                 # + statements_to_arrow – schema for the parquet
                  # statement store and shared currency between buffer
                  # and writer.
 ```
@@ -80,9 +81,10 @@ storage/
                      #   .compact (file bin-pack)
                      #   .vacuum (delete obsolete files)
   journal/
-    base.py          # BaseJournalStore + JournalRow
-                     # .flush()             – yields raw JournalRow
-                     # .flush_statements()  – yields StatementRow (unpacked)
+    base.py          # BaseJournalStore
+                     # .flush_batches()  – rotates the journal, yields
+                     #                     Arrow batches, drops each segment
+                     #                     once the consumer wrote it
     sql.py           # SqlJournalStore (sqlite / psql)
     api.py           # ApiJournalStore (HTTP forwarding)
   tags.py            # TagStore – key-value freshness tracking
@@ -120,7 +122,7 @@ The async `optimize` operation produces this canonical state by running the thre
 
 The `shard` partition key is the unit that keeps per-partition working sets bounded, independent of total dataset size. Everything expensive in the lakehouse operates one `(shard, bucket)` partition at a time:
 
-- **Writes:** statement rows arrive shard-sorted from the journal (the journal table is indexed by shard), and `append` buffers at most one shard's batch in memory before writing it out.
+- **Writes:** statement rows arrive shard-sorted from the journal (a flush drains one rotated segment, ordered by shard), and `append` buffers at most one shard's batch in memory before writing it out.
 - **Reads:** statement queries iterate `(shard, bucket)` partitions in Python and push `WHERE shard = ?` into DuckDB; the live view is a plain scan, so filters push to file statistics and a full-store `ORDER BY entity_id` stays bounded to one partition. Single-entity lookups hash the entity id and scan just its own shard.
 - **Optimize:** the merge rewrite materializes one partition at a time – its memory and rewrite cost scale with the largest partition, not the whole table.
 
@@ -260,7 +262,7 @@ ftm_lakehouse/
 │   ├── dataset.py           # DatasetModel + set_model_class hook
 │   ├── file.py              # File metadata model
 │   ├── job.py               # Job models
-│   └── statement.py         # SHARDED_SCHEMA, StatementRow
+│   └── statement.py         # SHARDED_SCHEMA, LakehouseStatement
 │
 ├── storage/                 # Layer 2: Single-purpose storage interfaces
 │   ├── journal/             # SQL write-ahead log (sql.py, api.py, base.py)

@@ -1,4 +1,6 @@
+from collections import defaultdict
 from datetime import datetime
+from typing import DefaultDict
 
 from followthemoney import EntityProxy, Statement, StatementEntity
 from followthemoney.namespace import Namespace
@@ -12,7 +14,7 @@ from ftm_lakehouse.core.conventions.path import entity_shard
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.exceptions import BufferFullError
 from ftm_lakehouse.helpers.statements import make_base_id_statement
-from ftm_lakehouse.model.statement import StatementRow, StatementRows
+from ftm_lakehouse.model.statement import LakehouseStatement, LakehouseStatements
 from ftm_lakehouse.util import validate_origin
 
 settings = Settings()
@@ -57,7 +59,9 @@ class EntityBuffer:
         # Default emission timestamp for entities that carry none of their
         # own (:meth:`add_entity` pin chain) - e.g. the CLI ``--last-seen``.
         self.last_seen: str | None = last_seen.isoformat() if last_seen else None
-        self._buffer: dict[tuple[str, str], StatementRow] = {}
+        self._buffer: DefaultDict[str, dict[str, LakehouseStatement]] = defaultdict(
+            dict
+        )
         self._buffer_size: int = 0
 
     def _check_capacity(self) -> None:
@@ -114,12 +118,12 @@ class EntityBuffer:
         if fragment is None and isinstance(stmt, LakeStatement):
             fragment = stmt.fragment
 
-        # Create new LakeStatement with correct values (Statement is immutable).
+        # Create new LakehouseStatement with correct values (Statement is immutable).
         # ``id`` is deliberately unset so the constructor content-hashes it
         # under ``self.dataset``. canonical_id is intentionally unset –
         # storage drops it and FtM defaults it to entity_id (single-dataset
         # store, no resolution).
-        stmt = LakeStatement(
+        stmt = LakehouseStatement(
             entity_id=stmt.entity_id,
             prop=stmt.prop,
             schema=stmt.schema,
@@ -132,12 +136,13 @@ class EntityBuffer:
             last_seen=stmt.last_seen,
             origin=origin,
             fragment=fragment,
+            shard=entity_shard(stmt.entity_id, self.shards),
+            deleted_at=deleted_at,
         )
         if stmt.id is None:
             return None
 
-        shard = entity_shard(stmt.entity_id, self.shards)
-        self._buffer[(stmt.dedupe_key, origin)] = StatementRow(shard, stmt, deleted_at)
+        self._buffer[stmt.shard][stmt.dedupe_key] = stmt
         self._buffer_size += 1
         return stmt.id
 
@@ -219,16 +224,16 @@ class EntityBuffer:
         )
         self.add_statement(base, fragment=fragment, origin=origin)
 
-    def flush_buffer(self) -> StatementRows:
-        """Yield buffered rows sorted by shard, then clear the buffer.
+    def flush_buffer(self) -> LakehouseStatements:
+        """Yield buffered statements sorted by shard, then clear the buffer.
 
         Yields:
-            :class:`StatementRow` sorted by ``shard`` so the consumer can
-            stream per-shard parquet batches with bounded memory.
+            :class:`LakehouseStatement` sorted by ``shard`` so the consumer
+            can stream per-shard parquet batches with bounded memory.
         """
-        for row in sorted(self._buffer.values(), key=lambda r: r.shard):
-            yield row
-        self._buffer = {}
+        for shard in self._buffer:
+            yield from self._buffer[shard].values()
+        self._buffer.clear()
         self._buffer_size = 0
 
     def __len__(self) -> int:

@@ -8,12 +8,17 @@ deliberately left to the reverse proxy (``client_max_body_size``,
 philosophy.
 """
 
+from datetime import datetime, timezone
+
+import pyarrow as pa
 import pytest
 from fastapi.testclient import TestClient
 from ftmq.query import G, M, P, Query
 
 from ftm_lakehouse.api import dependencies
 from ftm_lakehouse.api.main import get_app
+from ftm_lakehouse.core.arrow import ARROW_CONTENT_TYPE, serialize_table
+from ftm_lakehouse.model.statement import LakehouseStatement, statements_to_arrow
 
 
 @pytest.fixture()
@@ -76,3 +81,53 @@ def test_query_rejects_malformed(client) -> None:
         )
         assert response.status_code == 422, endpoint
         assert "Invalid query json" in response.json()["detail"][0]["msg"]
+
+
+def _statement_batch() -> pa.Table:
+    stmt = LakehouseStatement(
+        entity_id="jane",
+        prop="name",
+        schema="Person",
+        value="Jane Doe",
+        dataset="test",
+    )
+    return statements_to_arrow([stmt], datetime.now(timezone.utc))
+
+
+def _post_bulk(client: TestClient, table: pa.Table):
+    return client.post(
+        "/test/_api/journal/bulk",
+        content=serialize_table(table),
+        headers={"Content-Type": ARROW_CONTENT_TYPE},
+    )
+
+
+def test_journal_bulk_accepts_a_statement_batch(client) -> None:
+    assert _post_bulk(client, _statement_batch()).status_code == 200
+
+
+def test_journal_bulk_rejects_a_foreign_batch(client) -> None:
+    """A batch missing statement columns is a client error, not a 500."""
+    res = _post_bulk(client, pa.table({"nope": ["x"]}))
+    assert res.status_code == 400
+
+
+def test_journal_bulk_rejects_a_null_required_column(client) -> None:
+    """Nulls where the statement schema requires a value are a client error."""
+    table = _statement_batch()
+    holed = table.set_column(
+        table.schema.get_field_index("entity_id"),
+        pa.field("entity_id", pa.string()),
+        pa.array([None], pa.string()),
+    )
+    res = _post_bulk(client, holed)
+    assert res.status_code == 400
+
+
+def test_journal_bulk_rejects_a_non_arrow_body(client) -> None:
+    res = client.post(
+        "/test/_api/journal/bulk",
+        content=b"not arrow at all",
+        headers={"Content-Type": ARROW_CONTENT_TYPE},
+    )
+    assert res.status_code == 400

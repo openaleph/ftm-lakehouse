@@ -1,49 +1,42 @@
 """JournalStore - SQL or http api statement buffer for write-ahead logging."""
 
-from datetime import datetime
-from typing import Generator, Generic, NamedTuple, Self, TypeAlias, TypeVar
+from typing import Generator, Generic, Self, TypeAlias, TypeVar
 
+import pyarrow as pa
 from anystore.logging import get_logger
-from ftmq.store.lake import LakeStatement
+from rigour.time import utc_now
 
+from ftm_lakehouse.core.api import no_api
 from ftm_lakehouse.core.conventions.path import entity_shard
 from ftm_lakehouse.core.settings import Settings
-from ftm_lakehouse.exceptions import MalformedStatementError
-from ftm_lakehouse.helpers.statements import (
-    UNIT_SEP,
-    UNPACK_MIN_FIELDS,
-    pack_journal_row,
-    unpack_journal_row,
-)
 from ftm_lakehouse.logic.entities.buffer import EntityBuffer
-from ftm_lakehouse.model.statement import StatementRow, StatementRows
+from ftm_lakehouse.model.statement import (
+    SHARDED_SCHEMA,
+    LakehouseStatements,
+    statements_to_arrow,
+)
 
 settings = Settings()
 log = get_logger(__name__)
 
 WRITE_BATCH_SIZE = 10_000
 
+DRAIN_BATCH_SIZE = 100_000
+"""Rows per table handed to a flush consumer."""
 
-class JournalRow(NamedTuple):
-    """A single journal row – used for both SQL storage and wire format.
+RecordBatches: TypeAlias = Generator[pa.RecordBatch, None, None]
+"""What a reader hands over, on its way into a table."""
 
-    ``shard`` is the entity-id hash bucket the statement routes to in the
-    parquet store. PyArrow handles the final sort within each batch.
-    ``fragment`` is the supersession group key (empty string = non-fragment);
-    it rides as its own column – not inside the packed ``data`` – because it
-    is part of the journal's primary key. Writers derive it from
-    ``LakeStatement.fragment``; readers stamp it back via
-    :meth:`ftmq.store.lake.LakeStatement.from_statement`.
-    """
+StatementTables: TypeAlias = Generator[pa.Table, None, None]
+"""Stream of journal rows in the parquet statement schema.
 
-    id: str
-    shard: str
-    data: str
-    deleted_at: datetime | None
-    fragment: str = ""
-
-
-JournalRows: TypeAlias = Generator[JournalRow, None, None]
+The journal buffers exactly the rows the parquet store persists
+(:data:`~ftm_lakehouse.model.statement.SHARDED_SCHEMA`), so a flush moves
+Arrow tables from one store to the other. ``pa.Table`` because that is what
+every end of the pipe already speaks – ``statements_to_arrow``,
+``ParquetStore.append``, ``adbc_ingest``, :meth:`BaseJournalWriter.add_batch`
+– so nothing has to be taken apart and put back together on the way.
+"""
 
 
 S = TypeVar("S", bound="BaseJournalStore")
@@ -51,77 +44,95 @@ S = TypeVar("S", bound="BaseJournalStore")
 
 class BaseJournalWriter(EntityBuffer, Generic[S]):
     """
-    Bulk writer for the journal with batched upserts.
+    Bulk writer for the journal.
 
     Not intended for direct use - use JournalStore.writer() instead.
+
+    :meth:`add_statement` buffers through :class:`EntityBuffer` – which
+    re-keys statement ids and collapses re-emissions within the batch – and
+    inserts every :data:`WRITE_BATCH_SIZE` rows. :meth:`add_batch` writes
+    an already-packed arrow table straight through.
     """
 
     def __init__(self, store: S, shards: int, origin: str | None = None) -> None:
         super().__init__(store.dataset, shards, origin)
         self.store = store
-        self._raw_rows: dict[tuple[str, str], JournalRow] = {}
+        self._adding_entity = False
 
-    def _upsert_batch(self) -> None:
+    def _insert(self, batch: pa.Table) -> None:
+        """Write one :data:`SHARDED_SCHEMA` table to the journal."""
         raise NotImplementedError
-
-    def _pending(self) -> int:
-        """Rows waiting for the next upsert batch, across both add paths."""
-        return self._buffer_size + len(self._raw_rows)
-
-    def flush_rows(self) -> JournalRows:
-        yield from self._raw_rows.values()
-        self._raw_rows = {}
-        for row in self.flush_buffer():
-            yield JournalRow(
-                row.stmt.id,
-                row.shard,
-                pack_journal_row(row.stmt),
-                row.deleted_at,
-                row.stmt.fragment,
-            )
 
     def add_statement(self, *args, **kwargs) -> str | None:
         stmt_id = super().add_statement(*args, **kwargs)
-        if self._pending() >= WRITE_BATCH_SIZE:
-            self._upsert_batch()
+        if not self._adding_entity and self._buffer_size >= WRITE_BATCH_SIZE:
+            self.flush()
         return stmt_id
 
-    def add_row(self, row: JournalRow) -> None:
-        """Buffer an already-packed journal row as-is – no unpack / re-pack.
+    def add_entity(self, *args, **kwargs) -> None:
+        """Add an entity's statements, then insert if the batch is full.
 
-        Fast path for the api bulk route: the sending writer produced the row
-        through this same class, so the statement id is already re-keyed and
-        ``data`` already packed. Only ``shard`` is re-derived – from the
-        packed ``entity_id`` against *this* dataset's shard count – so a
-        client with a stale shard config cannot mis-route a partition. Rows
-        deduplicate per ``(id, fragment)`` within a batch (latest wins), the
-        same key the upsert conflicts on. Do not mix with
-        :meth:`add_statement` in one writer – a key present in both buffers
-        would reach a single multi-values upsert twice.
+        The check waits for the whole entity: inserts commit per batch, so
+        flushing mid-entity could land its properties without the ``BASE_ID``
+        checksum row ``add_entity`` appends last – a half entity that then
+        flushes to parquet and survives merge.
+        """
+        self._adding_entity = True
+        try:
+            super().add_entity(*args, **kwargs)
+        finally:
+            self._adding_entity = False
+        if self._buffer_size >= WRITE_BATCH_SIZE:
+            self.flush()
+
+    def add_batch(self, batch: pa.Table) -> None:
+        """Insert an already-packed Arrow table as-is – no repacking.
+
+        Fast path for the api bulk route: the sending writer produced these
+        rows through this same class, so statement ids are already re-keyed
+        and every column is in place. Only ``shard`` is re-derived – from
+        ``entity_id`` against *this* dataset's shard count – so a client with
+        a stale shard config cannot mis-route a partition.
+
+        Args:
+            batch: Rows carrying at least the :data:`SHARDED_SCHEMA` columns;
+                extra columns are dropped and types are cast to the schema.
 
         Raises:
-            MalformedStatementError: If ``row.data`` has fewer than
-                :data:`~ftm_lakehouse.helpers.statements.UNPACK_MIN_FIELDS`
-                fields.
+            KeyError: If a :data:`SHARDED_SCHEMA` column is missing.
+            pyarrow.ArrowInvalid: If a column cannot be cast to its schema type.
         """
-        parts = row.data.split(UNIT_SEP, UNPACK_MIN_FIELDS)
-        if len(parts) < UNPACK_MIN_FIELDS:
-            raise MalformedStatementError(
-                f"Packed statement has {len(parts)} fields; "
-                f"expected at least {UNPACK_MIN_FIELDS}"
-            )
-        shard = entity_shard(parts[1], self.shards)
-        self._raw_rows[(row.id, row.fragment)] = row._replace(shard=shard)
-        if self._pending() >= WRITE_BATCH_SIZE:
-            self._upsert_batch()
+        if not batch.num_rows:
+            return
+        batch = batch.select(SHARDED_SCHEMA.names).cast(SHARDED_SCHEMA)
+        batch = batch.set_column(
+            SHARDED_SCHEMA.get_field_index("shard"), "shard", self._shard_column(batch)
+        )
+        self._insert(batch)
+
+    def _shard_column(self, batch: pa.Table) -> pa.Array:
+        if self.shards <= 1:
+            # `entity_shard`'s single-shard sentinel, without the row loop
+            return pa.repeat(entity_shard("", self.shards), batch.num_rows)
+        return pa.array(
+            [entity_shard(e, self.shards) for e in batch["entity_id"].to_pylist()],
+            pa.string(),
+        )
 
     def flush(self) -> None:
-        """Flush pending rows and commit transaction."""
-        self._upsert_batch()
+        """Insert the buffered statements."""
+        if self._buffer_size:
+            self._insert(statements_to_arrow(self.flush_buffer(), utc_now()))
 
     def rollback(self) -> None:
-        """Rollback the current transaction."""
-        pass
+        """Drop the buffered statements that have not been inserted yet.
+
+        Inserts commit per batch, so earlier batches of the same writer stay –
+        harmless in an append-only journal, where re-emissions accumulate and
+        ``merge`` collapses them.
+        """
+        self._buffer.clear()
+        self._buffer_size = 0
 
     def close(self) -> None:
         """Close the connection."""
@@ -155,6 +166,9 @@ class BaseJournalStore(Generic[W]):
 
     _writer_cls: type[W]
 
+    _is_api: bool = False
+    """Overridden by the api store's mixin – see :func:`no_api`."""
+
     def __init__(
         self,
         dataset: str,
@@ -173,59 +187,39 @@ class BaseJournalStore(Generic[W]):
         """
         return self._writer_cls(self, shards=shards, origin=origin)
 
-    def flush(self) -> JournalRows:
-        """Destructively iterate journal rows in raw packed form.
+    @no_api
+    def flush_batches(self, ordered: bool = True) -> StatementTables:
+        """Destructively iterate journal rows as Arrow batches.
 
-        Rows are deleted after being yielded. If the consumer raises an
-        exception the transaction is rolled back.
+        Local-only: draining a remote journal into a local parquet store is
+        not a supported combination – the server that owns the journal owns
+        its flush, and ``ApiEntityRepository.flush()`` delegates the whole
+        thing there.
 
-        The HTTP-forwarding journal API uses this to stream JSONL without
-        unpack-then-repack overhead; the parquet write path uses
-        :meth:`flush_statements` instead.
+        Rows are discarded only after the consumer has written them: the
+        implementation claims what is currently in the journal, hands it over
+        whole batch by whole batch, and drops each claimed segment once the
+        consumer comes back for more. A consumer that raises or abandons the
+        generator leaves the rest in place for the next call – no
+        transaction, and never a silent loss.
+
+        Args:
+            ordered: Sort each segment by ``shard``, so the consumer appends
+                one parquet file per ``(shard, bucket, origin)`` partition.
+                Single-shard datasets pass ``False`` and skip the sort.
 
         Yields:
-            :class:`JournalRow` ``(id, shard, data, deleted_at)`` – ``data``
-            is still packed (the unit-separator-delimited statement wire
-            format).
+            ``pa.RecordBatch`` in :data:`SHARDED_SCHEMA`.
         """
         raise NotImplementedError
 
-    def flush_statements(self) -> StatementRows:
-        """Destructively iterate as :class:`StatementRow` (data unpacked).
+    @no_api
+    def iterate_entity(self, entity_id: str) -> LakehouseStatements:
+        """Iterate the live (non-tombstone) journal statements of one entity.
 
-        Thin wrapper over :meth:`flush` for consumers (notably
-        :meth:`EntityRepository.flush`) that want ``Statement`` objects
-        instead of the packed wire format. Malformed rows (failed
-        :func:`unpack_journal_row`) are logged and skipped so one corrupt
-        row can't abort the whole flush.
-
-        Yields:
-            :class:`StatementRow` ``(shard, stmt, deleted_at)`` produced by
-            unpacking each :class:`JournalRow`; ``stmt`` is a
-            :class:`ftmq.store.lake.LakeStatement` stamped with the row's
-            ``fragment`` column.
-        """
-        for r in self.flush():
-            try:
-                stmt = unpack_journal_row(r.data)
-            except MalformedStatementError as exc:
-                log.warning(
-                    "Skipping malformed journal row",
-                    row_id=r.id,
-                    shard=r.shard,
-                    error=str(exc),
-                )
-                continue
-            yield StatementRow(
-                r.shard, LakeStatement.from_statement(stmt, r.fragment), r.deleted_at
-            )
-
-    def iterate_shard(self, shard: str) -> Generator[LakeStatement, None, None]:
-        """Iterate the live (non-tombstone) statements of one shard.
-
-        Non-destructive read twin of :meth:`flush_statements` – malformed
-        rows are logged and skipped the same way. Backed by the shard index
-        in the SQL journal; not available on the api journal.
+        Non-destructive read used by the delete paths, which need the rows
+        that are buffered but not yet in parquet. Not available on the api
+        journal.
         """
         raise NotImplementedError
 

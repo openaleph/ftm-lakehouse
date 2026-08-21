@@ -452,17 +452,17 @@ class ParquetStore:
         return released
 
     def append(self, batch: pa.Table) -> None:
-        """Append a sorted batch of statements.
+        """Append a batch of statements.
 
         The batch should be scoped to a single ``shard`` for write efficiency
-        (one parquet file per ``(shard, bucket, origin)`` partition). The
-        method sorts by ``(bucket, origin, entity_id, fragment, prop, id,
-        last_seen DESC)`` – clustering a fragment's rows physically
-        contiguous, then by ``prop`` because the supersession group key
-        includes it – then splits by ``bucket`` so each ``write_deltalake``
-        call uses the bucket-appropriate ``writer_properties`` (small vs.
-        large profile). Duplicates land as separate rows and are reaped by
-        :meth:`merge`.
+        (one parquet file per ``(shard, bucket, origin)`` partition). The method
+        splits by ``bucket`` so each ``write_deltalake`` call uses the
+        bucket-appropriate ``writer_properties`` (small vs.  large profile).
+        Duplicates land as separate rows and are reaped by :meth:`merge`.
+
+        Deliberately does **not** sort. Nothing downstream reads in physical
+        order, and :meth:`merge` rewrites every partition an append touched
+        into the file sort order anyway.
 
         Held under the *shared* side of the write fence
         (:meth:`_append_fence`): concurrent appends run in parallel – Delta
@@ -491,17 +491,6 @@ class ParquetStore:
             f"Flushing {len(batch)} statements to parquet ...",
             buckets=buckets,
             shards=shards,
-        )
-        batch = batch.sort_by(
-            [
-                ("bucket", "ascending"),
-                ("origin", "ascending"),
-                ("entity_id", "ascending"),
-                ("fragment", "ascending"),
-                ("prop", "ascending"),
-                ("id", "ascending"),
-                ("last_seen", "descending"),
-            ]
         )
         with self._tags.touch(tag.STATEMENTS_UPDATED):
             self._mark_updated(batch)

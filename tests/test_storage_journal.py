@@ -7,26 +7,30 @@ from pathlib import Path
 from typing import Generator
 
 import httpx
+import pyarrow as pa
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from followthemoney import EntityProxy
 from followthemoney.statement import Statement
-from sqlalchemy import insert
 
 from ftm_lakehouse.api.routes.journal import router
 from ftm_lakehouse.core.api import get_api
 from ftm_lakehouse.core.conventions.path import entity_shard
-from ftm_lakehouse.exceptions import MalformedStatementError
-from ftm_lakehouse.helpers.statements import (
-    UNIT_SEP,
-    UNPACK_MIN_FIELDS,
-    pack_journal_row,
-    unpack_journal_row,
-)
 from ftm_lakehouse.lake import get_lakehouse
-from ftm_lakehouse.storage.journal import ApiJournalStore, JournalRows, SqlJournalStore
+from ftm_lakehouse.model.statement import (
+    SHARDED_SCHEMA,
+    LakehouseStatement,
+    statements_to_arrow,
+)
+from ftm_lakehouse.storage.journal import (
+    ApiJournalStore,
+    SqlJournalStore,
+    StatementTables,
+)
 from ftm_lakehouse.storage.journal import get_journal as _get_journal_factory
-from ftm_lakehouse.storage.journal.base import BaseJournalStore, JournalRow
+from ftm_lakehouse.storage.journal import sql_journal
+from ftm_lakehouse.storage.journal.base import BaseJournalStore
 
 DATASET = "test"
 SHARDS = 8
@@ -50,17 +54,34 @@ def make_statement(
     )
 
 
-def collect_statements(items: JournalRows) -> list[Statement]:
-    """Collect all statements from flush items."""
-    return [unpack_journal_row(row.data) for row in items]
+def collect_rows(tables: StatementTables) -> list[dict]:
+    """Flatten flushed tables into row dicts."""
+    return [row for table in tables for row in table.to_pylist()]
+
+
+def owner(journal: BaseJournalStore) -> BaseJournalStore:
+    """The store that holds the rows – the server's, for a remote journal.
+
+    A local repository against a remote journal is not a supported
+    combination: :meth:`BaseJournalStore.flush_batches` is ``@no_api``, so
+    the api variant reads back through the store the bulk route wrote into.
+    """
+    if isinstance(journal, ApiJournalStore):
+        return _get_journal_factory(DATASET)
+    return journal
+
+
+def flush(journal: BaseJournalStore) -> list[dict]:
+    """Drain the journal, whichever store owns it."""
+    return collect_rows(owner(journal).flush_batches())
 
 
 def _make_sql_journal() -> SqlJournalStore:
-    return SqlJournalStore(dataset=DATASET, uri="sqlite:///:memory:")
+    return sql_journal(DATASET, "sqlite:///:memory:")
 
 
 def _make_psql_journal() -> SqlJournalStore:
-    store = SqlJournalStore(dataset=DATASET, uri=PSQL_URI)
+    store = sql_journal(DATASET, PSQL_URI)
     store.clear()
     return store
 
@@ -118,7 +139,7 @@ def journal(request) -> Generator[BaseJournalStore, None, None]:
 
 def test_storage_journal_initialize(journal):
     """Test journal can be initialized and starts empty."""
-    assert collect_statements(journal.flush()) == []
+    assert flush(journal) == []
 
 
 def test_storage_journal_put_and_flush(journal):
@@ -130,14 +151,12 @@ def test_storage_journal_put_and_flush(journal):
         w.add_statement(make_statement("john", "name", "John Smith"))
         w.add_statement(make_statement("john", "firstName", "John"))
 
-    flushed = collect_statements(journal.flush())
-    entity_ids = {s.entity_id for s in flushed}
-    assert "jane" in entity_ids
-    assert "john" in entity_ids
+    flushed = flush(journal)
+    assert {r["entity_id"] for r in flushed} == {"jane", "john"}
     assert len(flushed) == 5
 
     # After flush, should be empty
-    assert collect_statements(journal.flush()) == []
+    assert flush(journal) == []
 
 
 def test_storage_journal_writer_context_manager(journal):
@@ -146,26 +165,21 @@ def test_storage_journal_writer_context_manager(journal):
         for i in range(100):
             w.add_statement(make_statement(f"e{i}", "name", f"Name {i}"))
 
-    flushed = collect_statements(journal.flush())
-    assert len(flushed) == 100
+    assert len(flush(journal)) == 100
 
 
 def test_storage_journal_flush_empties(journal):
     """Test that flush empties the journal."""
     with journal.writer(SHARDS) as w:
         for i in range(5):
-            entity_id = f"entity_{i:02d}"
-            w.add_statement(make_statement(entity_id, "name", f"Name {i}"))
+            w.add_statement(make_statement(f"entity_{i:02d}", "name", f"Name {i}"))
 
-    flushed = collect_statements(journal.flush())
-    assert len(flushed) == 5
-
-    # Should be empty after flush
-    assert collect_statements(journal.flush()) == []
+    assert len(flush(journal)) == 5
+    assert flush(journal) == []
 
 
 def test_storage_journal_statement_fields(journal):
-    """Test that key statement fields are preserved."""
+    """Test that key statement fields are preserved as typed columns."""
     stmt = Statement(
         entity_id="jane",
         prop="name",
@@ -178,65 +192,48 @@ def test_storage_journal_statement_fields(journal):
     with journal.writer(SHARDS) as w:
         w.add_statement(stmt)
 
-    flushed = collect_statements(journal.flush())
-    name_stmts = [s for s in flushed if s.prop == "name"]
-    assert len(name_stmts) == 1
-    retrieved = name_stmts[0]
-    assert retrieved.entity_id == "jane"
-    assert retrieved.prop == "name"
-    assert retrieved.schema == "Person"
-    assert retrieved.value == "Jane Doe"
-    assert retrieved.dataset == DATASET
-    assert retrieved.lang == "en"
-    assert retrieved.origin == "import"
-    assert retrieved.id is not None
+    rows = [r for r in flush(journal) if r["prop"] == "name"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["entity_id"] == "jane"
+    assert row["prop"] == "name"
+    assert row["schema"] == "Person"
+    assert row["value"] == "Jane Doe"
+    assert row["dataset"] == DATASET
+    assert row["lang"] == "en"
+    assert row["origin"] == "import"
+    assert row["bucket"] == "thing"
+    assert row["id"] is not None
+    assert row["first_seen"] is not None
+    assert row["last_seen"] is not None
 
-    assert collect_statements(journal.flush()) == []
+    assert flush(journal) == []
+
+
+def test_storage_journal_flush_schema(journal):
+    """Flushed batches carry the parquet statement schema, unchanged."""
+    with journal.writer(SHARDS) as w:
+        w.add_statement(make_statement("jane", "name", "Jane Doe"))
+
+    batches = list(owner(journal).flush_batches())
+    assert len(batches) == 1
+    assert batches[0].schema.equals(SHARDED_SCHEMA)
 
 
 def test_storage_journal_flush_yields_shard(journal):
-    """Test that flush yields (id, shard, data, deleted_at) tuples."""
+    """Every row carries the shard its entity id hashes to."""
     with journal.writer(SHARDS) as w:
-        w.add_statement(
-            Statement(
-                entity_id="e1",
-                prop="name",
-                schema="Person",
-                value="Alice",
-                dataset=DATASET,
-                origin="source_a",
-            )
-        )
-        w.add_statement(
-            Statement(
-                entity_id="e2",
-                prop="name",
-                schema="Person",
-                value="Bob",
-                dataset=DATASET,
-                origin="source_b",
-            )
-        )
-        w.add_statement(
-            Statement(
-                entity_id="e3",
-                prop="name",
-                schema="Person",
-                value="Charlie",
-                dataset=DATASET,
-                origin="source_a",
-            )
-        )
+        w.add_statement(make_statement("e1", "name", "Alice", origin="source_a"))
+        w.add_statement(make_statement("e2", "name", "Bob", origin="source_b"))
+        w.add_statement(make_statement("e3", "name", "Charlie", origin="source_a"))
 
-    items = list(journal.flush())
-    assert len(items) == 3
-
-    for row in items:
+    rows = flush(journal)
+    assert len(rows) == 3
+    for row in rows:
         # 8 shards = single hex char
-        assert len(row.shard) == 1
-        stmt = unpack_journal_row(row.data)
-        assert row.shard == entity_shard(stmt.entity_id, SHARDS)
-        assert stmt.origin in ("source_a", "source_b")
+        assert len(row["shard"]) == 1
+        assert row["shard"] == entity_shard(row["entity_id"], SHARDS)
+        assert row["origin"] in ("source_a", "source_b")
 
 
 def test_storage_journal_flush_sorted_order(journal):
@@ -244,19 +241,26 @@ def test_storage_journal_flush_sorted_order(journal):
     with journal.writer(SHARDS) as w:
         for origin in ["z_origin", "a_origin", "m_origin"]:
             for i in range(3):
-                stmt = Statement(
-                    entity_id=f"{origin}_{i}",
-                    prop="name",
-                    schema="Person",
-                    value=f"Name {i}",
-                    dataset=DATASET,
-                    origin=origin,
+                w.add_statement(
+                    make_statement(f"{origin}_{i}", "name", f"Name {i}", origin=origin)
                 )
-                w.add_statement(stmt)
 
-    items = list(journal.flush())
-    shards = [row.shard for row in items]
+    shards = [r["shard"] for r in flush(journal)]
     assert shards == sorted(shards)
+
+
+def test_storage_journal_values_survive_round_trip(journal):
+    """Control characters, newlines and tabs come back byte-identical.
+
+    The rows are typed columns end to end – on the wire too, where they ride
+    an Arrow IPC stream – so no delimiter can be confused with content.
+    """
+    value = "a\x1fb\nc\td\\e\"f'g"
+    with journal.writer(SHARDS) as w:
+        w.add_statement(make_statement("jane", "name", value))
+
+    (row,) = flush(journal)
+    assert row["value"] == value
 
 
 def test_storage_journal_rollback_on_consumer_error(request, journal):
@@ -270,21 +274,20 @@ def test_storage_journal_rollback_on_consumer_error(request, journal):
 
     # Try to consume but raise error
     try:
-        for _ in journal.flush():
+        for _ in journal.flush_batches():
             raise ValueError("Simulated error")
     except ValueError:
         pass
 
-    # Statements should still be in journal due to rollback
-    flushed = collect_statements(journal.flush())
-    assert len(flushed) == 5
-    assert collect_statements(journal.flush()) == []
+    # The claimed segment was never dropped, so the rows are still there
+    assert len(flush(journal)) == 5
+    assert flush(journal) == []
 
 
 def test_storage_journal_rollback_on_consumer_abandon(request, journal):
     """If the flush generator is abandoned mid-stream (HTTP client
-    disconnect → ``GeneratorExit``), the write transaction rolls back
-    and yielded rows remain in the journal for the next flush."""
+    disconnect → ``GeneratorExit``), the claimed segment is left in place
+    for the next flush – rows are dropped only after they were taken."""
     param = request.node.callspec.params["journal"]
     if param == "api":
         pytest.skip("API rollback is server-side only; client-side abandon is a no-op")
@@ -293,47 +296,60 @@ def test_storage_journal_rollback_on_consumer_abandon(request, journal):
         for i in range(5):
             w.add_statement(make_statement(f"e{i}", "name", f"Name {i}"))
 
-    gen = journal.flush()
-    first = next(gen)
-    assert first is not None
+    gen = journal.flush_batches()
+    assert next(gen) is not None
     # Simulate the consumer abandoning the iterator (e.g. ASGI client
     # disconnect). Python sends GeneratorExit into the generator at the
-    # current yield; flush's try/except BaseException rolls back.
+    # current yield, before the segment is dropped.
     gen.close()
 
-    # All five rows still present – DELETE was rolled back.
+    # All five rows still present – in the orphaned segment.
+    assert journal._segments()
     assert journal.count() == 5
-    flushed = collect_statements(journal.flush())
-    assert len(flushed) == 5
+    assert len(flush(journal)) == 5
     assert journal.count() == 0
+    assert journal._segments() == []
 
 
-def test_storage_journal_upsert_duplicate_statements(journal):
-    """Test that duplicate statements are upserted (updated, not duplicated)."""
-    stmt = Statement(
-        entity_id="jane",
-        prop="name",
-        schema="Person",
-        value="Jane Doe",
-        dataset=DATASET,
-        origin="import",
-    )
+def test_storage_journal_duplicate_statements_accumulate(journal):
+    """Re-emissions pile up: the journal has no key, ``merge`` collapses them.
+
+    Different origins are *not* collapsed either – the parquet row identity
+    is ``(origin, id, fragment)``, and a journal key on ``(id, fragment)``
+    used to drop the earlier origin's provenance silently.
+    """
+    stmt = make_statement("jane", "name", "Jane Doe", origin="import")
 
     with journal.writer(SHARDS) as w:
         w.add_statement(stmt)
 
-    # Add the same statement again (same id)
     with journal.writer(SHARDS) as w:
         w.add_statement(stmt)
 
-    # Add same statement with different origin - should update
     stmt.origin = "updated"
     with journal.writer(SHARDS) as w:
         w.add_statement(stmt)
 
-    flushed = collect_statements(journal.flush())
-    assert len(flushed) == 1
-    assert flushed[0].origin == "updated"
+    rows = flush(journal)
+    assert len(rows) == 3
+    assert len({r["id"] for r in rows}) == 1  # same content, same statement id
+    assert sorted(r["origin"] for r in rows) == ["import", "import", "updated"]
+
+
+def test_storage_journal_same_content_distinct_origins(journal):
+    """Two origins of one statement survive a single batch.
+
+    The upsert used to hit its own conflict target twice here: sqlite kept
+    the last row silently, postgres raised ``CardinalityViolation``.
+    """
+    stmt = make_statement("jane", "name", "Jane Doe")
+    with journal.writer(SHARDS) as w:
+        w.add_statement(stmt, origin="source_a")
+        w.add_statement(stmt, origin="source_b")
+
+    rows = flush(journal)
+    assert sorted(r["origin"] for r in rows) == ["source_a", "source_b"]
+    assert len({r["id"] for r in rows}) == 1
 
 
 def test_storage_journal_count(journal):
@@ -347,7 +363,7 @@ def test_storage_journal_count(journal):
     assert journal.count() == 10
 
     # Flush empties the journal
-    list(journal.flush())
+    flush(journal)
     assert journal.count() == 0
 
 
@@ -365,26 +381,19 @@ def test_storage_journal_clear(journal):
 
 
 def test_storage_journal_flush_large_single_shard_batch(request, journal):
-    """A full 10k-row fetch batch in one shard flushes in one pass.
-
-    Regression: the per-batch DELETE keyed on the ``(id, fragment)``
-    primary key used a literal row-value IN list – postgres expands that
-    into a left-nested OR chain (one parser stack frame per element) and
-    raised ``StatementTooComplex`` (54001) at batch size. The keys now go
-    through a VALUES semi-join with constant expression depth.
-    """
+    """A single shard past the write-batch size drains in one pass."""
     param = request.node.callspec.params["journal"]
     if param == "api":
-        pytest.skip("Exercises the SQL delete path; server side is covered by sql")
+        pytest.skip("Exercises the SQL drain path; server side is covered by sql")
 
     with journal.writer(1) as w:
         for i in range(10_001):
             w.add_statement(make_statement(f"e{i}", "name", f"Name {i}"))
 
     assert journal.count() == 10_001
-    flushed = list(journal.flush())
-    assert len(flushed) == 10_001
-    assert {row.shard for row in flushed} == {"0"}
+    rows = flush(journal)
+    assert len(rows) == 10_001
+    assert {r["shard"] for r in rows} == {"0"}
     assert journal.count() == 0
 
 
@@ -392,12 +401,11 @@ def test_storage_journal_flush_large_single_shard_batch(request, journal):
 def concurrent_journal(request, tmp_path):
     """Journal fixture for concurrent write tests (needs file-based or network DB)."""
     if request.param == "sqlite":
-        uri = f"sqlite:///{tmp_path / 'journal.db'}"
-        store = SqlJournalStore(dataset=DATASET, uri=uri)
+        store = sql_journal(DATASET, f"sqlite:///{tmp_path / 'journal.db'}")
         yield store
         store.dispose()
     else:
-        store = SqlJournalStore(dataset=DATASET, uri=PSQL_URI)
+        store = sql_journal(DATASET, PSQL_URI)
         store.clear()
         yield store
         store.clear()
@@ -405,13 +413,12 @@ def concurrent_journal(request, tmp_path):
 
 
 def test_storage_journal_flush_concurrent_write(concurrent_journal):
-    """Test that concurrent writes during flush are never silently lost.
+    """Rows written during a flush land in the fresh table, never lost.
 
-    Per-shard flush may pick up rows inserted into not-yet-processed shards
-    during the same call, so the exact split between "this flush" and "next
-    flush" is non-deterministic. The contract is weaker: every row inserted
-    is eventually yielded exactly once, never deleted without being yielded
-    first, and the journal ends up empty after two flushes.
+    The flush claims the whole journal up front by rotating it away, so the
+    split between "this flush" and "the next one" is exact: a writer that
+    starts mid-flush – including one that outlives the rotation – writes into
+    the new table and is picked up next time.
     """
     journal = concurrent_journal
 
@@ -423,130 +430,45 @@ def test_storage_journal_flush_concurrent_write(concurrent_journal):
     initial_ids = {f"initial_{i}" for i in range(5)}
     concurrent_ids = {f"concurrent_{i}" for i in range(3)}
 
-    flushed_entity_ids: set[str] = set()
-    injected = False
-    for row in journal.flush():
-        flushed_entity_ids.add(unpack_journal_row(row.data).entity_id)
+    # a writer that is already open when the rotation happens
+    writer = journal.writer(SHARDS)
+    writer.add_statement(make_statement("concurrent_0", "name", "Concurrent 0"))
 
-        # After first row, inject new rows via a separate writer
+    flushed: set[str] = set()
+    injected = False
+    for batch in journal.flush_batches():
+        flushed.update(batch.column("entity_id").to_pylist())
         if not injected:
+            writer.flush()  # the pre-rotation writer commits into the new table
             with journal.writer(SHARDS) as w:
-                for i in range(3):
+                for i in range(1, 3):
                     w.add_statement(
                         make_statement(f"concurrent_{i}", "name", f"Concurrent {i}")
                     )
             injected = True
+    writer.close()
 
-    # All initial rows must be in this flush; concurrent rows may or may not be.
-    assert initial_ids <= flushed_entity_ids
-    assert flushed_entity_ids <= initial_ids | concurrent_ids
-    assert journal.count() == 5 + 3 - len(flushed_entity_ids)
-
-    remaining = collect_statements(journal.flush())
-    remaining_ids = {s.entity_id for s in remaining}
-
-    # The union of both flushes covers every inserted row exactly once.
-    assert flushed_entity_ids | remaining_ids == initial_ids | concurrent_ids
-    assert flushed_entity_ids.isdisjoint(remaining_ids)
-    assert journal.count() == 0
-
-
-# ---------------------------------------------------------------------------
-# Malformed-statement robustness
-#
-# ``unpack_journal_row`` raises :class:`MalformedStatementError` on a too-short
-# packed payload, and ``BaseJournalStore.flush_statements`` catches+logs+skips
-# so one corrupt row can't abort a whole flush.
-# ---------------------------------------------------------------------------
-
-
-def test_unpack_rejects_short_payload() -> None:
-    truncated = UNIT_SEP.join(["a"] * (UNPACK_MIN_FIELDS - 1))
-    with pytest.raises(MalformedStatementError):
-        unpack_journal_row(truncated)
-
-
-def test_unpack_accepts_canonical_pack_output() -> None:
-    stmt = make_statement("jane", "name", "Jane Doe")
-    out = unpack_journal_row(pack_journal_row(stmt))
-    assert out.entity_id == "jane"
-    assert out.value == "Jane Doe"
-
-
-def test_unpack_tolerates_extra_trailing_fields() -> None:
-    """``pack_journal_row`` emits 14 fields (trailing ``prop_type``);
-    ``unpack_journal_row`` only reads the first 13. Extra trailing fields
-    must not trip the validator."""
-    canonical = pack_journal_row(make_statement("x", "name", "v"))
-    parts = canonical.split(UNIT_SEP)
-    assert len(parts) >= UNPACK_MIN_FIELDS
-    unpack_journal_row(canonical)
-
-
-def test_storage_journal_flush_skips_malformed_rows(request, journal):
-    """A truncated ``data`` payload in the journal doesn't crash flush.
-
-    The malformed row is logged and skipped; good rows on either side are
-    yielded normally. Direct row-injection requires SQL access so this is
-    SQL-only – the API journal goes through the wire format and can't
-    produce a malformed row from the client side."""
-    param = request.node.callspec.params["journal"]
-    if param == "api":
-        pytest.skip("Malformed-row injection requires direct SQL access")
-
-    with journal.writer(SHARDS) as w:
-        w.add_statement(make_statement("good_1", "name", "Good One"))
-        w.add_statement(make_statement("good_2", "name", "Good Two"))
-
-    # Inject a bad row directly into the underlying SQL table.
-    with journal.engine.begin() as conn:
-        conn.execute(
-            insert(journal.table).values(
-                id="bad-1",
-                shard="0",
-                data=UNIT_SEP.join("abc"),  # < UNPACK_MIN_FIELDS after split
-                deleted_at=None,
-            )
-        )
-
+    assert flushed == initial_ids
     assert journal.count() == 3
 
-    flushed = list(journal.flush_statements())
-
-    # Two good rows survive; the malformed row was skipped.
-    assert len(flushed) == 2
-    assert {row.stmt.entity_id for row in flushed} == {"good_1", "good_2"}
-    # Flush remains destructive: nothing left in the journal.
+    remaining = {r["entity_id"] for r in flush(journal)}
+    assert remaining == concurrent_ids
     assert journal.count() == 0
 
 
 def test_storage_journal_fragment_round_trip(journal):
-    """Fragment rides through the journal as its own column and surfaces
-    on both JournalRow and StatementRow."""
+    """Fragment rides through the journal as its own column."""
     with journal.writer(SHARDS) as w:
         w.add_statement(make_statement("jane", "name", "Jane Doe"), fragment="row1")
         w.add_statement(make_statement("john", "name", "John Smith"))
 
-    rows = {row.id: row for row in journal.flush()}
-    fragments = {
-        unpack_journal_row(r.data).entity_id: r.fragment for r in rows.values()
-    }
-    assert fragments == {"jane": "row1", "john": ""}
-
-
-def test_storage_journal_flush_statements_fragment(journal):
-    """flush_statements stamps fragment onto the LakeStatement."""
-    with journal.writer(SHARDS) as w:
-        w.add_statement(make_statement("jane", "name", "Jane Doe"), fragment="row1")
-
-    rows = list(journal.flush_statements())
-    assert len(rows) == 1
-    assert rows[0].stmt.fragment == "row1"
+    rows = flush(journal)
+    assert {r["entity_id"]: r["fragment"] for r in rows} == {"jane": "row1", "john": ""}
 
 
 def test_storage_journal_same_id_multiple_fragments(journal):
     """The same statement content under distinct fragments (and without
-    one) is distinct rows – the primary key is (id, fragment)."""
+    one) stays distinct rows."""
     stmt = make_statement("jane", "name", "Jane Doe")
     with journal.writer(SHARDS) as w:
         w.add_statement(stmt)
@@ -554,47 +476,114 @@ def test_storage_journal_same_id_multiple_fragments(journal):
         w.add_statement(stmt, fragment="row2")
 
     assert journal.count() == 3
-    rows = list(journal.flush())
-    assert sorted(r.fragment for r in rows) == ["", "row1", "row2"]
-    assert len({r.id for r in rows}) == 1
+    rows = flush(journal)
+    assert sorted(r["fragment"] for r in rows) == ["", "row1", "row2"]
+    assert len({r["id"] for r in rows}) == 1
 
 
-def test_storage_journal_upsert_same_id_fragment(journal):
-    """Re-adding the same (id, fragment) upserts into one row."""
+def test_storage_journal_repeated_id_fragment_accumulates(journal):
+    """Re-adding the same (id, fragment) appends – nothing upserts."""
     stmt = make_statement("jane", "name", "Jane Doe")
     with journal.writer(SHARDS) as w:
         w.add_statement(stmt, fragment="row1")
     with journal.writer(SHARDS) as w:
         w.add_statement(stmt, fragment="row1")
 
-    assert journal.count() == 1
+    assert journal.count() == 2
 
 
-def test_storage_journal_writer_add_row(journal):
-    """``add_row`` buffers packed rows as-is: id and data are trusted, the
-    shard is re-derived against the writer's shard count, rows dedupe per
-    (id, fragment) within a batch, malformed data is rejected."""
-    packed = pack_journal_row(make_statement("jane", "name", "Jane Doe"))
-    wrong_shard = "99"
+def test_storage_journal_writer_keeps_entities_whole(journal, monkeypatch):
+    """An auto-insert never splits an entity from its checksum row.
+
+    Inserts commit per batch, so a batch boundary inside one entity would
+    land its properties without the ``BASE_ID`` row that closes it.
+    """
+    from ftm_lakehouse.storage.journal import base
+
+    monkeypatch.setattr(base, "WRITE_BATCH_SIZE", 2)
+    jane = EntityProxy.from_dict(
+        {
+            "id": "jane",
+            "schema": "Person",
+            "properties": {"name": ["Jane Doe"], "firstName": ["Jane"]},
+        }
+    )
     with journal.writer(SHARDS) as w:
-        w.add_row(JournalRow("row-a", wrong_shard, packed, None, ""))
-        w.add_row(JournalRow("row-a", wrong_shard, packed, None, ""))  # dedupes
-        w.add_row(JournalRow("row-a", wrong_shard, packed, None, "frag"))
-        with pytest.raises(MalformedStatementError):
-            w.add_row(JournalRow("row-b", "0", "too-short", None, ""))
+        w.add_entity(jane)
+
+    rows = flush(journal)
+    props = {r["prop"] for r in rows}
+    assert "id" in props  # the BASE_ID checksum row
+    assert {"name", "firstName"} <= props
+
+
+def test_storage_journal_api_cannot_flush():
+    """A remote journal is write-only for its client.
+
+    Draining one into a local parquet store is not a supported combination –
+    the server that holds the rows owns their flush, and a repository in api
+    mode delegates the whole thing to it.
+    """
+    store = _make_api_journal()
+    # the guard is on the call, not the first iteration
+    with pytest.raises(RuntimeError, match="not available in API mode"):
+        store.flush_batches()
+    with pytest.raises(RuntimeError, match="not available in API mode"):
+        store.iterate_entity("jane")
+    store.close()
+
+
+def test_storage_journal_writer_add_batch(journal):
+    """``add_batch`` stores packed rows as-is, but re-derives the shard.
+
+    The wire carries whatever the client packed; a stale shard config on the
+    sending side must not mis-route a partition.
+    """
+    stmt = LakehouseStatement.from_statement(make_statement("jane", "name", "Jane Doe"))
+    stmt.shard = "99"  # a stale shard config on the sending side
+    batch = statements_to_arrow([stmt, stmt], datetime.now(timezone.utc))
+    with journal.writer(SHARDS) as w:
+        w.add_batch(batch)
 
     assert journal.count() == 2
-    rows = list(journal.flush())
-    assert {r.id for r in rows} == {"row-a"}
-    assert sorted(r.fragment for r in rows) == ["", "frag"]
+    rows = flush(journal)
+    assert {r["id"] for r in rows} == {stmt.id}
     for row in rows:
-        assert row.shard == entity_shard("jane", SHARDS)
-        assert unpack_journal_row(row.data).value == "Jane Doe"
+        assert row["shard"] == entity_shard("jane", SHARDS)
+        assert row["value"] == "Jane Doe"
 
 
-def test_storage_journal_iterate_shard(journal):
-    """``iterate_shard`` yields only the live statements of one shard, skips
-    malformed rows, and is not implemented on the api journal."""
+def test_storage_journal_add_batch_rejects_foreign_schema(journal):
+    """A batch missing statement columns is refused, not silently stored."""
+    batch = pa.table({"nope": ["x"]})
+    with journal.writer(SHARDS) as w:
+        with pytest.raises(KeyError):
+            w.add_batch(batch)
+
+
+def test_storage_journal_add_batch_rejects_null_required_column(journal):
+    """A null in a required column is refused at the boundary.
+
+    The journal has no key, but it still has the schema: a row that could
+    not be read back – or that would blow up a partition value on write –
+    must not reach storage.
+    """
+    stmt = LakehouseStatement.from_statement(make_statement("jane", "name", "Jane"))
+    batch = statements_to_arrow([stmt], datetime.now(timezone.utc))
+    holed = batch.set_column(
+        batch.schema.get_field_index("origin"),
+        pa.field("origin", pa.string()),
+        pa.array([None], pa.string()),
+    )
+    with journal.writer(SHARDS) as w:
+        with pytest.raises(ValueError):
+            w.add_batch(holed)
+    assert journal.count() == 0
+
+
+def test_storage_journal_iterate_entity(journal):
+    """``iterate_entity`` yields the live statements of one entity, across
+    segments, and is not implemented on the api journal."""
     with journal.writer(SHARDS) as w:
         w.add_statement(make_statement("jane", "name", "Jane Doe"))
         w.add_statement(make_statement("john", "name", "John Smith"))
@@ -603,23 +592,105 @@ def test_storage_journal_iterate_shard(journal):
             datetime.now(timezone.utc),  # tombstone
         )
 
-    shard = entity_shard("jane", SHARDS)
     if isinstance(journal, ApiJournalStore):
-        with pytest.raises(NotImplementedError):
-            list(journal.iterate_shard(shard))
+        with pytest.raises(RuntimeError, match="not available in API mode"):
+            journal.iterate_entity("jane")
         return
 
-    with journal.engine.connect() as conn:
-        conn.execute(
-            insert(journal.table).values(
-                id="malformed", shard=shard, data="too-short", fragment=""
-            )
-        )
-        conn.commit()
+    values = {s.value for s in journal.iterate_entity("jane")}
+    assert values == {"Jane Doe"}  # live rows of that entity only
 
-    values = {s.value for s in journal.iterate_shard(shard)}
-    assert "Jane Doe" in values  # live row of the shard
-    assert "Jane" not in values  # tombstoned
-    assert "too-short" not in values  # malformed row skipped, not raised
-    if entity_shard("john", SHARDS) != shard:
-        assert "John Smith" not in values  # other shard
+    # an orphaned segment stays visible until it is drained
+    gen = journal.flush_batches()
+    next(gen)
+    gen.close()
+    assert journal._segments()
+    assert {s.value for s in journal.iterate_entity("jane")} == {"Jane Doe"}
+
+
+def test_storage_journal_flush_survives_a_failed_write(journal, request):
+    """A failed downstream write must not take the flush window with it.
+
+    The segment is dropped only once the consumer comes back for the next
+    batch, so a consumer that raises while writing leaves every row it has
+    not written yet in place.
+    """
+    param = request.node.callspec.params["journal"]
+    if param == "api":
+        pytest.skip("Server-side drain; the client cannot fail mid-stream here")
+
+    with journal.writer(SHARDS) as w:
+        for i in range(5):
+            w.add_statement(make_statement(f"e{i}", "name", f"Name {i}"))
+
+    with pytest.raises(RuntimeError):
+        for _ in journal.flush_batches():
+            raise RuntimeError("downstream write failed")
+
+    assert journal.count() == 5
+    assert len(flush(journal)) == 5
+    assert journal.count() == 0
+
+
+def test_storage_journal_concurrent_flushes_drain_once(concurrent_journal):
+    """Two flushes racing on one dataset: each row is drained exactly once.
+
+    Rotation alone does not serialize them – the second flush finds the live
+    table already empty and would drain the first one's segment, duplicating
+    every row and then failing on the double drop. The flush lock is what
+    makes the loser a no-op.
+    """
+    store = concurrent_journal
+    with store.writer(SHARDS) as w:
+        for i in range(3):
+            w.add_statement(make_statement(f"e{i}", "name", f"Name {i}"))
+
+    first = store.flush_batches()
+    rows = next(first).num_rows  # rotates and starts draining
+
+    assert collect_rows(store.flush_batches()) == []  # locked out
+
+    rows += sum(b.num_rows for b in first)
+    assert rows == 3
+    assert store.count() == 0
+    assert store._segments() == []
+
+
+@pytest.mark.skipif(not PSQL_URI, reason="needs PYTEST_POSTGRESQL_URI")
+def test_storage_journal_psql_append_only():
+    """The postgres journal is a keyless, index-free heap with no dead tuples."""
+    store = _make_psql_journal()
+    table = store.table.name
+
+    def scalar(sql: str) -> int:
+        with store.engine.connect() as conn:
+            return conn.exec_driver_sql(sql).scalar() or 0
+
+    assert scalar(f"SELECT count(*) FROM pg_indexes WHERE tablename = '{table}'") == 0
+    assert (
+        scalar(
+            "SELECT count(*) FROM pg_constraint "
+            f"WHERE conrelid = '{table}'::regclass AND contype IN ('p', 'u')"
+        )
+        == 0
+    )
+
+    def dead_tuples() -> int:
+        # summed in python: a LIKE pattern would need psycopg2's `%%` escape
+        with store.engine.connect() as conn:
+            rows = conn.exec_driver_sql(
+                "SELECT relname, n_dead_tup FROM pg_stat_user_tables"
+            ).fetchall()
+        return sum(n for name, n in rows if name.startswith(table))
+
+    before = dead_tuples()
+
+    with store.writer(SHARDS) as w:
+        for i in range(100):
+            w.add_statement(make_statement(f"e{i}", "name", f"Name {i}"))
+    assert len(collect_rows(store.flush_batches())) == 100
+
+    # no UPDATE and no DELETE anywhere in the write or claim path
+    assert dead_tuples() == before
+    store.clear()
+    store.dispose()

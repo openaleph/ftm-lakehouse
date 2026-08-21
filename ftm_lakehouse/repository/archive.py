@@ -158,8 +158,6 @@ class ArchiveRepository(DatasetHandle):
             info = resource.info()
             file = File.from_info(info, checksum)
 
-        file.checksum = checksum
-
         # patch File from given file props
         file_props: dict[str, Any] = {}
         for key in list(metadata.keys()):

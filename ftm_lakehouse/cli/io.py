@@ -172,9 +172,9 @@ def _bulk_import_rows(
     for row in rows:
         buffer.add(row)
         if len(buffer) >= bulk_size:
-            repo.write_rows(buffer.flush(), batch_size=None)
+            repo.write_batches(iter([buffer.flush()]))
     if buffer:
-        repo.write_rows(buffer.flush(), batch_size=None)
+        repo.write_batches(iter([buffer.flush()]))
 
 
 def import_entities_unsafe(

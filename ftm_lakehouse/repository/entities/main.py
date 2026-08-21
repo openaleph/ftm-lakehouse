@@ -17,7 +17,7 @@ from ftmq import C
 from ftmq.io import smart_read_proxies
 from ftmq.model.stats import DatasetStats
 from ftmq.query import M, Query
-from ftmq.store.lake import LakeStatement, pack_statement
+from ftmq.store.lake import LakeStatement
 from ftmq.types import StatementEntities, Statements, ValueEntities
 from rigour.time import utc_now
 
@@ -26,11 +26,11 @@ from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.logic.compress import compress_stream, decompress_stream
 from ftm_lakehouse.logic.entities.aggregate import aggregate_unsafe
-from ftm_lakehouse.model.statement import SHARDED_SCHEMA, StatementRow
+from ftm_lakehouse.model.statement import LakehouseStatement, statements_to_arrow
 from ftm_lakehouse.repository.base import DatasetHandle
 from ftm_lakehouse.repository.diff import ParquetDiffMixin, make_envelope
 from ftm_lakehouse.storage.journal import get_journal
-from ftm_lakehouse.storage.journal.base import BaseJournalWriter
+from ftm_lakehouse.storage.journal.base import BaseJournalWriter, StatementTables
 from ftm_lakehouse.storage.parquet import ParquetStore
 
 settings = Settings()
@@ -142,144 +142,119 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
     def flush(self) -> int:
         """Drain the journal into the parquet statement store.
 
-        Groups journal rows by ``(shard, bucket, origin)`` and appends one
-        sorted parquet file per partition via :meth:`write_statements`.
+        The journal holds the parquet statement columns, so this streams Arrow
+        batches from one store into the other via :meth:`write_batches`.
         Duplicates and tombstones land as new rows; call :meth:`merge`
         afterwards to collapse them.
 
         Returns:
             Number of statements appended.
         """
-        if self._journal.count() == 0:
-            self.log.debug("Journal is empty", journal=mask_uri(self._journal.uri))
-            # set tags for the initial run
-            if not self._tags.exists(tag.JOURNAL_FLUSHED):
-                self._tags.set(tag.JOURNAL_FLUSHED)
-            if not self._tags.exists(tag.STATEMENTS_UPDATED):
-                self._tags.set(tag.STATEMENTS_UPDATED)
-            return 0
-
         with self._tags.touch(tag.JOURNAL_FLUSHED), Took() as t:
             self.log.info("Flushing journal ...", journal=mask_uri(self._journal.uri))
-
-            total = self.write_statements(
-                self._journal.flush_statements(), now=utc_now()
+            total = self.write_batches(
+                self._journal.flush_batches(ordered=self.shards > 1)
             )
 
+        if total:
             self.log.info(
                 "Flushed statements from journal to lake",
                 count=total,
                 took=t.took,
                 journal=mask_uri(self._journal.uri),
             )
-
-            return total
+        elif not self._tags.exists(tag.STATEMENTS_UPDATED):
+            # initial run: give freshness comparisons a baseline
+            self._tags.set(tag.STATEMENTS_UPDATED)
+        return total
 
     @no_api
     def write_statements(
         self,
-        statements: Iterable[StatementRow],
+        statements: Iterable[LakehouseStatement],
         now: datetime | None = None,
         batch_size: int | None = WRITE_SHARD_BATCH,
     ) -> int:
         """Pack and append a shard-sorted stream of statements to parquet.
 
-        Input is an iterable of :class:`StatementRow` already ordered by
-        shard – exactly what :meth:`EntityBuffer.flush_buffer` and
-        :meth:`JournalStore.flush_statements` produce. Consecutive rows for
-        the same shard accumulate into one per-shard batch;
-        :meth:`ParquetStore.append` then splits each batch by bucket and
-        writes one parquet file per partition.
+        Input is an iterable of :class:`LakehouseStatement` already ordered
+        by shard – exactly what :meth:`EntityBuffer.flush_buffer` produces.
+        Consecutive statements of the same shard accumulate into one batch,
+        which :func:`statements_to_arrow` packs columnwise before
+        :meth:`write_batches` appends it.
 
-        This is the shared core of:
-
-        - :meth:`flush` (drains the journal),
-        - bare bulk-import paths in the CLI that bypass the journal entirely.
+        This is the safe bulk-import path (the CLI paths that bypass the
+        journal). Rows that are packed already – the journal drain, the
+        unsafe import – go to :meth:`write_batches` directly.
 
         Tombstones (rows with ``deleted_at`` set) get their ``last_seen``
-        bumped to ``deleted_at`` so they win the ``ROW_NUMBER() OVER (... ORDER
-        BY last_seen DESC)`` tiebreak against the live row in
+        bumped to ``deleted_at`` in the packer so they win the ``ROW_NUMBER()
+        OVER (... ORDER BY last_seen DESC)`` tiebreak in
         :meth:`ParquetStore.merge`.
 
         Args:
-            statements: Shard-sorted stream of :class:`StatementRow`.
+            statements: Shard-sorted stream of :class:`LakehouseStatement`.
             now: Default timestamp for missing ``first_seen`` /
                 ``last_seen``. Defaults to the current UTC time.
-            batch_size: Override batch size (memory cap) or set to ``None`` to
-                signal the caller already batches.
+            batch_size: Row cap per in-memory batch, or ``None`` to signal
+                the caller already batches.
 
         Returns:
             Number of statements written.
         """
-        if now is None:
-            now = utc_now()
+        return self.write_batches(
+            self._pack_shards(statements, now or utc_now(), batch_size)
+        )
 
-        def rows() -> Generator[SDict, None, None]:
-            for row in statements:
-                data = pack_statement(row.stmt)
-                data["first_seen"] = data.get("first_seen") or now
-                data["deleted_at"] = row.deleted_at
-                # Tombstones bump last_seen to the delete timestamp so they win
-                # the ROW_NUMBER ORDER BY last_seen DESC tiebreak in merge().
-                data["last_seen"] = row.deleted_at or data.get("last_seen") or now
-                data["shard"] = row.shard
-                yield data
+    def _pack_shards(
+        self,
+        statements: Iterable[LakehouseStatement],
+        now: datetime,
+        batch_size: int | None,
+    ) -> StatementTables:
+        """Pack a shard-sorted statement stream into per-shard tables."""
+        buffer: list[LakehouseStatement] = []
 
-        return self.write_rows(rows(), batch_size=batch_size)
+        def _pack() -> pa.Table:
+            table = statements_to_arrow(buffer, now)
+            buffer.clear()
+            return table
+
+        for stmt in statements:
+            full = batch_size is not None and len(buffer) >= batch_size
+            if buffer and (full or stmt.shard != buffer[-1].shard):
+                yield _pack()
+            buffer.append(stmt)
+
+        if buffer:
+            yield _pack()
 
     @no_api
-    def write_rows(
-        self,
-        rows: Iterable[SDict],
-        batch_size: int | None = WRITE_SHARD_BATCH,
-    ) -> int:
-        """Append a shard-sorted stream of packed row dicts to parquet.
+    def write_batches(self, tables: StatementTables) -> int:
+        """Append packed Arrow tables to parquet – the one write loop.
 
-        The shared emit loop under :meth:`write_statements` and the direct
-        target of the unsafe bulk-import path
-        (:mod:`ftm_lakehouse.logic.entities.explode`), which produces these
-        rows without any FtM object construction. Rows must carry every
-        :data:`~ftm_lakehouse.model.statement.SHARDED_SCHEMA` column plus
-        ``shard`` and arrive sorted by shard; consecutive rows of one shard
-        accumulate into a single batch and :meth:`ParquetStore.append`
-        splits each batch by bucket.
-
-        Memory is bounded by ``batch_size``: within a single shard, the
-        in-memory accumulator is emitted to parquet every ``batch_size``
-        rows so a pathologically large shard cannot OOM the writer.
+        Every path whose rows are packed already: the journal drain
+        (:meth:`JournalStore.flush_batches`), the unsafe bulk import
+        (:class:`~ftm_lakehouse.logic.entities.explode.RowBuffer`), and
+        :meth:`write_statements` once it has packed its own. Tables arrive in
+        :data:`~ftm_lakehouse.model.statement.SHARDED_SCHEMA` and go straight
+        to :meth:`ParquetStore.append` – one is durable before the producer
+        is asked for the next, which is what lets the journal drop a segment
+        it has handed over. Sizing is the producer's call; each table becomes
+        one parquet file per ``(shard, bucket, origin)`` partition it spans.
 
         Args:
-            rows: Shard-sorted stream of packed row dicts.
-            batch_size: Row cap per in-memory shard batch, or ``None`` to
-                signal the caller already batches.
+            tables: Stream of packed statement tables.
 
         Returns:
             Number of rows written.
         """
         total = 0
-        current_shard: str | None = None
-        buffer: list[SDict] = []
-
-        def _emit() -> None:
-            nonlocal total
-            if not buffer:
-                return
-            batch = pa.Table.from_pylist(buffer, schema=SHARDED_SCHEMA)
-            self._statements.append(batch)
-            total += len(batch)
-            buffer.clear()
-
-        for data in rows:
-            shard = data["shard"]
-            if current_shard is not None and current_shard != shard:
-                _emit()
-            if batch_size is not None:
-                if len(buffer) >= batch_size:
-                    _emit()
-            current_shard = shard
-            buffer.append(data)
-
-        _emit()
+        for table in tables:
+            if not table.num_rows:
+                continue
+            self._statements.append(table)
+            total += table.num_rows
         return total
 
     def merge(self, force: bool = False) -> None:
@@ -516,14 +491,11 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
             if stmt.id:
                 stmts_by_key[stmt.dedupe_key] = stmt
 
-        # Read from journal (may override parquet entries). The shard scan is
-        # index-assisted; filter by entity_id on the unpacked statements.
-        shard = path.entity_shard(entity_id, self.shards)
-        for lake_stmt in self._journal.iterate_shard(shard):
-            if lake_stmt.entity_id != entity_id:
-                continue
-            if lake_stmt.id:
-                stmts_by_key[lake_stmt.dedupe_key] = lake_stmt
+        # Read from journal (may override parquet entries) – typed columns,
+        # so the entity filter runs in SQL.
+        for stmt in self._journal.iterate_entity(entity_id):
+            if stmt.id:
+                stmts_by_key[stmt.dedupe_key] = stmt
 
         return list(stmts_by_key.values())
 

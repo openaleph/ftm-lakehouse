@@ -5,10 +5,16 @@ from ftm_lakehouse.storage.journal.api import ApiJournalStore, ApiJournalWriter
 from ftm_lakehouse.storage.journal.base import (
     BaseJournalStore,
     BaseJournalWriter,
-    JournalRow,
-    JournalRows,
+    RecordBatches,
+    StatementTables,
 )
-from ftm_lakehouse.storage.journal.sql import SqlJournalStore, SqlJournalWriter
+from ftm_lakehouse.storage.journal.sql import (
+    PostgresJournalStore,
+    SqliteJournalStore,
+    SqlJournalStore,
+    SqlJournalWriter,
+    sql_journal,
+)
 
 
 @cache
@@ -18,16 +24,19 @@ def get_journal(dataset: str, uri: str | None = None) -> BaseJournalStore:
     uri = uri or settings.resolved_journal_uri
     if settings.api_mode:
         return ApiJournalStore(dataset, uri)
-    return SqlJournalStore(dataset, uri)
+    return sql_journal(dataset, uri)
 
 
 __all__ = [
     "BaseJournalStore",
     "BaseJournalWriter",
-    "JournalRow",
-    "JournalRows",
+    "RecordBatches",
+    "StatementTables",
     "SqlJournalStore",
     "SqlJournalWriter",
+    "SqliteJournalStore",
+    "PostgresJournalStore",
+    "sql_journal",
     "ApiJournalStore",
     "ApiJournalWriter",
     "get_journal",
