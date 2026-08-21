@@ -197,8 +197,11 @@ def test_merge_fragment_supersession_single_value(now):
     assert out.num_rows == 1
     row = out.to_pylist()[0]
     assert row["id"] == "h2"
-    # first_seen folded to the group minimum, spanning superseded rows
-    assert row["first_seen"] == now
+    # `first_seen` folds per statement id, not across the supersession group:
+    # h2 is a different value than the h1 it replaced, so it keeps its own
+    # observation date. Folding it back to h1's would both misdate it and hide
+    # the update from `first_seen`-based diff change detection.
+    assert row["first_seen"] == t2
 
 
 def test_merge_fragment_supersession_multi_value(now):

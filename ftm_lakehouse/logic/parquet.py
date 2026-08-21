@@ -135,10 +135,19 @@ def _dedupe_sql(
       is idempotent. ``origin`` in the group key keeps the same fragment
       under two origins as two independent supersession groups.
 
-    Both branches fold ``first_seen`` to ``MIN(first_seen)`` over their
-    group via ``SELECT * REPLACE``, so the surviving row carries its
-    group's earliest observation (windows compute before ``QUALIFY``
+    Both branches fold ``first_seen`` to ``MIN(first_seen)`` over the rows
+    carrying the same *content* – the statement ``id`` – via ``SELECT *
+    REPLACE``, so re-importing identical data keeps its original observation
+    date and does not read as a change (windows compute before ``QUALIFY``
     filters, so dropped duplicates still contribute their timestamps).
+
+    The fragment branch folds by ``id`` too, not by its supersession group:
+    the group spans *different* values, so folding across it would stamp a
+    superseding value with the date of the row it replaced – both a false
+    ``first_seen`` and, because ``first_seen`` is what
+    :meth:`~ftm_lakehouse.repository.diff.ParquetDiffMixin.export_diff`
+    detects change with, a silently undiffable update. Only the ``QUALIFY``
+    windows below work at group scope, which is what supersession means.
 
     Args:
         source: Relation to read from – a ``delta_scan('...')`` clause
@@ -168,7 +177,7 @@ nonfragment_rows AS (
 fragment_rows AS (
     SELECT * REPLACE (
         MIN(first_seen) OVER (
-            PARTITION BY shard, bucket, origin, entity_id, prop, fragment
+            PARTITION BY shard, bucket, origin, entity_id, prop, fragment, id
         ) AS first_seen
     )
     FROM base
