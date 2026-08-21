@@ -130,7 +130,7 @@ description = "Happy Eyeballs for asyncio"
 optional = true
 python-versions = ">=3.10"
 groups = ["main"]
-markers = "extra == \"api\" or extra == \"http\" or extra == \"s3\" or extra == \"gcs\" or extra == \"azure\""
+markers = "extra == \"api\" or extra == \"http\" or extra == \"azure\" or extra == \"gcs\" or extra == \"s3\""
 files = [
     {file = "aiohappyeyeballs-2.7.1-py3-none-any.whl", hash = "sha256:9243213661e29250eb41368e5daa826fc017156c3b8a11440826b2e3ed376472"},
     {file = "aiohappyeyeballs-2.7.1.tar.gz", hash = "sha256:065665c041c42a5938ed220bdcd7230f22527fbec085e1853d2402c8a3615d9d"},
@@ -143,7 +143,7 @@ description = "Async http client/server framework (asyncio)"
 optional = true
 python-versions = ">=3.10"
 groups = ["main"]
-markers = "extra == \"api\" or extra == \"http\" or extra == \"s3\" or extra == \"gcs\" or extra == \"azure\""
+markers = "extra == \"api\" or extra == \"http\" or extra == \"azure\" or extra == \"gcs\" or extra == \"s3\""
 files = [
     {file = "aiohttp-3.14.3-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:eb0495d778817619273c108784292be161a924b9f5ae5cbbc70a2caa6838250b"},
     {file = "aiohttp-3.14.3-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:c3c200cf9757edd785051dc699c7ecbec22110dbfcb3fefc7a9f9695eda8ea7a"},
@@ -299,7 +299,7 @@ description = "aiosignal: a list of registered asynchronous callbacks"
 optional = true
 python-versions = ">=3.9"
 groups = ["main"]
-markers = "extra == \"api\" or extra == \"http\" or extra == \"s3\" or extra == \"gcs\" or extra == \"azure\""
+markers = "extra == \"api\" or extra == \"http\" or extra == \"azure\" or extra == \"gcs\" or extra == \"s3\""
 files = [
     {file = "aiosignal-1.4.0-py3-none-any.whl", hash = "sha256:053243f8b92b990551949e63930a839ff0cf0b0ebbe0597b0f3fb19e1a0fe82e"},
     {file = "aiosignal-1.4.0.tar.gz", hash = "sha256:f47eecd9468083c2029cc99945502cb7708b082c232f9aca65da147157b251c7"},
@@ -587,7 +587,7 @@ files = [
     {file = "attrs-26.1.0-py3-none-any.whl", hash = "sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309"},
     {file = "attrs-26.1.0.tar.gz", hash = "sha256:d03ceb89cb322a8fd706d4fb91940737b6642aa36998fe130a9bc96c985eff32"},
 ]
-markers = {main = "extra == \"api\" or extra == \"http\" or extra == \"s3\" or extra == \"gcs\" or extra == \"azure\""}
+markers = {main = "extra == \"api\" or extra == \"http\" or extra == \"azure\" or extra == \"gcs\" or extra == \"s3\""}
 
 [[package]]
 name = "aws-xray-sdk"
@@ -1908,7 +1908,7 @@ description = "A list-like structure which implements collections.abc.MutableSeq
 optional = true
 python-versions = ">=3.9"
 groups = ["main"]
-markers = "extra == \"api\" or extra == \"http\" or extra == \"s3\" or extra == \"gcs\" or extra == \"azure\""
+markers = "extra == \"api\" or extra == \"http\" or extra == \"azure\" or extra == \"gcs\" or extra == \"s3\""
 files = [
     {file = "frozenlist-1.8.0-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:b37f6d31b3dcea7deb5e9696e529a6aa4a898adc33db82da12e4c60a7c4d2011"},
     {file = "frozenlist-1.8.0-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:ef2b7b394f208233e471abc541cc6991f907ffd47dc72584acee3147899d6565"},
@@ -3571,6 +3571,8 @@ files = [
     {file = "lxml-6.1.2-cp38-cp38-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:af6585a466cee2c5a524f7fffc591844bd604a29fdd9cade964f548512b5ef7e"},
     {file = "lxml-6.1.2-cp38-cp38-manylinux_2_28_i686.whl", hash = "sha256:841630176c15fa5d3c5cd6f755435d3c5540a82e1dd2a7de1799401f92ee6d24"},
     {file = "lxml-6.1.2-cp38-cp38-musllinux_1_2_x86_64.whl", hash = "sha256:215bb3cc4be015ccac3c7d4f25eb7b941f857fe5b02c0e3504cca61f7fb12455"},
+    {file = "lxml-6.1.2-cp38-cp38-win32.whl", hash = "sha256:7c687fd8e558c7d169f6f1987b696f37824d3a097f291bffd0ab4a2ea2307dfb"},
+    {file = "lxml-6.1.2-cp38-cp38-win_amd64.whl", hash = "sha256:69df1856cb6c065e5bfd23adcc7408bfa6dcf32b0018373a99b0769bd86e2256"},
     {file = "lxml-6.1.2-cp39-cp39-macosx_10_9_universal2.whl", hash = "sha256:2dcc69e307e0916c7a0b552212010938d02a664d29b6bda75ab2bc5fa487c861"},
     {file = "lxml-6.1.2-cp39-cp39-macosx_10_9_x86_64.whl", hash = "sha256:243ecef7cb7415766dd742336cd5b8361a84c6f297e2773c865b783724cbbe74"},
     {file = "lxml-6.1.2-cp39-cp39-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:08f0c9ed7cded07c5e798b17c9c25bbba5d0650c8ff0a7f65f84c634966f0f10"},
@@ -4201,7 +4203,7 @@ description = "multidict implementation"
 optional = true
 python-versions = ">=3.9"
 groups = ["main"]
-markers = "extra == \"api\" or extra == \"http\" or extra == \"s3\" or extra == \"gcs\" or extra == \"azure\""
+markers = "extra == \"api\" or extra == \"http\" or extra == \"azure\" or extra == \"gcs\" or extra == \"s3\""
 files = [
     {file = "multidict-6.7.1-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:c93c3db7ea657dd4637d57e74ab73de31bccefe144d3d4ce370052035bc85fb5"},
     {file = "multidict-6.7.1-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:974e72a2474600827abaeda71af0c53d9ebbc3c2eb7da37b37d7829ae31232d8"},
@@ -5142,7 +5144,7 @@ description = "Accelerated property cache"
 optional = true
 python-versions = ">=3.10"
 groups = ["main"]
-markers = "extra == \"api\" or extra == \"http\" or extra == \"s3\" or extra == \"gcs\" or extra == \"azure\""
+markers = "extra == \"api\" or extra == \"http\" or extra == \"azure\" or extra == \"gcs\" or extra == \"s3\""
 files = [
     {file = "propcache-0.5.2-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:d5a81be28596d6559f6131ef33e10200de6e17643b3c74ce03f9eb103be6ae8b"},
     {file = "propcache-0.5.2-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:29cbaac5ea0212663e6845e04b5e188d5a6ae6dd919810ac835bf1d3b42c3f4c"},
@@ -7821,7 +7823,7 @@ description = "Yet another URL library"
 optional = true
 python-versions = ">=3.10"
 groups = ["main"]
-markers = "extra == \"api\" or extra == \"http\" or extra == \"s3\" or extra == \"gcs\" or extra == \"azure\""
+markers = "extra == \"api\" or extra == \"http\" or extra == \"azure\" or extra == \"gcs\" or extra == \"s3\""
 files = [
     {file = "yarl-1.24.5-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:88f50c94e21a0a7f14042c015b0eba1881af78562e7bf007e0033e624da59750"},
     {file = "yarl-1.24.5-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:6efbccc3d7f75d5b03105172a8dc86d82ba4da86817952529dd93185f4a88be2"},
@@ -7936,25 +7938,25 @@ propcache = ">=0.2.1"
 
 [[package]]
 name = "zensical"
-version = "0.0.55"
+version = "0.0.56"
 description = "A modern static site generator built by the creators of Material for MkDocs"
 optional = false
 python-versions = ">=3.10"
 groups = ["dev"]
 files = [
-    {file = "zensical-0.0.55-cp310-abi3-macosx_10_12_x86_64.whl", hash = "sha256:b53d213126402fec053b59e68122198a92caec6e53ac9673e7b2c27008acccb7"},
-    {file = "zensical-0.0.55-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:bbe0bdafab130bd5a9444adccf3330e056388eedb82681ffa51c6c476264688b"},
-    {file = "zensical-0.0.55-cp310-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:5a699bc5711ddc51a7362b5875d88bcdb9eea018dd76b241920dfeff9fd14abd"},
-    {file = "zensical-0.0.55-cp310-abi3-manylinux_2_17_armv7l.manylinux2014_armv7l.whl", hash = "sha256:0e5f8a734d3b1d964de4e81f257f7ddb69c79b23178df6713d56eea97e9ddbdf"},
-    {file = "zensical-0.0.55-cp310-abi3-manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:f83fd50c61c42a9a37510843b1de07652f8ec5df8cc245382cfc2e592c7d6f83"},
-    {file = "zensical-0.0.55-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:d7a970fe0f2512261d60f64ebcc9b9e2dbce4a96f520a4dac21a980881b9284d"},
-    {file = "zensical-0.0.55-cp310-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:7b9b6c27080d3976ef7e2b9ac211a4f6f0a446e104a01114889a0992f571da56"},
-    {file = "zensical-0.0.55-cp310-abi3-musllinux_1_2_armv7l.whl", hash = "sha256:588b14322d55652d83de551c7fcd8a377c65753a4f393a88b359fd92738efe1e"},
-    {file = "zensical-0.0.55-cp310-abi3-musllinux_1_2_i686.whl", hash = "sha256:79e9ce4195f8d7b0a7d364f9adc1a98bdb4c5f213985edd6fa75d7e3359e8616"},
-    {file = "zensical-0.0.55-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:bc8d2f8a343311f668c96aced77ca679144d62dc0f191dadbd9d7bc84e980295"},
-    {file = "zensical-0.0.55-cp310-abi3-win32.whl", hash = "sha256:c63d6d925b69e5e115a96e6981e2c24194abda3757e65fb5ff843329f1b8bdfb"},
-    {file = "zensical-0.0.55-cp310-abi3-win_amd64.whl", hash = "sha256:cbe65f11dab3f019fc047ddbf147b6f6ac8f6e2a83232c8be6d65fa7c50ee7df"},
-    {file = "zensical-0.0.55.tar.gz", hash = "sha256:adc4b5c963385ffa22b18b999c7cfb74689670170276fb1370fe70f78314b431"},
+    {file = "zensical-0.0.56-cp310-abi3-macosx_10_12_x86_64.whl", hash = "sha256:5135ea3aa5d1358503fc1903e866c191873b138028bc1ab170abac3a4b537ffe"},
+    {file = "zensical-0.0.56-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:a22ae2329ba755c6e58e1fe5967ca429d580d346a73cf467ad5185377e2cf809"},
+    {file = "zensical-0.0.56-cp310-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:03c70ef328e31cce0e31739acdd6679e9272bc7a3016ca5eafaa16dcfda460c9"},
+    {file = "zensical-0.0.56-cp310-abi3-manylinux_2_17_armv7l.manylinux2014_armv7l.whl", hash = "sha256:1ffc50153a50292078357a5052e7a6b3e20a818523792ffcbeace70418b761eb"},
+    {file = "zensical-0.0.56-cp310-abi3-manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:88bba0e339d36647ce638a42b4ba96f2521b59ea54be74c314340be7e401f94b"},
+    {file = "zensical-0.0.56-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:8b7a37f6ac38ac218e3e0dd311b58c468603963e38ee23f2e25672dcd6e9c17b"},
+    {file = "zensical-0.0.56-cp310-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:5f6d850bce3184422b37b9d98ef4d123047a47446844793251cabc04bd55f8f0"},
+    {file = "zensical-0.0.56-cp310-abi3-musllinux_1_2_armv7l.whl", hash = "sha256:d18944a4a111050b8f571e73d4e2475d7ce62ce78b64f09bcf33bb11cc346e1c"},
+    {file = "zensical-0.0.56-cp310-abi3-musllinux_1_2_i686.whl", hash = "sha256:3937029ec5091d577c2a05ebccd38fde97fab28662d165ead66d566689b2a6df"},
+    {file = "zensical-0.0.56-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:346a1cdbad157633d185f79039a97c8b4f8c2b40be7d7efd56d72622f40247b0"},
+    {file = "zensical-0.0.56-cp310-abi3-win32.whl", hash = "sha256:a06681046f74b5bdc506d22af8fcef505b2450e45538c7f01a5e028f4e50c6f7"},
+    {file = "zensical-0.0.56-cp310-abi3-win_amd64.whl", hash = "sha256:c557985f12d042c15dcb7d577543d81ceee9281f96d591d265310b673437a325"},
+    {file = "zensical-0.0.56.tar.gz", hash = "sha256:c359163800d1c3a8c39af48f4e2869fcfc2b4fc00d28652bd2a5b0330c36530c"},
 ]
 
 [package.dependencies]
@@ -7990,4 +7992,4 @@ s3 = ["s3fs"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<3.15"
-content-hash = "f205008801a211b94e4db5fcc3a97911fb94680df498d849d54143e89e88e13e"
+content-hash = "3e450a34701349ee4a7ff7e391f9b15613e22b3eae5d0bdf3de675f24fb28da9"
