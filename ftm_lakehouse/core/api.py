@@ -4,6 +4,7 @@ from functools import cache, wraps
 from typing import Callable, Generator, TypeVar
 
 import httpx
+from anystore.decorators import error_handler
 from anystore.logic.uri import join_uri
 from anystore.store.resource import UriResource
 from anystore.types import Uri
@@ -15,6 +16,9 @@ from ftm_lakehouse.core.settings import Settings, __version__
 F = TypeVar("F", bound=Callable)
 
 USER_AGENT = f"ftm-lakehouse/{__version__}"
+
+MAX_RETRIES = 5
+"""Attempts per api request before the error propagates."""
 
 _default_headers: dict[str, str] = {"User-Agent": USER_AGENT}
 _settings = Settings()
@@ -55,7 +59,22 @@ class LakehouseApi(UriResource):
     def make_request(
         self, url: str, method: str = "GET", **kwargs  # noqa: ANN003
     ) -> httpx.Response:
-        res = self.client.request(method, url, **kwargs)
+        """Perform one api request, retrying transient failures.
+
+        Raises:
+            httpx.HTTPStatusError: On a 4xx, or a 5xx that outlived its retries.
+            httpx.HTTPError: On a transport failure that outlived its retries.
+        """
+
+        def _request() -> httpx.Response:
+            res = self.client.request(method, url, **kwargs)
+            if res.status_code >= 500:
+                res.raise_for_status()
+            return res
+
+        res: httpx.Response = error_handler(max_retries=MAX_RETRIES, do_raise=True)(
+            _request
+        )()
         res.raise_for_status()
         return res
 
