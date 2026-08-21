@@ -317,8 +317,8 @@ class ParquetStore:
             self._store, key=path.LOCK, max_retries=self.settings.lock_max_retries
         )
 
-    def _await(self, ready: Callable[[], bool], what: str) -> None:
-        """Block until ``ready()`` is true, with the fence's retry bound.
+    def _fence_retry(self, attempt: Callable[[], None]) -> None:
+        """Retry ``attempt`` until it stops raising, with the fence's bound.
 
         The retry policy is anystore's ``error_handler`` with
         ``backoff_factor=1`` – the same engine ``Lock`` acquisition composes:
@@ -328,6 +328,14 @@ class ParquetStore:
         in total before the ``RuntimeError`` propagates (``do_raise=True`` –
         without it a still-busy fence would silently pass).
         """
+        error_handler(
+            max_retries=self.settings.lock_max_retries,
+            backoff_factor=1,
+            do_raise=True,
+        )(attempt)()
+
+    def _await(self, ready: Callable[[], bool], what: str) -> None:
+        """Block until ``ready()`` is true, with the fence's retry bound."""
 
         def check() -> None:
             if not ready():
@@ -336,11 +344,7 @@ class ParquetStore:
                     "the fence via `ftm-lakehouse maintenance unlock`."
                 )
 
-        error_handler(
-            max_retries=self.settings.lock_max_retries,
-            backoff_factor=1,
-            do_raise=True,
-        )(check)()
+        self._fence_retry(check)
 
     def _append_markers(self) -> list[str]:
         """Keys of all currently registered append markers."""
@@ -379,11 +383,7 @@ class ParquetStore:
                     "`ftm-lakehouse maintenance unlock`."
                 )
 
-        error_handler(
-            max_retries=self.settings.lock_max_retries,
-            backoff_factor=1,
-            do_raise=True,
-        )(register)()
+        self._fence_retry(register)
         try:
             yield
         finally:
@@ -472,10 +472,10 @@ class ParquetStore:
         once in :meth:`_ensure_table` (under the exclusive lock, so two
         racing imports can't both commit version ``0``); the write loop
         itself always appends. Each touched ``(shard, bucket, origin)``
-        partition is stamped with a ``last_updated`` freshness tag *before*
-        the Delta writes so a later :meth:`merge` can skip partitions that
-        didn't change – see :meth:`_mark_updated` for the crash-safety
-        ordering.
+        partition is stamped with a ``last_updated`` freshness tag inside
+        the fence and *before* the Delta writes, so a later :meth:`merge`
+        can skip partitions that didn't change – see :meth:`_mark_updated`
+        for why both halves of that ordering are load-bearing.
 
         Args:
             batch: PyArrow table with the columns of
@@ -493,9 +493,9 @@ class ParquetStore:
             shards=shards,
         )
         with self._tags.touch(tag.STATEMENTS_UPDATED):
-            self._mark_updated(batch)
             self._ensure_table()
             with self._append_fence():
+                self._mark_updated(batch)
                 for bucket in buckets:
                     sub = batch.filter(pc.equal(batch["bucket"], bucket))
                     write_deltalake(
@@ -517,13 +517,20 @@ class ParquetStore:
         against its ``last_optimized`` to decide whether the partition
         needs rewriting.
 
-        Called at the head of :meth:`append`, inside the write fence but
-        *before* the Delta commits – the conservative crash ordering: a
-        writer dying mid-append leaves at worst a dirty tag with no data
-        (one harmless extra merge), never committed data in a
-        clean-looking partition that merge would skip forever (reads
-        depend on merge for correctness, so a permanently skipped
-        partition would surface duplicates indefinitely).
+        Called *inside* the append fence and *before* the Delta commits.
+        Both halves matter, and the failure they prevent is the same one:
+        a partition that looks clean while holding un-merged rows, which a
+        default :meth:`merge` then skips forever (reads depend on merge
+        for correctness, so it would surface duplicates indefinitely).
+
+        - Before the commits, so a writer dying mid-append leaves at worst
+          a dirty tag with no data – one harmless extra merge.
+        - Inside the fence, so a :meth:`merge` cannot stamp
+          ``last_optimized`` between this tag and the commits it belongs
+          to. Outside the fence that interleaving is reachable: the
+          appender stamps ``last_updated``, gets locked out of the fence
+          by the in-flight merge, and commits its rows only after that
+          merge has stamped a *newer* ``last_optimized`` over them.
         """
         partitions = batch.select(PARTITIONS).group_by(PARTITIONS).aggregate([])
         for shard, bucket, origin in zip(
@@ -532,6 +539,30 @@ class ParquetStore:
             partitions["origin"].to_pylist(),
         ):
             self._tags.set(tag.statements_partition_updated(shard, bucket, origin))
+
+    @property
+    def needs_merge(self) -> bool:
+        """Whether any partition has been written to since its last merge.
+
+        Reads are canonical only on a merged store – the live ``statement``
+        view does no read-time dedupe – so paths that publish canonical rows
+        (:meth:`~ftm_lakehouse.repository.diff.ParquetDiffMixin.export_diff`)
+        check this first.
+
+        The dataset-level ``statements/last_optimized`` tag cannot answer it:
+        :class:`~ftm_lakehouse.operation.maintenance.OptimizeOperation` stamps
+        that with its *start* time while :meth:`merge` bumps
+        ``statements/last_updated`` on completion, so the dataset pair reads
+        stale right after a successful optimize. The per-partition tags are
+        the ones :meth:`merge` itself compares, stamped in the order that
+        makes the comparison sound.
+        """
+        for shard, bucket, origin in self._list_partitions():
+            updated = tag.statements_partition_updated(shard, bucket, origin)
+            optimized = tag.statements_partition_optimized(shard, bucket, origin)
+            if not self._tags.is_latest(optimized, [updated]):
+                return True
+        return False
 
     def merge(self, force: bool = False) -> None:
         """Collapse duplicates and reap expired tombstones, partition by partition.
@@ -636,11 +667,14 @@ class ParquetStore:
                         slices=len(ranges),
                     )
             if merged:
-                # A rewrite changes the store's logical content (duplicates
-                # collapse, deletes apply), so consumers keyed on
-                # STATEMENTS_UPDATED - exports, statistics, the fresh-CSV
-                # shortcut - must go stale and re-run after an optimize.
-                self._tags.set(tag.STATEMENTS_UPDATED)
+                # A rewrite changes the store's logical *canonical* content
+                # (duplicates collapse, deletes apply), which is what every
+                # downstream consumer reads - exports, statistics, diffs. They
+                # key on STATEMENTS_OPTIMIZED, stamped here on completion, so
+                # they go stale exactly when the canonical content moved.
+                # STATEMENTS_UPDATED stays the append-side clock: it says rows
+                # landed, not that they are canonical yet.
+                self._tags.set(tag.STATEMENTS_OPTIMIZED)
         self.log.info(
             "Merge complete.",
             merged=merged,
@@ -904,19 +938,3 @@ class ParquetStore:
             EntityPayload instances
         """
         yield from aggregate_unsafe(self._statement_data(q), self.dataset)
-
-    def _execute_sql(self, sql: str) -> Iterator[StatementDict]:
-        """Stream raw-SQL results as ``StatementDict`` rows.
-
-        Counterpart to ``LakeStore._execute`` for SQL strings the
-        SQLAlchemy layer cannot express (the dedupe CTEs of
-        :func:`~ftm_lakehouse.logic.parquet.build_changed_sql`). The
-        cursor stays pinned in this generator's frame while its result
-        streams via ``fetchmany``.
-        """
-        with self._lake.cursor() as cur:
-            res = cur.execute(sql)
-            cols = [d[0] for d in res.description]
-            while rows := res.fetchmany(100_000):
-                for row in rows:
-                    yield cast(StatementDict, dict(zip(cols, row)))
