@@ -1,5 +1,6 @@
 """Arrow IPC framing for the http api."""
 
+import io
 from datetime import datetime, timezone
 
 import pyarrow as pa
@@ -56,6 +57,18 @@ def test_core_arrow_writes_a_chunk_per_message():
     chunks = list(serialize_batches([chunked], SHARDED_SCHEMA))
     assert len(chunks) > 1  # one per chunk, plus the end-of-stream marker
     assert read(b"".join(chunks)).equals(table)
+
+
+def test_core_arrow_stream_is_compressed():
+    """Buffers go out compressed – the uplink is the write path's bottleneck,
+    not the packing."""
+    table = make_table()
+    payload = serialize_table(table)
+    plain = io.BytesIO()
+    with pa.ipc.new_stream(plain, table.schema) as writer:
+        writer.write(table)
+    assert len(payload) * 2 < len(plain.getvalue())
+    assert read(payload).equals(table)
 
 
 def test_core_arrow_empty_stream_carries_the_schema():
