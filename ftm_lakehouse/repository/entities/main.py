@@ -215,7 +215,6 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
     @no_api
     def export_statements_csv(self) -> None:
         """Export the statement store to the ``statements.csv`` artifact."""
-        self._store.ensure_parent(self.EXPORTS_STATEMENTS)
         self._statements.export_csv(self.EXPORTS_STATEMENTS)
 
     @property
@@ -329,8 +328,6 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
         Compression comes from :attr:`compression` (the dataset's config), not
         from the caller.
         """
-        self._store.ensure_parent(self.ENTITIES_JSON)
-
         statements_csv_uri = self._fresh_statements_csv()
         if statements_csv_uri is not None:
             rows = self._stream_statements_csv(statements_csv_uri)
