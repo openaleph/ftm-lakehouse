@@ -1,5 +1,7 @@
 """JournalStore - SQL statement buffer for write-ahead logging."""
 
+from __future__ import annotations
+
 import random
 import threading
 import time
@@ -10,7 +12,6 @@ from typing import Any, Generator
 from uuid import uuid4
 
 import pyarrow as pa
-from adbc_driver_postgresql.dbapi import Connection
 from anystore.logging import get_logger
 from ftmq.util import datetime_iso
 from rigour.time import utc_now
@@ -37,8 +38,11 @@ from ftm_lakehouse.storage.journal.base import (
 
 try:  # optional `postgres` extra – ADBC does the Arrow row IO on postgres
     from adbc_driver_postgresql import dbapi as adbc_pg
+
+    Connection = adbc_pg.Connection
 except ImportError:  # pragma: no cover
     adbc_pg = None
+    Connection = Any
 
 log = get_logger(__name__)
 
