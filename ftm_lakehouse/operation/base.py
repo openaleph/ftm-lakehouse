@@ -68,21 +68,50 @@ class DatasetJobOperation(DatasetHandle, Generic[DJ]):
     def handle(self, run: JobRun, *args, **kwargs) -> None:
         raise NotImplementedError
 
+    def prepare(self) -> None:
+        """Bring the dataset into the state :meth:`handle` reads from.
+
+        Runs *before* the freshness check and before the target tag's window
+        opens, which is what makes it usable at all: :meth:`Tags.touch` stamps
+        the target with the timestamp it *entered*, so preparation that writes
+        a dependency tag from inside the window would mark the result stale the
+        moment it is written. Ahead of the window, the timestamps stay honest –
+        prepare moves the dependency, then the target is stamped after it.
+
+        No-op by default; :class:`~ftm_lakehouse.operation.export.
+        ExportOperation` drains the journal and merges the statement store
+        here, since exports read canonical rows.
+        """
+
+    def is_fresh(self) -> bool:
+        """Whether the target is newer than every dependency – nothing to do.
+
+        Tag-pair comparison by default. Override where the question is not a
+        pair of timestamps (``OptimizeOperation`` asks the statement store
+        directly).
+        """
+        target = self.get_target()
+        dependencies = self.get_dependencies()
+        if not (target and dependencies):
+            return False
+        return self._tags.is_latest(target, dependencies)
+
     def _run_local(self, force: bool | None = False, *args, **kwargs) -> DJ:
-        """Core run logic – orchestration + handle()."""
+        """Core run logic – prepare() + orchestration + handle()."""
         target = self.get_target()
         dependencies = self.get_dependencies()
 
+        self.prepare()
+
         if not force:
-            if target and dependencies:
-                if self._tags.is_latest(target, dependencies):
-                    self.job.log.info(
-                        f"Already up-to-date: `{target}`, skipping ...",
-                        target=target,
-                        dependencies=dependencies,
-                    )
-                    self.job.stop()
-                    return self.job
+            if self.is_fresh():
+                self.job.log.info(
+                    f"Already up-to-date: `{target}`, skipping ...",
+                    target=target,
+                    dependencies=dependencies,
+                )
+                self.job.stop()
+                return self.job
 
         # Execute: Store target tag and job result on successful context leave
         with self.jobs.run(self.job) as run, self._tags.touch(target) as now:

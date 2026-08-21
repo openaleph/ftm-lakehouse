@@ -35,6 +35,19 @@ class OptimizeOperation(DatasetJobOperation[OptimizeJob]):
     target = tag.STATEMENTS_OPTIMIZED
     dependencies = [tag.STATEMENTS_UPDATED]
 
+    def is_fresh(self) -> bool:
+        """Ask the statement store whether any partition is unmerged.
+
+        The tag pair cannot answer this one. ``merge`` stamps
+        :data:`~ftm_lakehouse.core.conventions.tag.STATEMENTS_OPTIMIZED` on
+        completion while the target tag records when this operation *started*,
+        so a successful optimize always finishes behind its own dependency and
+        reads as stale – costing a redundant full pass every time. The
+        per-partition tags :meth:`ParquetStore.merge` compares internally are
+        the sound predicate, and ``needs_merge`` is that comparison.
+        """
+        return not self.entities.needs_merge
+
     def handle(self, run: JobRun[OptimizeJob], force: bool = False, **kwargs) -> None:
         self.entities.merge(force)
         run.job.done += 1

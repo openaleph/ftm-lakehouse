@@ -163,6 +163,9 @@ def test_repository_document_export_diff(tmp_path, fixtures_path):
     entities.flush()
     assert entities._statements.version == 2
 
+    # a diff reads canonical rows, so the store has to be merged first
+    entities.merge()
+
     # Create initial diff
     diff_name_1 = repo.export_diff()
     assert diff_name_1 is not None
@@ -182,6 +185,7 @@ def test_repository_document_export_diff(tmp_path, fixtures_path):
     file3.write_text("new content")
     _archive_with_entities(archive, entities, file3)
     entities.flush()
+    entities.merge()  # a diff reads canonical rows
 
     # Incremental diff - captures changes via translog
     diff_name_2 = repo.export_diff()
@@ -209,9 +213,11 @@ def test_repository_document_export_diff_no_changes(tmp_path, fixtures_path):
     # Create data and flush
     _archive_with_entities(archive, entities, fixtures_path / "src" / "utf.txt")
     entities.flush()  # v0
+    entities.merge()  # a diff reads canonical rows
 
     _archive_with_entities(archive, entities, fixtures_path / "src" / "companies.csv")
     entities.flush()  # v1
+    entities.merge()  # a diff reads canonical rows
 
     # Export documents.csv for initial diff
     repo.export_csv()

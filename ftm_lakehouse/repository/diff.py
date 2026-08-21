@@ -2,7 +2,7 @@
 
 from abc import abstractmethod
 from datetime import datetime, timezone
-from functools import cached_property
+from itertools import chain
 from typing import Iterator
 
 from anystore.types import SDict
@@ -38,7 +38,7 @@ class ParquetDiffMixin:
 
     _diff_base_path: str
 
-    @cached_property
+    @property
     def _statements(self) -> ParquetStore:
         """Provided by the implementing repository (a ``cached_property``)."""
         raise NotImplementedError
@@ -49,13 +49,17 @@ class ParquetDiffMixin:
         ...
 
     @abstractmethod
-    def _write_diff(
-        self, entity_ids: Iterator[str], since: datetime, ts: datetime
-    ) -> str:
-        """Write the diff file for entities changed since ``since`` and return
-        its uri. ``entity_ids`` is the changed set (used to derive deletes);
-        ``since`` lets an impl re-derive the change set in SQL rather than
-        binding a large id list."""
+    def _write_diff(self, entity_ids: Iterator[str], ts: datetime) -> tuple[str, int]:
+        """Write the diff file for the given changed entity ids.
+
+        ``entity_ids`` streams in from :meth:`_get_changed_ids`; the impl owns
+        the one materialization the DEL derivation needs (it has to know which
+        changed ids produced no live entity), which is also where the returned
+        count comes from.
+
+        Returns:
+            ``(uri of the written diff, number of changed entities)``.
+        """
         ...
 
     @abstractmethod
@@ -88,13 +92,22 @@ class ParquetDiffMixin:
         self._tags.put(self._diff_state_key, f"{ts_str}:{version}")
 
     def export_diff(self) -> str | None:
-        """Export only data changed since last diff export using the translog.
+        """Export only the data changed since the last diff export.
 
-        Uses the translog's first_seen timestamps to identify changed entities
-        since the last export. Also detects soft deletes via translog deleted_at.
+        Changed entities are identified by their statements' ``first_seen``;
+        soft deletes surface through ``deleted_at`` on the raw statement
+        view (:attr:`ParquetStore.source_raw`). Each changed entity is then
+        re-read *whole*, so an ADD carries its current state.
+
+        Requires an optimized store: reads are canonical only after ``merge``
+        (the live view does no read-time dedupe), and change detection reads
+        ``first_seen``, which ``merge`` folds per statement id.
 
         Returns:
             Timestamp string of the created diff, or None if nothing created
+
+        Raises:
+            RuntimeError: If the statement store has un-merged writes.
         """
         with self._tags.touch(self._diff_base_path) as now:
             current_version = self._statements.version
@@ -102,6 +115,18 @@ class ParquetDiffMixin:
             # No table yet - nothing to diff
             if current_version is None:
                 return
+
+            # A diff publishes each changed entity's current state, which the
+            # live view only reports correctly once `merge` has collapsed
+            # duplicates and applied tombstones. On an un-merged store it
+            # would emit superseded values and miss deletes - refuse rather
+            # than publish a wrong delta.
+            if self._statements.needs_merge:
+                raise RuntimeError(
+                    f"Cannot export `{self._diff_base_path}`: the statement "
+                    "store has un-merged writes and a diff publishes canonical "
+                    "entities. Run `ftm-lakehouse maintenance optimize` first."
+                )
 
             state = self._get_diff_state()
 
@@ -118,21 +143,22 @@ class ParquetDiffMixin:
 
             last_timestamp, last_version = state
 
-            # Check if anything changed (main table or translog)
             main_changed = last_version < current_version
 
             if not main_changed:
                 return
 
-            # Collect changed entity IDs. If the version bumped but no entity
-            # has new first_seen >= last_timestamp (e.g. ``merge`` folded
-            # ``first_seen`` back), there's no diff content to write.
-            changed_entity_ids = list(self._get_changed_ids(last_timestamp))
-            if not changed_entity_ids:
+            # Changed entity IDs stream straight into the writer. Peek one
+            # first: if the version bumped but no entity has a new first_seen
+            # >= last_timestamp (e.g. ``merge`` folded ``first_seen`` back)
+            # there's no diff content, and no file should be opened for it.
+            changed_ids = self._get_changed_ids(last_timestamp)
+            first = next(changed_ids, None)
+            if first is None:
                 self._set_diff_state(now, current_version)
                 return
 
-            diff_uri = self._write_diff(iter(changed_entity_ids), last_timestamp, now)
+            diff_uri, changed = self._write_diff(chain([first], changed_ids), now)
 
             self._set_diff_state(now, current_version)
 
@@ -141,6 +167,6 @@ class ParquetDiffMixin:
                 f"Exported {self._diff_base_path} diff.",
                 version=ts_label,
                 diff_uri=mask_uri(diff_uri),
-                added_entities=len(changed_entity_ids),
+                added_entities=changed,
             )
             return ts_label

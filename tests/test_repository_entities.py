@@ -170,6 +170,9 @@ def test_repository_entities_export_diff(tmp_path):
     repo.flush()
     assert repo.version == 2
 
+    # a diff reads canonical rows, so the store has to be merged first
+    repo.merge()
+
     # Export entities.ftm.json (required for initial diff)
     smart_write_proxies(repo._store.open(path.ENTITIES_JSON, "wb"), repo.query())
 
@@ -193,6 +196,7 @@ def test_repository_entities_export_diff(tmp_path):
     with repo.writer() as writer:
         writer.add_entity(make_entity(BOB))
     repo.flush()
+    repo.merge()
 
     # Incremental diff - captures changes via translog
     diff_name_2 = repo.export_diff()
@@ -229,6 +233,7 @@ def test_repository_entities_export_diff(tmp_path):
     with repo.writer() as writer:
         writer.add_entity(make_entity(JANE_FIRSTNAME))
     repo.flush()
+    repo.merge()
 
     diff_name_3 = repo.export_diff()
     assert diff_name_3 is not None
@@ -237,7 +242,9 @@ def test_repository_entities_export_diff(tmp_path):
     )
     assert len(diff_files) == 3
 
-    # Find and verify the incremental diff contains only JANE
+    # Find and verify the incremental diff contains only JANE - and carries
+    # her whole current state, not just the statement that changed: consumers
+    # index an ADD payload wholesale, so a partial one would drop `name`
     diff_files_sorted = sorted(diff_files)
     with repo._store.open(diff_files_sorted[2]) as f:
         lines = f.readlines()
@@ -245,13 +252,18 @@ def test_repository_entities_export_diff(tmp_path):
     delta = json.loads(lines[0])
     assert delta["op"] == "ADD"
     assert delta["entity"]["id"] == "jane"
+    assert delta["entity"]["properties"] == {
+        "firstName": ["Jane"],
+        "name": ["Jane Doe"],
+    }
 
 
-@pytest.mark.parametrize("merge", [False, True])
-def test_repository_entities_export_diff_delete(tmp_path, merge):
-    """Deleting an entity produces a DEL op in the incremental diff – with
-    or without an intervening merge: the diff reads canonical rows via the
-    dedupe query, so flushed tombstones shadow their live rows either way."""
+def test_repository_entities_export_diff_delete(tmp_path):
+    """Deleting an entity produces a DEL op in the incremental diff.
+
+    The merge is what applies the tombstone – until it runs, the deleted
+    entity's rows are still live – which is why a diff requires an optimized
+    store (covered by ``..._requires_optimized_store``)."""
     from ftmq.io import smart_write_proxies
 
     repo = EntityRepository("test", tmp_path)
@@ -261,6 +273,7 @@ def test_repository_entities_export_diff_delete(tmp_path, merge):
         writer.add_entity(make_entity(JANE))
         writer.add_entity(make_entity(JOHN))
     repo.flush()
+    repo.merge()
 
     # Export entities.ftm.json (required for initial diff)
     entities_json_path = tmp_path / path.ENTITIES_JSON
@@ -270,14 +283,12 @@ def test_repository_entities_export_diff_delete(tmp_path, merge):
     diff_name_1 = repo.export_diff()
     assert diff_name_1 is not None
 
-    # Delete jane and flush the tombstones to parquet. The merge=True leg
-    # additionally collapses the partition (tombstones survive grace); the
-    # diff must emit the DEL in both cases.
+    # Delete jane, flush the tombstones and collapse the partition (the
+    # tombstone rows themselves survive the grace period).
     since = datetime.now(timezone.utc)
     repo.delete_entity("jane")
     repo.flush()
-    if merge:
-        repo.merge()
+    repo.merge()
 
     # jane is in changed entity ids
     assert list(repo._get_changed_ids(since)) == ["jane"]
@@ -334,10 +345,13 @@ def test_repository_entities_query_slice_multi_shard(tmp_path):
     assert len(names) == 8
 
 
-def test_repository_entities_export_diff_fragment_update_without_merge(tmp_path):
-    """An updated fragment emission diffs with only its latest values on an
-    un-merged store – the diff reads canonical (superseded) rows, not the
-    raw live view where both emissions still coexist."""
+def test_repository_entities_export_diff_fragment_update(tmp_path):
+    """An updated fragment emission diffs with only its latest values.
+
+    Supersession has dropped the shadowed emission, so it is not accumulated
+    into the ADD entity - and the superseding row keeps its own ``first_seen``
+    (``_dedupe_sql`` folds per statement id), so the update is detected at
+    all."""
     from ftmq.io import smart_write_proxies
 
     repo = EntityRepository("test", tmp_path)
@@ -354,6 +368,7 @@ def test_repository_entities_export_diff_fragment_update_without_merge(tmp_path)
     with repo.writer() as writer:
         writer.add_entity(jane_v1, fragment="row1")
     repo.flush()
+    repo.merge()
 
     entities_json_path = tmp_path / path.ENTITIES_JSON
     smart_write_proxies(str(entities_json_path), repo.query())
@@ -372,6 +387,7 @@ def test_repository_entities_export_diff_fragment_update_without_merge(tmp_path)
     with repo.writer() as writer:
         writer.add_entity(jane_v2, fragment="row1")
     repo.flush()
+    repo.merge()
 
     assert repo.export_diff() is not None
     diff_files = sorted(
@@ -402,6 +418,9 @@ def test_repository_entities_export_diff_no_changes(tmp_path):
     repo.flush()
     assert repo.version == 2
 
+    # a diff reads canonical rows, so the store has to be merged first
+    repo.merge()
+
     # Export entities.ftm.json for initial diff
     entities_json_path = tmp_path / path.ENTITIES_JSON
     smart_write_proxies(str(entities_json_path), repo.query())
@@ -417,3 +436,71 @@ def test_repository_entities_export_diff_no_changes(tmp_path):
     # Only one diff file should exist (initial)
     diff_files = list((tmp_path / path.DIFFS_ENTITIES).glob("*.delta.json"))
     assert len(diff_files) == 1
+
+
+def test_repository_entities_export_diff_partial_delete_keeps_the_entity(tmp_path):
+    """Tombstoning one statement diffs as an ADD of what remains, not a DEL.
+
+    ``DEL`` means the entity is gone entirely; the entity here still exists,
+    so a whole-entity DEL would tell consumers to drop something live.
+    """
+    from ftmq.io import smart_write_proxies
+
+    repo = EntityRepository("test", tmp_path)
+    jane = EntityProxy.from_dict(
+        {
+            "id": "jane",
+            "schema": "Person",
+            "properties": {"name": ["Jane Doe"], "firstName": ["Jane"]},
+        }
+    )
+    with repo.writer() as writer:
+        writer.add_entity(jane)
+    repo.flush()
+    repo.merge()
+
+    smart_write_proxies(str(tmp_path / path.ENTITIES_JSON), repo.query())
+    assert repo.export_diff() is not None
+
+    victim = next(
+        s
+        for s in repo.query_statements(Query(M(entity_id="jane")))
+        if s.prop == "firstName"
+    )
+    repo.delete_statement(victim)
+    repo.flush()
+    repo.merge()
+
+    assert repo.export_diff() is not None
+    diff_files = sorted(
+        (tmp_path / path.DIFFS_ENTITIES).glob("*.delta.json"), key=lambda p: p.name
+    )
+    ops = [json.loads(line) for line in open(diff_files[-1])]
+    assert len(ops) == 1
+    assert ops[0]["op"] == "ADD"
+    assert ops[0]["entity"]["properties"] == {"name": ["Jane Doe"]}
+
+
+def test_repository_entities_export_diff_requires_optimized_store(tmp_path):
+    """A diff on an un-merged store refuses instead of publishing wrong data.
+
+    Reads are canonical only after ``merge``: before it, a deleted entity's
+    rows are still live and a superseded fragment value still shows. A diff
+    publishes each changed entity's current state, so it must not run there.
+    """
+    repo = EntityRepository("test", tmp_path)
+    with repo.writer() as writer:
+        writer.add_entity(make_entity(JANE))
+    repo.flush()
+
+    assert repo._statements.needs_merge
+    with pytest.raises(RuntimeError, match="un-merged writes"):
+        repo.export_diff()
+
+    repo.merge()
+    assert not repo._statements.needs_merge
+
+    from ftmq.io import smart_write_proxies
+
+    smart_write_proxies(str(tmp_path / path.ENTITIES_JSON), repo.query())
+    assert repo.export_diff() is not None

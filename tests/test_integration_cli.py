@@ -1,3 +1,5 @@
+import csv
+
 import orjson
 from ftmq.util import make_entity
 from typer.testing import CliRunner
@@ -5,6 +7,7 @@ from typer.testing import CliRunner
 from ftm_lakehouse.catalog import get_dataset_model
 from ftm_lakehouse.cli import cli
 from ftm_lakehouse.repository.entities.main import EntityRepository
+from ftm_lakehouse.repository.factories import clear_caches, get_entities
 from tests.conftest import make_test_api
 from tests.shared import JANE
 
@@ -144,3 +147,43 @@ def test_cli_entities_iterate_query(tmp_path):
         ],
     )
     assert res.exit_code != 0
+
+
+def _iterate_statements(uri: str, name: str, out_csv) -> list[dict]:
+    res = runner.invoke(
+        cli, ["--uri", uri, "-d", name, "statements", "iterate", "-o", str(out_csv)]
+    )
+    assert res.exit_code == 0, res.output
+    with open(out_csv) as fh:
+        return list(csv.DictReader(fh))
+
+
+def test_cli_statements_iterate_local_and_api(tmp_path):
+    """``statements iterate`` streams raw row dicts on both backends.
+
+    The command has no api branch – ``query_statements_data`` is overridden
+    on the api repository. The two shapes differ by design (local reads the
+    physical view, so it carries ``shard`` / ``bucket`` / ``deleted_at``;
+    the api reads the wire format), but both carry the statement content and
+    the ``fragment`` supersession key that ``statements import`` reads back.
+    """
+    lake = tmp_path / "lake"
+    jane = make_entity(JANE)
+    repo = get_entities("iterate_ds", str(lake / "iterate_ds"))
+    repo.add(jane, origin="test")
+    repo.flush()
+
+    local_rows = _iterate_statements(str(lake), "iterate_ds", tmp_path / "local.csv")
+    clear_caches()
+    with make_test_api(lake) as base_url:
+        api_rows = _iterate_statements(base_url, "iterate_ds", tmp_path / "api.csv")
+
+    common = ["id", "entity_id", "prop", "schema", "value", "origin", "fragment"]
+    assert all(c in local_rows[0] for c in common)
+    assert all(c in api_rows[0] for c in common)
+
+    def content(rows):
+        return sorted(tuple(r[c] for c in common) for r in rows)
+
+    assert content(local_rows) == content(api_rows)
+    assert {r["entity_id"] for r in local_rows} == {jane.id}

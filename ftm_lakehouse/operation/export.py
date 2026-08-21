@@ -122,7 +122,7 @@ class ExportSpec:
     target: str
     handler: Callable[..., None]
     # Include JOURNAL_UPDATED so we don't skip when there's unflushed data
-    dependencies: tuple[str, ...] = (tag.STATEMENTS_UPDATED, tag.JOURNAL_UPDATED)
+    dependencies: tuple[str, ...] = (tag.STATEMENTS_OPTIMIZED,)
     requires_statements: bool = True
     """Skip the handler when the statement store is empty."""
 
@@ -149,9 +149,10 @@ EXPORTS: dict[ExportKind, ExportSpec] = {
 class ExportOperation(DatasetJobOperation[ExportJob]):
     """Export the dataset, dispatched by ``job.kind`` via :data:`EXPORTS`.
 
-    Checks if the journal needs to be flushed first. Skips if the last
-    export is newer than the last statements update (per-kind freshness
-    target / dependencies from the spec table).
+    Flushes and merges first (:meth:`prepare`) – exports read canonical
+    rows. Skips if the last export is newer than the last *optimize* (per-kind
+    freshness target / dependencies from the spec table): the canonical
+    content is what an export reflects, so that is what it goes stale against.
     """
 
     @property
@@ -164,20 +165,27 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
     def get_dependencies(self) -> list[str]:
         return list(self.spec.dependencies)
 
-    def ensure_flush(self) -> bool:
+    def prepare(self) -> None:
+        """Drain the journal and merge, so the export reads canonical rows.
+
+        Both are freshness-gated, so a store that is already current pays a
+        tag read and a partition listing. Running here rather than inside
+        :meth:`handle` is what keeps it honest: ``merge`` stamps
+        ``statements/last_optimized``, this export's own dependency, and the
+        target tag is stamped from when the window opened – which is after
+        this returns.
+        """
         if not self._tags.is_latest(tag.JOURNAL_FLUSHED, [tag.JOURNAL_UPDATED]):
             self.entities.flush()
-        if not self.entities.exists:
+        if self.entities.exists and self.entities.needs_merge:
+            self.entities.merge()
+
+    def handle(self, run: JobRun[ExportJob], *args: Any, **kwargs: Any) -> None:
+        if self.spec.requires_statements and not self.entities.exists:
             self.log.info(
                 "Statement store empty, skipping ...",
                 uri=mask_uri(self.entities.uri),
             )
-            return False
-        return True
-
-    def handle(self, run: JobRun[ExportJob], *args: Any, **kwargs: Any) -> None:
-        has_statements = self.ensure_flush()
-        if self.spec.requires_statements and not has_statements:
             return
         self.spec.handler(self, run, **kwargs)
         run.job.done = 1

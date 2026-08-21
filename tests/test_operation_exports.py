@@ -42,8 +42,11 @@ def test_operation_export_statements(tmp_path):
 
     assert op.get_target() == path.EXPORTS_STATEMENTS
     assert op.get_target() == "exports/statements.csv"
-    assert op.get_dependencies() == [tag.STATEMENTS_UPDATED, tag.JOURNAL_UPDATED]
-    assert op.get_dependencies() == ["statements/last_updated", "journal/last_updated"]
+    # exports reflect canonical content, so they go stale against the merge
+    # clock - not against raw appends or the journal, which `prepare()` has
+    # already resolved by the time the freshness check runs
+    assert op.get_dependencies() == [tag.STATEMENTS_OPTIMIZED]
+    assert op.get_dependencies() == ["statements/last_optimized"]
 
     # Run the export operation
     result = op.run()
@@ -74,7 +77,7 @@ def test_operation_export_entities(tmp_path):
 
     assert op.get_target() == path.ENTITIES_JSON
     assert op.get_target() == "entities.ftm.json"
-    assert op.get_dependencies() == [tag.STATEMENTS_UPDATED, tag.JOURNAL_UPDATED]
+    assert op.get_dependencies() == [tag.STATEMENTS_OPTIMIZED]
 
     # Run the export operation
     result = op.run()
@@ -105,7 +108,7 @@ def test_operation_export_statistics(tmp_path):
 
     assert op.get_target() == path.EXPORTS_STATISTICS
     assert op.get_target() == "exports/statistics.json"
-    assert op.get_dependencies() == [tag.STATEMENTS_UPDATED, tag.JOURNAL_UPDATED]
+    assert op.get_dependencies() == [tag.STATEMENTS_OPTIMIZED]
 
     # Run the export operation
     result = op.run()
@@ -199,36 +202,43 @@ def test_export_entities_reuses_fresh_statements_csv(tmp_path):
     assert fresh is not None
     assert fresh.endswith(path.EXPORTS_STATEMENTS)
 
-    # New statements invalidate the exported CSV
+    # New statements invalidate the exported CSV once they are canonical:
+    # the shortcut keys on the merge clock, and an export only ever reads it
+    # from inside a run whose `prepare()` has already flushed and merged.
     with repo.writer(origin="test") as writer:
         writer.add_entity(make_entity(BOB))
     repo.flush()
+    repo.merge()
     assert repo._fresh_statements_csv() is None
 
 
 def test_export_stale_after_optimize(tmp_path):
-    """A merge that rewrote partitions stamps STATEMENTS_UPDATED, so exports
-    captured pre-merge go stale and re-run instead of skipping as
-    'up-to-date' with duplicate / undeleted rows baked in."""
+    """A merge that rewrote partitions stamps STATEMENTS_OPTIMIZED, so exports
+    taken before it go stale and re-run instead of skipping as 'up-to-date'
+    with duplicate / undeleted rows baked in."""
     repo = EntityRepository(dataset=DATASET, uri=tmp_path)
     setup_entities(repo)
     setup_entities(repo)  # duplicate physical rows -> merge will rewrite
 
     make_op(ExportKind.statements, tmp_path).run()
-    assert repo._fresh_statements_csv() is not None
-
-    repo.merge()
-
-    # merge changed the logical content: the exported CSV is stale again
-    assert not repo._tags.is_latest(path.EXPORTS_STATEMENTS, [tag.STATEMENTS_UPDATED])
-    assert repo._fresh_statements_csv() is None
-
-    # a re-run regenerates instead of skipping, and is fresh once more
-    make_op(ExportKind.statements, tmp_path).run()
+    # the run prepared itself: the duplicates were merged *before* the CSV was
+    # written, so it is canonical and fresh straight away
+    assert not repo.needs_merge
     assert repo._fresh_statements_csv() is not None
 
     # a merge with nothing to rewrite does not dirty anything
     repo.merge()
+    assert repo._fresh_statements_csv() is not None
+
+    # new duplicate rows, then a merge that rewrites them: the CSV predates
+    # the canonical content it claims to hold
+    setup_entities(repo)
+    repo.merge()
+    assert not repo._tags.is_latest(path.EXPORTS_STATEMENTS, [tag.STATEMENTS_OPTIMIZED])
+    assert repo._fresh_statements_csv() is None
+
+    # a re-run regenerates instead of skipping, and is fresh once more
+    make_op(ExportKind.statements, tmp_path).run()
     assert repo._fresh_statements_csv() is not None
 
 
@@ -255,7 +265,7 @@ def test_operation_export_documents(tmp_path, fixtures_path):
 
     assert op.get_target() == path.EXPORTS_DOCUMENTS
     assert op.get_target() == "exports/documents.csv"
-    assert op.get_dependencies() == [tag.STATEMENTS_UPDATED, tag.JOURNAL_UPDATED]
+    assert op.get_dependencies() == [tag.STATEMENTS_OPTIMIZED]
 
     # Run the export operation
     result = op.run()

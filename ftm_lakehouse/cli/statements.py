@@ -47,11 +47,8 @@ def cli_statements_iterate(out_uri: OPT_OUT = "-"):
     """
     with DatasetContext() as (name, uri):
         entities = get_entities(name, uri)
-        if entities._is_api:
-            rows = (r.to_dict() for r in entities.query_statements())
-        else:
-            # faster as no Statement model serialization
-            rows = entities.query_statements_data()
+        # raw row dicts – no Statement model serialization on either backend
+        rows = entities.query_statements_data()
         with smart_open(out_uri, "w") as fh:
             smart_write_csv(fh, rows)
 
@@ -78,8 +75,8 @@ def cli_statements_import(
     Mirrors ``entities import`` at the statement grain. Rows are parsed with
     the lakehouse ``read_csv_statements`` – which preserves the ``fragment``
     supersession key (followthemoney's reader has no notion of it) – then
-    buffered in ``EntityBuffer`` to pre-sort by shard and handed to
-    ``EntityRepository.write_statements`` for a per-shard parquet append.
+    buffered in ``EntityBuffer`` to group by shard and handed to
+    ``EntityRepository.write_batches`` as one packed table per shard.
     Bypasses the journal. With ``--unsafe``, rows skip Statement
     construction entirely and map straight to parquet rows.
     """

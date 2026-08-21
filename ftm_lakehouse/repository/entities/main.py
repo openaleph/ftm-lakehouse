@@ -4,6 +4,7 @@ import csv
 from contextlib import contextmanager
 from datetime import datetime
 from functools import cached_property
+from itertools import islice
 from typing import IO, Generator, Iterable, Iterator, cast
 
 import orjson
@@ -26,21 +27,14 @@ from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.logic.compress import compress_stream, decompress_stream
 from ftm_lakehouse.logic.entities.aggregate import aggregate_unsafe
-from ftm_lakehouse.model.statement import LakehouseStatement, statements_to_arrow
+from ftm_lakehouse.logic.parquet import QUERY_IN_BATCH_SIZE
 from ftm_lakehouse.repository.base import DatasetHandle
 from ftm_lakehouse.repository.diff import ParquetDiffMixin, make_envelope
 from ftm_lakehouse.storage.journal import get_journal
-from ftm_lakehouse.storage.journal.base import BaseJournalWriter, StatementTables
+from ftm_lakehouse.storage.journal.base import BaseJournalWriter
 from ftm_lakehouse.storage.parquet import ParquetStore
 
 settings = Settings()
-
-WRITE_SHARD_BATCH = 100_000
-"""Maximum rows accumulated per shard before an interim parquet write.
-
-Prevents one giant shard from buffering arbitrarily many statements in memory
-before :meth:`EntityRepository.write_statements` emits.
-"""
 
 
 class EntityRepository(ParquetDiffMixin, DatasetHandle):
@@ -100,24 +94,22 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
     def writer(
         self, origin: str | None = None
     ) -> Generator[BaseJournalWriter, None, None]:
-        """
-        Get a bulk writer for adding entities/statements.
+        """Get a bulk writer for adding entities/statements.
+
+        The writer owns its own lifecycle (insert the tail on success, drop
+        the un-inserted buffer on error, close either way – see
+        :meth:`BaseJournalWriter.__exit__`); this adds the freshness tag,
+        stamped only when the block leaves cleanly.
 
         Usage:
             with repo.writer(origin="import") as writer:
                 writer.add_entity(entity)
         """
-        with self._tags.touch(tag.JOURNAL_UPDATED):
-            writer = self._journal.writer(self.shards, origin)
-            try:
-                yield writer
-            except BaseException:
-                writer.rollback()
-                raise
-            else:
-                writer.flush()
-            finally:
-                writer.close()
+        with (
+            self._tags.touch(tag.JOURNAL_UPDATED),
+            self._journal.writer(self.shards, origin) as writer,
+        ):
+            yield writer
 
     def add(
         self,
@@ -163,85 +155,29 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
                 took=t.took,
                 journal=mask_uri(self._journal.uri),
             )
-        elif not self._tags.exists(tag.STATEMENTS_UPDATED):
-            # initial run: give freshness comparisons a baseline
-            self._tags.set(tag.STATEMENTS_UPDATED)
+        elif not self._tags.exists(tag.STATEMENTS_OPTIMIZED):
+            # initial run: give freshness comparisons a baseline. An empty
+            # store is trivially canonical, and without the tag every
+            # consumer keyed on it would re-run forever (`is_latest` is
+            # False when no dependency exists at all).
+            self._tags.set(tag.STATEMENTS_OPTIMIZED)
         return total
 
     @no_api
-    def write_statements(
-        self,
-        statements: Iterable[LakehouseStatement],
-        now: datetime | None = None,
-        batch_size: int | None = WRITE_SHARD_BATCH,
-    ) -> int:
-        """Pack and append a shard-sorted stream of statements to parquet.
-
-        Input is an iterable of :class:`LakehouseStatement` already ordered
-        by shard – exactly what :meth:`EntityBuffer.flush_buffer` produces.
-        Consecutive statements of the same shard accumulate into one batch,
-        which :func:`statements_to_arrow` packs columnwise before
-        :meth:`write_batches` appends it.
-
-        This is the safe bulk-import path (the CLI paths that bypass the
-        journal). Rows that are packed already – the journal drain, the
-        unsafe import – go to :meth:`write_batches` directly.
-
-        Tombstones (rows with ``deleted_at`` set) get their ``last_seen``
-        bumped to ``deleted_at`` in the packer so they win the ``ROW_NUMBER()
-        OVER (... ORDER BY last_seen DESC)`` tiebreak in
-        :meth:`ParquetStore.merge`.
-
-        Args:
-            statements: Shard-sorted stream of :class:`LakehouseStatement`.
-            now: Default timestamp for missing ``first_seen`` /
-                ``last_seen``. Defaults to the current UTC time.
-            batch_size: Row cap per in-memory batch, or ``None`` to signal
-                the caller already batches.
-
-        Returns:
-            Number of statements written.
-        """
-        return self.write_batches(
-            self._pack_shards(statements, now or utc_now(), batch_size)
-        )
-
-    def _pack_shards(
-        self,
-        statements: Iterable[LakehouseStatement],
-        now: datetime,
-        batch_size: int | None,
-    ) -> StatementTables:
-        """Pack a shard-sorted statement stream into per-shard tables."""
-        buffer: list[LakehouseStatement] = []
-
-        def _pack() -> pa.Table:
-            table = statements_to_arrow(buffer, now)
-            buffer.clear()
-            return table
-
-        for stmt in statements:
-            full = batch_size is not None and len(buffer) >= batch_size
-            if buffer and (full or stmt.shard != buffer[-1].shard):
-                yield _pack()
-            buffer.append(stmt)
-
-        if buffer:
-            yield _pack()
-
-    @no_api
-    def write_batches(self, tables: StatementTables) -> int:
+    def write_batches(self, tables: Iterable[pa.Table]) -> int:
         """Append packed Arrow tables to parquet – the one write loop.
 
-        Every path whose rows are packed already: the journal drain
-        (:meth:`JournalStore.flush_batches`), the unsafe bulk import
-        (:class:`~ftm_lakehouse.logic.entities.explode.RowBuffer`), and
-        :meth:`write_statements` once it has packed its own. Tables arrive in
-        :data:`~ftm_lakehouse.model.statement.SHARDED_SCHEMA` and go straight
-        to :meth:`ParquetStore.append` – one is durable before the producer
-        is asked for the next, which is what lets the journal drop a segment
-        it has handed over. Sizing is the producer's call; each table becomes
-        one parquet file per ``(shard, bucket, origin)`` partition it spans.
+        Every producer packs its own rows and hands them here: the journal
+        drain (:meth:`JournalStore.flush_batches`), the safe bulk import
+        (:meth:`~ftm_lakehouse.logic.entities.buffer.EntityBuffer.flush_tables`)
+        and the unsafe one
+        (:class:`~ftm_lakehouse.logic.entities.explode.RowBuffer`). Tables
+        arrive in :data:`~ftm_lakehouse.model.statement.SHARDED_SCHEMA` and go
+        straight to :meth:`ParquetStore.append` – one is durable before the
+        producer is asked for the next, which is what lets the journal drop a
+        segment it has handed over. Sizing is the producer's call; each table
+        becomes one parquet file per ``(shard, bucket, origin)`` partition it
+        spans, so producers hand over shard-scoped tables.
 
         Args:
             tables: Stream of packed statement tables.
@@ -283,18 +219,32 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
         self._statements.export_csv(self.EXPORTS_STATEMENTS)
 
     @property
+    @no_api
     def exists(self) -> bool:
-        """Whether the statement store has been written."""
+        """Whether the statement store has been written – local only."""
         return self._statements.exists
 
+    @property
     @no_api
+    def needs_merge(self) -> bool:
+        """Whether the statement store has writes that :meth:`merge` has not
+        collapsed yet – local only.
+
+        Reads are canonical only on a merged store, so anything publishing
+        canonical rows (the exports, and :meth:`export_diff` strictly) checks
+        this first. See :attr:`ParquetStore.needs_merge`.
+        """
+        return self._statements.needs_merge
+
     def query_statements_data(self, q: Query | None = None) -> Iterator[StatementDict]:
         """Query raw statement dicts from the parquet store.
 
-        The fast local read: no :class:`~ftmq.store.lake.LakeStatement`
-        construction – use :meth:`query_statements` for model objects.
+        The fast read: no :class:`~ftmq.store.lake.LakeStatement`
+        construction – use :meth:`query_statements` for model objects. Same
+        execution strategy as :meth:`query_statements`, so a sorted or
+        sliced query still runs globally instead of once per partition.
         """
-        yield from self._statements._query_statement_data(q)
+        yield from self._statements._statement_data(q)
 
     @no_api
     def unlock(self) -> bool:
@@ -385,7 +335,7 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
         if statements_csv_uri is not None:
             rows = self._stream_statements_csv(statements_csv_uri)
         else:
-            rows = self._statements._query_statement_data()
+            rows = self.query_statements_data()
 
         entities = aggregate_unsafe(rows, self.dataset)
         entities = (e.to_dict() for e in entities)
@@ -419,15 +369,17 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
         """URI of the exported ``statements.csv`` if it's current, else ``None``.
 
         Current = its freshness tag (its own target key) is newer than
-        ``statements/last_updated`` (bumped by appends *and* merges, so an
-        optimize invalidates the CSV) and ``journal/last_updated`` (unflushed
-        journal data means the CSV is behind). Within a full export run
+        ``statements/last_optimized``, the canonical-content clock every
+        export goes stale against. Unflushed journal rows and un-merged
+        appends need no separate check: an export only runs on a store its
+        :meth:`ExportOperation.prepare` has already drained and merged, and
+        that merge moves this very tag. Within a full export run
         statements.csv is written first, so entity export streams it instead
         of re-scanning parquet.
         """
         if not self._store.exists(self.EXPORTS_STATEMENTS):
             return None
-        deps = [tag.STATEMENTS_UPDATED, tag.JOURNAL_UPDATED]
+        deps = [tag.STATEMENTS_OPTIMIZED]
         if self._tags.is_latest(self.EXPORTS_STATEMENTS, deps):
             return self._store.to_uri(self.EXPORTS_STATEMENTS)
         return None
@@ -451,10 +403,9 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
         stmts = self._collect_entity_statements(entity_id)
         if not stmts:
             return 0
-        with self._journal.writer(self.shards) as w:
+        with self.writer() as w:
             for stmt in stmts:
                 w.add_statement(stmt, deleted_at=now)
-        self._tags.set(tag.JOURNAL_UPDATED)
         return len(stmts)
 
     def delete_statement(self, stmt: Statement, fragment: str | None = None) -> None:
@@ -469,10 +420,8 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
                 fragment-bearing row when passing a plain ``Statement``;
                 leave unset otherwise.
         """
-        with self._tags.touch(tag.JOURNAL_UPDATED):
-            now = utc_now()
-            with self._journal.writer(self.shards) as w:
-                w.add_statement(stmt, deleted_at=now, fragment=fragment)
+        with self.writer() as w:
+            w.add_statement(stmt, deleted_at=utc_now(), fragment=fragment)
 
     @no_api
     def _collect_entity_statements(self, entity_id: str) -> list[LakeStatement]:
@@ -519,38 +468,57 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
         return self._statements.get_entity_ids(q, source=self._statements.source_raw)
 
     @no_api
-    def _write_diff(
-        self, entity_ids: Iterator[str], since: datetime, ts: datetime
-    ) -> str:
+    def _write_diff(self, entity_ids: Iterator[str], ts: datetime) -> tuple[str, int]:
         """Write entities as line-based JSON with operation envelopes."""
         key = path.entities_diff(ts, self.compression)
+        changed: set[str] = set(entity_ids)
         with (
             self._store.open(key, "wb") as o,
             compress_stream(o, self.compression) as out,
         ):
-            smart_write_json(out, self._get_delta_entities(entity_ids, since))
-        return self._store.to_uri(key)
+            smart_write_json(out, self._get_delta_entities(changed))
+        return self._store.to_uri(key), len(changed)
 
     @no_api
-    def _get_delta_entities(
-        self, entity_ids: Iterator[str], since: datetime
-    ) -> Generator[SDict, None, None]:
-        """ADD envelopes for entities changed since ``since`` – one scoped
-        subquery per partition via :meth:`ParquetStore.query_changed`, no
-        per-batch ``IN`` loop – plus DEL envelopes for changed ids whose live
-        statements are all gone."""
-        original_ids: set[str] = set(entity_ids)
+    def _get_delta_entities(self, entity_ids: set[str]) -> Generator[SDict, None, None]:
+        """Envelopes for the changed entities: their current state, or a delete.
+
+        Consumers index an envelope's payload wholesale, so the two ops mean
+        exactly one thing each:
+
+        - ``ADD`` – the entity as it stands now, **whole**. Not the statements
+          that changed: a consumer overwrites its copy with this payload, so a
+          partial one would drop every property that did not change.
+        - ``DEL`` – the entity is gone entirely. Tombstoning *some* of an
+          entity's statements leaves it live, and it round-trips here as an
+          ADD carrying what remains.
+
+        Both fall out of one lookup. Each changed id is re-read whole from the
+        live view – canonical, because :meth:`export_diff` requires a merged
+        store – so what comes back is the entity's current state, and an entity
+        whose statements are all gone simply does not come back. Ids are
+        batched into ``entity_id IN (...)`` lookups, which the source prunes to
+        the shards they fall in.
+
+        The lookup is what makes DEL correct, and no timestamp filter can
+        replace it: "has a statement newer than ``since``" is not "is still
+        live", so a partially deleted entity – tombstone reaped, other
+        statements untouched – would fall out of the ADD set and be published
+        as a delete. Detecting *change* is :meth:`_get_changed_ids`' job, over
+        the raw rows.
+        """
         seen_ids: set[str] = set()
-        q = Query(C(first_seen__gte=since))
-        for entity in self._statements._query_data(q):
-            if entity.id:
-                seen_ids.add(entity.id)
-            yield make_envelope(entity.to_dict())
-        for entity_id in original_ids - seen_ids:
+        ids = iter(entity_ids)
+        while batch := set(islice(ids, QUERY_IN_BATCH_SIZE)):
+            for entity in self._statements._query_data(Query(M(entity_id__in=batch))):
+                if entity.id:
+                    seen_ids.add(entity.id)
+                yield make_envelope(entity.to_dict())
+        for entity_id in entity_ids - seen_ids:
             yield make_envelope({"id": entity_id}, op="DEL")
 
     @no_api
-    def _write_initial_diff(self, ts: datetime, **kwargs) -> None:
+    def _write_initial_diff(self, ts: datetime) -> None:
         """Copy over exported entities.ftm.json to initial diff version.
 
         Both artifacts carry the dataset's codec, so the payload is decoded

@@ -1,8 +1,11 @@
 """Api-mode ``EntityRepository`` – the http twin picked at construction."""
 
+from typing import Iterator
+
 import orjson
 from anystore.types import Uri
 from followthemoney import StatementEntity
+from followthemoney.statement import StatementDict
 from ftmq.model.stats import DatasetStats
 from ftmq.query import Query
 from ftmq.store.lake import LakeStatement
@@ -59,10 +62,20 @@ class ApiEntityRepository(EntityRepository):
         *,
         flush_first: bool = False,
     ) -> Statements:
+        for data in self._stream_statements(q, flush_first):
+            yield LakeStatement.from_dict(data)
+
+    def query_statements_data(self, q: Query | None = None) -> Iterator[StatementDict]:
+        """The wire rows as they arrive – no ``LakeStatement`` round-trip."""
+        return self._stream_statements(q, False)
+
+    def _stream_statements(
+        self, q: Query | None, flush_first: bool
+    ) -> Iterator[StatementDict]:
         url = self._make_url("statements/query")
         data = {"flush_first": flush_first, "query": q.to_dict() if q else None}
         for line in self._api.stream_request(url, "POST", json=data):
-            yield LakeStatement.from_dict(orjson.loads(line))
+            yield orjson.loads(line)
 
     def delete_entity(self, entity_id: str) -> int:
         url = self._make_url(entity_id)

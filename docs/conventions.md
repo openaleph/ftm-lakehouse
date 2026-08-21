@@ -47,8 +47,8 @@ Operations use tags to track freshness and skip unnecessary work – `is_latest(
 |-----|--------|---------|
 | `journal/last_updated` | Statement writes | Journal has uncommitted data |
 | `journal/last_flushed` | Flush operation | Journal was flushed |
-| `statements/last_updated` | Flush / append / merge | Parquet store was updated |
-| `statements/last_optimized` | Optimize operation | Merge + compact + vacuum ran |
+| `statements/last_updated` | Flush / append | Rows landed in the parquet store – not canonical yet |
+| `statements/last_optimized` | `merge`, on completion | Canonical content changed. The clock every export, statistic and diff goes stale against |
 | `archive/last_updated` | File archive | New file was archived |
 | `exports/statements.csv`, `entities.ftm.json`, `exports/documents.csv`, `exports/statistics.json`, `index.json` | Export operations | Export target keys double as their freshness tags |
 | `operations/crawl/last_run` | Crawl operation | Last crawl execution |

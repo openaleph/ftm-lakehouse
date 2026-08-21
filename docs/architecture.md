@@ -335,7 +335,7 @@ flowchart TD
     AR --> |"create Document"| B
 
     B --> |"flush()"| C[(Parquet Store)]
-    A3[Tenant bulk imports] --> |"EntityBuffer + write_statements"| C
+    A3[Tenant bulk imports] --> |"EntityBuffer + write_batches"| C
 
     C --> |"optimize() – merge + compact + vacuum"| C
 

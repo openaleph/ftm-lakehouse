@@ -133,28 +133,22 @@ class DocumentRepository(ParquetDiffMixin, DatasetHandle):
         q = Query(*Q_DOCUMENTS, (C(first_seen__gte=since) | C(deleted_at__gte=since)))
         return self._statements.get_entity_ids(q, source=self._statements.source_raw)
 
-    def _write_diff(
-        self, entity_ids: Iterator[str], since: datetime, ts: datetime
-    ) -> str:
-        """Write documents as CSV with op column (``since`` unused here – the
-        documents diff still resolves the passed changed-id set per batch)."""
+    def _write_diff(self, entity_ids: Iterator[str], ts: datetime) -> tuple[str, int]:
+        """Write documents as CSV with an op column."""
         key = path.documents_diff(ts)
+        changed: set[str] = set(entity_ids)
         with self._store.open(key, "w") as o:
-            smart_write_csv(o, self._get_delta_documents(entity_ids))
-        return self._store.to_uri(key)
+            smart_write_csv(o, self._get_delta_documents(changed))
+        return self._store.to_uri(key), len(changed)
 
-    def _get_delta_documents(
-        self, entity_ids: Iterator[str]
-    ) -> Generator[dict, None, None]:
-        original_ids: set[str] = set()
+    def _get_delta_documents(self, entity_ids: set[str]) -> Generator[dict, None, None]:
         seen_ids: set[str] = set()
         it = iter(entity_ids)
         while batch := set(islice(it, QUERY_IN_BATCH_SIZE)):
-            original_ids.update(batch)
             for doc in self.collect(Query(M(entity_id__in=batch))):
                 seen_ids.add(doc.id)
                 yield {"op": "ADD", **doc.model_dump(by_alias=True, mode="json")}
-        for entity_id in original_ids - seen_ids:
+        for entity_id in entity_ids - seen_ids:
             yield {"op": "DEL", "id": entity_id}
 
     def _write_initial_diff(self, ts: datetime) -> None:
