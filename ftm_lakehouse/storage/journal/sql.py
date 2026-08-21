@@ -200,7 +200,7 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
     def _table(self, name: str) -> Table:
         return journal_table(MetaData(), name)
 
-    def _rotate(self) -> str:
+    def _rotate(self) -> None:
         """Claim the current journal: rename it, create a fresh one, atomically.
 
         DDL is transactional in both dialects, so a writer sees either the
@@ -224,7 +224,7 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
                         f'ALTER TABLE "{self.table.name}" RENAME TO "{name}"'
                     )
                     conn.execute(CreateTable(self.table))
-                return name
+                return
             except OperationalError as exc:
                 attempt += 1
                 if attempt >= ROTATE_MAX_RETRIES:
@@ -345,13 +345,6 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
     def dispose(self) -> None:
         """Dispose the engine and close all pooled connections."""
         self.engine.dispose()
-
-    def __del__(self) -> None:
-        """Clean up engine on garbage collection."""
-        try:
-            self.engine.dispose()
-        except Exception:
-            pass
 
 
 class SqliteJournalStore(SqlJournalStore):

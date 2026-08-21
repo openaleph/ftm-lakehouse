@@ -90,13 +90,13 @@ now = datetime.now(timezone.utc)
 for proxy in smart_read_proxies("entities.ftm.json"):
     buffer.add_entity(proxy)
     if len(buffer) >= 1_000_000:
-        repo.write_statements(buffer.flush_buffer(), now=now)
+        repo.write_batches(buffer.flush_tables(now))
 
 if buffer:
-    repo.write_statements(buffer.flush_buffer(), now=now)
+    repo.write_batches(buffer.flush_tables(now))
 ```
 
-The `EntityBuffer` keys statements by ID and sorts by shard on flush; `repo.write_statements` packs the sorted stream per partition into one parquet file per `(shard, bucket, origin)` triple.
+The `EntityBuffer` keys statements by `(id, origin, fragment)` and holds them grouped by shard; `buffer.flush_tables()` drains it as one packed Arrow table per shard, and `repo.write_batches` appends each one as a parquet file per `(shard, bucket, origin)` triple.
 
 The CLI command `ftm-lakehouse entities import` does exactly this.
 

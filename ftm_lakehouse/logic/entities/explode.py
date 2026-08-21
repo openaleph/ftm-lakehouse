@@ -31,7 +31,7 @@ from ftmq.store.lake import get_schema_bucket
 from ftmq.util import iso_datetime
 
 from ftm_lakehouse.core.conventions.path import entity_shard
-from ftm_lakehouse.helpers.statements import make_base_id_statement
+from ftm_lakehouse.helpers.statements import dedupe_key, make_base_id_statement
 from ftm_lakehouse.model.statement import SHARDED_SCHEMA
 from ftm_lakehouse.util import single_string, validate_origin
 
@@ -225,26 +225,26 @@ def statement_row_unsafe(
 
 
 class RowBuffer:
-    """``(id, fragment, origin)``-keyed packed-row buffer, flushed as Arrow.
+    """:func:`dedupe_key`-keyed packed-row buffer, flushed as Arrow.
 
-    The unsafe twin of :class:`~ftm_lakehouse.logic.entities.buffer.
-    EntityBuffer`: deduplicates re-emissions within one batch by
-    ``(id, fragment, origin)`` – matching the store's per-origin row
-    identity, so the same id under distinct fragments *or* origins stays
-    distinct – and flushes a shard-sorted :data:`SHARDED_SCHEMA` table, the
-    same currency the journal drain hands to
+    The unsafe twin of
+    :class:`~ftm_lakehouse.logic.entities.buffer.EntityBuffer`: collapses
+    re-emissions within one batch on the same row identity that buffer uses
+    – so the same id under distinct fragments *or* origins stays distinct –
+    and flushes a shard-sorted :data:`SHARDED_SCHEMA` table, the same
+    currency the journal drain hands to
     :meth:`EntityRepository.write_batches`. Memory is bounded by the caller,
     which flushes every ``bulk_size`` rows.
     """
 
     def __init__(self) -> None:
-        self._rows: dict[tuple[str, str, str], SDict] = {}
+        self._rows: dict[str, SDict] = {}
 
     def add(self, row: SDict | None) -> None:
         """Buffer a packed row; ``None`` (a skipped input row) is ignored."""
         if row is None:
             return
-        self._rows[(row["id"], row["fragment"], row["origin"])] = row
+        self._rows[dedupe_key(row["id"], row["origin"], row["fragment"])] = row
 
     def flush(self) -> pa.Table:
         """Pack the buffered rows shard-sorted, then clear the buffer."""

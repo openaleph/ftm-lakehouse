@@ -1,7 +1,8 @@
 from collections import defaultdict
 from datetime import datetime
-from typing import DefaultDict
+from typing import DefaultDict, Generator
 
+import pyarrow as pa
 from followthemoney import EntityProxy, Statement, StatementEntity
 from followthemoney.namespace import Namespace
 from followthemoney.statement.util import BASE_ID
@@ -14,7 +15,11 @@ from ftm_lakehouse.core.conventions.path import entity_shard
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.exceptions import BufferFullError
 from ftm_lakehouse.helpers.statements import make_base_id_statement
-from ftm_lakehouse.model.statement import LakehouseStatement, LakehouseStatements
+from ftm_lakehouse.model.statement import (
+    LakehouseStatement,
+    LakehouseStatements,
+    statements_to_arrow,
+)
 from ftm_lakehouse.util import validate_origin
 
 settings = Settings()
@@ -24,22 +29,26 @@ namespace = Namespace()
 
 
 class EntityBuffer:
-    """In-memory shard-sorted statement buffer.
+    """In-memory shard-grouped statement buffer.
 
-    Keys statements by ``(dedupe_key, origin)`` – matching the store's
-    per-origin row identity ``(origin, id, fragment)``: re-emissions in a
-    single batch deduplicate, while the same id under distinct fragments
-    *or* distinct origins stays distinct (merge never crosses origin
-    partitions, so collapsing across origins here would silently drop
-    provenance). Rows yield sorted by shard on :meth:`flush_buffer` so the
-    consumer (typically :meth:`EntityRepository.write_statements`) can
-    accumulate per-shard parquet batches with bounded memory.
+    Keys statements by :attr:`~ftmq.store.lake.LakeStatement.dedupe_key`
+    (``id``, ``origin``, ``fragment``) – the store's per-origin row identity:
+    re-emissions in a single batch deduplicate, while the same id under
+    distinct fragments *or* distinct origins stays distinct (merge never
+    crosses origin partitions, so collapsing across origins here would
+    silently drop provenance).
+
+    Rows are held grouped by ``shard`` and drained one shard at a time, so
+    :meth:`flush_tables` hands the parquet store one table per shard – one
+    file per ``(shard, bucket, origin)`` partition instead of one per
+    partition *per batch*.
 
     The buffer is bounded by ``max_rows`` (defaulting to
-    :attr:`Settings.max_buffer_rows`, i.e. ``LAKEHOUSE_MAX_BUFFER_ROWS``).
-    Adding past the cap raises :class:`BufferFullError`; callers must
-    flush (e.g. via :meth:`flush_buffer` + ``write_statements``) and
-    retry.
+    :attr:`Settings.max_buffer_rows`, i.e. ``LAKEHOUSE_MAX_BUFFER_ROWS``) –
+    the only memory bound on the write path, so a tenant colliding every
+    entity id onto one shard still cannot grow it past the cap. Adding past
+    the cap raises :class:`BufferFullError`; callers must flush (e.g. via
+    :meth:`flush_tables` + ``write_batches``) and retry.
     """
 
     def __init__(
@@ -80,6 +89,10 @@ class EntityBuffer:
     ) -> str | None:
         """Add a statement to the buffer.
 
+        Subclasses hook here to react to a single added statement – the
+        journal writer inserts a full batch. :meth:`add_entity` deliberately
+        does *not* route through this method (see :meth:`_add`).
+
         The statement ``id`` is always re-derived – content-hashed under
         the *buffer's* dataset via :meth:`Statement.generate_key` – so the
         same content lands under the same id regardless of the payload's
@@ -109,6 +122,23 @@ class EntityBuffer:
                 (see :func:`ftm_lakehouse.util.validate_origin`).
             BufferFullError: If the buffer has reached :attr:`max_rows`
                 and has not been flushed.
+        """
+        return self._add(stmt, deleted_at, fragment, origin)
+
+    def _add(
+        self,
+        stmt: Statement,
+        deleted_at: datetime | None,
+        fragment: str | None,
+        origin: str | None,
+    ) -> str | None:
+        """Buffer one statement – the shared implementation.
+
+        :meth:`add_entity` routes here rather than through
+        :meth:`add_statement` so a subclass hooking the public method cannot
+        fire mid-entity: the journal writer inserts per batch, and a batch
+        boundary inside one entity would land its properties without the
+        ``BASE_ID`` checksum row that closes it.
         """
         if stmt.entity_id is None:
             return None
@@ -200,9 +230,9 @@ class EntityBuffer:
                 continue
             stmt.first_seen = stmt.first_seen or e.first_seen or e.last_change
             stmt.last_seen = last_seen if fragment else (stmt.last_seen or last_seen)
-            # origin resolution delegates to add_statement:
+            # origin resolution delegates to _add:
             # override > stmt.origin > buffer default
-            stmt_id = self.add_statement(stmt, fragment=fragment, origin=origin)
+            stmt_id = self._add(stmt, None, fragment, origin)
             if stmt_id is None:
                 continue
             ids.add(stmt_id)
@@ -222,19 +252,50 @@ class EntityBuffer:
                 last_seen if fragment else (max(last_seens, default=None) or last_seen)
             ),
         )
-        self.add_statement(base, fragment=fragment, origin=origin)
+        self._add(base, None, fragment, origin)
+
+    def _drain(self) -> Generator[list[LakehouseStatement], None, None]:
+        """Pop the buffer one shard at a time, in insertion order.
+
+        Rows leave the buffer as they are handed over, so a consumer that
+        abandons the generator keeps the shards it never saw instead of
+        losing them (or seeing them twice on the next drain).
+        """
+        for shard in list(self._buffer):
+            rows = self._buffer.pop(shard)
+            self._buffer_size -= len(rows)
+            yield list(rows.values())
 
     def flush_buffer(self) -> LakehouseStatements:
-        """Yield buffered statements sorted by shard, then clear the buffer.
+        """Drain the buffer as a flat statement stream, shard by shard.
 
         Yields:
-            :class:`LakehouseStatement` sorted by ``shard`` so the consumer
-            can stream per-shard parquet batches with bounded memory.
+            :class:`LakehouseStatement` grouped by ``shard``.
         """
-        for shard in self._buffer:
-            yield from self._buffer[shard].values()
-        self._buffer.clear()
-        self._buffer_size = 0
+        for rows in self._drain():
+            yield from rows
+
+    def flush_tables(
+        self, now: datetime | None = None
+    ) -> Generator[pa.Table, None, None]:
+        """Drain the buffer as one packed Arrow table per shard.
+
+        What the parquet write path consumes: each table is scoped to a
+        single ``shard``, so
+        :meth:`~ftm_lakehouse.repository.entities.EntityRepository.write_batches`
+        appends one parquet file per ``(shard, bucket, origin)`` partition it
+        spans. Peak memory is one shard's rows, bounded by :attr:`max_rows`.
+
+        Args:
+            now: Default timestamp for statements missing ``first_seen`` /
+                ``last_seen``. Defaults to the current UTC time.
+
+        Yields:
+            Tables in :data:`~ftm_lakehouse.model.statement.SHARDED_SCHEMA`.
+        """
+        now = now or utc_now()
+        for rows in self._drain():
+            yield statements_to_arrow(rows, now)
 
     def __len__(self) -> int:
         return self._buffer_size

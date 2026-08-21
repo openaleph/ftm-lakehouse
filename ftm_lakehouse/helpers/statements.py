@@ -11,6 +11,20 @@ from followthemoney.util import HASH_ENCODING
 from ftmq.store.lake import LakeStatement
 
 
+def dedupe_key(id: str, origin: str, fragment: str) -> str:
+    """Row identity of a stored statement: ``id``, ``origin``, ``fragment``.
+
+    The same tab-joined key
+    :attr:`ftmq.store.lake.LakeStatement.dedupe_key` builds from a statement
+    object, for the packed-row paths that never construct one
+    (:class:`~ftm_lakehouse.logic.entities.explode.RowBuffer`). Both write
+    buffers collapse re-emissions on this key, matching the store's
+    per-origin row identity – the same id under distinct fragments *or*
+    origins stays a distinct row.
+    """
+    return f"{id}\t{origin}\t{fragment}"
+
+
 def make_base_id_statement(
     dataset: str,
     entity_id: str,

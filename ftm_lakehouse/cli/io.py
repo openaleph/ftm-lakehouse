@@ -1,8 +1,8 @@
 """Shared bulk-import loop for the CLI ``import`` commands.
 
 Both ``entities import`` and ``statements import`` stream items through an
-in-memory :class:`EntityBuffer` (pre-sorted by shard) and hand full batches
-to ``EntityRepository.write_statements`` for a per-shard parquet append,
+in-memory :class:`EntityBuffer` (grouped by shard) and hand each full batch
+to ``EntityRepository.write_batches`` as one packed table per shard,
 bypassing the journal. The loop here is the single implementation; the
 command modules only differ in how they parse their input.
 """
@@ -107,13 +107,13 @@ def _bulk_import(
             # Buffer hit its cap before we got to the bulk_size check
             # (e.g. bulk_size > LAKEHOUSE_MAX_BUFFER_ROWS). Drain and
             # retry the failed add so the item isn't dropped.
-            repo.write_statements(buffer.flush_buffer(), now=now, batch_size=None)
+            repo.write_batches(buffer.flush_tables(now))
             add(buffer, item, origin=item_origin, fragment=fragment)
         if len(buffer) >= bulk_size:
-            repo.write_statements(buffer.flush_buffer(), now=now, batch_size=None)
+            repo.write_batches(buffer.flush_tables(now))
 
     if buffer:
-        repo.write_statements(buffer.flush_buffer(), now=now, batch_size=None)
+        repo.write_batches(buffer.flush_tables(now))
 
 
 def import_entities(
@@ -172,9 +172,9 @@ def _bulk_import_rows(
     for row in rows:
         buffer.add(row)
         if len(buffer) >= bulk_size:
-            repo.write_batches(iter([buffer.flush()]))
+            repo.write_batches([buffer.flush()])
     if buffer:
-        repo.write_batches(iter([buffer.flush()]))
+        repo.write_batches([buffer.flush()])
 
 
 def import_entities_unsafe(

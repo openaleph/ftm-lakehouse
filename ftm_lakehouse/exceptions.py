@@ -7,6 +7,6 @@ class BufferFullError(RuntimeError):
 
     The cap defends against unbounded memory growth when a caller forgets
     to flush (or chooses a ``bulk_size`` larger than
-    :attr:`Settings.max_buffer_rows`). Catch this, call ``flush_buffer()``
-    + ``write_statements`` (or whatever drains the buffer), then retry.
+    :attr:`Settings.max_buffer_rows`). Catch this, call ``flush_tables()``
+    + ``write_batches`` (or whatever drains the buffer), then retry.
     """

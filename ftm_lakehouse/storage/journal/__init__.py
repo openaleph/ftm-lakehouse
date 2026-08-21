@@ -5,7 +5,6 @@ from ftm_lakehouse.storage.journal.api import ApiJournalStore, ApiJournalWriter
 from ftm_lakehouse.storage.journal.base import (
     BaseJournalStore,
     BaseJournalWriter,
-    RecordBatches,
     StatementTables,
 )
 from ftm_lakehouse.storage.journal.sql import (
@@ -30,7 +29,6 @@ def get_journal(dataset: str, uri: str | None = None) -> BaseJournalStore:
 __all__ = [
     "BaseJournalStore",
     "BaseJournalWriter",
-    "RecordBatches",
     "StatementTables",
     "SqlJournalStore",
     "SqlJournalWriter",

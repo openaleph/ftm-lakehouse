@@ -48,42 +48,42 @@ class BaseJournalWriter(EntityBuffer, Generic[S]):
 
     Not intended for direct use - use JournalStore.writer() instead.
 
-    :meth:`add_statement` buffers through :class:`EntityBuffer` – which
-    re-keys statement ids and collapses re-emissions within the batch – and
-    inserts every :data:`WRITE_BATCH_SIZE` rows. :meth:`add_batch` writes
-    an already-packed arrow table straight through.
+    :meth:`add_statement` and :meth:`add_entity` buffer through
+    :class:`EntityBuffer` – which re-keys statement ids and collapses
+    re-emissions within the batch – and insert every
+    :data:`WRITE_BATCH_SIZE` rows. :meth:`add_batch` writes an
+    already-packed arrow table straight through.
     """
 
     def __init__(self, store: S, shards: int, origin: str | None = None) -> None:
         super().__init__(store.dataset, shards, origin)
         self.store = store
-        self._adding_entity = False
 
     def _insert(self, batch: pa.Table) -> None:
         """Write one :data:`SHARDED_SCHEMA` table to the journal."""
         raise NotImplementedError
 
+    def _insert_if_full(self) -> None:
+        """Insert once the buffer holds a full batch.
+
+        Called after a whole added item, never mid-entity:
+        :meth:`EntityBuffer.add_entity` buffers through
+        :meth:`EntityBuffer._add`, so this hook cannot fire between an
+        entity's properties and the ``BASE_ID`` checksum row that closes it
+        – inserts commit per batch, and a half entity flushed to parquet
+        would survive merge.
+        """
+        if self._buffer_size >= WRITE_BATCH_SIZE:
+            self.flush()
+
     def add_statement(self, *args, **kwargs) -> str | None:
         stmt_id = super().add_statement(*args, **kwargs)
-        if not self._adding_entity and self._buffer_size >= WRITE_BATCH_SIZE:
-            self.flush()
+        self._insert_if_full()
         return stmt_id
 
     def add_entity(self, *args, **kwargs) -> None:
-        """Add an entity's statements, then insert if the batch is full.
-
-        The check waits for the whole entity: inserts commit per batch, so
-        flushing mid-entity could land its properties without the ``BASE_ID``
-        checksum row ``add_entity`` appends last – a half entity that then
-        flushes to parquet and survives merge.
-        """
-        self._adding_entity = True
-        try:
-            super().add_entity(*args, **kwargs)
-        finally:
-            self._adding_entity = False
-        if self._buffer_size >= WRITE_BATCH_SIZE:
-            self.flush()
+        super().add_entity(*args, **kwargs)
+        self._insert_if_full()
 
     def add_batch(self, batch: pa.Table) -> None:
         """Insert an already-packed Arrow table as-is – no repacking.
