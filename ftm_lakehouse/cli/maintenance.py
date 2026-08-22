@@ -138,7 +138,6 @@ def cli_flush(
             for name in catalog.list_datasets():
                 count = get_entities(name, catalog.dataset_uri(name)).flush()
                 total += count
-                console.print(f"[green]{name}: flushed {count} statements.[/green]")
             console.print(f"[green]Flushed {total} statements in total.[/green]")
     else:
         with DatasetContext() as (name, uri):
