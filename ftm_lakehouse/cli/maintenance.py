@@ -7,6 +7,7 @@
 
 Everything else groups under ``maintenance``:
 
+    ftm-lakehouse maintenance flush
     ftm-lakehouse maintenance optimize
     ftm-lakehouse maintenance unlock
 """
@@ -101,6 +102,24 @@ def cli_export(
     with DatasetContext() as (name, uri):
         res = op.export(name, kind, uri, force=bool(force))
         console.print(res)
+
+
+# ---------------------------------------------------------------------------
+# Journal drain
+# ---------------------------------------------------------------------------
+
+
+@maintenance.command("flush")
+def cli_flush():
+    """Drain outstanding journal statements into the parquet store.
+
+    Duplicates and tombstones land as new rows – run ``maintenance optimize``
+    afterwards to collapse them. In api mode the flush is delegated to the
+    server.
+    """
+    with DatasetContext() as (name, uri):
+        total = get_entities(name, uri).flush()
+        console.print(f"[green]Flushed {total} statements.[/green]")
 
 
 # ---------------------------------------------------------------------------

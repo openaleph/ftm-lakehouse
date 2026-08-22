@@ -309,7 +309,7 @@ ftm_lakehouse/
 │   ├── entities.py          # entities iterate / stream / import
 │   ├── statements.py        # statements iterate / stream / import / sql
 │   ├── archive.py           # archive get / ls / download
-│   ├── maintenance.py       # make, export, maintenance optimize / unlock
+│   ├── maintenance.py       # make, export, maintenance flush / optimize / unlock
 │   ├── crawl.py             # crawl (top level)
 │   └── zfs.py               # zfs init (agent lives in the zfs-agent package)
 │
