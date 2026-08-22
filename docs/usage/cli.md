@@ -11,7 +11,7 @@ ftm-lakehouse [OPTIONS] <group> <command> [ARGS]
 | `archive` | Content-addressed file storage |
 | `entities` | Read and write FtM entities |
 | `statements` | Read and write raw FtM statements |
-| `maintenance` | Storage maintenance (optimize, unlock) |
+| `maintenance` | Storage maintenance (flush, optimize, unlock) |
 | `zfs` | ZFS dataset management |
 
 Top-level (no group), as frequently-used shortcuts: `ls` (dataset names), `datasets` (metadata), `configure` (write dataset configuration), `make` (build/update a dataset), `export` (produce a single export kind), `crawl` (ingest documents into the archive).
@@ -45,6 +45,10 @@ ftm-lakehouse -d my_dataset make
 # A single export kind on its own
 ftm-lakehouse -d my_dataset export statistics
 
+# Drain the journal on its own – one dataset, or the whole catalog
+ftm-lakehouse -d my_dataset maintenance flush
+ftm-lakehouse maintenance flush --all
+
 # Maintenance – async, run on a schedule in production. Merges duplicates per
 # (shard, bucket, origin) partition, drops tombstones older than
 # LAKEHOUSE_GRACE_PERIOD_DAYS, bin-packs small files, removes obsolete ones –
@@ -70,6 +74,12 @@ Layout-affecting settings (`shards`) only take effect on a dataset that has not 
 | `--optimize` / `--no-optimize` | on | Run the [optimize](entities.md#maintenance) pass before exporting (only applies with `--exports`) |
 | `--force-optimize` | off | Optimize even when the store is already up-to-date |
 | `--force-exports` | off | Re-compute the exports pipeline even when the tags say it is fresh |
+
+### `maintenance flush`
+
+`ftm-lakehouse -d <dataset> maintenance flush` drains outstanding journal statements into the parquet store and prints how many landed. It is the same drain `make` runs as its first stage, on its own – no optimize, no exports, so duplicates and tombstones stay as new rows until the next [optimize](entities.md#maintenance).
+
+`--all` sweeps every dataset in the catalog instead, printing a count per dataset plus the total. It addresses the whole catalog, so combining it with `-d` is an error rather than a silent override. Datasets with an empty journal are a cheap no-op – the drain probes for rows before it rotates anything – which makes `ftm-lakehouse maintenance flush --all` a reasonable cron entry for a lakehouse whose writers leave data in the journal. It fails fast: the first dataset that errors aborts the sweep.
 
 ## Commands
 

@@ -273,6 +273,13 @@ count = entities.flush()
 
 Claims the journal by rotating it away, then streams the rotated segment into parquet as Arrow batches, shard-ordered; each batch becomes one parquet file per `(shard, bucket, origin)` partition. Writers keep going against the fresh journal table throughout. No dedup happens here – duplicates and tombstones land as new rows for `merge` to collapse later.
 
+From the CLI, per dataset or across the whole catalog:
+
+```bash
+ftm-lakehouse -d my_dataset maintenance flush
+ftm-lakehouse maintenance flush --all
+```
+
 ### Compact (cheap)
 
 Bin-packs small parquet files within each `(shard, bucket, origin)` partition via Delta's `OPTIMIZE compact`. Does not change row contents.

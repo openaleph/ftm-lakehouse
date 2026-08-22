@@ -7,7 +7,7 @@
 
 Everything else groups under ``maintenance``:
 
-    ftm-lakehouse maintenance flush
+    ftm-lakehouse maintenance flush [--all]
     ftm-lakehouse maintenance optimize
     ftm-lakehouse maintenance unlock
 """
@@ -20,6 +20,8 @@ from ftm_lakehouse import operation as op
 from ftm_lakehouse.catalog import get_dataset_index
 from ftm_lakehouse.cli import (
     OPT_FORCE,
+    STATE,
+    CatalogContext,
     DatasetContext,
     cli,
     console,
@@ -110,16 +112,38 @@ def cli_export(
 
 
 @maintenance.command("flush")
-def cli_flush():
+def cli_flush(
+    all_: Annotated[
+        bool,
+        typer.Option(
+            "--all", help="Sweep the whole catalog (not combinable with `-d`)"
+        ),
+    ] = False,
+):
     """Drain outstanding journal statements into the parquet store.
+
+    With ``--all`` every dataset in the catalog is swept in turn. It addresses
+    the whole catalog, so it is mutually exclusive with ``-d``.
 
     Duplicates and tombstones land as new rows – run ``maintenance optimize``
     afterwards to collapse them. In api mode the flush is delegated to the
     server.
     """
-    with DatasetContext() as (name, uri):
-        total = get_entities(name, uri).flush()
-        console.print(f"[green]Flushed {total} statements.[/green]")
+    if all_:
+        if STATE["dataset"]:
+            console.print("[red]Use either `-d <dataset>` or `--all`, not both.[/red]")
+            raise typer.Exit(code=1)
+        with CatalogContext() as catalog:
+            total = 0
+            for name in catalog.list_datasets():
+                count = get_entities(name, catalog.dataset_uri(name)).flush()
+                total += count
+                console.print(f"[green]{name}: flushed {count} statements.[/green]")
+            console.print(f"[green]Flushed {total} statements in total.[/green]")
+    else:
+        with DatasetContext() as (name, uri):
+            total = get_entities(name, uri).flush()
+            console.print(f"[green]Flushed {total} statements.[/green]")
 
 
 # ---------------------------------------------------------------------------
