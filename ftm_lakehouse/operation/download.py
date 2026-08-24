@@ -1,6 +1,6 @@
 """Download operation - export the archive files to their nice paths."""
 
-from anystore.logic.constants import CHUNK_SIZE_LARGE
+from anystore.logic.constants import CHUNK_SIZE
 from anystore.logic.io import stream
 from anystore.store import get_store
 from anystore.types import Uri
@@ -52,5 +52,5 @@ class DownloadArchiveOperation(DatasetJobOperation[DownloadArchiveJob]):
             )
             with target.open(document.relative_path, "wb") as o:
                 with self.archive.open(document.checksum) as i:
-                    stream(i, o, CHUNK_SIZE_LARGE)
+                    stream(i, o, CHUNK_SIZE * 4)  # 1MB
             run.job.done += 1

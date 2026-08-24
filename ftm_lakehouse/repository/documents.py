@@ -7,7 +7,7 @@ from itertools import chain, islice
 from typing import Generator, Iterator
 
 from anystore.io import smart_stream_csv_models, smart_write_csv, smart_write_models
-from anystore.logic.constants import CHUNK_SIZE_LARGE
+from anystore.logic.constants import CHUNK_SIZE
 from anystore.logic.io import stream
 from anystore.types import Uri
 from anystore.util import join_uri
@@ -162,4 +162,4 @@ class DocumentRepository(ParquetDiffMixin, DatasetHandle):
             return
         with self._store.open(path.EXPORTS_DOCUMENTS, "rb") as i:
             with self._store.open(path.documents_diff(ts), "wb") as o:
-                stream(i, o, CHUNK_SIZE_LARGE)
+                stream(i, o, CHUNK_SIZE * 4)  # 1MB

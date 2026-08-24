@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import IO, Any, BinaryIO, ContextManager
 
 from anystore.io.read import open_virtual
-from anystore.logic.constants import CHUNK_SIZE_LARGE, DEFAULT_MODE
+from anystore.logic.constants import DEFAULT_MODE
 from anystore.logic.io import stream
 from anystore.store import get_store
 from anystore.store.resource import UriResource
@@ -219,7 +219,7 @@ class ArchiveRepository(DatasetHandle):
                 return checksum
             fh.seek(0)
         with self._store.open(path.archive_blob(checksum), "wb") as out:
-            stream(fh, out, CHUNK_SIZE_LARGE)
+            stream(fh, out)
         return checksum
 
     def delete(self, file: File) -> None:
