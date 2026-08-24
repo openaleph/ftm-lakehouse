@@ -9,6 +9,7 @@ Everything else groups under ``maintenance``:
 
     ftm-lakehouse maintenance flush [--all]
     ftm-lakehouse maintenance optimize
+    ftm-lakehouse maintenance shard --shards <n>
     ftm-lakehouse maintenance unlock
 """
 
@@ -168,6 +169,36 @@ def cli_optimize(
         res = op.optimize(
             name, uri, retention_hours=int(retention_hours or 0), force=bool(force)
         )
+        console.print(res)
+
+
+@maintenance.command("shard")
+def cli_shard(
+    shards: Annotated[
+        int,
+        typer.Option(help="Target number of entity-id hash shards (0/1 = single)."),
+    ],
+    force: OPT_FORCE = False,
+) -> None:
+    """Re-shard the statement store: rewrite it onto a new shard count and
+    record that count in ``config.yml``.
+
+    The shard count is otherwise fixed at dataset creation, since every
+    reader and writer resolves it from the config. Growing it is the fix for
+    a dataset whose partitions have become too big to query well; see
+    ``docs/architecture.md`` for how to size it.
+
+    A full rewrite of the store: the journal is drained first, every
+    ``(bucket, origin)`` group is streamed into its new shard partitions,
+    and the config is written last. Nothing is deduped or sorted on the way,
+    so follow up with ``maintenance optimize``.
+
+    **Run with writers stopped** – the write fence holds off parquet
+    appends, but statements journalled under the old count and flushed
+    afterwards land in the wrong partition.
+    """
+    with DatasetContext() as (name, uri):
+        res = op.shard(name, int(shards), uri, force=bool(force))
         console.print(res)
 
 

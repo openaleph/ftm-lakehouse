@@ -22,8 +22,14 @@ from ftm_lakehouse.operation.factories import (
     export,
     make,
     optimize,
+    shard,
 )
-from ftm_lakehouse.operation.maintenance import OptimizeJob, OptimizeOperation
+from ftm_lakehouse.operation.maintenance import (
+    OptimizeJob,
+    OptimizeOperation,
+    ShardJob,
+    ShardOperation,
+)
 from ftm_lakehouse.operation.make import MakeJob, MakeOperation
 
 __all__ = [
@@ -37,10 +43,13 @@ __all__ = [
     "MakeOperation",
     "OptimizeJob",
     "OptimizeOperation",
+    "ShardJob",
+    "ShardOperation",
     # Factory functions
     "crawl",
     "download_archive",
     "export",
     "make",
     "optimize",
+    "shard",
 ]

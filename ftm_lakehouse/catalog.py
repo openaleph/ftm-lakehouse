@@ -13,8 +13,10 @@ LRU-cached, so :func:`update_dataset` invalidates the factory caches after
 every write – repositories fetched *afterwards* see the new config, while
 instances held across the write keep their old snapshot. Config that affects
 the storage layout (``shards``, ``compression``) must be set at creation
-(``ensure_dataset("big_leak", shards=8)``) and is immutable after the first
-write.
+(``ensure_dataset("big_leak", shards=8)``); writing it here afterwards only
+changes what readers expect, not where the rows are. Moving them is
+:class:`~ftm_lakehouse.operation.maintenance.ShardOperation`, which rewrites
+the statement store and then records the new count through this module.
 """
 
 from functools import cached_property

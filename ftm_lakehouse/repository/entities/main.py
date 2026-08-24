@@ -203,6 +203,28 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
         self._statements.merge(force)
 
     @no_api
+    def shard(self, shards: int) -> None:
+        """Re-shard the parquet store onto ``shards`` entity-hash shards.
+
+        Drains the journal first – journal rows carry the shard key of the
+        count they were written under, so anything left behind would land
+        in a stale partition – then rewrites the store
+        (:meth:`ParquetStore.shard`) and adopts the new count, so this
+        instance keeps resolving reads and writes to the right shards.
+
+        Only the storage half: the dataset's ``config.yml`` is what every
+        *other* reader resolves the count from, and
+        :class:`~ftm_lakehouse.operation.maintenance.ShardOperation` writes
+        it once this returns.
+
+        Args:
+            shards: Target shard count; ``<= 1`` means a single shard.
+        """
+        self.flush()
+        self._statements.shard(shards)
+        self.shards = shards
+
+    @no_api
     def compact(self) -> None:
         """Bin-pack small parquet files within each partition."""
         self._statements.compact()

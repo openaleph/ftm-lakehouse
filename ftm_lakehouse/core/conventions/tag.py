@@ -32,6 +32,9 @@ OP_DOWNLOAD_ARCHIVE = "operations/download_archive/last_run"
 OP_MAKE = "operations/make/last_run"
 """Last make (full workflow) execution"""
 
+OP_SHARD = "operations/shard/last_run"
+"""Last re-shard (statement store rewritten onto a new shard count)"""
+
 
 def statements_partition_updated(shard: str, bucket: str, origin: str) -> str:
     """Per-partition freshness tag: a ``(shard, bucket, origin)`` was written.

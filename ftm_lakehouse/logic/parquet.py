@@ -21,6 +21,7 @@ from deltalake import DeltaTable
 from ftmq.query import Query
 from ftmq.query.leaves import IdLeaf
 from ftmq.query.sql import PruneFn
+from ftmq.store.lake import TARGET_SIZE
 
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.core.settings import Settings
@@ -41,6 +42,11 @@ MERGE_SAMPLE_SIZE = 10_000
 """Reservoir sample size for :func:`build_bounds_sample_sql`. Bounds the
 slice-boundary resolution – boundary quality only affects load balance
 across slices, never correctness, so a fixed sample is fine."""
+
+SHARD_MIN_FILE_SIZE = 32 * 1_048_576  # 32 MB
+"""Floor for :func:`shard_target_file_size` – below this a re-shard would
+trade its memory bound for a file-count explosion the follow-up ``compact``
+has to clean up."""
 
 FALLBACK_MEMORY_LIMIT = "8GB"
 """Slice budget when ``LAKEHOUSE_DUCKDB_MEMORY_LIMIT`` is not a parseable
@@ -285,6 +291,69 @@ def build_merge_sql(
     )
 
 
+def shard_expr_sql(shards: int, column: str = "entity_id") -> str:
+    """DuckDB expression computing the shard key of ``column``.
+
+    The SQL twin of :func:`ftm_lakehouse.core.conventions.path.entity_shard`,
+    used by :func:`build_shard_sql` so a re-shard recomputes every row's
+    partition inside DuckDB's vectorised pipeline instead of marshaling
+    ids into Python. ``banal.hash_data`` of a ``str`` is a plain SHA-1 of
+    its UTF-8 bytes, which is exactly what DuckDB's ``sha1()`` returns –
+    the two are pinned to agree by
+    ``tests/test_logic_parquet.py::test_shard_expr_sql_parity``.
+
+    Args:
+        shards: Target shard count; ``<= 1`` collapses to the constant
+            single-shard key, matching ``entity_shard``.
+        column: Column holding the entity id.
+
+    Returns:
+        A DuckDB scalar expression yielding the hex-padded shard key.
+    """
+    if shards <= 1:
+        return "'0'"
+    width = path.shard_hex_width(shards)
+    return (
+        f"printf('%0{width}x', "
+        f"(('0x' || substr(sha1({column}), 1, 8))::BIGINT) % {int(shards)})"
+    )
+
+
+def build_shard_sql(shard: str, bucket: str, origin: str, shards: int) -> str:
+    """DuckDB SQL re-keying one partition's rows onto ``shards`` shards.
+
+    ``SELECT *`` over the **raw** ``statement_raw`` view (tombstones and
+    pre-merge duplicates included – a re-shard moves rows, it does not
+    decide what survives) with the stored ``shard`` swapped for the one
+    :func:`shard_expr_sql` computes from ``entity_id``. ``REPLACE`` keeps
+    the projection positional, so the result still *is*
+    :data:`~ftm_lakehouse.model.statement.SHARDED_SCHEMA` and streams
+    straight into ``write_deltalake``.
+
+    Deliberately unordered and un-deduped: the caller
+    (:meth:`~ftm_lakehouse.storage.parquet.ParquetStore.shard`) re-stamps
+    every rewritten partition as dirty, so the next ``merge`` restores the
+    file sort order – paying for a sort here would only make the rewrite
+    slower.
+
+    Args:
+        shard: Source shard value (hex-padded) to read.
+        bucket: Source bucket – invariant under re-sharding.
+        origin: Source origin tag – invariant under re-sharding; single
+            quotes are doubled as defense in depth.
+        shards: Target shard count.
+
+    Returns:
+        Executable DuckDB SQL.
+    """
+    origin = validate_origin(origin)
+    return (
+        f"SELECT * REPLACE ({shard_expr_sql(shards)} AS shard) "
+        f"FROM {TABLE_RAW.name} "
+        f"WHERE shard = '{shard}' AND bucket = '{bucket}' AND origin = '{origin}'"
+    )
+
+
 def build_bounds_sample_sql(
     shard: str, bucket: str, origin: str, size: int = MERGE_SAMPLE_SIZE
 ) -> str:
@@ -380,6 +449,32 @@ def merge_slice_count(partition_bytes: int, memory_limit: str) -> int:
     if partition_bytes <= 0:
         return 1
     return max(1, math.ceil(partition_bytes * MERGE_SPILL_FACTOR / budget))
+
+
+def shard_target_file_size(shards: int) -> int:
+    """Delta ``target_file_size`` for a re-shard write, bounding its memory.
+
+    A re-shard scatters one ``(bucket, origin)`` group across every target
+    shard, so ``write_deltalake`` holds one open partition writer per
+    shard and each buffers up to ``target_file_size`` compressed bytes
+    before it flushes. At the default :data:`~ftmq.store.lake.TARGET_SIZE`
+    that peak is the file size *times the shard count* – gigabytes for the
+    very datasets a re-shard is for. Dividing by the shard count keeps the
+    peak at roughly one ``TARGET_SIZE`` regardless of how many shards the
+    rows fan out into.
+
+    Merge has no such problem – it writes one partition per call – and
+    keeps the full ``TARGET_SIZE``. The smaller files a re-shard leaves
+    behind are what ``compact`` bin-packs on the next optimize, which the
+    re-shard asks for anyway.
+
+    Args:
+        shards: Target shard count.
+
+    Returns:
+        Byte size, never below :data:`SHARD_MIN_FILE_SIZE`.
+    """
+    return max(TARGET_SIZE // max(shards, 1), SHARD_MIN_FILE_SIZE)
 
 
 def make_prune_by_shard(shards: int = 0) -> PruneFn:

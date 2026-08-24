@@ -30,7 +30,9 @@ un-iterated global view.
 
 ``merge`` collapses physical duplicates and reaps tombstones past grace –
 load-bearing for read correctness, not just cleanup; ``compact`` bin-packs
-small files; ``vacuum`` removes obsolete Delta file versions.
+small files; ``vacuum`` removes obsolete Delta file versions. ``shard``
+re-keys the whole store onto a different shard count, the one operation
+that moves rows between partitions.
 
 Layout:
     statements/shard={s}/bucket={b}/origin={o}/part-*.parquet
@@ -78,11 +80,13 @@ from ftm_lakehouse.logic.entities.aggregate import EntityPayload
 from ftm_lakehouse.logic.parquet import (
     build_bounds_sample_sql,
     build_merge_sql,
+    build_shard_sql,
     duckdb_config,
     live_view_sql,
     make_prune_by_shard,
     merge_slice_count,
     raw_view_sql,
+    shard_target_file_size,
     slice_ranges,
 )
 from ftm_lakehouse.model.dataset import DEFAULT_SHARDS
@@ -93,6 +97,7 @@ from ftm_lakehouse.model.statement import (
     statement_csv_select,
 )
 from ftm_lakehouse.storage.tags import TagStore
+from ftm_lakehouse.util import validate_origin
 
 PARTITIONS = ["shard", "bucket", "origin"]
 
@@ -606,7 +611,7 @@ class ParquetStore:
         (:func:`~ftm_lakehouse.logic.parquet.slice_ranges`), one merge
         query runs per range – strictly sequentially, so only one sort
         window is materialised at a time – and the slices chain into the
-        single atomic partition overwrite (:meth:`_merge_reader`). No
+        single atomic partition overwrite (:meth:`_chained_reader`). No
         dedupe group spans an ``entity_id`` bound, ranges stream in
         ascending order, so output content, file sort order and the Delta
         commit are identical to a single-pass merge.
@@ -645,7 +650,7 @@ class ParquetStore:
                         ]
                         write_deltalake(
                             str(self.uri),
-                            self._merge_reader(cur, sqls),
+                            self._chained_reader(cur, sqls),
                             mode="overwrite",
                             partition_by=PARTITIONS,
                             predicate=(
@@ -682,26 +687,29 @@ class ParquetStore:
             grace_period_days=self.settings.grace_period_days,
         )
 
-    def _merge_reader(
+    def _chained_reader(
         self, cur: duckdb.DuckDBPyConnection, sqls: list[str]
     ) -> pa.RecordBatchReader:
-        """Chain per-slice merge queries into one lazily-executed reader.
+        """Chain queries into one lazily-executed reader for a single write.
 
         Each query's ``to_arrow_reader`` streams from DuckDB's execution
-        pipeline and ``write_deltalake`` consumes batch by batch, so the
-        merge never materialises a partition in Python memory. The
+        pipeline and ``write_deltalake`` consumes batch by batch, so a
+        rewrite never materialises its input in Python memory. The
         queries execute strictly sequentially – query ``i + 1`` only
-        starts once query ``i`` is exhausted – so at most one slice's
-        sort window lives in DuckDB at a time, which is the point of
-        range slicing. Slices arrive in ascending ``entity_id`` range
-        order and each is internally sorted, so the concatenated stream
-        keeps the global file sort order.
+        starts once query ``i`` is exhausted – so at most one of them
+        holds a sort window in DuckDB at a time.
+
+        Both rewriting paths feed it: :meth:`merge` passes its range
+        slices, which arrive in ascending ``entity_id`` order and are
+        each internally sorted, so the concatenated stream keeps the
+        global file sort order; :meth:`shard` passes one query per
+        source partition, deliberately unordered.
 
         Args:
             cur: Open DuckDB cursor – must stay alive until the returned
                 reader is fully consumed.
-            sqls: Per-slice merge queries in range order; a single-pass
-                merge passes exactly one.
+            sqls: Queries in output order; a single-pass merge passes
+                exactly one.
         """
         first = cur.execute(sqls[0]).to_arrow_reader()
 
@@ -730,6 +738,94 @@ class ParquetStore:
             key = (shard, bucket, origin)
             sizes[key] = sizes.get(key, 0) + size
         return sizes
+
+    def shard(self, shards: int) -> None:
+        """Re-key the whole store onto ``shards`` entity-hash shards.
+
+        The physical half of a shard-count change: every row's ``shard``
+        is recomputed from its ``entity_id``
+        (:func:`~ftm_lakehouse.logic.parquet.build_shard_sql`) and the
+        store is rewritten into the new partition layout. ``bucket`` and
+        ``origin`` are invariant under re-sharding – only ``shard``
+        moves – so the rewrite runs one ``write_deltalake`` per
+        ``(bucket, origin)`` group, replacing that group's partitions
+        wholesale via ``predicate`` while the group's source partitions
+        stream in through a single chained reader
+        (:meth:`_chained_reader`). Nothing is materialised in Python, and
+        each group's rows land in one atomic Delta commit with the
+        bucket-appropriate ``writer_properties``.
+
+        One writer per *target* partition stays open across a group's
+        write, so the target file size is scaled down by the shard count
+        (:func:`~ftm_lakehouse.logic.parquet.shard_target_file_size`) to
+        keep their combined buffers bounded; the resulting small files are
+        what the follow-up ``compact`` bin-packs.
+
+        Deliberately no dedupe and no sort: the use case is a store whose
+        queries have outgrown their shard count, and a re-shard moves
+        rows rather than deciding which survive. Every rewritten
+        partition is therefore re-stamped as dirty, so the next
+        :meth:`merge` restores canonical content and file sort order –
+        run ``optimize`` afterwards. The stamps are per-partition only;
+        the dataset-level clocks stay put, because a re-shard changes
+        physical layout, not canonical content, and the exports keyed on
+        them are byte-identical either side of it.
+
+        Idempotent: the target shard is a function of ``entity_id`` and
+        the target count alone, never of the value a row currently
+        carries, so a run interrupted between group commits is repaired
+        by running it again.
+
+        Held under the exclusive maintenance fence
+        (:meth:`_maintenance_fence`), which blocks parquet appends but
+        **not** journal writes – a statement journalled before the
+        re-shard and flushed after it carries a shard key from the old
+        count and lands in the wrong partition. Run with writers stopped.
+
+        Args:
+            shards: Target shard count; ``<= 1`` collapses the store into
+                the single ``"0"`` shard.
+        """
+        if self.exists:
+            self._rewrite_shards(shards)
+        self.shards = shards
+        # the cached sources prune by the shard count they were built with
+        self.__dict__.pop("source", None)
+        self.__dict__.pop("source_raw", None)
+        self.log.info("Re-shard complete.", shards=shards)
+
+    def _rewrite_shards(self, shards: int) -> None:
+        """Rewrite every ``(bucket, origin)`` group onto ``shards`` shards."""
+        with self._maintenance_fence():
+            groups: dict[tuple[str, str], list[str]] = {}
+            for shard, bucket, origin in self._list_partitions():
+                groups.setdefault((bucket, origin), []).append(shard)
+            for (bucket, origin), sources in groups.items():
+                sqls = [build_shard_sql(s, bucket, origin, shards) for s in sources]
+                with Took() as t, self._lake.cursor() as cur:
+                    write_deltalake(
+                        str(self.uri),
+                        self._chained_reader(cur, sqls),
+                        mode="overwrite",
+                        partition_by=PARTITIONS,
+                        predicate=(
+                            f"bucket = '{bucket}' AND "
+                            f"origin = '{validate_origin(origin)}'"
+                        ),
+                        writer_properties=writer_for_bucket(bucket),
+                        target_file_size=shard_target_file_size(shards),
+                        storage_options=storage_options(),
+                    )
+                self.log.info(
+                    f"Re-sharded `{bucket}/{origin}`.",
+                    took=t.took,
+                    bucket=bucket,
+                    origin=origin,
+                    sources=len(sources),
+                    shards=shards,
+                )
+            for shard, bucket, origin in self._list_partitions():
+                self._tags.set(tag.statements_partition_updated(shard, bucket, origin))
 
     def compact(self) -> None:
         """Bin-pack small parquet files within each partition.

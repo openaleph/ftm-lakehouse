@@ -6,12 +6,18 @@ from datetime import datetime, timedelta, timezone
 import pyarrow as pa
 import pytest
 from ftmq.query import M, P, Query
+from ftmq.store.lake import TARGET_SIZE
 
+from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.logic.parquet import (
     MERGE_SPILL_FACTOR,
+    SHARD_MIN_FILE_SIZE,
     build_merge_sql,
+    build_shard_sql,
     make_prune_by_shard,
     merge_slice_count,
+    shard_expr_sql,
+    shard_target_file_size,
     slice_ranges,
 )
 from ftm_lakehouse.model.statement import SHARDED_SCHEMA, TABLE_RAW
@@ -614,3 +620,103 @@ def test_prune_by_shard():
     prune = make_prune_by_shard(16)
     q = Query(M(entity_id__in=["jane", "bob"]))
     assert prune(q) == {"4", "d"}
+
+
+@pytest.mark.parametrize("shards", [0, 1, 2, 7, 8, 16, 32, 256, 4096])
+def test_shard_expr_sql_parity(shards):
+    """The SQL shard expression must agree with ``path.entity_shard``.
+
+    The re-shard rewrite computes partition keys in DuckDB while every
+    reader and writer computes them in Python – a divergence would file
+    rows under keys no id-filtered query ever prunes to. ``hash_data`` of
+    a ``str`` is a plain SHA-1 over its UTF-8 bytes, which is what
+    DuckDB's ``sha1()`` gives, so the two agree by construction; this
+    pins it against a change on either side.
+    """
+    ids = [
+        "jane",
+        "bob",
+        "de-adf9c1e5b1a",
+        "ünïcødé-id",
+        "a'b",  # a quote must not reach the expression unescaped
+        "",
+        "x" * 512,
+    ]
+    con = make_duckdb()
+    expr = shard_expr_sql(shards, "id")
+    con.register("ids", pa.table({"id": ids}))
+    got = [r[0] for r in con.execute(f"SELECT {expr} FROM ids").fetchall()]
+    assert got == [path.entity_shard(i, shards) for i in ids]
+
+
+def test_build_shard_sql_rekeys_partition(now):
+    """``build_shard_sql`` moves rows to their new shard, keeping everything
+    else – tombstones and duplicates included."""
+    table = _table(
+        [
+            {
+                "shard": "0",
+                "id": f"s{i}",
+                "entity_id": e,
+                "dataset": "test",
+                "bucket": "thing",
+                "origin": "ingest",
+                "schema": "Person",
+                "prop": "name",
+                "value": e,
+                "external": False,
+                "first_seen": now,
+                "last_seen": now,
+                "deleted_at": deleted,
+            }
+            for i, (e, deleted) in enumerate(
+                [("jane", None), ("jane", None), ("bob", None), ("alice", now)]
+            )
+        ]
+        # a row of the same bucket in another partition must not come along
+        + [
+            {
+                "shard": "0",
+                "id": "other",
+                "entity_id": "jane",
+                "dataset": "test",
+                "bucket": "thing",
+                "origin": "crawl",
+                "schema": "Person",
+                "prop": "name",
+                "value": "jane",
+                "external": False,
+                "first_seen": now,
+                "last_seen": now,
+            }
+        ]
+    )
+    con = make_duckdb()
+    con.register(TABLE_RAW.name, table)
+    out = con.execute(build_shard_sql("0", "thing", "ingest", 8)).arrow().read_all()
+
+    assert out.schema.names == SHARDED_SCHEMA.names
+    rows = out.to_pylist()
+    # no dedupe, no tombstone reaping – 4 rows in, 4 rows out
+    assert len(rows) == 4
+    assert sorted(r["id"] for r in rows) == ["s0", "s1", "s2", "s3"]
+    for row in rows:
+        assert row["shard"] == path.entity_shard(row["entity_id"], 8)
+    assert sum(1 for r in rows if r["deleted_at"] is not None) == 1
+
+
+def test_build_shard_sql_single_shard():
+    """Collapsing to one shard writes the constant key, not a hash."""
+    assert "'0' AS shard" in build_shard_sql("3", "thing", "ingest", 1)
+    assert "'0' AS shard" in build_shard_sql("3", "thing", "ingest", 0)
+
+
+def test_shard_target_file_size():
+    """A re-shard holds one writer per target shard open, so the file size
+    is divided by the shard count – floored, to bound the file count."""
+    assert shard_target_file_size(0) == TARGET_SIZE
+    assert shard_target_file_size(1) == TARGET_SIZE
+    assert shard_target_file_size(4) == TARGET_SIZE // 4
+    # the product stays around one TARGET_SIZE until the floor kicks in
+    assert 4 * shard_target_file_size(4) == TARGET_SIZE
+    assert shard_target_file_size(4096) == SHARD_MIN_FILE_SIZE

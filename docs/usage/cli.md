@@ -54,13 +54,18 @@ ftm-lakehouse maintenance flush --all
 # LAKEHOUSE_GRACE_PERIOD_DAYS, bin-packs small files, removes obsolete ones –
 # always in one pass, held under the dataset write fence.
 ftm-lakehouse -d my_dataset maintenance optimize
+
+# Change the shard count of an existing dataset: rewrites every partition,
+# then records the new count in config.yml. Run with writers stopped, and
+# follow up with `maintenance optimize`.
+ftm-lakehouse -d my_dataset maintenance shard --shards 8
 ```
 
 ### `configure`
 
 `ftm-lakehouse -d <dataset> configure -c <config.yml>` writes dataset configuration and nothing else – no flush, no exports. The yaml follows the [dataset configuration](../deployment/configuration.md#dataset-configuration) schema; only the keys it actually contains are written, so a partial file leaves everything else (notably `shards`) untouched. `name` and `uri` are taken from `-d` / the catalog and ignored if present in the file. Each write keeps a versioned snapshot.
 
-Layout-affecting settings (`shards`) only take effect on a dataset that has not been written to yet – see [Sharding](../architecture.md#sharding-why-and-how-many-shards).
+Layout-affecting settings (`shards`) only take effect on a dataset that has not been written to yet – writing a different `shards` value here changes what readers *expect*, not where the rows are. Use `maintenance shard --shards <n>` to actually move them – see [Re-sharding](../architecture.md#re-sharding-an-existing-dataset).
 
 ### `make`
 

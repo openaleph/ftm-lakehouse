@@ -48,6 +48,18 @@ Both builders emit `delta_scan('<uri>')`, so a view defined from this SQL resolv
 
 An executable DuckDB SQL string over `statement_raw` holding all dedupe / fragment-supersession logic; it collapses one `(shard, bucket, origin)` partition for physical rewrite. Change-detection for diff exports no longer has its own SQL builder – it is an ftmq `Query` over the raw source (`ParquetStore.get_entity_ids(q, source=store.source_raw)`).
 
+::: ftm_lakehouse.logic.parquet.build_shard_sql
+    options:
+        heading_level: 3
+        show_root_heading: true
+
+::: ftm_lakehouse.logic.parquet.shard_expr_sql
+    options:
+        heading_level: 3
+        show_root_heading: true
+
+The other partition rewrite: `build_shard_sql` re-keys a partition's rows onto a new shard count for `ParquetStore.shard`, recomputing each row's `shard` in DuckDB. `shard_expr_sql` is the SQL twin of `path.entity_shard` – `banal.hash_data` of a string is a plain SHA-1 over its UTF-8 bytes, which is what DuckDB's `sha1()` returns, and a parity test pins the two together.
+
 ## Statement Serialization
 
 Statements are packed once, columnwise, by `ftm_lakehouse.model.statement.statements_to_arrow` – see [Model](model.md#statement-schema).

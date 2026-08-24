@@ -27,8 +27,10 @@ class DatasetModel(Dataset):
     """Number of entity-id hash shards for the parquet store. ``0`` (default)
     means a single shard; huge datasets should configure ``8`` or more at
     creation for bounded per-partition working sets (e.g.
-    ``ensure_dataset("big_leak", shards=8)``). Immutable after first
-    write – changing it requires a full rewrite."""
+    ``ensure_dataset("big_leak", shards=8)``). Fixed once the store is
+    written: setting it here only changes where readers *look*, so changing
+    it after the fact means a full rewrite –
+    :class:`~ftm_lakehouse.operation.maintenance.ShardOperation`."""
     compression: CompressKind | None = None
     """Compress exported artifacts (statements.csv, entities.ftm.json, diffs...)"""
 

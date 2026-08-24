@@ -25,7 +25,12 @@ from ftm_lakehouse.operation.download import (
     DownloadArchiveOperation,
 )
 from ftm_lakehouse.operation.export import ExportJob, ExportKind, ExportOperation
-from ftm_lakehouse.operation.maintenance import OptimizeJob, OptimizeOperation
+from ftm_lakehouse.operation.maintenance import (
+    OptimizeJob,
+    OptimizeOperation,
+    ShardJob,
+    ShardOperation,
+)
 from ftm_lakehouse.operation.make import MakeJob, MakeOperation
 
 
@@ -86,6 +91,36 @@ def optimize(
         retention_hours=retention_hours,
     )
     return OptimizeOperation(job, uri).run(force=force)
+
+
+def shard(
+    dataset: str,
+    shards: int,
+    uri: Uri | None = None,
+    force: bool = False,
+) -> ShardJob:
+    """
+    Change the dataset's shard count: rewrite the statement store onto
+    ``shards`` entity-hash shards, then record the count in ``config.yml``.
+
+    A full rewrite of the store – the shard count is otherwise fixed at
+    creation. Drains the journal first and leaves every partition marked
+    dirty, so run ``optimize`` afterwards. Run with writers stopped: the
+    write fence covers parquet appends, not journal writes.
+
+    Args:
+        dataset: Name of the dataset to re-shard
+        shards: Target shard count (``0`` / ``1`` = a single shard)
+        uri: Dataset storage root override
+        force: Re-shard even when the dataset is already configured for
+            ``shards`` – the way to repair a config that was changed
+            without a rewrite
+
+    Returns:
+        The completed job result
+    """
+    job = ShardJob.make(dataset=dataset, shards=shards)
+    return ShardOperation(job, uri).run(force=force)
 
 
 def make(dataset: str, uri: Uri | None = None, force: bool = False) -> MakeJob:
