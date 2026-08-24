@@ -10,7 +10,6 @@ from enum import Enum
 from fnmatch import fnmatch
 from typing import Generator
 
-import aiohttp
 from anystore.store import get_store
 from anystore.types import Uri
 from anystore.util import mask_uri
@@ -82,12 +81,17 @@ class CrawlOperation(DatasetJobOperation[CrawlJob]):
         super().__init__(*args, **kwargs)
         self.source = get_store(self.job.uri)
         if self.source.is_http:
-            backend_config = ensure_dict(self.source.backend_config)
-            backend_config["client_kwargs"] = {
-                **ensure_dict(backend_config.get("client_kwargs")),
-                "timeout": aiohttp.ClientTimeout(total=3600 * 24),
-            }
-            self.source.backend_config = backend_config
+            try:
+                import aiohttp
+
+                backend_config = ensure_dict(self.source.backend_config)
+                backend_config["client_kwargs"] = {
+                    **ensure_dict(backend_config.get("client_kwargs")),
+                    "timeout": aiohttp.ClientTimeout(total=3600 * 24),
+                }
+                self.source.backend_config = backend_config
+            except ImportError as e:
+                raise ImportError(f"Please install `aiohttp` dependency: {e}")
 
     def get_uris(self) -> Generator[str, None, None]:
         """
