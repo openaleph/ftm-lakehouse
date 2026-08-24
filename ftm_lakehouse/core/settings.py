@@ -36,16 +36,19 @@ class Settings(BaseSettings):
     grace_period_days: int = 30
     max_buffer_rows: int = 1_000_000
 
+    journal_pool_size: int = 5
+    """Postgres journal connections kept warm between writers
+    (``LAKEHOUSE_JOURNAL_POOL_SIZE``). ``0`` pools nothing. It is per dataset: a
+    worker writing many datasets holds up to this many idle connections for each
+    of them, which is the figure to size against postgres
+    ``max_connections``."""
+
     lock_max_retries: int = 22
     """Retry bound when acquiring the dataset write fence (``.LOCK``). Retry
     ``n`` sleeps ``n + rand(0, 1)`` seconds, so the total wait is roughly
-    ``N²/2`` seconds – the default of 22 gives up after ~4.5 minutes, just
-    inside a 300s reverse-proxy read timeout (each API client waiting on the
-    fence pins a worker thread, so a higher bound multiplies across retrying
-    clients). Long-running local bulk jobs can raise it via
-    ``LAKEHOUSE_LOCK_MAX_RETRIES``. On exhaustion the writer raises
-    ``RuntimeError`` instead of waiting forever; a lock left behind by a
-    crashed writer must be released via ``ftm-lakehouse operations unlock``."""
+    ``N²/2`` seconds – the default of 22 gives up after ~4.5 minutes; a lock
+    left behind by a crashed writer must be released via ``ftm-lakehouse
+    operations unlock``."""
 
     duckdb_memory_limit: str = "8GB"
     duckdb_temp_directory: str | None = None

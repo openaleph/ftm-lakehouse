@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from followthemoney import EntityProxy
 from followthemoney.statement import Statement
+from sqlalchemy.pool import NullPool
 
 from ftm_lakehouse.api.routes.journal import router
 from ftm_lakehouse.core.api import get_api
@@ -29,6 +30,7 @@ from ftm_lakehouse.storage.journal import (
     StatementTables,
 )
 from ftm_lakehouse.storage.journal import get_journal as _get_journal_factory
+from ftm_lakehouse.storage.journal import sql as journal_sql
 from ftm_lakehouse.storage.journal import sql_journal
 from ftm_lakehouse.storage.journal.base import BaseJournalStore
 
@@ -694,3 +696,198 @@ def test_storage_journal_psql_append_only():
     assert dead_tuples() == before
     store.clear()
     store.dispose()
+
+
+# -- connection pool
+#
+# The pool itself is SQLAlchemy's `QueuePool` over the store's `connect`, so
+# these cover the wiring around it - that writers share a connection, that a
+# broken or dead one never reaches the next writer, and that nothing is left
+# checked out - not QueuePool's own behaviour.
+
+
+def _ingest_into_missing_table(conn, batch) -> None:
+    """An `insert_batch` that fails *on the server*.
+
+    A python-level raise would leave the session perfectly healthy; only a
+    real error aborts the transaction, which is the state these tests are
+    about.
+    """
+    with conn.cursor() as cur:
+        cur.adbc_ingest("journal_no_such_table", batch, mode="append")
+    conn.commit()
+
+
+@pytest.mark.skipif(not PSQL_URI, reason="needs PYTEST_POSTGRESQL_URI")
+def test_storage_journal_postgres_writers_share_connection():
+    """Successive writers reuse the pooled ADBC connection instead of dialling
+    a new one - the whole point, ~60ms per writer otherwise."""
+    store = sql_journal(DATASET, PSQL_URI)
+    store.clear()
+    try:
+        seen = []
+        for i in range(3):
+            with store.writer(SHARDS) as w:
+                w.add_statement(make_statement(f"pooled_{i}", "name", f"Pooled {i}"))
+                seen.append(w.conn.dbapi_connection)
+
+        assert seen[0] is seen[1] is seen[2]
+        assert store.pool().checkedout() == 0
+        assert store.count() == 3
+    finally:
+        store.clear()
+        store.dispose()
+
+
+@pytest.mark.skipif(not PSQL_URI, reason="needs PYTEST_POSTGRESQL_URI")
+def test_storage_journal_postgres_failed_insert_recovers(monkeypatch):
+    """A failed insert leaves the session's transaction aborted, where every
+    later statement fails until it is rolled back. Handing the connection back
+    is what rolls it back, so the *same* writer stays usable - a caller that
+    catches a per-item error and keeps going must not silently lose the rest.
+    """
+    store = sql_journal(DATASET, PSQL_URI)
+    store.clear()
+    try:
+        writer = store.writer(SHARDS)
+        writer.add_statement(make_statement("boom", "name", "Boom"))
+
+        with monkeypatch.context() as m:
+            m.setattr(store, "insert_batch", _ingest_into_missing_table)
+            with pytest.raises(Exception):
+                writer.flush()
+
+        assert writer._conn is None
+        assert store.pool().checkedout() == 0
+
+        writer.add_statement(make_statement("after", "name", "After"))
+        writer.flush()
+        writer.close()
+
+        # the failed batch is gone - the buffer was drained before the insert -
+        # but nothing after it was lost
+        assert store.count() == 1
+    finally:
+        store.clear()
+        store.dispose()
+
+
+@pytest.mark.skipif(not PSQL_URI, reason="needs PYTEST_POSTGRESQL_URI")
+def test_storage_journal_postgres_failing_flush_releases_connection(monkeypatch):
+    """The tail flush in `__exit__` is where every writer under
+    `WRITE_BATCH_SIZE` rows sends its data, so it failing is the common exit,
+    not an edge - and it must still give the connection back."""
+    store = sql_journal(DATASET, PSQL_URI)
+    store.clear()
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(store, "insert_batch", _ingest_into_missing_table)
+            with pytest.raises(Exception):
+                with store.writer(SHARDS) as writer:
+                    writer.add_statement(make_statement("leak", "name", "Leak"))
+
+        assert writer._conn is None
+        assert store.pool().checkedout() == 0
+
+        with store.writer(SHARDS) as w:
+            w.add_statement(make_statement("after", "name", "After"))
+        assert store.count() == 1
+    finally:
+        store.clear()
+        store.dispose()
+
+
+@pytest.mark.skipif(not PSQL_URI, reason="needs PYTEST_POSTGRESQL_URI")
+def test_storage_journal_postgres_dead_connection_replaced():
+    """Pooling reintroduces a failure a per-writer `connect()` did not have: an
+    idle connection the server has since dropped. The checkout ping retires it
+    before a writer can touch it."""
+    store = sql_journal(DATASET, PSQL_URI)
+    store.clear()
+    try:
+        with store.writer(SHARDS) as w:
+            w.add_statement(make_statement("live", "name", "Live"))
+            pooled = w.conn.dbapi_connection
+            with pooled.cursor() as cur:
+                cur.execute("SELECT pg_backend_pid()")
+                pid = cur.fetchone()[0]
+
+        killer = store.connect()
+        try:
+            with killer.cursor() as cur:
+                cur.execute(f"SELECT pg_terminate_backend({pid})")
+            killer.commit()
+        finally:
+            killer.close()
+
+        with store.writer(SHARDS) as w:
+            w.add_statement(make_statement("survivor", "name", "Survivor"))
+            assert w.conn.dbapi_connection is not pooled
+        assert store.count() == 2
+    finally:
+        store.clear()
+        store.dispose()
+
+
+@pytest.mark.skipif(not PSQL_URI, reason="needs PYTEST_POSTGRESQL_URI")
+def test_storage_journal_postgres_flush_drains_through_pool():
+    """The drain reads a segment on a pooled connection and drops it right
+    after - which needs check-in to have ended the read transaction."""
+    store = sql_journal(DATASET, PSQL_URI)
+    store.clear()
+    try:
+        with store.writer(SHARDS) as w:
+            for i in range(3):
+                w.add_statement(make_statement(f"drain_{i}", "name", f"Drain {i}"))
+
+        assert sum(t.num_rows for t in store.flush_batches()) == 3
+        assert store._segments() == []
+        assert store.pool().checkedout() == 0
+        assert store.count() == 0
+    finally:
+        store.clear()
+        store.dispose()
+
+
+@pytest.mark.skipif(not PSQL_URI, reason="needs PYTEST_POSTGRESQL_URI")
+def test_storage_journal_postgres_dispose_rebuilds_pool():
+    """`get_journal` caches the store for the life of the process, so `dispose`
+    has to drop the pool rather than leave a closed one behind."""
+    store = sql_journal(DATASET, PSQL_URI)
+    store.clear()
+    try:
+        with store.writer(SHARDS) as w:
+            w.add_statement(make_statement("disposed", "name", "Disposed"))
+        assert store.pool().checkedin() == 1
+
+        store.dispose()
+        assert store._pool is None
+
+        with store.writer(SHARDS) as w:
+            w.add_statement(make_statement("reborn", "name", "Reborn"))
+        assert store.count() == 2
+    finally:
+        store.clear()
+        store.dispose()
+
+
+@pytest.mark.skipif(not PSQL_URI, reason="needs PYTEST_POSTGRESQL_URI")
+def test_storage_journal_postgres_pool_size_zero(monkeypatch):
+    """`0` pools nothing - `QueuePool(pool_size=0)` means *unbounded*, so the
+    obvious way to turn pooling off has to be a different pool."""
+    monkeypatch.setattr(journal_sql.settings, "journal_pool_size", 0)
+    store = sql_journal(DATASET, PSQL_URI)
+    store.clear()
+    try:
+        seen = []
+        for i in range(2):
+            with store.writer(SHARDS) as w:
+                w.add_statement(make_statement(f"unpooled_{i}", "name", f"U {i}"))
+                seen.append(w.conn.dbapi_connection)
+
+        assert isinstance(store.pool(), NullPool)
+        assert seen[0] is not seen[1]
+        assert store.count() == 2
+    finally:
+        store.clear()
+        store.dispose()

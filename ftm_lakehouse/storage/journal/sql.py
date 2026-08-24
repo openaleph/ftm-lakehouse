@@ -17,10 +17,11 @@ from ftmq.util import datetime_iso
 from rigour.time import utc_now
 from sqlalchemy import MetaData, Table, delete, insert, inspect, select
 from sqlalchemy.engine import Engine, create_engine, make_url
-from sqlalchemy.exc import OperationalError
-from sqlalchemy.pool import NullPool, StaticPool
+from sqlalchemy.exc import DisconnectionError, OperationalError
+from sqlalchemy.pool import NullPool, Pool, QueuePool, StaticPool
 from sqlalchemy.schema import CreateTable
 
+from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.exceptions import ImproperlyConfigured
 from ftm_lakehouse.model.statement import (
     SHARDED_SCHEMA,
@@ -44,6 +45,7 @@ except ImportError:  # pragma: no cover
     adbc_pg = None
     Connection = Any
 
+settings = Settings()
 log = get_logger(__name__)
 
 READ_BATCH_SIZE = 10_000
@@ -88,8 +90,9 @@ def _row_to_statement(row: Any) -> LakehouseStatement:
 class SqlJournalWriter(BaseJournalWriter["SqlJournalStore"]):
     """SQL-backed bulk writer, appending batches.
 
-    Holds one connection for its lifetime and hands each packed batch to the
-    store, whose dialect implementation owns the insert.
+    Borrows one connection from the store for its lifetime and hands each
+    packed batch to the store, whose dialect implementation owns the insert.
+    :meth:`close` gives it back.
     """
 
     def __init__(
@@ -104,16 +107,24 @@ class SqlJournalWriter(BaseJournalWriter["SqlJournalStore"]):
     @property
     def conn(self) -> Any:
         if self._conn is None:
-            self._conn = self.store.connect()
+            self._conn = self.store.acquire()
         return self._conn
 
     def _insert(self, batch: pa.Table) -> None:
-        self.store.insert_batch(self.conn, batch)
+        try:
+            self.store.insert_batch(self.conn, batch)
+        except Exception:
+            # postgres leaves the session in an aborted transaction, where
+            # every later statement fails until it is rolled back – and
+            # handing the connection back is what rolls it back, so a caller
+            # that catches the error and keeps writing gets a usable one
+            self.close()
+            raise
 
     def close(self) -> None:
-        """Close the connection."""
+        """Hand the connection back to the store."""
         if self._conn is not None:
-            self._conn.close()
+            self.store.release(self._conn)
             self._conn = None
 
 
@@ -152,6 +163,29 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
     def connect(self) -> Any:
         """Open a connection for a writer's inserts."""
         raise NotImplementedError
+
+    def acquire(self) -> Any:
+        """Take a connection for a writer's inserts.
+
+        A plain :meth:`connect` here – the engines in this module all use
+        non-caching pools, so a sqlite connection costs what it costs.
+        :class:`PostgresJournalStore` overrides it to borrow from a pool of
+        its own, because the ADBC write path bypasses the engine entirely
+        and a cold ADBC connection is expensive.
+        """
+        return self.connect()
+
+    def release(self, conn: Any) -> None:
+        """Hand a writer's connection back.
+
+        Closing is the whole of it in both dialects, though it means
+        different things: file-backed sqlite drops the connection, in-memory
+        sqlite returns the one shared connection to its ``StaticPool``, and
+        :class:`PostgresJournalStore` checks the ADBC connection back into
+        its pool – rolled back on the way in, so the next writer never
+        inherits an aborted transaction.
+        """
+        conn.close()
 
     def insert_batch(self, conn: Any, batch: pa.Table) -> None:
         """Append one packed batch to the live table."""
@@ -431,20 +465,42 @@ ERR_NO_ADBC = ImproperlyConfigured(
 )
 
 
+def _ping_on_checkout(conn: Any, record: Any, proxy: Any) -> None:
+    """Validate a pooled ADBC connection before a writer gets it.
+
+    Pooling reintroduces a failure a per-writer ``connect()`` did not have:
+    an idle connection the server has since dropped – an
+    ``idle_session_timeout``, a pgbouncer reap, a failover, a restart – sits
+    in the pool looking fine, and the writer finds out when its insert
+    fails. :class:`~sqlalchemy.exc.DisconnectionError` is what the checkout
+    retry catches to retire that connection and dial a fresh one in its
+    place, so the round trip here is what keeps the failure off the caller.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+    except Exception as exc:
+        raise DisconnectionError(f"Journal connection is dead: {exc}") from exc
+
+
 class PostgresJournalStore(SqlJournalStore):
     """Journal on postgres – Arrow row IO through ADBC, binary ``COPY``."""
 
     lock_timeout = ROTATE_LOCK_TIMEOUT
 
+    def __init__(self, dataset: str, uri: str | None = None) -> None:
+        super().__init__(dataset, uri)
+        self._pool_lock = threading.Lock()
+        self._pool: Pool | None = None
+
     def make_engine(self) -> Engine:
-        # NullPool: connections opened on demand, closed after use.
-        # The ``get_journal`` factory is unbounded ``@cache`` (one
-        # engine per dataset name) so a default QueuePool of 5+10
-        # idle connections per engine multiplies fast under many
-        # distinct datasets across multiple workers. NullPool keeps
-        # the concurrent connection count bounded by request load
-        # rather than by cached engine count – important to stay
-        # under postgres ``max_connections``.
+        # NullPool: connections opened on demand, closed after use. The
+        # engine only carries DDL, counts and the advisory lock here – the
+        # write path goes through ADBC and the pool below – and
+        # ``get_journal`` is an unbounded ``@cache``, so a default QueuePool
+        # of 5+10 idle connections per cached dataset would multiply for no
+        # gain. What to size against postgres ``max_connections`` is
+        # ``journal_pool_size``, not this.
         return create_engine(self.uri, hide_parameters=True, poolclass=NullPool)
 
     @cached_property
@@ -481,21 +537,76 @@ class PostgresJournalStore(SqlJournalStore):
             raise ERR_NO_ADBC
         return adbc_pg.connect(self.adbc_uri)
 
-    def insert_batch(self, conn: Connection, batch: pa.Table) -> None:
+    def pool(self) -> Pool:
+        """The writers' connection pool, built on first use.
+
+        ADBC ships no pool of its own, so this is SQLAlchemy's over
+        :meth:`connect` (the upstream recipe – see
+        https://arrow.apache.org/adbc/current/python/recipe/postgresql.html).
+        A cold ADBC connection costs way more than the liveness ping.
+
+        ``settings.journal_pool_size`` bounds what is kept *idle* between
+        writers – ``0`` pools nothing at all. ``max_overflow=-1`` keeps the
+        burst behaviour a per-writer ``connect()`` had: writers beyond the
+        pool open their own connection rather than queueing, so peak
+        connections follow write concurrency either way.
+
+        Built behind a lock rather than as a ``cached_property``: those have
+        had no lock since python 3.12, and one store is shared across a
+        worker's threads – two threads opening their first writer would each
+        build a pool, and only one of them would be reachable to dispose.
+        """
+        with self._pool_lock:
+            if self._pool is None:
+                if settings.journal_pool_size < 1:
+                    self._pool = NullPool(self.connect)
+                else:
+                    self._pool = QueuePool(
+                        self.connect,
+                        pool_size=settings.journal_pool_size,
+                        max_overflow=-1,
+                        events=[(_ping_on_checkout, "checkout")],
+                    )
+            return self._pool
+
+    def acquire(self) -> Any:
+        return self.pool().connect()
+
+    def dispose(self) -> None:
+        """Close the pooled connections along with the engine's.
+
+        The pool is dropped, not just emptied: ``get_journal`` caches this
+        store for the life of the process, so it has to come back up on the
+        next writer.
+        """
+        with self._pool_lock:
+            if self._pool is not None:
+                self._pool.dispose()
+                self._pool = None
+        super().dispose()
+
+    def insert_batch(self, conn: Any, batch: pa.Table) -> None:
         with conn.cursor() as cur:
             cur.adbc_ingest(self.table.name, batch, mode="append")
         conn.commit()
 
     def read_segment(self, name: str, ordered: bool) -> RecordBatches:
+        """Stream a segment's rows through a pooled connection.
+
+        :meth:`SqlJournalStore._drain` drops the segment as soon as this
+        returns, and that ``DROP`` needs a lock an open read transaction
+        would hold. Releasing is what ends the transaction: check-in rolls
+        back, so the connection is back in the pool with nothing held.
+        """
         order = " ORDER BY shard" if ordered else ""
-        conn = self.connect()
+        conn = self.acquire()
         try:
             with conn.cursor() as cur:
                 cur.execute(f'SELECT {COLUMNS} FROM "{name}"{order}')
                 for batch in cur.fetch_record_batch():
                     yield batch.cast(SHARDED_SCHEMA)
         finally:
-            conn.close()
+            self.release(conn)
 
 
 def sql_journal(dataset: str, uri: str) -> SqlJournalStore:

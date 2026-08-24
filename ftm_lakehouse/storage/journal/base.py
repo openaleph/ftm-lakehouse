@@ -142,11 +142,16 @@ class BaseJournalWriter(EntityBuffer, Generic[S]):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:  # noqa: ANN001
-        if exc_type is not None:
-            self.rollback()
-        else:
-            self.flush()
-        self.close()
+        # the tail flush is where every writer under `WRITE_BATCH_SIZE` rows
+        # sends its data, so it failing is the common exit, not an edge – and
+        # its connection has to go back either way
+        try:
+            if exc_type is not None:
+                self.rollback()
+            else:
+                self.flush()
+        finally:
+            self.close()
 
 
 W = TypeVar("W", bound=BaseJournalWriter)
