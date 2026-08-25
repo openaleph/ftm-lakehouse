@@ -354,6 +354,35 @@ def test_storage_journal_same_content_distinct_origins(journal):
     assert len({r["id"] for r in rows}) == 1
 
 
+def test_storage_journal_repeated_flush_inserts_nothing(journal, monkeypatch):
+    """A writer kept open across flushes must not insert an empty batch.
+
+    Re-emissions collapse in the writer's buffer, so its row count used to
+    outlive the rows: the next ``flush()`` packed a 0-row table and handed it
+    to the store – ``INSERT ... DEFAULT VALUES`` on sqlite, a wasted round
+    trip on postgres and the api.
+    """
+    stmt = make_statement("jane", "name", "Jane Doe")
+    inserted: list[int] = []
+    w = journal.writer(SHARDS)
+    _insert = w._insert
+
+    def spy(batch: pa.Table) -> None:
+        inserted.append(batch.num_rows)
+        _insert(batch)
+
+    monkeypatch.setattr(w, "_insert", spy)
+    with w:
+        w.add_statement(stmt)
+        w.add_statement(stmt)  # a re-emission – dedupes in the buffer
+        w.flush()
+        w.flush()
+
+    # two explicit flushes plus the tail flush at __exit__ – one insert
+    assert inserted == [1]
+    assert len(flush(journal)) == 1
+
+
 def test_storage_journal_count(journal):
     """Test counting rows in journal."""
     assert journal.count() == 0

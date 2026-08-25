@@ -4,7 +4,9 @@ The entity-level write path (``add_entity``) must keep per-statement origin
 of read-back ``StatementEntity`` objects (delegating resolution to
 ``add_statement``: override > statement > buffer default) and pin one
 ``last_seen`` per emission so heterogeneous read-back timestamps cannot
-split an emission across supersession ties.
+split an emission across supersession ties. Its ``_buffer_size`` must track
+the buffered rows exactly – re-emissions collapse in the dict, and
+everything that asks the buffer how full it is reads that counter.
 """
 
 from datetime import datetime, timezone
@@ -73,6 +75,38 @@ def test_add_statement_keeps_distinct_origins():
     assert len(stmts) == 2
     assert {s.origin for s in stmts} == {"orig_a", "orig_b"}
     assert len({s.id for s in stmts}) == 1  # same content-hashed id
+
+
+def test_add_statement_size_counts_rows_not_calls():
+    """A re-emission overwrites its row – the size must not count it.
+
+    Counting calls left the buffer claiming rows it no longer held once
+    drained, so a writer kept open across flushes flushed again on an empty
+    buffer.
+    """
+    buffer = EntityBuffer(DATASET, shards=1)
+    stmt = _lake_stmt("name", "Acme Inc", T1, "orig_a")
+    buffer.add_statement(stmt)
+    buffer.add_statement(stmt)
+    assert len(buffer) == 1
+
+    list(buffer.flush_buffer())
+    assert len(buffer) == 0
+    assert bool(buffer) is False
+
+
+def test_add_entity_reemission_keeps_size_exact():
+    """Re-emitting an entity collapses in the dict – and in the size.
+
+    ``_buffer_size == sum(len(rows) for rows in _buffer.values())`` is the
+    invariant every capacity check and flush trigger depends on.
+    """
+    buffer = EntityBuffer(DATASET, shards=8)
+    for _ in range(3):
+        buffer.add_entity(_read_back_entity())
+        assert len(buffer) == len(_buffered(buffer))
+    # name, country and the synthesized id statement – once each
+    assert len(buffer) == 3
 
 
 def test_add_entity_origin_override_wins():

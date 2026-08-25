@@ -172,8 +172,14 @@ class EntityBuffer:
         if stmt.id is None:
             return None
 
-        self._buffer[stmt.shard][stmt.dedupe_key] = stmt
-        self._buffer_size += 1
+        rows = self._buffer[stmt.shard]
+        # The size tracks the dict, not the number of calls: a re-emission
+        # overwrites its row, and counting it would leave the size holding
+        # the collapsed duplicates after a drain – `_check_capacity`, the
+        # journal's batch trigger and `__len__` all read it.
+        if stmt.dedupe_key not in rows:
+            self._buffer_size += 1
+        rows[stmt.dedupe_key] = stmt
         return stmt.id
 
     def add_entity(

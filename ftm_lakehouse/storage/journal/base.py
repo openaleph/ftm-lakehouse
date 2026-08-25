@@ -120,9 +120,16 @@ class BaseJournalWriter(EntityBuffer, Generic[S]):
         )
 
     def flush(self) -> None:
-        """Insert the buffered statements."""
-        if self._buffer_size:
-            self._insert(statements_to_arrow(self.flush_buffer(), utc_now()))
+        """Insert the buffered statements.
+
+        The packed table's row count is the guard, not the buffer's – an
+        empty insert is a wasted round trip on postgres and the api, and
+        SQLAlchemy turns the sqlite one into ``INSERT ... DEFAULT VALUES``,
+        which the journal's ``NOT NULL`` columns reject.
+        """
+        batch = statements_to_arrow(self.flush_buffer(), utc_now())
+        if batch.num_rows:
+            self._insert(batch)
 
     def rollback(self) -> None:
         """Drop the buffered statements that have not been inserted yet.
