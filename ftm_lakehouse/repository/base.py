@@ -1,3 +1,4 @@
+from functools import cache
 from typing import NamedTuple
 
 from anystore.logging import get_logger
@@ -48,6 +49,7 @@ def dataset_uri(dataset: str, uri: Uri | None = None) -> str:
     return str(join_uri(ensure_uri(settings.uri), dataset))
 
 
+@cache
 def ensure_zfs(dataset: str, uri: Uri) -> None:
     """Provision the dataset's tuned ZFS datasets for its storage location.
 
