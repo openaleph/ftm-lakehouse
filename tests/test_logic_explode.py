@@ -24,7 +24,7 @@ from ftm_lakehouse.logic.entities.explode import (
     statement_row_unsafe,
     strip_namespace,
 )
-from ftm_lakehouse.model.statement import SHARDED_SCHEMA
+from ftm_lakehouse.model.statement import JOURNAL_SCHEMA
 
 NOW = datetime(2026, 7, 31, 12, 0, 0, 123456, tzinfo=timezone.utc)
 PIN = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
@@ -56,13 +56,13 @@ PAYLOADS = [
 ]
 
 
-def _safe_rows(tmp_path, datas, shards: int) -> list[dict]:
+def _safe_rows(tmp_path, datas) -> list[dict]:
     """Rows the safe CLI path would hand to the parquet writer."""
     fp = tmp_path / "in.ftm.json"
     with open(fp, "wb") as fh:
         for data in datas:
             fh.write(orjson.dumps(data, option=orjson.OPT_APPEND_NEWLINE))
-    buffer = EntityBuffer("test", shards, "bulk", last_seen=PIN)
+    buffer = EntityBuffer("test", "bulk", last_seen=PIN)
     for proxy in smart_read_proxies(str(fp)):
         buffer.add_entity(
             proxy, origin=_extract_origin(proxy), fragment=_extract_fragment(proxy)
@@ -73,22 +73,18 @@ def _safe_rows(tmp_path, datas, shards: int) -> list[dict]:
         data["first_seen"] = data.get("first_seen") or NOW
         data["deleted_at"] = stmt.deleted_at
         data["last_seen"] = stmt.deleted_at or data.get("last_seen") or NOW
-        data["shard"] = stmt.shard
         data.pop("canonical_id", None)
         rows.append(data)
     return rows
 
 
-@pytest.mark.parametrize("shards", [1, 8])
-def test_explode_parity_with_safe_path(tmp_path, shards):
+def test_explode_parity_with_safe_path(tmp_path):
     pinned = iso_datetime(PIN.isoformat())
-    safe = {(r["id"], r["fragment"]): r for r in _safe_rows(tmp_path, PAYLOADS, shards)}
+    safe = {(r["id"], r["fragment"]): r for r in _safe_rows(tmp_path, PAYLOADS)}
     unsafe = {
         (r["id"], r["fragment"]): r
         for data in PAYLOADS
-        for r in explode_unsafe(
-            data, "test", shards, now=NOW, origin="bulk", last_seen=pinned
-        )
+        for r in explode_unsafe(data, "test", now=NOW, origin="bulk", last_seen=pinned)
     }
     assert set(safe) == set(unsafe)
     for key, safe_row in safe.items():
@@ -105,8 +101,8 @@ def test_explode_ids_independent_of_payload_datasets():
         "last_change": "2024-01-01T00:00:00",
     }
     foreign = {**plain, "datasets": ["somewhere_else"]}
-    rows_plain = list(explode_unsafe(plain, "test", 1, now=NOW, origin="bulk"))
-    rows_foreign = list(explode_unsafe(foreign, "test", 1, now=NOW, origin="bulk"))
+    rows_plain = list(explode_unsafe(plain, "test", now=NOW, origin="bulk"))
+    rows_foreign = list(explode_unsafe(foreign, "test", now=NOW, origin="bulk"))
     assert rows_plain == rows_foreign
     assert rows_plain[0]["id"] == Statement.make_key("test", "x", "name", "X", False)
     assert rows_plain[0]["id"] == rows_foreign[0]["id"]
@@ -124,13 +120,13 @@ def test_strip_namespace():
 def test_explode_drops_unclean_ids():
     """Ids failing the registry clean vanish exactly like in the safe path."""
     junk = {"id": "jane doe", "schema": "Person", "properties": {"name": ["x"]}}
-    assert not list(explode_unsafe(junk, "test", 1, now=NOW, origin="bulk"))
+    assert not list(explode_unsafe(junk, "test", now=NOW, origin="bulk"))
     bad_ref = {
         "id": "jane",
         "schema": "Person",
         "properties": {"name": ["x"], "proof": ["bad ref"]},
     }
-    rows = list(explode_unsafe(bad_ref, "test", 1, now=NOW, origin="bulk"))
+    rows = list(explode_unsafe(bad_ref, "test", now=NOW, origin="bulk"))
     assert [r["prop"] for r in rows] == ["name", "id"]  # unclean ref dropped
 
 
@@ -140,7 +136,6 @@ def test_explode_unknown_schema_raises():
             explode_unsafe(
                 {"id": "x", "schema": "Nope", "properties": {}},
                 "test",
-                1,
                 now=NOW,
                 origin="bulk",
             )
@@ -152,24 +147,23 @@ def test_explode_skips_unknown_props_and_incomplete_payloads():
         explode_unsafe(
             {"id": "x", "schema": "Person", "properties": {"nope": ["y"]}},
             "test",
-            1,
             now=NOW,
             origin="bulk",
         )
     )
     assert [r["prop"] for r in rows] == ["id"]  # only the BASE checksum row
     for data in ({}, {"id": "x"}, {"schema": "Person"}):
-        assert not list(explode_unsafe(data, "test", 1, now=NOW, origin="bulk"))
+        assert not list(explode_unsafe(data, "test", now=NOW, origin="bulk"))
 
 
 def test_explode_override_origin():
     data = {**PAYLOADS[0], "origin": ["crawl"]}
     rows = list(
-        explode_unsafe(data, "test", 1, now=NOW, origin="forced", override_origin=False)
+        explode_unsafe(data, "test", now=NOW, origin="forced", override_origin=False)
     )
     assert {r["origin"] for r in rows} == {"crawl"}
     rows = list(
-        explode_unsafe(data, "test", 1, now=NOW, origin="forced", override_origin=True)
+        explode_unsafe(data, "test", now=NOW, origin="forced", override_origin=True)
     )
     assert {r["origin"] for r in rows} == {"forced"}
 
@@ -187,7 +181,7 @@ def test_statement_row_unsafe_fields():
         "first_seen": "2024-01-01T00:00:00",
         "fragment": "f1",
     }
-    packed = statement_row_unsafe(row, "dst", 1, now=NOW, origin="bulk")
+    packed = statement_row_unsafe(row, "dst", now=NOW, origin="bulk")
     assert packed is not None
     assert packed["dataset"] == "dst"
     assert packed["lang"] is None  # date is a non-linguistic type
@@ -204,8 +198,7 @@ def test_statement_row_unsafe_fields():
     assert packed["first_seen"] == iso_datetime("2024-01-01T00:00:00")
 
     assert (
-        statement_row_unsafe({"schema": "Person"}, "dst", 1, now=NOW, origin="b")
-        is None
+        statement_row_unsafe({"schema": "Person"}, "dst", now=NOW, origin="b") is None
     )
 
 
@@ -224,7 +217,7 @@ def test_statement_row_unsafe_parity_with_safe_path():
         "fragment": "",
         "id": "given-id",
     }
-    buffer = EntityBuffer("dst", 1, "bulk")
+    buffer = EntityBuffer("dst", "bulk")
     buffer.add_statement(
         LakeStatement(
             id=row["id"],
@@ -245,10 +238,9 @@ def test_statement_row_unsafe_parity_with_safe_path():
     safe["first_seen"] = safe.get("first_seen") or NOW
     safe["deleted_at"] = safe_stmt.deleted_at
     safe["last_seen"] = safe_stmt.deleted_at or safe.get("last_seen") or NOW
-    safe["shard"] = safe_stmt.shard
     safe.pop("canonical_id", None)
 
-    unsafe = statement_row_unsafe(row, "dst", 1, now=NOW, origin="bulk")
+    unsafe = statement_row_unsafe(row, "dst", now=NOW, origin="bulk")
     assert unsafe == safe
     # both paths re-key the carried-over id under the target dataset
     assert safe["id"] != "given-id"
@@ -259,21 +251,16 @@ def test_row_buffer_dedupes_and_sorts():
     buffer = RowBuffer()
     buffer.add(None)
     assert not buffer
-    buffer.add({"id": "a", "fragment": "", "origin": "x", "shard": "1"})
+    buffer.add({"id": "a", "fragment": "", "origin": "x"})
+    buffer.add({"id": "a", "fragment": "", "origin": "x", "value": "v2"})  # wins
+    buffer.add({"id": "a", "fragment": "f1", "origin": "x"})  # distinct fragment
     buffer.add(
-        {"id": "a", "fragment": "", "origin": "x", "shard": "1", "value": "v2"}
-    )  # re-emission wins
-    buffer.add(
-        {"id": "a", "fragment": "f1", "origin": "x", "shard": "0"}
-    )  # distinct fragment
-    buffer.add(
-        {"id": "a", "fragment": "", "origin": "y", "shard": "1"}
+        {"id": "a", "fragment": "", "origin": "y"}
     )  # distinct origin survives - the store keys rows per origin
     assert len(buffer) == 3
 
     table = buffer.flush()
-    assert table.schema.equals(SHARDED_SCHEMA)
+    assert table.schema.equals(JOURNAL_SCHEMA)
     rows = table.to_pylist()
-    assert [r["shard"] for r in rows] == ["0", "1", "1"]
     assert {r["value"] for r in rows if r["origin"] == "x"} == {None, "v2"}
     assert not buffer and len(buffer) == 0

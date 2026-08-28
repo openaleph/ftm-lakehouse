@@ -54,8 +54,9 @@ model/
   file.py        # File, Files - archived file metadata
   job.py         # JobModel, DatasetJobModel - job execution tracking
   dataset.py     # DatasetModel - dataset metadata / config
-  statement.py   # SHARDED_SCHEMA (pyarrow) + TABLE (SQLAlchemy) +
-                 # LakehouseStatement (LakeStatement + shard, deleted_at)
+  statement.py   # JOURNAL_SCHEMA / SHARDED_SCHEMA (pyarrow) +
+                 # TABLE (SQLAlchemy) +
+                 # LakehouseStatement (LakeStatement + deleted_at)
                  # + statements_to_arrow – schema for the parquet
                  # statement store and shared currency between buffer
                  # and writer.
@@ -97,13 +98,15 @@ Blob, file metadata, and text storage are handled directly by repositories using
 
 The parquet statement store is partitioned by `(shard, bucket, origin)`:
 
-- `shard` – `hash(entity_id) % shards` (the dataset's configured shard count), hex-padded
+- `shard` – `hash(entity_id) % shards` (the dataset's configured shard count), hex-padded. Derived in `ParquetStore.append` and nowhere else; producers hand over rows without it
 - `bucket` – coarse FtM schema group (thing / interval / document / page / pages / mention)
 - `origin` – caller-supplied source tag
 
 Each row carries `first_seen`, `last_seen`, `fragment`, and `deleted_at` directly in the parquet schema (no separate translog). The live `statement` query view is a plain `WHERE deleted_at IS NULL` scan – **no read-time dedupe** – so a filter (`schema` / `prop` / `entity_id`) pushes straight through to DuckDB's per-file statistics.
 
-Writes are **append-only**: `append` sorts a per-shard batch by `(bucket, origin, entity_id, fragment, prop, id, last_seen DESC)` and writes one parquet file per `(shard, bucket, origin)` partition. Duplicates and tombstones land as additional rows.
+Writes are **append-only**: `append` derives each row's `shard` from its `entity_id`, then writes one parquet file per `(shard, bucket, origin)` partition the batch spans. It deliberately does not sort – nothing reads in physical order, and `merge` rewrites every partition an append touched anyway. Duplicates and tombstones land as additional rows.
+
+Deriving the partition key at the last moment is what keeps the layout honest. Rows reach `append` in `JOURNAL_SCHEMA`, which has no `shard` column at all: a journalled row routinely outlives the process that wrote it, so a shard key packed at write time could encode a count that is no longer configured. Because the key is a function of `entity_id` and the *writing store's* count, a producer that resolved a stale config can no longer mis-route a partition – at worst it hands over a batch spanning several shards, which costs extra files that `compact` bin-packs.
 
 **Correctness assumes an optimized store.** Dedupe, fragment supersession, `first_seen`/`last_seen` folding, and tombstone reaping all happen in `merge`; between a write and the next merge, reads can surface duplicate ids and rows whose delete has not been applied. Run `optimize` before you query or export. `merge` routes every row into one of two isolated branches on the `fragment` column (empty-string sentinel, never NULL):
 
@@ -122,13 +125,13 @@ The async `optimize` operation produces this canonical state by running the thre
 
 The `shard` partition key is the unit that keeps per-partition working sets bounded, independent of total dataset size. Everything expensive in the lakehouse operates one `(shard, bucket)` partition at a time:
 
-- **Writes:** statement rows arrive shard-sorted from the journal (a flush drains one rotated segment, ordered by shard), and `append` buffers at most one shard's batch in memory before writing it out.
+- **Writes:** producers hand over shard-scoped batches where they can – `EntityBuffer` groups its rows by shard – so `append` usually writes one file per partition. It is only a batching hint: a batch spanning shards is written correctly, just across more files.
 - **Reads:** statement queries iterate `(shard, bucket)` partitions in Python and push `WHERE shard = ?` into DuckDB; the live view is a plain scan, so filters push to file statistics and a full-store `ORDER BY entity_id` stays bounded to one partition. Single-entity lookups hash the entity id and scan just its own shard.
 - **Optimize:** the merge rewrite materializes one partition at a time – its memory and rewrite cost scale with the largest partition, not the whole table.
 
 Sharding is a trade-off, not a free win: every shard multiplies the partition count (`shard × bucket × origin`), which means more small parquet files, more Delta log metadata, and more per-partition query iterations. For small and medium datasets that overhead costs more than the bounded working sets gain.
 
-That's why the **default is `0`** – a single shard (`shard <= 1` collapses to one `"0"` partition). The default is hardcoded, deliberately not an environment setting: the shard count is per-dataset configuration, recorded in the dataset's `config.yml` at creation (e.g. `ensure_dataset("big_leak", shards=8)`), and every reader and writer resolves it from there – a process running with a different environment cannot mis-shard an existing dataset. Don't configure shards unless the dataset is huge: from roughly tens of millions of statements upward, set `shards: 8` (or more, scaling with entity count) so merge rewrites stay bounded. Size it for the data you expect, not the data you have on day one: the shard count is fixed for as long as the store stands, and changing it means rewriting every partition. When a dataset does outgrow its layout, `ftm-lakehouse -d <dataset> maintenance shard --shards 8` (the `ShardOperation`) is that rewrite – see [Re-sharding](#re-sharding-an-existing-dataset).
+That's why the **default is `0`** – a single shard (`shard <= 1` collapses to one `"0"` partition). The default is hardcoded, deliberately not an environment setting: the shard count is per-dataset configuration, recorded in the dataset's `config.yml` at creation (e.g. `ensure_dataset("big_leak", shards=8)`), and every reader and writer resolves it from there. Placement is enforced rather than trusted: `ParquetStore.append` derives each row's shard from its `entity_id` against the count *it* resolved, so a producer holding a stale config cannot mis-shard an existing dataset. Don't configure shards unless the dataset is huge: from roughly tens of millions of statements upward, set `shards: 8` (or more, scaling with entity count) so merge rewrites stay bounded. Size it for the data you expect, not the data you have on day one: the shard count is fixed for as long as the store stands, and changing it means rewriting every partition. When a dataset does outgrow its layout, `ftm-lakehouse -d <dataset> maintenance shard --shards 8` (the `ShardOperation`) is that rewrite – see [Re-sharding](#re-sharding-an-existing-dataset).
 
 #### Re-sharding an existing dataset
 
@@ -272,7 +275,7 @@ ftm_lakehouse/
 │   ├── dataset.py           # DatasetModel + set_model_class hook
 │   ├── file.py              # File metadata model
 │   ├── job.py               # Job models
-│   └── statement.py         # SHARDED_SCHEMA, LakehouseStatement
+│   └── statement.py         # JOURNAL/SHARDED_SCHEMA, LakehouseStatement
 │
 ├── storage/                 # Layer 2: Single-purpose storage interfaces
 │   ├── journal/             # SQL write-ahead log (sql.py, api.py, base.py)

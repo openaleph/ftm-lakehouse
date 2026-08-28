@@ -96,7 +96,7 @@ if buffer:
     repo.write_batches(buffer.flush_tables(now))
 ```
 
-The `EntityBuffer` keys statements by `(id, origin, fragment)` and holds them grouped by shard; `buffer.flush_tables()` drains it as one packed Arrow table per shard, and `repo.write_batches` appends each one as a parquet file per `(shard, bucket, origin)` triple.
+The `EntityBuffer` keys statements by `(id, origin, fragment)` and holds them grouped by shard; `buffer.flush_tables()` drains it as one packed Arrow table per shard, and `repo.write_batches` appends each one as a parquet file per `(shard, bucket, origin)` triple. The grouping is a batching hint – `shard` is not a packed column, and `ParquetStore.append` derives the stored key from `entity_id` – so passing a wrong `shards` here costs file count, never placement.
 
 The CLI command `ftm-lakehouse entities import` does exactly this.
 
@@ -271,7 +271,7 @@ Three independent async operations on the parquet statement store, held under th
 count = entities.flush()
 ```
 
-Claims the journal by rotating it away, then streams the rotated segment into parquet as Arrow batches, shard-ordered; each batch becomes one parquet file per `(shard, bucket, origin)` partition. Writers keep going against the fresh journal table throughout. No dedup happens here – duplicates and tombstones land as new rows for `merge` to collapse later.
+Claims the journal by rotating it away, then streams the rotated segment into parquet as Arrow batches. Journal rows carry no `shard` column – `append` derives it from `entity_id` against the dataset's current shard count, so a row journalled before a config change still lands where readers look for it – and the segment streams out unordered, so a batch becomes one parquet file per `(shard, bucket, origin)` partition it spans. Writers keep going against the fresh journal table throughout. No dedup happens here – duplicates and tombstones land as new rows for `merge` to collapse later.
 
 From the CLI, per dataset or across the whole catalog:
 

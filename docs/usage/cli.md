@@ -65,7 +65,7 @@ ftm-lakehouse -d my_dataset maintenance shard --shards 8
 
 `ftm-lakehouse -d <dataset> configure -c <config.yml>` writes dataset configuration and nothing else – no flush, no exports. The yaml follows the [dataset configuration](../deployment/configuration.md#dataset-configuration) schema; only the keys it actually contains are written, so a partial file leaves everything else (notably `shards`) untouched. `name` and `uri` are taken from `-d` / the catalog and ignored if present in the file. Each write keeps a versioned snapshot.
 
-Layout-affecting settings (`shards`) only take effect on a dataset that has not been written to yet – writing a different `shards` value here changes what readers *expect*, not where the rows are. Use `maintenance shard --shards <n>` to actually move them – see [Re-sharding](../architecture.md#re-sharding-an-existing-dataset).
+Layout-affecting settings (`shards`) belong in the config *before* a dataset is written to. Setting a different value on a store that already holds rows splits it: rows written from then on are placed under the new count, the rows already there keep their old partitions, and reads prune by the new count – so an `entity_id`-filtered query silently misses whichever half didn't move. `maintenance shard --shards <n>` is the operation that moves them – see [Re-sharding](../architecture.md#re-sharding-an-existing-dataset).
 
 ### `make`
 

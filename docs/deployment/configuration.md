@@ -24,7 +24,7 @@
 | `LOG_LEVEL` | Logging level (DEBUG, INFO, WARNING, ERROR) | `INFO` |
 | `DEBUG` | Enable debug mode | `false` |
 
-There is deliberately **no environment setting for the shard count**: it is per-dataset configuration (`shards` in `config.yml`, default `0` = single shard), so a process with a different environment can't mis-shard an existing dataset. Huge datasets should configure `8` or more at creation; changing it later means rewriting every partition with `maintenance shard` – see [Sharding](../architecture.md#sharding-why-and-how-many-shards).
+There is deliberately **no environment setting for the shard count**: it is per-dataset configuration (`shards` in `config.yml`, default `0` = single shard). Placement is enforced on write – `ParquetStore.append` derives each row's shard from its `entity_id` against the count the store resolved – so a process with a different environment can't mis-shard an existing dataset. Huge datasets should configure `8` or more at creation; changing it later means rewriting every partition with `maintenance shard` – see [Sharding](../architecture.md#sharding-why-and-how-many-shards).
 
 ### Basic Usage
 

@@ -58,7 +58,7 @@ Optimize the parquet statement store in one pass: merge (per-partition rewrite t
 
 ## ShardOperation
 
-Change the dataset's shard count after the fact: drain the journal, rewrite every `(bucket, origin)` group into the new shard partitions (streamed, one atomic Delta commit per group), then record the new count in `config.yml`. Neither dedupes nor sorts – it moves rows – so every rewritten partition comes out dirty and wants an `optimize` afterwards. Run it with writers stopped: the maintenance fence covers parquet appends, not journal writes.
+Change the dataset's shard count after the fact: drain the journal, rewrite every `(bucket, origin)` group into the new shard partitions (streamed, one atomic Delta commit per group), then record the new count in `config.yml`. Neither dedupes nor sorts – it moves rows – so every rewritten partition comes out dirty and wants an `optimize` afterwards. Run it with writers stopped: the maintenance fence covers parquet appends, not journal writes, and a flush landing between the rewrite and the config write still resolves the old count.
 
 ::: ftm_lakehouse.operation.maintenance.ShardJob
     options:

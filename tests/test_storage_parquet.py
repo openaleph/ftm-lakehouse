@@ -13,7 +13,7 @@ from ftmq.types import Statements
 from ftm_lakehouse.core.conventions import tag
 from ftm_lakehouse.core.conventions.path import entity_shard
 from ftm_lakehouse.logic import parquet as logic_parquet
-from ftm_lakehouse.model.statement import SHARDED_SCHEMA, TABLE_RAW
+from ftm_lakehouse.model.statement import JOURNAL_SCHEMA, TABLE_RAW
 from ftm_lakehouse.storage.parquet import ParquetStore
 
 DATASET = "test"
@@ -36,7 +36,12 @@ def make_statement(
 
 
 def _pack(stmt: Statement, deleted_at: datetime | None = None) -> dict:
-    """Pack a statement to a row dict with shard, bucket, origin, deleted_at."""
+    """Pack a statement to a row dict with bucket, origin, deleted_at.
+
+    ``shard`` rides along for the partition grouping in :func:`_flush` only –
+    :meth:`ParquetStore.append` derives the stored one from ``entity_id``, so
+    it is stripped before the table is handed over.
+    """
     now = datetime(2024, 1, 1, tzinfo=timezone.utc)
     row = pack_statement(stmt)
     row["first_seen"] = row.get("first_seen") or now
@@ -54,7 +59,10 @@ def _flush(store: ParquetStore, rows: list[dict]) -> int:
         by_partition[(r["shard"], r["bucket"], r["origin"])].append(r)
     total = 0
     for (_shard, bucket, _origin), partition_rows in sorted(by_partition.items()):
-        table = pa.Table.from_pylist(partition_rows, schema=SHARDED_SCHEMA)
+        table = pa.Table.from_pylist(
+            [{k: v for k, v in r.items() if k != "shard"} for r in partition_rows],
+            schema=JOURNAL_SCHEMA,
+        )
         store.append(table)
         total += len(table)
     return total

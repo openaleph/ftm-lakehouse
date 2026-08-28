@@ -3,20 +3,19 @@ aggregation".
 
 Turns aggregated FtM entity payload dicts (and raw ``statements.csv`` row
 dicts) directly into packed parquet row dicts matching
-:data:`~ftm_lakehouse.model.statement.SHARDED_SCHEMA`, bypassing the
+`JOURNAL_SCHEMA`, bypassing the
 EntityProxy → Namespace → StatementEntity → Statement → LakeStatement
-object chain entirely. Like :func:`aggregate_unsafe
-<ftm_lakehouse.logic.entities.aggregate.aggregate_unsafe>` on the read side,
-this trades validation for speed – input is trusted.
+object chain entirely. Like
+[`aggregate_unsafe`][ftm_lakehouse.logic.entities.aggregate.aggregate_unsafe] on the read
+side, this trades validation for speed if the input can be trusted.
 
 Parity with the safe path is the contract: identical statement ids
-(:meth:`Statement.make_key`), identical ``BASE_ID`` checksum rows, identical
+(`Statement.make_key`), identical ``BASE_ID`` checksum rows, identical
 namespace stripping and timestamp pinning – so the same payload imported
-through either path collapses to the same physical rows on :meth:`merge`.
+through either path collapses to the same physical rows on `merge`.
 """
 
 from datetime import datetime
-from operator import itemgetter
 from typing import Iterator
 
 import pyarrow as pa
@@ -30,9 +29,8 @@ from followthemoney.types import registry
 from ftmq.store.lake import get_schema_bucket
 from ftmq.util import iso_datetime
 
-from ftm_lakehouse.core.conventions.path import entity_shard
 from ftm_lakehouse.helpers.statements import dedupe_key, make_base_id_statement
-from ftm_lakehouse.model.statement import SHARDED_SCHEMA
+from ftm_lakehouse.model.statement import JOURNAL_SCHEMA
 from ftm_lakehouse.util import single_string, validate_origin
 
 
@@ -44,7 +42,6 @@ def strip_namespace(value: str) -> str | None:
 def explode_unsafe(
     data: SDict,
     dataset: str,
-    shards: int,
     *,
     now: datetime,
     origin: str,
@@ -56,7 +53,7 @@ def explode_unsafe(
     Emits one row per ``(prop, value)`` plus the trailing ``BASE_ID``
     checksum row, replicating what the safe path produces for the same
     payload: the entity id and every entity-type property value are
-    namespace-stripped, statement ids come from :meth:`Statement.make_key`,
+    namespace-stripped, statement ids come from `Statement.make_key`,
     unknown / stub properties are skipped silently and every row shares one
     pinned ``last_seen`` (the payload's ``last_change``, else ``last_seen``,
     else ``now`` at second granularity – multi-valued props must tie to survive
@@ -67,7 +64,6 @@ def explode_unsafe(
             ``properties`` plus context keys). Payloads with embedded
             ``statements`` are not supported – use the statement import.
         dataset: Target dataset name, stamped on (and hashed into) every row.
-        shards: The dataset's shard count.
         now: Run-level timestamp for missing ``first_seen`` / ``last_seen``.
         origin: Default origin tag if the payload carries none.
         override_origin: Force ``origin`` over the payload's own.
@@ -75,7 +71,7 @@ def explode_unsafe(
             ``last_change``.
 
     Yields:
-        Packed row dicts carrying every ``SHARDED_SCHEMA`` column.
+        Packed row dicts carrying every ``JOURNAL_SCHEMA`` column.
 
     Raises:
         InvalidData: If the payload's schema is unknown.
@@ -96,7 +92,6 @@ def explode_unsafe(
     last_change = data.get("last_change")
     changed = iso_datetime(last_change) if isinstance(last_change, str) else None
     base = {
-        "shard": entity_shard(entity_id, shards),
         "entity_id": entity_id,
         "dataset": dataset,
         "bucket": get_schema_bucket(schema.name),
@@ -153,7 +148,6 @@ def explode_unsafe(
 def statement_row_unsafe(
     row: SDict,
     dataset: str,
-    shards: int,
     *,
     now: datetime,
     origin: str,
@@ -165,7 +159,7 @@ def statement_row_unsafe(
     recomputed from the model (the CSV column is ignored, as
     ``Statement.__init__`` does), ``lang`` is nulled for non-linguistic
     types, and the ``id`` is always re-derived – content-hashed under the
-    *target* dataset via :meth:`Statement.make_key`, a carried-over id is
+    *target* dataset via `Statement.make_key`, a carried-over id is
     ignored – so identical content collapses on merge across imports and
     round-trips. Entity ids are **not** namespace-stripped – parity with
     the safe statement path.
@@ -173,7 +167,6 @@ def statement_row_unsafe(
     Args:
         row: CSV row dict (string values).
         dataset: Target dataset name.
-        shards: The dataset's shard count.
         now: Run-level timestamp for missing ``first_seen`` / ``last_seen``.
         origin: Default origin tag if the row carries none.
         override_origin: Force ``origin`` over the row's own.
@@ -203,7 +196,6 @@ def statement_row_unsafe(
     row_origin = None if override_origin else row.get("origin")
     first_seen = iso_datetime(row.get("first_seen") or None) or now
     return {
-        "shard": entity_shard(entity_id, shards),
         "id": stmt_id,
         "entity_id": entity_id,
         "dataset": dataset,
@@ -225,16 +217,14 @@ def statement_row_unsafe(
 
 
 class RowBuffer:
-    """:func:`dedupe_key`-keyed packed-row buffer, flushed as Arrow.
+    """`dedupe_key`-keyed packed-row buffer, flushed as Arrow.
 
-    The unsafe twin of
-    :class:`~ftm_lakehouse.logic.entities.buffer.EntityBuffer`: collapses
-    re-emissions within one batch on the same row identity that buffer uses
-    – so the same id under distinct fragments *or* origins stays distinct –
-    and flushes a shard-sorted :data:`SHARDED_SCHEMA` table, the same
-    currency the journal drain hands to
-    :meth:`EntityRepository.write_batches`. Memory is bounded by the caller,
-    which flushes every ``bulk_size`` rows.
+    The unsafe twin of `EntityBuffer`: collapses re-emissions within one batch
+    on the same row identity that buffer uses – so the same id under distinct
+    fragments *or* origins stays distinct – and flushes a `JOURNAL_SCHEMA`
+    table, the same currency the journal drain hands to
+    [`write_batches`][ftm_lakehouse.repository.EntityRepository.write_batches].
+    Memory is bounded by the caller, which flushes every ``bulk_size`` rows.
     """
 
     def __init__(self) -> None:
@@ -247,10 +237,10 @@ class RowBuffer:
         self._rows[dedupe_key(row["id"], row["origin"], row["fragment"])] = row
 
     def flush(self) -> pa.Table:
-        """Pack the buffered rows shard-sorted, then clear the buffer."""
-        rows = sorted(self._rows.values(), key=itemgetter("shard"))
+        """Pack the buffered rows, then clear the buffer."""
+        rows = list(self._rows.values())
         self._rows = {}
-        return pa.Table.from_pylist(rows, schema=SHARDED_SCHEMA)
+        return pa.Table.from_pylist(rows, schema=JOURNAL_SCHEMA)
 
     def __len__(self) -> int:
         return len(self._rows)

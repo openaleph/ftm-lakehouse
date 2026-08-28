@@ -1,4 +1,4 @@
-"""Statement packing: a statement stream into a ``SHARDED_SCHEMA`` table."""
+"""Statement packing: a statement stream into a ``JOURNAL_SCHEMA`` table."""
 
 from datetime import datetime, timezone
 
@@ -7,7 +7,7 @@ from rigour.time import utc_now
 from sqlalchemy import MetaData
 
 from ftm_lakehouse.model.statement import (
-    SHARDED_SCHEMA,
+    JOURNAL_SCHEMA,
     LakehouseStatement,
     journal_table,
     statements_to_arrow,
@@ -30,14 +30,13 @@ def make_stmt(**kwargs) -> LakehouseStatement:
 
 def test_model_statement_pack_fields():
     """Every statement field lands in its own typed column."""
-    stmt = make_stmt(
-        lang="en", origin="import", external=True, fragment="row1", shard="3"
-    )
+    stmt = make_stmt(lang="en", origin="import", external=True, fragment="row1")
     table = statements_to_arrow([stmt], NOW)
 
-    assert table.schema.equals(SHARDED_SCHEMA)
+    assert table.schema.equals(JOURNAL_SCHEMA)
+    # `shard` is not packed - `ParquetStore.append` derives it
+    assert "shard" not in table.schema.names
     (packed,) = table.to_pylist()
-    assert packed["shard"] == "3"
     assert packed["id"] == stmt.id
     assert packed["entity_id"] == "jane"
     assert packed["dataset"] == "test"
@@ -91,13 +90,14 @@ def test_model_statement_pack_timestamp_forms():
     assert packed[3] == datetime(2020, 1, 1, 10, tzinfo=timezone.utc)
 
 
-def test_model_statement_pack_defaults_shard_and_fragment():
-    """Constructed without storage facts: single-shard sentinel, no fragment."""
+def test_model_statement_pack_defaults_fragment_and_deleted_at():
+    """Constructed without storage facts: no fragment, no tombstone, no shard."""
     stmt = LakehouseStatement(
         entity_id="jane", prop="name", schema="Person", value="x", dataset="test"
     )
+    assert not hasattr(stmt, "shard")
     (packed,) = statements_to_arrow([stmt], NOW).to_pylist()
-    assert packed["shard"] == "0"
+    assert "shard" not in packed
     assert packed["fragment"] == ""
     assert packed["deleted_at"] is None
 
@@ -109,20 +109,21 @@ def test_model_statement_upgrades_a_lake_statement():
     )
     stmt = LakehouseStatement.from_statement(plain, fragment="row1")
     assert isinstance(stmt, LakehouseStatement)
-    assert (stmt.fragment, stmt.shard, stmt.deleted_at) == ("row1", "0", None)
+    assert (stmt.fragment, stmt.deleted_at) == ("row1", None)
 
 
 def test_model_statement_pack_empty():
     """An empty stream still yields the schema, so writers can append it."""
     table = statements_to_arrow([], NOW)
     assert table.num_rows == 0
-    assert table.schema.equals(SHARDED_SCHEMA)
+    assert table.schema.equals(JOURNAL_SCHEMA)
 
 
 def test_model_journal_table_mirrors_schema():
     """The journal DDL is the statement schema – keyless, index-free."""
     table = journal_table(MetaData(), "journal_test")
-    assert [c.name for c in table.columns] == list(SHARDED_SCHEMA.names)
+    assert [c.name for c in table.columns] == list(JOURNAL_SCHEMA.names)
+    assert "shard" not in table.columns
     assert list(table.primary_key) == []
     assert table.indexes == set()
     assert not any(c.unique for c in table.columns)

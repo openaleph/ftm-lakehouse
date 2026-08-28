@@ -24,7 +24,7 @@ from sqlalchemy.schema import CreateTable
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.exceptions import ImproperlyConfigured
 from ftm_lakehouse.model.statement import (
-    SHARDED_SCHEMA,
+    JOURNAL_SCHEMA,
     LakehouseStatement,
     LakehouseStatements,
     journal_table,
@@ -63,7 +63,7 @@ ROTATE_LOCK_TIMEOUT = "5s"
 ROTATE_MAX_RETRIES = 5
 ROTATE_BASE_DELAY = 1  # seconds
 
-COLUMNS = ", ".join(f'"{name}"' for name in SHARDED_SCHEMA.names)
+COLUMNS = ", ".join(f'"{name}"' for name in JOURNAL_SCHEMA.names)
 
 
 def _row_to_statement(row: Any) -> LakehouseStatement:
@@ -82,7 +82,6 @@ def _row_to_statement(row: Any) -> LakehouseStatement:
         last_seen=datetime_iso(row.last_seen),
         origin=row.origin,
         fragment=row.fragment or "",
-        shard=row.shard,
         deleted_at=row.deleted_at,
     )
 
@@ -98,10 +97,9 @@ class SqlJournalWriter(BaseJournalWriter["SqlJournalStore"]):
     def __init__(
         self,
         store: "SqlJournalStore",
-        shards: int,
         origin: str | None = None,
     ) -> None:
-        super().__init__(store, shards=shards, origin=origin)
+        super().__init__(store, origin=origin)
         self._conn: Any = None
 
     @property
@@ -132,8 +130,8 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
     """
     SQL-based journal for buffering writes.
 
-    An append-only heap per dataset, carrying the parquet statement columns
-    (:data:`~ftm_lakehouse.model.statement.SHARDED_SCHEMA`). A flush claims
+    An append-only heap per dataset, carrying the producer statement columns
+    (:data:`~ftm_lakehouse.model.statement.JOURNAL_SCHEMA`). A flush claims
     the whole table by renaming it to a timestamped segment and creating a
     fresh one in the same DDL transaction, streams the segment out as Arrow,
     and drops it – so cleanup is a catalog operation, never a ``DELETE``.
@@ -191,8 +189,8 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
         """Append one packed batch to the live table."""
         raise NotImplementedError
 
-    def read_segment(self, name: str, ordered: bool) -> RecordBatches:
-        """Stream a segment's rows, ``ORDER BY shard`` when asked."""
+    def read_segment(self, name: str) -> RecordBatches:
+        """Stream a segment's rows."""
         raise NotImplementedError
 
     @contextmanager
@@ -290,7 +288,7 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
 
     # -- flush
 
-    def flush_batches(self, ordered: bool = True) -> StatementTables:
+    def flush_batches(self) -> StatementTables:
         """Rotate the journal, then stream each segment as Arrow.
 
         Held under :meth:`flush_lock` for the whole window – a second flush
@@ -298,11 +296,12 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
         one's segment twice. Segments left by a crashed flush are picked up
         here, which is the whole of orphan recovery.
 
-        Args:
-            ordered: Sort each segment by ``shard`` so the consumer appends
-                one parquet file per ``(shard, bucket, origin)`` partition.
-                Callers that know the dataset is single-shard pass ``False``
-                and skip the sort.
+        Segments stream out unordered: rows carry no ``shard`` column to sort
+        on, and the sort this used to do was an un-indexed pass over the whole
+        segment that had to finish before the first row could be handed over.
+        A drained table therefore spans shards and
+        :meth:`~ftm_lakehouse.storage.parquet.ParquetStore.append` writes one
+        file per partition it touches, which ``compact`` bin-packs.
         """
         with self.flush_lock() as acquired:
             if not acquired:
@@ -314,9 +313,9 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
             if self._has_rows(self.table.name):
                 self._rotate()
             for name in self._segments():
-                yield from self._drain(name, ordered)
+                yield from self._drain(name)
 
-    def _drain(self, name: str, ordered: bool) -> StatementTables:
+    def _drain(self, name: str) -> StatementTables:
         """Stream one segment in whole tables, then drop it.
 
         Read chunks are gathered into a table *before* it is yielded – which
@@ -330,14 +329,14 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
         """
         pending: list[pa.RecordBatch] = []
         rows = 0
-        for chunk in self.read_segment(name, ordered):
+        for chunk in self.read_segment(name):
             pending.append(chunk)
             rows += chunk.num_rows
             if rows >= DRAIN_BATCH_SIZE:
-                yield pa.Table.from_batches(pending, schema=SHARDED_SCHEMA)
+                yield pa.Table.from_batches(pending, schema=JOURNAL_SCHEMA)
                 pending, rows = [], 0
         if pending:
-            yield pa.Table.from_batches(pending, schema=SHARDED_SCHEMA)
+            yield pa.Table.from_batches(pending, schema=JOURNAL_SCHEMA)
         # only after the reader is closed: DROP needs the exclusive lock a
         # still-open read transaction on the same connection would never yield
         self._drop(name)
@@ -432,18 +431,15 @@ class SqliteJournalStore(SqlJournalStore):
         conn.execute(insert(self.table), batch.to_pylist())
         conn.commit()
 
-    def read_segment(self, name: str, ordered: bool) -> RecordBatches:
+    def read_segment(self, name: str) -> RecordBatches:
         """Transpose each cursor chunk columnwise into Arrow.
 
-        Row tuples already arrive in :data:`SHARDED_SCHEMA` column order –
+        Row tuples already arrive in :data:`JOURNAL_SCHEMA` column order –
         the table is built from that schema – so the batch is one
         ``zip(*rows)`` away, with no dict per row and no keyed lookup per
         column (~1.6x a ``from_pylist`` of row dicts).
         """
-        table = self._table(name)
-        q = select(table)
-        if ordered:
-            q = q.order_by(table.c.shard)
+        q = select(self._table(name))
         with self.engine.connect() as conn:
             cursor = conn.execution_options(stream_results=True).execute(q)
             try:
@@ -451,9 +447,9 @@ class SqliteJournalStore(SqlJournalStore):
                     yield pa.RecordBatch.from_arrays(
                         [
                             pa.array(column, field.type)
-                            for column, field in zip(zip(*rows), SHARDED_SCHEMA)
+                            for column, field in zip(zip(*rows), JOURNAL_SCHEMA)
                         ],
-                        schema=SHARDED_SCHEMA,
+                        schema=JOURNAL_SCHEMA,
                     )
             finally:
                 cursor.close()
@@ -590,7 +586,7 @@ class PostgresJournalStore(SqlJournalStore):
             cur.adbc_ingest(self.table.name, batch, mode="append")
         conn.commit()
 
-    def read_segment(self, name: str, ordered: bool) -> RecordBatches:
+    def read_segment(self, name: str) -> RecordBatches:
         """Stream a segment's rows through a pooled connection.
 
         :meth:`SqlJournalStore._drain` drops the segment as soon as this
@@ -598,13 +594,12 @@ class PostgresJournalStore(SqlJournalStore):
         would hold. Releasing is what ends the transaction: check-in rolls
         back, so the connection is back in the pool with nothing held.
         """
-        order = " ORDER BY shard" if ordered else ""
         conn = self.acquire()
         try:
             with conn.cursor() as cur:
-                cur.execute(f'SELECT {COLUMNS} FROM "{name}"{order}')
+                cur.execute(f'SELECT {COLUMNS} FROM "{name}"')
                 for batch in cur.fetch_record_batch():
-                    yield batch.cast(SHARDED_SCHEMA)
+                    yield batch.cast(JOURNAL_SCHEMA)
         finally:
             self.release(conn)
 

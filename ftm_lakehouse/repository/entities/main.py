@@ -107,7 +107,7 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
         """
         with (
             self._tags.touch(tag.JOURNAL_UPDATED),
-            self._journal.writer(self.shards, origin) as writer,
+            self._journal.writer(origin) as writer,
         ):
             yield writer
 
@@ -144,9 +144,7 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
         """
         with self._tags.touch(tag.JOURNAL_FLUSHED), Took() as t:
             self.log.info("Flushing journal ...", journal=mask_uri(self._journal.uri))
-            total = self.write_batches(
-                self._journal.flush_batches(ordered=self.shards > 1)
-            )
+            total = self.write_batches(self._journal.flush_batches())
 
         if total:
             self.log.info(
@@ -172,12 +170,13 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
         (:meth:`~ftm_lakehouse.logic.entities.buffer.EntityBuffer.flush_tables`)
         and the unsafe one
         (:class:`~ftm_lakehouse.logic.entities.explode.RowBuffer`). Tables
-        arrive in :data:`~ftm_lakehouse.model.statement.SHARDED_SCHEMA` and go
-        straight to :meth:`ParquetStore.append` – one is durable before the
-        producer is asked for the next, which is what lets the journal drop a
-        segment it has handed over. Sizing is the producer's call; each table
-        becomes one parquet file per ``(shard, bucket, origin)`` partition it
-        spans, so producers hand over shard-scoped tables.
+        arrive in :data:`~ftm_lakehouse.model.statement.JOURNAL_SCHEMA` – no
+        ``shard`` column, :meth:`ParquetStore.append` derives it – and go
+        straight there; one is durable before the producer is asked for the
+        next, which is what lets the journal drop a segment it has handed
+        over. Sizing is the producer's call; each table becomes one parquet
+        file per ``(shard, bucket, origin)`` partition it spans, so a
+        shard-scoped table costs the fewest files.
 
         Args:
             tables: Stream of packed statement tables.

@@ -1,6 +1,5 @@
 """Shared FastAPI dependencies and constants for API routes."""
 
-from functools import lru_cache
 from typing import Annotated
 
 from anystore.types import SDict
@@ -8,10 +7,8 @@ from fastapi import Body, Depends, Request
 from ftmq.query import Query
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from ftm_lakehouse.catalog import get_dataset_model
 from ftm_lakehouse.core.settings import ApiSettings
 from ftm_lakehouse.repository.entities import EntityRepository
-from ftm_lakehouse.repository.factories import LRU_MAX
 from ftm_lakehouse.repository.factories import get_entities as _get_entities
 from ftm_lakehouse.storage.journal import BaseJournalStore
 from ftm_lakehouse.storage.journal import get_journal as _get_journal
@@ -46,24 +43,6 @@ def get_entities_repo(dataset: str, request: Request) -> EntityRepository:
 
 
 Entities = Annotated[EntityRepository, Depends(get_entities_repo)]
-
-
-@lru_cache(maxsize=LRU_MAX)
-def _resolve_shards(dataset: str, uri: str) -> int:
-    return get_dataset_model(dataset, uri).shards
-
-
-def get_dataset_shards(dataset: str, request: Request) -> int:
-    """The dataset's recorded shard count.
-
-    Resolved from the dataset's own ``config.yml`` (never the server's
-    environment) and cached per ``(dataset, uri)`` – the shard count is
-    fixed at dataset creation and must not change, so one read per process
-    suffices."""
-    return _resolve_shards(dataset, get_dataset_uri(dataset, request))
-
-
-Shards = Annotated[int, Depends(get_dataset_shards)]
 
 
 def get_journal(dataset: str) -> BaseJournalStore:

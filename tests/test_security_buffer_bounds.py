@@ -2,21 +2,20 @@
 
 Guards the trust boundary: a single malicious tenant must not be able to
 OOM the writer by filling the in-memory buffer past its cap. ``max_rows``
-is the only bound on the write path – including when every entity-id is
-made to collide onto one shard, so the whole buffer drains as one table.
+is the only bound on the write path: the buffer holds no partition key, so
+however the entity ids are distributed the whole thing drains as one table.
 """
 
 from datetime import datetime, timezone
 
 import pyarrow as pa
-import pyarrow.compute as pc
 import pytest
 from followthemoney import Statement, model
 
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.exceptions import BufferFullError
 from ftm_lakehouse.logic.entities.buffer import EntityBuffer
-from ftm_lakehouse.model.statement import SHARDED_SCHEMA
+from ftm_lakehouse.model.statement import JOURNAL_SCHEMA
 from ftm_lakehouse.repository.entities.main import EntityRepository
 
 
@@ -36,7 +35,7 @@ def _stmt(i: int) -> Statement:
 
 
 def test_entity_buffer_respects_max_rows() -> None:
-    buf = EntityBuffer("test", shards=8, max_rows=5)
+    buf = EntityBuffer("test", max_rows=5)
     for i in range(5):
         buf.add_statement(_stmt(i))
     assert len(buf) == 5
@@ -46,7 +45,7 @@ def test_entity_buffer_respects_max_rows() -> None:
 
 
 def test_entity_buffer_flush_releases_capacity() -> None:
-    buf = EntityBuffer("test", shards=8, max_rows=3)
+    buf = EntityBuffer("test", max_rows=3)
     for i in range(3):
         buf.add_statement(_stmt(i))
     with pytest.raises(BufferFullError):
@@ -62,7 +61,7 @@ def test_entity_buffer_flush_releases_capacity() -> None:
 
 
 def test_entity_buffer_add_entity_rejects_when_full() -> None:
-    buf = EntityBuffer("test", shards=8, max_rows=2)
+    buf = EntityBuffer("test", max_rows=2)
     buf.add_statement(_stmt(0))
     buf.add_statement(_stmt(1))
 
@@ -77,11 +76,11 @@ def test_entity_buffer_add_entity_rejects_when_full() -> None:
 
 
 def test_entity_buffer_default_max_rows_from_settings() -> None:
-    buf = EntityBuffer("test", shards=8)
+    buf = EntityBuffer("test")
     assert buf.max_rows == Settings().max_buffer_rows
 
 
-# --- flush_tables: the drain the parquet write path consumes ---------------
+# --- flush_table: the drain the parquet write path consumes ----------------
 
 
 def _stub_append(repo, captured: list[pa.Table]) -> None:
@@ -93,56 +92,41 @@ def _stub_append(repo, captured: list[pa.Table]) -> None:
     repo._statements.append = _append  # type: ignore[method-assign]
 
 
-def test_flush_tables_emits_one_table_per_shard() -> None:
-    """Each drained table is shard-scoped – one parquet file per partition."""
-    buf = EntityBuffer("test", shards=8)
-    for i in range(200):
-        buf.add_statement(_stmt(i))
+def test_flush_table_packs_the_whole_buffer() -> None:
+    """The drain is one table, carrying no partition key.
 
-    tables = list(buf.flush_tables(datetime.now(timezone.utc)))
-
-    assert len(tables) > 1, "200 ids should spread over more than one shard"
-    assert all(len(pc.unique(t["shard"])) == 1 for t in tables)
-    assert all(t.schema.equals(SHARDED_SCHEMA) for t in tables)
-    assert sum(len(t) for t in tables) == 200
-    assert len(buf) == 0
-
-
-def test_flush_tables_abandoned_keeps_the_rest() -> None:
-    """A consumer that stops mid-drain keeps what it never saw – and only that.
-
-    Rows leave the buffer as they are handed over, so an abandoned drain
-    neither loses a shard nor re-emits one that already went downstream.
+    ``shard`` is derived by ``ParquetStore.append``, so the buffer neither
+    groups by it nor packs it – however the entity ids are distributed, the
+    whole buffer goes over in a single ``JOURNAL_SCHEMA`` table.
     """
-    buf = EntityBuffer("test", shards=8)
+    buf = EntityBuffer("test")
     for i in range(200):
         buf.add_statement(_stmt(i))
 
-    tables = buf.flush_tables(datetime.now(timezone.utc))
-    first = next(tables)
-    tables.close()
+    table = buf.flush_table(datetime.now(timezone.utc))
 
-    remaining = 200 - len(first)
-    assert len(buf) == remaining
-    assert sum(len(t) for t in buf.flush_tables()) == remaining
+    assert table.schema.equals(JOURNAL_SCHEMA)
+    assert "shard" not in table.schema.names
+    assert len(table) == 200
+    assert len(buf) == 0
+    # drained, not copied: a second flush has nothing left to hand over
+    assert len(buf.flush_table()) == 0
 
 
-def test_flush_tables_single_shard_collision_bounded_by_cap(tmp_path) -> None:
-    """Colliding every id onto one shard stays bounded by the buffer cap."""
+def test_flush_table_bounded_by_cap(tmp_path) -> None:
+    """The cap – not the input size – is what bounds a drain."""
     repo = EntityRepository("test", tmp_path)
     captured: list[pa.Table] = []
     _stub_append(repo, captured)
 
-    # shards <= 1 is the single-shard sentinel: every row lands in shard "0"
-    buf = EntityBuffer("test", shards=0, max_rows=50)
+    buf = EntityBuffer("test", max_rows=50)
     for i in range(50):
         buf.add_statement(_stmt(i))
     with pytest.raises(BufferFullError):
         buf.add_statement(_stmt(99))
 
-    total = repo.write_batches(buf.flush_tables(datetime.now(timezone.utc)))
+    total = repo.write_batches([buf.flush_table(datetime.now(timezone.utc))])
 
     assert total == 50
-    # one shard, one table – capped by max_rows, never by the row count
     assert len(captured) == 1
     assert len(captured[0]) == 50

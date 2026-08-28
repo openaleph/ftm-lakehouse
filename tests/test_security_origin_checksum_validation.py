@@ -155,11 +155,11 @@ def test_archive_blob_rejects_invalid_checksum() -> None:
 
 def test_entity_buffer_init_rejects_traversal_origin() -> None:
     with pytest.raises(ValueError):
-        EntityBuffer("test", shards=8, origin="../../evil")
+        EntityBuffer("test", origin="../../evil")
 
 
 def test_entity_buffer_add_entity_rejects_traversal_origin() -> None:
-    buf = EntityBuffer("test", shards=8, origin="default")
+    buf = EntityBuffer("test", origin="default")
     entity = model.make_entity("Person")
     entity.id = "test-person"
     entity.add("name", "Test")

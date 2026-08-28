@@ -7,7 +7,7 @@ import pyarrow as pa
 
 from ftm_lakehouse.core.arrow import serialize_batches, serialize_table
 from ftm_lakehouse.model.statement import (
-    SHARDED_SCHEMA,
+    JOURNAL_SCHEMA,
     LakehouseStatement,
     statements_to_arrow,
 )
@@ -44,7 +44,7 @@ def test_core_arrow_table_round_trip():
 def test_core_arrow_round_trip_keeps_the_schema():
     """Nullability included – the wire carries the statement contract."""
     decoded = read(serialize_table(make_table(rows=10)))
-    assert decoded.schema.equals(SHARDED_SCHEMA)
+    assert decoded.schema.equals(JOURNAL_SCHEMA)
 
 
 def test_core_arrow_writes_a_chunk_per_message():
@@ -52,9 +52,9 @@ def test_core_arrow_writes_a_chunk_per_message():
     without materializing it."""
     table = make_table()
     chunked = pa.Table.from_batches(
-        table.to_batches(max_chunksize=500), schema=SHARDED_SCHEMA
+        table.to_batches(max_chunksize=500), schema=JOURNAL_SCHEMA
     )
-    chunks = list(serialize_batches([chunked], SHARDED_SCHEMA))
+    chunks = list(serialize_batches([chunked], JOURNAL_SCHEMA))
     assert len(chunks) > 1  # one per chunk, plus the end-of-stream marker
     assert read(b"".join(chunks)).equals(table)
 
@@ -73,6 +73,6 @@ def test_core_arrow_stream_is_compressed():
 
 def test_core_arrow_empty_stream_carries_the_schema():
     """Nothing to write still frames a valid stream."""
-    decoded = read(b"".join(serialize_batches([], SHARDED_SCHEMA)))
-    assert decoded.schema.equals(SHARDED_SCHEMA)
+    decoded = read(b"".join(serialize_batches([], JOURNAL_SCHEMA)))
+    assert decoded.schema.equals(JOURNAL_SCHEMA)
     assert decoded.num_rows == 0

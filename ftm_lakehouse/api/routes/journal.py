@@ -11,28 +11,24 @@ import pyarrow as pa
 from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse
 
-from ftm_lakehouse.api.dependencies import Journal, Shards
+from ftm_lakehouse.api.dependencies import Journal
 
 router = APIRouter()
 
 
 @router.post("/{dataset}/_api/journal/bulk")
-async def journal_bulk(
-    shards: Shards, journal: Journal, request: Request
-) -> PlainTextResponse:
+async def journal_bulk(journal: Journal, request: Request) -> PlainTextResponse:
     """Write an Arrow IPC stream of statement rows into the journal.
 
     Rows are buffered as-is (:meth:`BaseJournalWriter.add_batch`) – the
-    sending writer already re-keyed ids and packed every column; only
-    ``shard`` is re-derived against the dataset's recorded shard count,
-    resolved from its config, never from the server's environment."""
+    sending writer already re-keyed ids and packed every column."""
     body = await request.body()
     if not body:
         return PlainTextResponse("0")
 
     def _write() -> int:
         batch = pa.ipc.open_stream(pa.py_buffer(body)).read_all()
-        with journal.writer(shards) as writer:
+        with journal.writer() as writer:
             writer.add_batch(batch)
         return int(batch.num_rows)
 

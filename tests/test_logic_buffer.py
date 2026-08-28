@@ -49,12 +49,12 @@ def _read_back_entity() -> StatementEntity:
 
 
 def _buffered(buffer: EntityBuffer) -> list[LakeStatement]:
-    return list(s for b in buffer._buffer.values() for s in b.values())
+    return list(buffer._buffer.values())
 
 
 def test_add_entity_keeps_statement_origin():
     """Read-back statements keep their own origin over the buffer default."""
-    buffer = EntityBuffer(DATASET, shards=1, origin="importer")
+    buffer = EntityBuffer(DATASET, origin="importer")
     buffer.add_entity(_read_back_entity())
     origins = {s.prop: s.origin for s in _buffered(buffer)}
     assert origins["name"] == "orig_a"
@@ -67,7 +67,7 @@ def test_add_statement_keeps_distinct_origins():
     """The same statement content under two origins stays two buffered rows –
     matching the store's per-origin row identity ``(origin, id, fragment)``;
     collapsing here would silently drop provenance in one batch."""
-    buffer = EntityBuffer(DATASET, shards=1)
+    buffer = EntityBuffer(DATASET)
     buffer.add_statement(_lake_stmt("name", "Acme Inc", T1, "orig_a"))
     buffer.add_statement(_lake_stmt("name", "Acme Inc", T1, "orig_b"))
     buffer.add_statement(_lake_stmt("name", "Acme Inc", T1, "orig_b"))  # dedupes
@@ -84,7 +84,7 @@ def test_add_statement_size_counts_rows_not_calls():
     drained, so a writer kept open across flushes flushed again on an empty
     buffer.
     """
-    buffer = EntityBuffer(DATASET, shards=1)
+    buffer = EntityBuffer(DATASET)
     stmt = _lake_stmt("name", "Acme Inc", T1, "orig_a")
     buffer.add_statement(stmt)
     buffer.add_statement(stmt)
@@ -98,10 +98,10 @@ def test_add_statement_size_counts_rows_not_calls():
 def test_add_entity_reemission_keeps_size_exact():
     """Re-emitting an entity collapses in the dict – and in the size.
 
-    ``_buffer_size == sum(len(rows) for rows in _buffer.values())`` is the
-    invariant every capacity check and flush trigger depends on.
+    ``_buffer_size == len(_buffer)`` is the invariant every capacity check
+    and flush trigger depends on.
     """
-    buffer = EntityBuffer(DATASET, shards=8)
+    buffer = EntityBuffer(DATASET)
     for _ in range(3):
         buffer.add_entity(_read_back_entity())
         assert len(buffer) == len(_buffered(buffer))
@@ -111,14 +111,14 @@ def test_add_entity_reemission_keeps_size_exact():
 
 def test_add_entity_origin_override_wins():
     """An explicit origin argument overrides per-statement provenance."""
-    buffer = EntityBuffer(DATASET, shards=1, origin="importer")
+    buffer = EntityBuffer(DATASET, origin="importer")
     buffer.add_entity(_read_back_entity(), origin="forced")
     assert {s.origin for s in _buffered(buffer)} == {"forced"}
 
 
 def test_add_entity_default_origin_for_fresh_entities():
     """Fresh FtM entities (no statement origin) get the buffer default."""
-    buffer = EntityBuffer(DATASET, shards=1, origin="importer")
+    buffer = EntityBuffer(DATASET, origin="importer")
     buffer.add_entity(make_entity(JANE))
     assert {s.origin for s in _buffered(buffer)} == {"importer"}
 
@@ -127,7 +127,7 @@ def test_add_entity_pins_uniform_last_seen_for_fragments():
     """A fragment emission = one last_seen: heterogeneous read-back
     timestamps are pinned to the entity's own (max) last_seen so the
     emission can never split across supersession ties."""
-    buffer = EntityBuffer(DATASET, shards=1)
+    buffer = EntityBuffer(DATASET)
     buffer.add_entity(_read_back_entity(), fragment="row1")
     last_seens = {s.last_seen for s in _buffered(buffer)}
     assert last_seens == {T2}
@@ -136,7 +136,7 @@ def test_add_entity_pins_uniform_last_seen_for_fragments():
 def test_add_entity_keeps_statement_last_seen_without_fragment():
     """Non-fragment emissions keep per-statement last_seen – faithful
     provenance on store round-trips; only unset values fall back."""
-    buffer = EntityBuffer(DATASET, shards=1)
+    buffer = EntityBuffer(DATASET)
     buffer.add_entity(_read_back_entity())
     last_seens = {s.prop: s.last_seen for s in _buffered(buffer)}
     assert last_seens["name"] == T1
@@ -149,7 +149,7 @@ def test_add_entity_buffer_last_seen_default():
     """An entity without timestamps of its own is pinned to the buffer's
     ``last_seen`` default (the CLI ``--last-seen`` option)."""
     default = datetime(2026, 2, 2, 12, 0, 0, tzinfo=timezone.utc)
-    buffer = EntityBuffer(DATASET, shards=1, last_seen=default)
+    buffer = EntityBuffer(DATASET, last_seen=default)
     buffer.add_entity(make_entity(JANE))
     assert {s.last_seen for s in _buffered(buffer)} == {default.isoformat()}
 
@@ -157,7 +157,7 @@ def test_add_entity_buffer_last_seen_default():
 def test_add_entity_pins_now_without_any_timestamp():
     """No entity timestamp, no buffer default: one shared ``now`` per
     emission - never per-row jitter."""
-    buffer = EntityBuffer(DATASET, shards=1)
+    buffer = EntityBuffer(DATASET)
     buffer.add_entity(make_entity(JANE))
     last_seens = {s.last_seen for s in _buffered(buffer)}
     assert len(last_seens) == 1

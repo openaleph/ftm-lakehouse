@@ -205,7 +205,6 @@ def import_entities_unsafe(
         for row in explode_unsafe(
             data,
             repo.dataset,
-            repo.shards,
             now=now,
             origin=origin,
             override_origin=override_origin,
@@ -238,7 +237,6 @@ def import_statements_unsafe(
         statement_row_unsafe(
             data,
             repo.dataset,
-            repo.shards,
             now=now,
             origin=origin,
             override_origin=override_origin,

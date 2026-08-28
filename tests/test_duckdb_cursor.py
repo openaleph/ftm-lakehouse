@@ -15,9 +15,8 @@ import pyarrow as pa
 from followthemoney import Statement
 from ftmq.store.lake import pack_statement
 
-from ftm_lakehouse.core.conventions.path import entity_shard
 from ftm_lakehouse.core.settings import Settings
-from ftm_lakehouse.model.statement import SHARDED_SCHEMA
+from ftm_lakehouse.model.statement import JOURNAL_SCHEMA
 from ftm_lakehouse.storage.parquet import ParquetStore
 from tests.duck import make_duckdb
 
@@ -39,10 +38,9 @@ def _seed(store: ParquetStore) -> None:
     row = pack_statement(stmt)
     row["first_seen"] = now
     row["last_seen"] = now
-    row["shard"] = entity_shard(row["entity_id"], SHARDS)
     row["deleted_at"] = None
     row["fragment"] = ""
-    store.append(pa.Table.from_pylist([row], schema=SHARDED_SCHEMA))
+    store.append(pa.Table.from_pylist([row], schema=JOURNAL_SCHEMA))
 
 
 def test_cursor_isolation_under_concurrent_reads(tmp_path) -> None:

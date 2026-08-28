@@ -2,7 +2,10 @@
 
 Statements live in one Delta Lake table (per dataset) partitioned by
 ``(shard, bucket, origin)``. ``shard`` is the hex-padded entity_id hash bucket;
-the uniform shard count is set per dataset via ``DatasetModel.shards``.
+the uniform shard count is set per dataset via ``DatasetModel.shards``. It is
+derived in :meth:`ParquetStore.append` and nowhere else – producers hand over
+``JOURNAL_SCHEMA`` rows with no shard key at all, so a partition can never be
+picked against a shard count other than the one this store is configured for.
 
 Writes are **append-only**: each flush sorts a per-partition batch by
 ``(entity_id, id, last_seen DESC)`` in memory and appends it as a new parquet
@@ -456,14 +459,44 @@ class ParquetStore:
             released = True
         return released
 
+    def _with_shard(self, batch: pa.Table) -> pa.Table:
+        """Derive the ``shard`` partition key from ``entity_id``.
+
+        The single point where a row's partition is decided, so ``shard`` is
+        always a function of ``entity_id`` and *this* store's configured
+        count – never of what some producer computed earlier, possibly
+        against a different config. That is what keeps a stale writer from
+        mis-routing rows: the journal carries no shard key
+        (:data:`~ftm_lakehouse.model.statement.JOURNAL_SCHEMA`), so there is
+        nothing stale to trust.
+
+        Hashes the *distinct* entity ids rather than every row – statements
+        come many per entity, so the dictionary detour costs a fraction of a
+        row-wise loop and the ``take`` is vectorized.
+        """
+        ids = pc.dictionary_encode(batch.column("entity_id").combine_chunks())
+        shards = pa.array(
+            [path.entity_shard(e, self.shards) for e in ids.dictionary.to_pylist()],
+            pa.string(),
+        )
+        return batch.append_column(
+            SHARDED_SCHEMA.field("shard"), pc.take(shards, ids.indices)
+        ).select(SHARDED_SCHEMA.names)
+
     def append(self, batch: pa.Table) -> None:
         """Append a batch of statements.
 
-        The batch should be scoped to a single ``shard`` for write efficiency
-        (one parquet file per ``(shard, bucket, origin)`` partition). The method
-        splits by ``bucket`` so each ``write_deltalake`` call uses the
-        bucket-appropriate ``writer_properties`` (small vs.  large profile).
-        Duplicates land as separate rows and are reaped by :meth:`merge`.
+        Rows arrive in
+        :data:`~ftm_lakehouse.model.statement.JOURNAL_SCHEMA` – without a
+        ``shard`` column – and :meth:`_with_shard` derives it here. The batch
+        should hold one shard's worth of entities for write efficiency (one
+        parquet file per ``(shard, bucket, origin)`` partition), but that is a
+        batching hint from the producer, not a correctness contract: a batch
+        spanning shards simply writes more files, which :meth:`compact`
+        bin-packs. The method splits by ``bucket`` so each ``write_deltalake``
+        call uses the bucket-appropriate ``writer_properties`` (small vs.
+        large profile). Duplicates land as separate rows and are reaped by
+        :meth:`merge`.
 
         Deliberately does **not** sort. Nothing downstream reads in physical
         order, and :meth:`merge` rewrites every partition an append touched
@@ -484,12 +517,12 @@ class ParquetStore:
 
         Args:
             batch: PyArrow table with the columns of
-                :data:`ftm_lakehouse.model.statement.SHARDED_SCHEMA`. Rows
-                should already be scoped to a single shard.
+                :data:`ftm_lakehouse.model.statement.JOURNAL_SCHEMA`.
         """
         if len(batch) == 0:
             return
 
+        batch = self._with_shard(batch)
         buckets = pc.unique(batch["bucket"]).to_pylist()
         shards = pc.unique(batch["shard"]).to_pylist()
         self.log.info(

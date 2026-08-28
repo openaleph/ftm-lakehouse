@@ -7,11 +7,10 @@ from anystore.logging import get_logger
 from rigour.time import utc_now
 
 from ftm_lakehouse.core.api import no_api
-from ftm_lakehouse.core.conventions.path import entity_shard
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.logic.entities.buffer import EntityBuffer
 from ftm_lakehouse.model.statement import (
-    SHARDED_SCHEMA,
+    JOURNAL_SCHEMA,
     LakehouseStatements,
     statements_to_arrow,
 )
@@ -28,10 +27,10 @@ RecordBatches: TypeAlias = Generator[pa.RecordBatch, None, None]
 """What a reader hands over, on its way into a table."""
 
 StatementTables: TypeAlias = Generator[pa.Table, None, None]
-"""Stream of journal rows in the parquet statement schema.
+"""Stream of journal rows in the producer statement schema.
 
-The journal buffers exactly the rows the parquet store persists
-(:data:`~ftm_lakehouse.model.statement.SHARDED_SCHEMA`), so a flush moves
+The journal buffers exactly the rows producers pack
+(:data:`~ftm_lakehouse.model.statement.JOURNAL_SCHEMA`), so a flush moves
 Arrow tables from one store to the other. ``pa.Table`` because that is what
 every end of the pipe already speaks – ``statements_to_arrow``,
 ``ParquetStore.append``, ``adbc_ingest``, :meth:`BaseJournalWriter.add_batch`
@@ -53,14 +52,18 @@ class BaseJournalWriter(EntityBuffer, Generic[S]):
     re-emissions within the batch – and insert every
     :data:`WRITE_BATCH_SIZE` rows. :meth:`add_batch` writes an
     already-packed arrow table straight through.
+
+    The buffer is constructed single-shard: journal rows carry no ``shard``
+    column, so :class:`EntityBuffer`'s shard grouping would only reorder rows
+    on their way into a SQL heap.
     """
 
-    def __init__(self, store: S, shards: int, origin: str | None = None) -> None:
-        super().__init__(store.dataset, shards, origin)
+    def __init__(self, store: S, origin: str | None = None) -> None:
+        super().__init__(store.dataset, 1, origin)
         self.store = store
 
     def _insert(self, batch: pa.Table) -> None:
-        """Write one :data:`SHARDED_SCHEMA` table to the journal."""
+        """Write one :data:`JOURNAL_SCHEMA` table to the journal."""
         raise NotImplementedError
 
     def _insert_if_full(self) -> None:
@@ -90,34 +93,22 @@ class BaseJournalWriter(EntityBuffer, Generic[S]):
 
         Fast path for the api bulk route: the sending writer produced these
         rows through this same class, so statement ids are already re-keyed
-        and every column is in place. Only ``shard`` is re-derived – from
-        ``entity_id`` against *this* dataset's shard count – so a client with
-        a stale shard config cannot mis-route a partition.
+        and every column is in place. Nothing about the dataset's layout is
+        taken from the client – there is no shard key to take, and the one
+        that ends up in parquet is derived at
+        :meth:`~ftm_lakehouse.storage.parquet.ParquetStore.append`.
 
         Args:
-            batch: Rows carrying at least the :data:`SHARDED_SCHEMA` columns;
+            batch: Rows carrying at least the :data:`JOURNAL_SCHEMA` columns;
                 extra columns are dropped and types are cast to the schema.
 
         Raises:
-            KeyError: If a :data:`SHARDED_SCHEMA` column is missing.
+            KeyError: If a :data:`JOURNAL_SCHEMA` column is missing.
             pyarrow.ArrowInvalid: If a column cannot be cast to its schema type.
         """
         if not batch.num_rows:
             return
-        batch = batch.select(SHARDED_SCHEMA.names).cast(SHARDED_SCHEMA)
-        batch = batch.set_column(
-            SHARDED_SCHEMA.get_field_index("shard"), "shard", self._shard_column(batch)
-        )
-        self._insert(batch)
-
-    def _shard_column(self, batch: pa.Table) -> pa.Array:
-        if self.shards <= 1:
-            # `entity_shard`'s single-shard sentinel, without the row loop
-            return pa.repeat(entity_shard("", self.shards), batch.num_rows)
-        return pa.array(
-            [entity_shard(e, self.shards) for e in batch["entity_id"].to_pylist()],
-            pa.string(),
-        )
+        self._insert(batch.select(JOURNAL_SCHEMA.names).cast(JOURNAL_SCHEMA))
 
     def flush(self) -> None:
         """Insert the buffered statements.
@@ -189,18 +180,16 @@ class BaseJournalStore(Generic[W]):
         self.dataset = dataset
         self.uri = uri or settings.resolved_journal_uri
 
-    def writer(self, shards: int, origin: str | None = None) -> W:
+    def writer(self, origin: str | None = None) -> W:
         """Get a bulk writer for adding rows.
 
         Args:
-            shards: The dataset's shard count. Callers resolve it from the
-                dataset's config
             origin: Origin tag for statements written through this writer.
         """
-        return self._writer_cls(self, shards=shards, origin=origin)
+        return self._writer_cls(self, origin=origin)
 
     @no_api
-    def flush_batches(self, ordered: bool = True) -> StatementTables:
+    def flush_batches(self) -> StatementTables:
         """Destructively iterate journal rows as Arrow batches.
 
         Local-only: draining a remote journal into a local parquet store is
@@ -215,13 +204,8 @@ class BaseJournalStore(Generic[W]):
         generator leaves the rest in place for the next call – no
         transaction, and never a silent loss.
 
-        Args:
-            ordered: Sort each segment by ``shard``, so the consumer appends
-                one parquet file per ``(shard, bucket, origin)`` partition.
-                Single-shard datasets pass ``False`` and skip the sort.
-
         Yields:
-            ``pa.RecordBatch`` in :data:`SHARDED_SCHEMA`.
+            ``pa.Table`` in :data:`JOURNAL_SCHEMA`.
         """
         raise NotImplementedError
 
