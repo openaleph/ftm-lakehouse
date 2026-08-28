@@ -1,10 +1,11 @@
 """Export operations (parquet -> statements.csv, entities.ftm.json,
 statistics.json, documents.csv, index.json).
 
-All exports run through a single :class:`ExportOperation` parameterized by
-:class:`ExportKind`. Per-kind behavior lives in the :data:`EXPORTS` spec
-table – adding a new export means adding a handler function and a spec
-entry, not a new job / operation / factory triple.
+All exports run through a single [`ExportOperation`][ExportOperation] parameterized by
+[`ExportKind`][ExportKind]. Per-kind behavior lives in the
+[`EXPORTS`][ftm_lakehouse.core.conventions.path.EXPORTS] spec table – adding a
+new export means adding a handler function and a spec entry, not a new job /
+operation / factory triple.
 """
 
 from dataclasses import dataclass
@@ -147,9 +148,10 @@ EXPORTS: dict[ExportKind, ExportSpec] = {
 
 
 class ExportOperation(DatasetJobOperation[ExportJob]):
-    """Export the dataset, dispatched by ``job.kind`` via :data:`EXPORTS`.
+    """Export the dataset, dispatched by ``job.kind`` via
+    [`EXPORTS`][ftm_lakehouse.core.conventions.path.EXPORTS].
 
-    Flushes and merges first (:meth:`prepare`) – exports read canonical
+    Flushes and merges first ([`prepare`][ExportOperation.prepare]) – exports read canonical
     rows. Skips if the last export is newer than the last *optimize* (per-kind
     freshness target / dependencies from the spec table): the canonical
     content is what an export reflects, so that is what it goes stale against.
@@ -170,7 +172,7 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
 
         Both are freshness-gated, so a store that is already current pays a
         tag read and a partition listing. Running here rather than inside
-        :meth:`handle` is what keeps it honest: ``merge`` stamps
+        `handle` is what keeps it honest: ``merge`` stamps
         ``statements/last_optimized``, this export's own dependency, and the
         target tag is stamped from when the window opened – which is after
         this returns.

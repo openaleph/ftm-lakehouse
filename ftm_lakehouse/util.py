@@ -26,7 +26,7 @@ def safe_name(value: str, field: str = "name") -> str:
     Rejects empty strings, path traversal sequences (``..``), the current-
     directory marker (``.``), path separators (``/`` and ``\\``), control
     characters (including null and DEL), and anything longer than
-    :data:`SAFE_NAME_MAX_LEN`.
+    `SAFE_NAME_MAX_LEN`.
 
     Use this for every caller-supplied string that flows into a filesystem
     path, storage key, or partition value. ``origin``, ``file_id``, bucket
@@ -69,14 +69,14 @@ def validate_origin(origin: str) -> str:
 
     ``origin`` is caller-supplied (journal rows, crawl callers, API
     requests) and flows directly into archive file paths
-    (:func:`ftm_lakehouse.core.conventions.path.archive_txt`) and parquet
+    ([`archive_txt`][ftm_lakehouse.core.conventions.path.archive_txt]) and parquet
     partition prefixes
-    (:func:`ftm_lakehouse.core.conventions.path.statement_origin`).
+    ([`statement_origin`][ftm_lakehouse.core.conventions.path.statement_origin]).
     Without validation a traversal sequence in ``origin`` escapes the
     archive subtree or writes a parquet partition outside
     ``statements/``.
 
-    Built on :func:`safe_name`; allows everything ``safe_name`` allows
+    Built on `safe_name`; allows everything ``safe_name`` allows
     (printable, no separators, no traversal), which covers conventional
     origins like ``default``, ``crawl``, ``mapping:abc123…``, ``source-a``.
 
@@ -87,7 +87,7 @@ def validate_origin(origin: str) -> str:
         ``origin`` unchanged if valid.
 
     Raises:
-        ValueError: As per :func:`safe_name`.
+        ValueError: As per `safe_name`.
     """
     return safe_name(origin, "origin")
 
@@ -117,8 +117,7 @@ def validate_checksum(ch: str) -> str:
 
 
 def make_checksum_key(ch: str) -> str:
-    """
-    Generate a path key for the given SHA256 checksum.
+    """Generate a path key for the given SHA256 checksum.
 
     Examples:
         >>> make_checksum_key("a7fdc3...")
@@ -127,11 +126,11 @@ def make_checksum_key(ch: str) -> str:
     Args:
         ch: SHA256 Hex checksum (content_hash)
 
-    Raises:
-        ValueError: If the checksum is not a valid SHA256 hex digest
-
     Returns:
         The prefixed path
+
+    Raises:
+        ValueError: If the checksum is not a valid SHA256 hex digest
     """
     validate_checksum(ch)
     return "/".join((ch[:2], ch[2:4], ch[4:6], ch))
@@ -193,7 +192,7 @@ def validate_dataset_name(name: str) -> str:
     the lakehouse's reserved-name list.
 
     The same check is used at every external entry point (API, CLI,
-    :class:`Catalog`) so that a dataset name can be trusted as it flows
+    [`Catalog`][ftm_lakehouse.Catalog]) so that a dataset name can be trusted as it flows
     into path construction, SQL identifiers, and DuckDB queries downstream.
 
     Args:

@@ -241,7 +241,7 @@ class ArchiveRepository(DatasetHandle):
         Raises:
             ValueError: If ``checksum`` is not a valid SHA256 hex digest or
                 ``origin`` is not a safe path component
-                (see :func:`ftm_lakehouse.util.validate_origin`).
+                (see `validate_origin`).
         """
         key = path.archive_txt(checksum, origin)
         self._txts.put(key, text)

@@ -60,8 +60,8 @@ class QueryBody(BaseModel):
     serializing ``ftmq.Query`` through the wire via ``.from_dict()`` /
     ``.to_dict()``.
 
-    :meth:`to_query` enforces the runtime complexity caps from
-    :class:`ApiSettings` on the parsed query.
+    `to_query` enforces the runtime complexity caps from
+    `ApiSettings` on the parsed query.
 
     Use as ``body: QueryBody`` in a route signature; FastAPI parses and
     validates the request body against this model before the handler runs,

@@ -69,18 +69,19 @@ class DatasetJobOperation(DatasetHandle, Generic[DJ]):
         raise NotImplementedError
 
     def prepare(self) -> None:
-        """Bring the dataset into the state :meth:`handle` reads from.
+        """Bring the dataset into the state `handle` reads from.
 
         Runs *before* the freshness check and before the target tag's window
-        opens, which is what makes it usable at all: :meth:`Tags.touch` stamps
+        opens, which is what makes it usable at all: `Tags.touch` stamps
         the target with the timestamp it *entered*, so preparation that writes
         a dependency tag from inside the window would mark the result stale the
         moment it is written. Ahead of the window, the timestamps stay honest –
         prepare moves the dependency, then the target is stamped after it.
 
-        No-op by default; :class:`~ftm_lakehouse.operation.export.
-        ExportOperation` drains the journal and merges the statement store
-        here, since exports read canonical rows.
+        No-op by default;
+        [`ExportOperation`][ftm_lakehouse.operation.export.ExportOperation] drains the
+        journal and merges the statement store here, since exports read
+        canonical rows.
         """
 
     def is_fresh(self) -> bool:
@@ -135,7 +136,7 @@ class DatasetJobOperation(DatasetHandle, Generic[DJ]):
     def run(self, force: bool | None = False, *args, **kwargs) -> DJ:
         """Execute the handle function, force to run it regardless of freshness
         dependencies. In api mode the whole job is delegated to the remote
-        operations endpoint (:meth:`_api_run`)."""
+        operations endpoint (`_api_run`)."""
         if self._is_api:
             return self._api_run(force, *args, **kwargs)
         return self._run_local(force, *args, **kwargs)

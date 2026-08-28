@@ -30,12 +30,12 @@ can sit directly on an HTTP response body.
 The wrapped handle is always **binary** – a codec frame is bytes – while
 ``mode`` describes the stream handed back: ``"rb"`` / ``"wb"`` (default) give
 a binary one, ``"r"`` / ``"w"`` a text one for consumers like
-:class:`csv.DictReader`. Text is a :class:`io.TextIOWrapper` layered on the
-codec (see :func:`_as_mode`), never a codec opened in text mode – both reject
+`csv.DictReader`. Text is a `io.TextIOWrapper` layered on the
+codec (see `_as_mode`), never a codec opened in text mode – both reject
 that outright.
 
 ``compression.zstd`` only exists on Python 3.14+, so older interpreters pull
-:mod:`backports.zstd` – the backport of the very same module, a dependency
+`backports.zstd` – the backport of the very same module, a dependency
 guarded by a ``python_version<'3.14'`` marker – and get byte-identical
 frames from an identical API.
 """
@@ -66,7 +66,7 @@ def _as_mode(stream: IO[bytes], mode: str) -> IO[Any]:
 
     Both codecs are binary-only – ``GzipFile`` and ``ZstdFile`` reject
     ``"rt"`` / ``"wt"`` with ``ValueError`` – so a text stream is always a
-    :class:`io.TextIOWrapper` on the *outside*, exactly what ``gzip.open()``
+    `io.TextIOWrapper` on the *outside*, exactly what ``gzip.open()``
     does internally. utf-8 is pinned rather than inheriting the locale, and
     ``newline=""`` leaves line endings untranslated so newlines inside
     quoted csv fields survive the round trip.
@@ -125,7 +125,7 @@ def decompress_stream(
         algorithm: Codec the frame was compressed with. Pass ``None`` to omit
             compression.
         mode: Whether the *returned* stream yields ``str`` (``"r"`` – what
-            :class:`csv.DictReader` needs) or ``bytes`` (``"rb"``, the
+            `csv.DictReader` needs) or ``bytes`` (``"rb"``, the
             default). Only the ``"b"`` is read.
 
     Returns:

@@ -20,7 +20,7 @@ router = APIRouter()
 async def journal_bulk(journal: Journal, request: Request) -> PlainTextResponse:
     """Write an Arrow IPC stream of statement rows into the journal.
 
-    Rows are buffered as-is (:meth:`BaseJournalWriter.add_batch`) – the
+    Rows are buffered as-is (`BaseJournalWriter.add_batch`) – the
     sending writer already re-keyed ids and packed every column."""
     body = await request.body()
     if not body:

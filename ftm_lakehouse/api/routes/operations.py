@@ -15,7 +15,7 @@ router = APIRouter()
 
 
 def _registry() -> dict[str, tuple[type[DatasetJobModel], type[DatasetJobOperation]]]:
-    """Pair every operation exported by :mod:`ftm_lakehouse.operation` with
+    """Pair every operation exported by `operation` with
     the job model from its ``DatasetJobOperation[...]`` generic parameter,
     keyed by the job-model class name (the ``name`` field of a posted job).
 

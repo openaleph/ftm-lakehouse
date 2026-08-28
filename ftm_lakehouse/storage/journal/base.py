@@ -4,16 +4,11 @@ from typing import Generator, Generic, Self, TypeAlias, TypeVar
 
 import pyarrow as pa
 from anystore.logging import get_logger
-from rigour.time import utc_now
 
 from ftm_lakehouse.core.api import no_api
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.logic.entities.buffer import EntityBuffer
-from ftm_lakehouse.model.statement import (
-    JOURNAL_SCHEMA,
-    LakehouseStatements,
-    statements_to_arrow,
-)
+from ftm_lakehouse.model.statement import JOURNAL_SCHEMA, LakehouseStatements
 
 settings = Settings()
 log = get_logger(__name__)
@@ -30,10 +25,10 @@ StatementTables: TypeAlias = Generator[pa.Table, None, None]
 """Stream of journal rows in the producer statement schema.
 
 The journal buffers exactly the rows producers pack
-(:data:`~ftm_lakehouse.model.statement.JOURNAL_SCHEMA`), so a flush moves
+(`JOURNAL_SCHEMA`), so a flush moves
 Arrow tables from one store to the other. ``pa.Table`` because that is what
 every end of the pipe already speaks – ``statements_to_arrow``,
-``ParquetStore.append``, ``adbc_ingest``, :meth:`BaseJournalWriter.add_batch`
+``ParquetStore.append``, ``adbc_ingest``, `BaseJournalWriter.add_batch`
 – so nothing has to be taken apart and put back together on the way.
 """
 
@@ -47,31 +42,27 @@ class BaseJournalWriter(EntityBuffer, Generic[S]):
 
     Not intended for direct use - use JournalStore.writer() instead.
 
-    :meth:`add_statement` and :meth:`add_entity` buffer through
-    :class:`EntityBuffer` – which re-keys statement ids and collapses
+    `add_statement` and `add_entity` buffer through
+    `EntityBuffer` – which re-keys statement ids and collapses
     re-emissions within the batch – and insert every
-    :data:`WRITE_BATCH_SIZE` rows. :meth:`add_batch` writes an
+    `WRITE_BATCH_SIZE` rows. `add_batch` writes an
     already-packed arrow table straight through.
-
-    The buffer is constructed single-shard: journal rows carry no ``shard``
-    column, so :class:`EntityBuffer`'s shard grouping would only reorder rows
-    on their way into a SQL heap.
     """
 
     def __init__(self, store: S, origin: str | None = None) -> None:
-        super().__init__(store.dataset, 1, origin)
+        super().__init__(store.dataset, origin)
         self.store = store
 
     def _insert(self, batch: pa.Table) -> None:
-        """Write one :data:`JOURNAL_SCHEMA` table to the journal."""
+        """Write one `JOURNAL_SCHEMA` table to the journal."""
         raise NotImplementedError
 
     def _insert_if_full(self) -> None:
         """Insert once the buffer holds a full batch.
 
         Called after a whole added item, never mid-entity:
-        :meth:`EntityBuffer.add_entity` buffers through
-        :meth:`EntityBuffer._add`, so this hook cannot fire between an
+        `EntityBuffer.add_entity` buffers through
+        `EntityBuffer._add`, so this hook cannot fire between an
         entity's properties and the ``BASE_ID`` checksum row that closes it
         – inserts commit per batch, and a half entity flushed to parquet
         would survive merge.
@@ -96,14 +87,14 @@ class BaseJournalWriter(EntityBuffer, Generic[S]):
         and every column is in place. Nothing about the dataset's layout is
         taken from the client – there is no shard key to take, and the one
         that ends up in parquet is derived at
-        :meth:`~ftm_lakehouse.storage.parquet.ParquetStore.append`.
+        [`append`][ftm_lakehouse.storage.parquet.ParquetStore.append].
 
         Args:
-            batch: Rows carrying at least the :data:`JOURNAL_SCHEMA` columns;
+            batch: Rows carrying at least the `JOURNAL_SCHEMA` columns;
                 extra columns are dropped and types are cast to the schema.
 
         Raises:
-            KeyError: If a :data:`JOURNAL_SCHEMA` column is missing.
+            KeyError: If a `JOURNAL_SCHEMA` column is missing.
             pyarrow.ArrowInvalid: If a column cannot be cast to its schema type.
         """
         if not batch.num_rows:
@@ -118,7 +109,7 @@ class BaseJournalWriter(EntityBuffer, Generic[S]):
         SQLAlchemy turns the sqlite one into ``INSERT ... DEFAULT VALUES``,
         which the journal's ``NOT NULL`` columns reject.
         """
-        batch = statements_to_arrow(self.flush_buffer(), utc_now())
+        batch = self.flush_table()
         if batch.num_rows:
             self._insert(batch)
 
@@ -170,7 +161,7 @@ class BaseJournalStore(Generic[W]):
     _writer_cls: type[W]
 
     _is_api: bool = False
-    """Overridden by the api store's mixin – see :func:`no_api`."""
+    """Overridden by the api store's mixin – see `no_api`."""
 
     def __init__(
         self,
@@ -205,7 +196,7 @@ class BaseJournalStore(Generic[W]):
         transaction, and never a silent loss.
 
         Yields:
-            ``pa.Table`` in :data:`JOURNAL_SCHEMA`.
+            ``pa.Table`` in `JOURNAL_SCHEMA`.
         """
         raise NotImplementedError
 

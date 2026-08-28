@@ -126,7 +126,7 @@ def write_config(name: str, uri: str, config: str) -> DatasetModel:
 
 
 def parse_query(query: str | None = None, rql: str | None = None) -> Query | None:
-    """Build an ftmq :class:`~ftmq.query.Query` from a CLI query string.
+    """Build an ftmq `Query` from a CLI query string.
 
     ``-q`` takes the flat Aleph filter grammar, ``--rql`` the nested RQL one –
     they are alternatives, not combinable. Either string is a whole query: it
@@ -169,7 +169,7 @@ class CatalogContext(ErrorHandler):
 
 
 class DatasetContext(ErrorHandler):
-    """Yield the :class:`DatasetRef` of the dataset addressed via ``-d``.
+    """Yield the `DatasetRef` of the dataset addressed via ``-d``.
 
     Ensures the dataset exists (creates ``config.yml`` if needed) on entry –
     commands resolve repositories themselves via the factories:

@@ -75,9 +75,9 @@ def cli_statements_import(
     Mirrors ``entities import`` at the statement grain. Rows are parsed with
     the lakehouse ``read_csv_statements`` – which preserves the ``fragment``
     supersession key (followthemoney's reader has no notion of it) – then
-    buffered in ``EntityBuffer`` to group by shard and handed to
-    ``EntityRepository.write_batches`` as one packed table per shard.
-    Bypasses the journal. With ``--unsafe``, rows skip Statement
+    buffered in ``EntityBuffer`` and handed to
+    ``EntityRepository.write_batches`` as one packed table. Bypasses the
+    journal. With ``--unsafe``, rows skip Statement
     construction entirely and map straight to parquet rows.
     """
     with DatasetContext() as (name, uri):

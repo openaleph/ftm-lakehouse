@@ -60,7 +60,7 @@ def ensure_zfs_dataset(pool: str, dataset: str) -> None:
     """Create the dataset's tuned ZFS hierarchy under ``pool`` (idempotent).
 
     One parent plus one child per storage type, each with its
-    :class:`DatasetConfig` properties. Cached per ``(pool, dataset)`` so the
+    `DatasetConfig` properties. Cached per ``(pool, dataset)`` so the
     actual ``zfs create`` calls fire once per process.
     """
     dataset_name_check(dataset)

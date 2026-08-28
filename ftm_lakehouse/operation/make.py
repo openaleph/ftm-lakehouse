@@ -17,7 +17,7 @@ class MakeOperation(DatasetJobOperation[MakeJob]):
 
     def prepare(self) -> None:
         """Drain the journal; each export merges for itself in its own
-        :meth:`ExportOperation.prepare`."""
+        [`ExportOperation.prepare`][ExportOperation.prepare]."""
         self.entities.flush()
 
     def handle(self, run: JobRun, *args, **kwargs) -> None:

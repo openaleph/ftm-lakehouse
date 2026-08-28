@@ -1,15 +1,15 @@
 """Pure functions for Delta Lake parquet operations.
 
 DuckDB view-SQL builders for ``LakeStore`` and the per-partition merge SQL.
-The live ``statement`` view (:func:`live_view_sql`) is a plain
+The live ``statement`` view ([`live_view_sql`][live_view_sql]) is a plain
 ``WHERE deleted_at IS NULL`` scan – correctness assumes a store made
-canonical by :func:`build_merge_sql` (one row per id, supersession applied,
+canonical by [`build_merge_sql`][build_merge_sql] (one row per id, supersession applied,
 timestamps folded). ``statement_raw`` exposes every underlying Delta row for
 code paths that need tombstones / pre-merge duplicates visible (``merge``,
 ``get_entity_ids`` over the raw source).
 
 All dedupe / fragment-supersession / grace logic lives in one place –
-:func:`_dedupe_sql`, used only by :func:`build_merge_sql`. See its docstring
+`_dedupe_sql`, used only by [`build_merge_sql`][build_merge_sql]. See its docstring
 for the two-branch fragment semantics.
 """
 
@@ -33,39 +33,39 @@ QUERY_IN_BATCH_SIZE = 5_000
 MERGE_SPILL_FACTOR = 32
 """Estimated peak DuckDB footprint of the merge pipeline per compressed
 parquet byte – zstd/dictionary decompression blow-up (5–20x on statement
-data) times the concurrent sort materialisations of :func:`_dedupe_sql`
+data) times the concurrent sort materialisations of `_dedupe_sql`
 (window groups + final ``ORDER BY``), padded for headroom. Used by
-:func:`merge_slice_count` to bound each merge slice to the configured
+`merge_slice_count` to bound each merge slice to the configured
 DuckDB memory limit."""
 
 MERGE_SAMPLE_SIZE = 10_000
-"""Reservoir sample size for :func:`build_bounds_sample_sql`. Bounds the
+"""Reservoir sample size for `build_bounds_sample_sql`. Bounds the
 slice-boundary resolution – boundary quality only affects load balance
 across slices, never correctness, so a fixed sample is fine."""
 
 SHARD_MIN_FILE_SIZE = 32 * 1_048_576  # 32 MB
-"""Floor for :func:`shard_target_file_size` – below this a re-shard would
+"""Floor for `shard_target_file_size` – below this a re-shard would
 trade its memory bound for a file-count explosion the follow-up ``compact``
 has to clean up."""
 
 FALLBACK_MEMORY_LIMIT = "8GB"
 """Slice budget when ``LAKEHOUSE_DUCKDB_MEMORY_LIMIT`` is not a parseable
 byte size (e.g. a DuckDB percentage limit) – mirrors the conservative
-:class:`~ftm_lakehouse.core.settings.Settings` default."""
+[`Settings`][ftm_lakehouse.core.settings.Settings] default."""
 
 
 def duckdb_config() -> dict[str, str]:
     """LakeStore DuckDB config derived from lakehouse settings.
 
-    Per-query memory is bounded by :attr:`Settings.duckdb_memory_limit`
+    Per-query memory is bounded by `Settings.duckdb_memory_limit`
     (env: ``LAKEHOUSE_DUCKDB_MEMORY_LIMIT``, default ``8GB``); queries
-    exceeding the limit spill to :attr:`Settings.duckdb_temp_directory`
+    exceeding the limit spill to `Settings.duckdb_temp_directory`
     (env: ``LAKEHOUSE_DUCKDB_TEMP_DIRECTORY``) when set, otherwise to
     the OS temp directory DuckDB picks by default. Extensions (notably
-    ``delta``) are loaded from :attr:`Settings.duckdb_extension_directory`
+    ``delta``) are loaded from `Settings.duckdb_extension_directory`
     (env: ``LAKEHOUSE_DUCKDB_EXTENSION_DIRECTORY``) when set, otherwise
     from ``$HOME/.duckdb/extensions``. Passed to
-    :class:`~ftmq.store.lake.LakeStore` via the ``duckdb_config`` kwarg.
+    `LakeStore` via the ``duckdb_config`` kwarg.
     """
     settings = Settings()
     config: dict[str, str] = {"memory_limit": settings.duckdb_memory_limit}
@@ -88,7 +88,7 @@ def _delta_scan_clause(dt: DeltaTable) -> str:
     URI argument, so the URI is interpolated as a SQL string literal.
     Single quotes are doubled to prevent injection if a future code
     path lets a dataset name (and thus the URI) carry a quote – primary
-    validation is in :func:`ftm_lakehouse.util.validate_dataset_name`.
+    validation is in `validate_dataset_name`.
     """
     return f"delta_scan('{dt.table_uri.replace(chr(39), chr(39) * 2)}')"
 
@@ -97,7 +97,7 @@ def raw_view_sql(dt: DeltaTable) -> str:
     """SELECT body for the ``statement_raw`` view.
 
     Surfaces every physical row in the Delta table, including
-    tombstones and pre-merge duplicates. Used by :func:`build_merge_sql`
+    tombstones and pre-merge duplicates. Used by [`build_merge_sql`][build_merge_sql]
     and raw-source queries (diff exports) – any path that needs the
     physical layout visible.
     """
@@ -110,7 +110,7 @@ def _dedupe_sql(
     tombstone: str = "deleted_at IS NULL",
     order_by: str = "",
 ) -> str:
-    """Two-branch dedupe skeleton for physical :func:`build_merge_sql`.
+    """Two-branch dedupe skeleton for physical [`build_merge_sql`][build_merge_sql].
 
     Rows route into two isolated branches on ``fragment`` (empty-string
     sentinel, applied *before* any window runs so the branches can never
@@ -124,7 +124,7 @@ def _dedupe_sql(
       layer; ``origin`` in the key keeps the same id under two origins as
       two independent rows (matching the per-``(shard, bucket, origin)``
       scope of physical merge – load-bearing when the slice spans
-      origins, e.g. :func:`build_changed_sql`). Tombstones bump
+      origins, e.g. `build_changed_sql`). Tombstones bump
       ``last_seen = deleted_at`` at write time, so the tombstone wins
       ROW_NUMBER for a deleted statement – the ``deleted_at`` tiebreak
       keeps that deterministic even when delete and emission share a
@@ -151,7 +151,7 @@ def _dedupe_sql(
     the group spans *different* values, so folding across it would stamp a
     superseding value with the date of the row it replaced – both a false
     ``first_seen`` and, because ``first_seen`` is what
-    :meth:`~ftm_lakehouse.repository.diff.ParquetDiffMixin.export_diff`
+    `export_diff`
     detects change with, a silently undiffable update. Only the ``QUALIFY``
     windows below work at group scope, which is what supersession means.
 
@@ -209,7 +209,7 @@ WHERE {tombstone}
 def live_view_sql(dt: DeltaTable) -> str:
     """SELECT body for the live ``statement`` view.
 
-    On a store kept canonical by :func:`build_merge_sql` (one row per
+    On a store kept canonical by [`build_merge_sql`][build_merge_sql] (one row per
     statement id, fragment supersession applied, ``first_seen`` /
     ``last_seen`` folded) the live rows are simply the non-tombstoned
     physical rows – so the view is a plain filtered scan, no window
@@ -221,14 +221,14 @@ def live_view_sql(dt: DeltaTable) -> str:
     entity resolution, so it always equals ``entity_id`` – and is synthesised
     here as ``entity_id AS canonical_id`` so ftmq's query layer (which keys
     entity identity on ``canonical_id``) resolves against the view unchanged.
-    :func:`raw_view_sql` deliberately omits it so ``merge`` never materialises
+    [`raw_view_sql`][raw_view_sql] deliberately omits it so ``merge`` never materialises
     the duplicate column.
 
     Correctness holds only on an **optimized** store: between a write and
-    the next :meth:`merge` this view can surface duplicate ids and rows
+    the next `merge` this view can surface duplicate ids and rows
     whose delete has not been applied yet. Run ``optimize`` before
     querying – the dedupe / supersession / grace logic lives solely in
-    :func:`build_merge_sql`.
+    [`build_merge_sql`][build_merge_sql].
     """
     return (
         f"SELECT *, entity_id AS canonical_id "
@@ -245,7 +245,7 @@ def build_merge_sql(
 ) -> str:
     """DuckDB SQL that collapses one partition for physical merge.
 
-    :func:`_dedupe_sql` over the **raw** ``statement_raw`` view (not the
+    `_dedupe_sql` over the **raw** ``statement_raw`` view (not the
     deduped ``statement``) because ``merge`` needs every row visible –
     including tombstones within the grace window, which must persist
     physically to keep shadowing their live rows – scoped to one
@@ -264,7 +264,7 @@ def build_merge_sql(
             dropped. Typically ``now - LAKEHOUSE_GRACE_PERIOD_DAYS``.
         entity_id_range: Optional half-open ``[lo, hi)`` bound on
             ``entity_id`` (``None`` = unbounded on that side) scoping the
-            merge to one range slice (:func:`slice_ranges`). Every dedupe
+            merge to one range slice (`slice_ranges`). Every dedupe
             group is a function of a single entity – the non-fragment key
             ends in the statement ``id`` (owned by exactly one entity),
             the fragment key contains ``entity_id`` itself – so an
@@ -294,8 +294,8 @@ def build_merge_sql(
 def shard_expr_sql(shards: int, column: str = "entity_id") -> str:
     """DuckDB expression computing the shard key of ``column``.
 
-    The SQL twin of :func:`ftm_lakehouse.core.conventions.path.entity_shard`,
-    used by :func:`build_shard_sql` so a re-shard recomputes every row's
+    The SQL twin of [`entity_shard`][ftm_lakehouse.core.conventions.path.entity_shard],
+    used by [`build_shard_sql`][build_shard_sql] so a re-shard recomputes every row's
     partition inside DuckDB's vectorised pipeline instead of marshaling
     ids into Python. ``banal.hash_data`` of a ``str`` is a plain SHA-1 of
     its UTF-8 bytes, which is exactly what DuckDB's ``sha1()`` returns –
@@ -325,13 +325,13 @@ def build_shard_sql(shard: str, bucket: str, origin: str, shards: int) -> str:
     ``SELECT *`` over the **raw** ``statement_raw`` view (tombstones and
     pre-merge duplicates included – a re-shard moves rows, it does not
     decide what survives) with the stored ``shard`` swapped for the one
-    :func:`shard_expr_sql` computes from ``entity_id``. ``REPLACE`` keeps
+    [`shard_expr_sql`][shard_expr_sql] computes from ``entity_id``. ``REPLACE`` keeps
     the projection positional, so the result still *is*
-    :data:`~ftm_lakehouse.model.statement.SHARDED_SCHEMA` and streams
+    `SHARDED_SCHEMA` and streams
     straight into ``write_deltalake``.
 
     Deliberately unordered and un-deduped: the caller
-    (:meth:`~ftm_lakehouse.storage.parquet.ParquetStore.shard`) re-stamps
+    ([`shard`][ftm_lakehouse.storage.parquet.ParquetStore.shard]) re-stamps
     every rewritten partition as dirty, so the next ``merge`` restores the
     file sort order – paying for a sort here would only make the rewrite
     slower.
@@ -359,7 +359,7 @@ def build_bounds_sample_sql(
 ) -> str:
     """DuckDB SQL reservoir-sampling ``entity_id`` values from one partition.
 
-    Feeds :func:`slice_ranges` with boundary candidates for a range-sliced
+    Feeds `slice_ranges` with boundary candidates for a range-sliced
     merge. The partition filter sits in a subquery because DuckDB applies
     a query-level ``USING SAMPLE`` *before* the ``WHERE`` clause – sampled
     directly, most of the sample would come from other partitions.
@@ -404,7 +404,7 @@ def slice_ranges(sample: list[str], slices: int) -> list[tuple[str | None, str |
 
     Args:
         sample: ``entity_id`` values drawn from the partition
-            (:func:`build_bounds_sample_sql`).
+            (`build_bounds_sample_sql`).
         slices: Desired number of ranges; clamped to the sample size.
 
     Returns:
@@ -427,7 +427,7 @@ def merge_slice_count(partition_bytes: int, memory_limit: str) -> int:
     """Number of range slices to merge a partition of ``partition_bytes``.
 
     Estimates the peak DuckDB footprint of the merge pipeline as
-    :data:`MERGE_SPILL_FACTOR` times the partition's compressed parquet
+    `MERGE_SPILL_FACTOR` times the partition's compressed parquet
     size and slices so each slice's estimate fits within ``memory_limit``
     – keeping the per-slice sort mostly in RAM instead of exhausting the
     spill directory. ``1`` means the single-pass merge suffices.
@@ -437,7 +437,7 @@ def merge_slice_count(partition_bytes: int, memory_limit: str) -> int:
             the Delta log's add actions – no data scan).
         memory_limit: DuckDB memory limit string, typically
             ``Settings.duckdb_memory_limit``. Unparsable values (e.g. a
-            percentage) fall back to :data:`FALLBACK_MEMORY_LIMIT`.
+            percentage) fall back to `FALLBACK_MEMORY_LIMIT`.
 
     Returns:
         Slice count, at least ``1``.
@@ -457,7 +457,7 @@ def shard_target_file_size(shards: int) -> int:
     A re-shard scatters one ``(bucket, origin)`` group across every target
     shard, so ``write_deltalake`` holds one open partition writer per
     shard and each buffers up to ``target_file_size`` compressed bytes
-    before it flushes. At the default :data:`~ftmq.store.lake.TARGET_SIZE`
+    before it flushes. At the default `TARGET_SIZE`
     that peak is the file size *times the shard count* – gigabytes for the
     very datasets a re-shard is for. Dividing by the shard count keeps the
     peak at roughly one ``TARGET_SIZE`` regardless of how many shards the
@@ -472,7 +472,7 @@ def shard_target_file_size(shards: int) -> int:
         shards: Target shard count.
 
     Returns:
-        Byte size, never below :data:`SHARD_MIN_FILE_SIZE`.
+        Byte size, never below `SHARD_MIN_FILE_SIZE`.
     """
     return max(TARGET_SIZE // max(shards, 1), SHARD_MIN_FILE_SIZE)
 

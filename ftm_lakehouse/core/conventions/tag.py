@@ -3,7 +3,7 @@ Global tags used to identify actions. Used for cache keys of workflow runs etc.
 
 Export operations don't have constants here – their freshness tag is the
 ``path.*`` export target itself (e.g. ``exports/statements.csv``), touched
-by :meth:`DatasetJobOperation._run_local` after a successful run.
+by `DatasetJobOperation._run_local` after a successful run.
 """
 
 from ftm_lakehouse.util import validate_origin
@@ -39,11 +39,14 @@ OP_SHARD = "operations/shard/last_run"
 def statements_partition_updated(shard: str, bucket: str, origin: str) -> str:
     """Per-partition freshness tag: a ``(shard, bucket, origin)`` was written.
 
-    Partition-scoped analog of :data:`STATEMENTS_UPDATED`, stamped by
-    :meth:`ParquetStore.append`. :meth:`ParquetStore.merge` compares it
-    against :func:`statements_partition_optimized` via
-    :meth:`TagStore.is_latest` to skip partitions that haven't changed
-    since their last merge.
+    Partition-scoped analog of [`STATEMENTS_UPDATED`][STATEMENTS_UPDATED],
+    stamped by
+    [`ParquetStore.append`][ftm_lakehouse.storage.parquet.ParquetStore.append].
+    [`ParquetStore.merge`][ftm_lakehouse.storage.parquet.ParquetStore.merge]
+    compares it against
+    [`statements_partition_optimized`][statements_partition_optimized] via
+    [`TagStore.is_latest`][ftm_lakehouse.storage.tags.TagStore.is_latest] to
+    skip partitions that haven't changed since their last merge.
 
     Args:
         shard: Hex-padded shard value.
@@ -57,9 +60,12 @@ def statements_partition_updated(shard: str, bucket: str, origin: str) -> str:
 def statements_partition_optimized(shard: str, bucket: str, origin: str) -> str:
     """Per-partition freshness tag: a ``(shard, bucket, origin)`` was merged.
 
-    Partition-scoped analog of :data:`STATEMENTS_OPTIMIZED`, stamped by
-    :meth:`ParquetStore.merge` after it rewrites the partition. See
-    :func:`statements_partition_updated` for the freshness comparison.
+    Partition-scoped analog of [`STATEMENTS_OPTIMIZED`][STATEMENTS_OPTIMIZED],
+    stamped by
+    [`ParquetStore.merge`][ftm_lakehouse.storage.parquet.ParquetStore.merge]
+    after it rewrites the partition. See
+    [`statements_partition_updated`][statements_partition_updated] for the
+    freshness comparison.
 
     Args:
         shard: Hex-padded shard value.

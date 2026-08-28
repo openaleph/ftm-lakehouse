@@ -1,10 +1,11 @@
 """Shared bulk-import loop for the CLI ``import`` commands.
 
 Both ``entities import`` and ``statements import`` stream items through an
-in-memory :class:`EntityBuffer` (grouped by shard) and hand each full batch
-to ``EntityRepository.write_batches`` as one packed table per shard,
-bypassing the journal. The loop here is the single implementation; the
-command modules only differ in how they parse their input.
+in-memory `EntityBuffer` and hand each full batch to
+[`write_batches`][ftm_lakehouse.repository.EntityRepository.write_batches]
+as one packed table, bypassing the journal. The loop here is the single
+implementation; the command modules only differ in how they parse their
+input.
 """
 
 from datetime import datetime
@@ -37,7 +38,7 @@ def _extract_context_value(i: EntityProxy, key: str) -> str | None:
     """A single string value from an entity's context, else ``None``.
 
     Proxy-context twin of the dict extraction in the unsafe explode path –
-    both defer to :func:`ftm_lakehouse.util.single_string` (one-element
+    both defer to `single_string` (one-element
     lists count, multiple values are ambiguous) so per-statement provenance
     or the buffer default applies on fallback. ``StatementEntity`` has no
     ``context`` slot at all; its statements carry origin / fragment
@@ -84,9 +85,7 @@ def _bulk_import(
     last_seen: datetime | None,
     item_name: str,
 ) -> None:
-    buffer = EntityBuffer(
-        repo.dataset, repo.shards, origin, last_seen=last_seen, max_rows=bulk_size
-    )
+    buffer = EntityBuffer(repo.dataset, origin, last_seen=last_seen, max_rows=bulk_size)
     now = last_seen or utc_now()
 
     for item in logged_items(
@@ -107,13 +106,13 @@ def _bulk_import(
             # Buffer hit its cap before we got to the bulk_size check
             # (e.g. bulk_size > LAKEHOUSE_MAX_BUFFER_ROWS). Drain and
             # retry the failed add so the item isn't dropped.
-            repo.write_batches(buffer.flush_tables(now))
+            repo.write_batches([buffer.flush_table(now)])
             add(buffer, item, origin=item_origin, fragment=fragment)
         if len(buffer) >= bulk_size:
-            repo.write_batches(buffer.flush_tables(now))
+            repo.write_batches([buffer.flush_table(now)])
 
     if buffer:
-        repo.write_batches(buffer.flush_tables(now))
+        repo.write_batches([buffer.flush_table(now)])
 
 
 def import_entities(
@@ -163,7 +162,7 @@ def import_statements(
 def _bulk_import_rows(
     repo: EntityRepository, rows: Iterable[SDict | None], *, bulk_size: int
 ) -> None:
-    """Shared :class:`RowBuffer` loop for the ``--unsafe`` fast paths.
+    """Shared `RowBuffer` loop for the ``--unsafe`` fast paths.
 
     The cap is checked per row (not per input item) so one pathologically
     large entity cannot grow the buffer past the ``bulk_size`` memory bound.
@@ -188,9 +187,9 @@ def import_entities_unsafe(
 ) -> None:
     """Bulk-import aggregated FtM entity dicts without FtM object construction.
 
-    The ``--unsafe`` fast path: payloads go through :func:`explode_unsafe`
+    The ``--unsafe`` fast path: payloads go through `explode_unsafe`
     straight to packed parquet rows – same statement ids, namespace
-    stripping and timestamp pinning as :func:`import_entities`, minus
+    stripping and timestamp pinning as `import_entities`, minus
     validation and the per-statement object churn. Trusted input only.
     """
     validate_origin(origin)
@@ -226,8 +225,8 @@ def import_statements_unsafe(
     """Bulk-import ``statements.csv`` row dicts without Statement construction.
 
     The ``--unsafe`` fast path: CSV rows go through
-    :func:`statement_row_unsafe` straight to packed parquet rows, mirroring
-    :func:`import_statements` field by field – including ``last_seen``
+    `statement_row_unsafe` straight to packed parquet rows, mirroring
+    `import_statements` field by field – including ``last_seen``
     doubling as the stamp for rows missing their timestamps. Trusted input
     only.
     """

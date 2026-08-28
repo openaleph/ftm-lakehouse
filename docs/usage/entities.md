@@ -76,7 +76,7 @@ print(f"Flushed {count} statements")
 
 ### Bulk Import (bypassing the journal)
 
-For one-shot loads where journal write-amplification is wasteful (millions of entities from an exported file), stream through an in-memory shard buffer and write directly to parquet:
+For one-shot loads where journal write-amplification is wasteful (millions of entities from an exported file), stream through an in-memory buffer and write directly to parquet:
 
 ```python
 from datetime import datetime, timezone
@@ -84,19 +84,19 @@ from ftmq.io import smart_read_proxies
 from ftm_lakehouse.logic.entities.buffer import EntityBuffer
 
 repo = get_entities("my_dataset")
-buffer = EntityBuffer(repo.dataset, repo.shards, origin="bulk")
+buffer = EntityBuffer(repo.dataset, origin="bulk")
 now = datetime.now(timezone.utc)
 
 for proxy in smart_read_proxies("entities.ftm.json"):
     buffer.add_entity(proxy)
     if len(buffer) >= 1_000_000:
-        repo.write_batches(buffer.flush_tables(now))
+        repo.write_batches([buffer.flush_table(now)])
 
 if buffer:
-    repo.write_batches(buffer.flush_tables(now))
+    repo.write_batches([buffer.flush_table(now)])
 ```
 
-The `EntityBuffer` keys statements by `(id, origin, fragment)` and holds them grouped by shard; `buffer.flush_tables()` drains it as one packed Arrow table per shard, and `repo.write_batches` appends each one as a parquet file per `(shard, bucket, origin)` triple. The grouping is a batching hint – `shard` is not a packed column, and `ParquetStore.append` derives the stored key from `entity_id` – so passing a wrong `shards` here costs file count, never placement.
+The `EntityBuffer` keys statements by `(id, origin, fragment)`; `buffer.flush_table()` drains it as one packed Arrow table, and `repo.write_batches` appends it as one parquet file per `(shard, bucket, origin)` triple it spans. The buffer never sees a shard count – `shard` is not a packed column, and `ParquetStore.append` derives the stored key from `entity_id` – so nothing here can place a row against the wrong count.
 
 The CLI command `ftm-lakehouse entities import` does exactly this.
 

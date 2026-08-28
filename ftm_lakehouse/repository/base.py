@@ -21,7 +21,7 @@ class DatasetRef(NamedTuple):
 
     Unpacks like a plain tuple (``name, uri = ref``); repositories are
     resolved from it via the factories. The rich per-dataset object is
-    :class:`DatasetHandle`.
+    `DatasetHandle`.
     """
 
     name: str
@@ -32,11 +32,11 @@ def dataset_uri(dataset: str, uri: Uri | None = None) -> str:
     """Canonical URI for a dataset – same location, same string, same cache key.
 
     Validates ``dataset`` first
-    (:func:`~ftm_lakehouse.util.validate_dataset_name`) – every repository
+    (`validate_dataset_name`) – every repository
     factory and operation resolves through here, so no caller-supplied name
     reaches path construction unchecked. ``None`` derives
     ``{LAKEHOUSE_URI}/{dataset}`` exactly like
-    :func:`ftm_lakehouse.lake.get_lakehouse` does for the catalog; explicit
+    [`get_lakehouse`][ftm_lakehouse.lake.get_lakehouse] does for the catalog; explicit
     values (str or ``Path``) are normalized via ``ensure_uri``.
 
     Raises:
@@ -80,8 +80,10 @@ class DatasetHandle(LakehouseApiMixin):
     versions and the api client.
 
     Combines no storage itself – the repositories layer their storage
-    combinations on top, and :class:`DatasetJobOperation` adds the job
-    lifecycle. Anything that addresses one dataset subclasses this.
+    combinations on top, and
+    [`DatasetJobOperation`][ftm_lakehouse.operation.base.DatasetJobOperation]
+    adds the job lifecycle. Anything that addresses one dataset subclasses
+    this.
     """
 
     def __init__(self, dataset: str, uri: Uri) -> None:

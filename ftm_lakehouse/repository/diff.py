@@ -52,7 +52,7 @@ class ParquetDiffMixin:
     def _write_diff(self, entity_ids: Iterator[str], ts: datetime) -> tuple[str, int]:
         """Write the diff file for the given changed entity ids.
 
-        ``entity_ids`` streams in from :meth:`_get_changed_ids`; the impl owns
+        ``entity_ids`` streams in from `_get_changed_ids`; the impl owns
         the one materialization the DEL derivation needs (it has to know which
         changed ids produced no live entity), which is also where the returned
         count comes from.
@@ -96,7 +96,7 @@ class ParquetDiffMixin:
 
         Changed entities are identified by their statements' ``first_seen``;
         soft deletes surface through ``deleted_at`` on the raw statement
-        view (:attr:`ParquetStore.source_raw`). Each changed entity is then
+        view (`ParquetStore.source_raw`). Each changed entity is then
         re-read *whole*, so an ADD carries its current state.
 
         Requires an optimized store: reads are canonical only after ``merge``

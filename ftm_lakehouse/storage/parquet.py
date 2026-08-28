@@ -3,25 +3,25 @@
 Statements live in one Delta Lake table (per dataset) partitioned by
 ``(shard, bucket, origin)``. ``shard`` is the hex-padded entity_id hash bucket;
 the uniform shard count is set per dataset via ``DatasetModel.shards``. It is
-derived in :meth:`ParquetStore.append` and nowhere else – producers hand over
+derived in [`ParquetStore.append`][ParquetStore.append] and nowhere else – producers hand over
 ``JOURNAL_SCHEMA`` rows with no shard key at all, so a partition can never be
 picked against a shard count other than the one this store is configured for.
 
 Writes are **append-only**: each flush sorts a per-partition batch by
 ``(entity_id, id, last_seen DESC)`` in memory and appends it as a new parquet
 file. Two views are registered on the underlying ``LakeStore`` connection –
-:func:`~ftm_lakehouse.logic.parquet.live_view_sql` produces the ``statement``
+[`live_view_sql`][ftm_lakehouse.logic.parquet.live_view_sql] produces the ``statement``
 view that every read targets (a plain ``WHERE deleted_at IS NULL`` scan), and
-:func:`~ftm_lakehouse.logic.parquet.raw_view_sql` produces ``statement_raw``
+[`raw_view_sql`][ftm_lakehouse.logic.parquet.raw_view_sql] produces ``statement_raw``
 for code paths that need tombstones and pre-merge duplicates visible
-(:meth:`merge`, :meth:`get_entity_ids` over :attr:`source_raw`).
+(`merge`, `get_entity_ids` over `source_raw`).
 
 **Correctness assumes an optimized store.** The live view has no read-time
 dedupe – it just hides tombstones – so reads are correct only once
-:meth:`merge` has made the store canonical (one row per statement id,
+`merge` has made the store canonical (one row per statement id,
 fragment supersession applied, ``first_seen`` / ``last_seen`` folded). All of
 that dedupe logic lives solely in
-:func:`~ftm_lakehouse.logic.parquet.build_merge_sql`. Between a write and the
+[`build_merge_sql`][ftm_lakehouse.logic.parquet.build_merge_sql]. Between a write and the
 next merge, reads can surface duplicate ids and rows whose delete has not been
 applied yet.
 
@@ -119,12 +119,13 @@ class ParquetStore:
     """Single Delta Lake table (per dataset) partitioned by ``(shard, bucket,
     origin)``.
 
-    Writes are append-only: :meth:`append` sorts a per-partition batch in
+    Writes are append-only: [`append`][ParquetStore.append] sorts a per-partition batch in
     memory and writes one parquet file. Reads target the live ``statement``
-    view (``deleted_at IS NULL``) registered on the :class:`LakeStore`
-    connection and assume a store made canonical by :meth:`merge` –
-    :meth:`merge`, :meth:`compact`, :meth:`vacuum` are load-bearing for read
-    correctness, not just cleanup.
+    view (``deleted_at IS NULL``) registered on the `LakeStore`
+    connection and assume a store made canonical by
+    [`merge`][ParquetStore.merge] – [`merge`][ParquetStore.merge],
+    [`compact`][ParquetStore.compact], [`vacuum`][ParquetStore.vacuum] are
+    load-bearing for read correctness, not just cleanup.
     """
 
     def __init__(
@@ -193,10 +194,10 @@ class ParquetStore:
         """Compile ``q`` to a statements ``Select`` against the live view.
 
         Compiles through `self.source`, so a schema filter folds into
-        a ``bucket IN (...)`` predicate (ftmq's :class:`~ftmq.query.SqlSource`
+        a ``bucket IN (...)`` predicate (ftmq's `SqlSource`
         ``prune``) and a schema-scoped read prunes to the matching bucket
         partitions instead of scanning all of them. The single entry point every
-        lakehouse read funnels its :class:`~ftmq.query.Query` through.
+        lakehouse read funnels its `Query` through.
         """
         if q is None:
             q = Query()
@@ -229,8 +230,8 @@ class ParquetStore:
     def _statement_data(self, q: Query | None = None) -> Iterator[StatementDict]:
         """Statement dicts for ``q``, choosing the execution strategy.
 
-        One global query when sort / slice demand it (:meth:`_needs_global`),
-        else the per-partition iteration (:meth:`_query_statement_data`).
+        One global query when sort / slice demand it (`_needs_global`),
+        else the per-partition iteration (`_query_statement_data`).
         Rows stay entity-contiguous either way, so aggregation can run over
         the stream directly. Empty for a store that has never been written.
         """
@@ -247,7 +248,7 @@ class ParquetStore:
         Args:
             q: Optional ``Query`` of entity-level filters (schema, properties,
                 ids, ...) plus ordering / slicing – a sorted or sliced query
-                executes globally (:meth:`_needs_global`) so ``LIMIT`` and
+                executes globally (`_needs_global`) so ``LIMIT`` and
                 ``ORDER BY`` hold across partitions.
 
         Yields:
@@ -260,12 +261,12 @@ class ParquetStore:
         """Query ordered Statements from the store.
 
         Args:
-            q: Optional ``Query`` – executed via :meth:`_statement_data`;
+            q: Optional ``Query`` – executed via `_statement_data`;
                 sorted / sliced queries execute globally
-                (:meth:`_needs_global`).
+                (`_needs_global`).
 
         Yields:
-            :class:`~ftmq.store.lake.LakeStatement` objects matching the
+            `LakeStatement` objects matching the
             query.
         """
         for stmt_dict in self._statement_data(q):
@@ -276,7 +277,7 @@ class ParquetStore:
 
         Runs ftmq's aggregation SQL over the live ``statement`` view. Assumes
         an optimized store: the live view is a plain ``deleted_at IS NULL``
-        scan, so the aggregates are correct only once :meth:`merge` has made
+        scan, so the aggregates are correct only once [`merge`][ParquetStore.merge] has made
         the store canonical (one row per id, supersession applied). Run
         ``optimize`` before heavy stats workloads.
         """
@@ -289,7 +290,7 @@ class ParquetStore:
         per-partition read iteration), so it's cheap enough to short-circuit an
         export that would otherwise iterate every partition for zero results.
         Compiled through `self.source`, so a schema filter folds into
-        the same ``bucket IN (...)`` prune as :meth:`_compile_query` –
+        the same ``bucket IN (...)`` prune as `_compile_query` –
         non-matching partitions are pruned, not just file-skipped. Like the
         other aggregates it assumes an optimized store.
         """
@@ -305,20 +306,22 @@ class ParquetStore:
     def _write_lock(self) -> Lock:
         """Exclusive side of the dataset write fence.
 
-        Held by maintenance (:meth:`merge`, :meth:`compact`, :meth:`vacuum`
-        via :meth:`_maintenance_fence`) and by the first-ever :meth:`append`
-        of a dataset (table creation must not race). The lock lives at
+        Held by maintenance ([`merge`][ParquetStore.merge],
+        [`compact`][ParquetStore.compact], [`vacuum`][ParquetStore.vacuum] via
+        `_maintenance_fence`) and by the first-ever
+        [`append`][ParquetStore.append] of a dataset (table creation must not
+        race). The lock lives at
         ``{dataset_root}/.LOCK`` per ``path.LOCK``.
 
         Regular appends do **not** take this lock – they register a shared
-        marker instead (:meth:`_append_fence`); Delta's optimistic
+        marker instead (`_append_fence`); Delta's optimistic
         concurrency serializes concurrent append commits safely on its own.
 
         Acquisition is bounded by ``settings.lock_max_retries`` (total wait
         roughly ``N²/2`` seconds); entering the returned lock raises
         ``RuntimeError`` when the fence stays busy, so contended writers fail
         instead of pinning a thread forever. A lock left behind by a crashed
-        writer must be released manually via :meth:`unlock`
+        writer must be released manually via [`unlock`][ParquetStore.unlock]
         (``ftm-lakehouse maintenance unlock``).
         """
         return Lock(
@@ -367,7 +370,7 @@ class ParquetStore:
         the handshake sound on a linearizable store: when the ``.LOCK``
         check sees no lock, the marker write is already visible to any
         later drain poll by a maintenance holder, so
-        :meth:`_maintenance_fence` can never pass its drain while an
+        `_maintenance_fence` can never pass its drain while an
         unnoticed append is in flight. When ``.LOCK`` is held, the marker
         is removed *before* backing off (a parked appender must not
         deadlock the drain), then register-and-check retries under the
@@ -376,7 +379,7 @@ class ParquetStore:
         Concurrent appends never block each other – Delta append commits
         are blind appends that delta-rs serializes via optimistic commit
         retries. A marker left behind by a crashed appender blocks
-        maintenance until released via :meth:`unlock`
+        maintenance until released via [`unlock`][ParquetStore.unlock]
         (``ftm-lakehouse maintenance unlock``).
         """
         marker = f"{path.LOCK_APPENDS}/{uuid4().hex}"
@@ -402,7 +405,7 @@ class ParquetStore:
 
         Runs under the exclusive write lock so two racing first imports
         cannot both commit version ``0``. Establishing existence here –
-        once, at the first write – lets :meth:`append` always take the
+        once, at the first write – lets [`append`][ParquetStore.append] always take the
         shared append fence with ``mode="append"`` instead of
         special-casing creation inside the hot write path.
         """
@@ -467,7 +470,7 @@ class ParquetStore:
         count – never of what some producer computed earlier, possibly
         against a different config. That is what keeps a stale writer from
         mis-routing rows: the journal carries no shard key
-        (:data:`~ftm_lakehouse.model.statement.JOURNAL_SCHEMA`), so there is
+        (`JOURNAL_SCHEMA`), so there is
         nothing stale to trust.
 
         Hashes the *distinct* entity ids rather than every row – statements
@@ -487,37 +490,36 @@ class ParquetStore:
         """Append a batch of statements.
 
         Rows arrive in
-        :data:`~ftm_lakehouse.model.statement.JOURNAL_SCHEMA` – without a
-        ``shard`` column – and :meth:`_with_shard` derives it here. The batch
-        should hold one shard's worth of entities for write efficiency (one
-        parquet file per ``(shard, bucket, origin)`` partition), but that is a
-        batching hint from the producer, not a correctness contract: a batch
-        spanning shards simply writes more files, which :meth:`compact`
-        bin-packs. The method splits by ``bucket`` so each ``write_deltalake``
-        call uses the bucket-appropriate ``writer_properties`` (small vs.
-        large profile). Duplicates land as separate rows and are reaped by
-        :meth:`merge`.
+        `JOURNAL_SCHEMA` – without a
+        ``shard`` column – and `_with_shard` derives it here. Batches
+        may span any number of shards; each one becomes a parquet file per
+        ``(shard, bucket, origin)`` partition it touches, so a bigger batch
+        costs fewer files, not more. The method splits by ``bucket`` so each
+        ``write_deltalake`` call uses the bucket-appropriate
+        ``writer_properties`` (small vs. large profile). Duplicates land as
+        separate rows and are reaped by [`merge`][ParquetStore.merge].
 
         Deliberately does **not** sort. Nothing downstream reads in physical
-        order, and :meth:`merge` rewrites every partition an append touched
+        order, and [`merge`][ParquetStore.merge] rewrites every partition an append touched
         into the file sort order anyway.
 
         Held under the *shared* side of the write fence
-        (:meth:`_append_fence`): concurrent appends run in parallel – Delta
+        (`_append_fence`): concurrent appends run in parallel – Delta
         serializes their commits via optimistic concurrency – while
-        :meth:`merge` / :meth:`compact` / :meth:`vacuum` wait for the append
-        markers to drain before rewriting partitions. Table creation happens
-        once in :meth:`_ensure_table` (under the exclusive lock, so two
+        [`merge`][ParquetStore.merge] / [`compact`][ParquetStore.compact] /
+        [`vacuum`][ParquetStore.vacuum] wait for the append markers to drain
+        before rewriting partitions. Table creation happens
+        once in `_ensure_table` (under the exclusive lock, so two
         racing imports can't both commit version ``0``); the write loop
         itself always appends. Each touched ``(shard, bucket, origin)``
         partition is stamped with a ``last_updated`` freshness tag inside
-        the fence and *before* the Delta writes, so a later :meth:`merge`
-        can skip partitions that didn't change – see :meth:`_mark_updated`
+        the fence and *before* the Delta writes, so a later [`merge`][ParquetStore.merge]
+        can skip partitions that didn't change – see `_mark_updated`
         for why both halves of that ordering are load-bearing.
 
         Args:
             batch: PyArrow table with the columns of
-                :data:`ftm_lakehouse.model.statement.JOURNAL_SCHEMA`.
+                `JOURNAL_SCHEMA`.
         """
         if len(batch) == 0:
             return
@@ -549,21 +551,21 @@ class ParquetStore:
         """Stamp a ``last_updated`` tag on every partition present in ``batch``.
 
         Partition-level counterpart to the dataset-wide
-        :data:`~ftm_lakehouse.core.conventions.tag.STATEMENTS_UPDATED` tag:
+        [`STATEMENTS_UPDATED`][ftm_lakehouse.core.conventions.tag.STATEMENTS_UPDATED] tag:
         one tag per distinct ``(shard, bucket, origin)`` triple in the
-        batch. :meth:`merge` compares each partition's ``last_updated``
+        batch. [`merge`][ParquetStore.merge] compares each partition's ``last_updated``
         against its ``last_optimized`` to decide whether the partition
         needs rewriting.
 
         Called *inside* the append fence and *before* the Delta commits.
         Both halves matter, and the failure they prevent is the same one:
         a partition that looks clean while holding un-merged rows, which a
-        default :meth:`merge` then skips forever (reads depend on merge
+        default [`merge`][ParquetStore.merge] then skips forever (reads depend on merge
         for correctness, so it would surface duplicates indefinitely).
 
         - Before the commits, so a writer dying mid-append leaves at worst
           a dirty tag with no data – one harmless extra merge.
-        - Inside the fence, so a :meth:`merge` cannot stamp
+        - Inside the fence, so a [`merge`][ParquetStore.merge] cannot stamp
           ``last_optimized`` between this tag and the commits it belongs
           to. Outside the fence that interleaving is reachable: the
           appender stamps ``last_updated``, gets locked out of the fence
@@ -584,15 +586,15 @@ class ParquetStore:
 
         Reads are canonical only on a merged store – the live ``statement``
         view does no read-time dedupe – so paths that publish canonical rows
-        (:meth:`~ftm_lakehouse.repository.diff.ParquetDiffMixin.export_diff`)
+        (`export_diff`)
         check this first.
 
         The dataset-level ``statements/last_optimized`` tag cannot answer it:
-        :class:`~ftm_lakehouse.operation.maintenance.OptimizeOperation` stamps
-        that with its *start* time while :meth:`merge` bumps
+        [`OptimizeOperation`][ftm_lakehouse.operation.maintenance.OptimizeOperation] stamps
+        that with its *start* time while [`merge`][ParquetStore.merge] bumps
         ``statements/last_updated`` on completion, so the dataset pair reads
         stale right after a successful optimize. The per-partition tags are
-        the ones :meth:`merge` itself compares, stamped in the order that
+        the ones [`merge`][ParquetStore.merge] itself compares, stamped in the order that
         makes the comparison sound.
         """
         for shard, bucket, origin in self._list_partitions():
@@ -612,7 +614,7 @@ class ParquetStore:
         ``first_seen`` to the min; drop tombstones older than the grace
         cutoff) and atomically overwrites that partition via
         ``partition_filters``. Held under the exclusive maintenance fence
-        (``path.LOCK`` + append-marker drain, :meth:`_maintenance_fence`).
+        (``path.LOCK`` + append-marker drain, `_maintenance_fence`).
 
         Only partitions whose ``last_updated`` freshness tag is newer than
         their ``last_optimized`` tag are rewritten – a partition untouched
@@ -638,13 +640,13 @@ class ParquetStore:
 
         A partition whose parquet size suggests the merge pipeline would
         outgrow ``LAKEHOUSE_DUCKDB_MEMORY_LIMIT``
-        (:func:`~ftm_lakehouse.logic.parquet.merge_slice_count`) is merged
+        (`merge_slice_count`) is merged
         in contiguous ``entity_id`` range slices instead of one pass: a
         reservoir sample picks boundaries
-        (:func:`~ftm_lakehouse.logic.parquet.slice_ranges`), one merge
+        (`slice_ranges`), one merge
         query runs per range – strictly sequentially, so only one sort
         window is materialised at a time – and the slices chain into the
-        single atomic partition overwrite (:meth:`_chained_reader`). No
+        single atomic partition overwrite (`_chained_reader`). No
         dedupe group spans an ``entity_id`` bound, ranges stream in
         ascending order, so output content, file sort order and the Delta
         commit are identical to a single-pass merge.
@@ -732,10 +734,10 @@ class ParquetStore:
         starts once query ``i`` is exhausted – so at most one of them
         holds a sort window in DuckDB at a time.
 
-        Both rewriting paths feed it: :meth:`merge` passes its range
+        Both rewriting paths feed it: [`merge`][ParquetStore.merge] passes its range
         slices, which arrive in ascending ``entity_id`` order and are
         each internally sorted, so the concatenated stream keeps the
-        global file sort order; :meth:`shard` passes one query per
+        global file sort order; [`shard`][ParquetStore.shard] passes one query per
         source partition, deliberately unordered.
 
         Args:
@@ -758,7 +760,7 @@ class ParquetStore:
 
         Summed from the Delta log's add actions – file-level metadata,
         no data scan. Drives the slice count of a range-sliced
-        :meth:`merge`.
+        [`merge`][ParquetStore.merge].
         """
         actions = pa.table(self.deltatable.get_add_actions(flatten=True))
         sizes: dict[tuple[str, str, str], int] = {}
@@ -777,20 +779,20 @@ class ParquetStore:
 
         The physical half of a shard-count change: every row's ``shard``
         is recomputed from its ``entity_id``
-        (:func:`~ftm_lakehouse.logic.parquet.build_shard_sql`) and the
+        ([`build_shard_sql`][ftm_lakehouse.logic.parquet.build_shard_sql]) and the
         store is rewritten into the new partition layout. ``bucket`` and
         ``origin`` are invariant under re-sharding – only ``shard``
         moves – so the rewrite runs one ``write_deltalake`` per
         ``(bucket, origin)`` group, replacing that group's partitions
         wholesale via ``predicate`` while the group's source partitions
         stream in through a single chained reader
-        (:meth:`_chained_reader`). Nothing is materialised in Python, and
+        (`_chained_reader`). Nothing is materialised in Python, and
         each group's rows land in one atomic Delta commit with the
         bucket-appropriate ``writer_properties``.
 
         One writer per *target* partition stays open across a group's
         write, so the target file size is scaled down by the shard count
-        (:func:`~ftm_lakehouse.logic.parquet.shard_target_file_size`) to
+        (`shard_target_file_size`) to
         keep their combined buffers bounded; the resulting small files are
         what the follow-up ``compact`` bin-packs.
 
@@ -798,7 +800,7 @@ class ParquetStore:
         queries have outgrown their shard count, and a re-shard moves
         rows rather than deciding which survive. Every rewritten
         partition is therefore re-stamped as dirty, so the next
-        :meth:`merge` restores canonical content and file sort order –
+        [`merge`][ParquetStore.merge] restores canonical content and file sort order –
         run ``optimize`` afterwards. The stamps are per-partition only;
         the dataset-level clocks stay put, because a re-shard changes
         physical layout, not canonical content, and the exports keyed on
@@ -810,10 +812,11 @@ class ParquetStore:
         by running it again.
 
         Held under the exclusive maintenance fence
-        (:meth:`_maintenance_fence`), which blocks parquet appends but
-        **not** journal writes – a statement journalled before the
-        re-shard and flushed after it carries a shard key from the old
-        count and lands in the wrong partition. Run with writers stopped.
+        (`_maintenance_fence`), which blocks parquet appends but
+        **not** journal writes. Journalled rows carry no shard key, so a
+        flush *after* this returns places them under the new count – but
+        one landing between the rewrite and the config write still resolves
+        the old one. Run with writers stopped.
 
         Args:
             shards: Target shard count; ``<= 1`` collapses the store into
@@ -865,8 +868,8 @@ class ParquetStore:
 
         Cheap maintenance – Delta's ``OPTIMIZE compact`` only rewrites small
         files into larger ones; it does not collapse duplicate rows or drop
-        tombstones (use :meth:`merge` for that). Held under the exclusive
-        maintenance fence (:meth:`_maintenance_fence`).
+        tombstones (use [`merge`][ParquetStore.merge] for that). Held under the exclusive
+        maintenance fence (`_maintenance_fence`).
         """
         if not self.exists:
             return
@@ -887,10 +890,11 @@ class ParquetStore:
     def vacuum(self, retention_hours: int = 0) -> None:
         """Delete obsolete parquet files no longer referenced by the Delta log.
 
-        Tombstoned files (replaced by :meth:`merge` / :meth:`compact`) become
-        orphans on disk; vacuum prunes them once they're past
+        Tombstoned files (replaced by [`merge`][ParquetStore.merge] /
+        [`compact`][ParquetStore.compact]) become orphans on disk; vacuum
+        prunes them once they're past
         ``retention_hours``. Held under the exclusive maintenance fence
-        (:meth:`_maintenance_fence`).
+        (`_maintenance_fence`).
 
         Args:
             retention_hours: Keep files newer than this many hours. ``0``
@@ -910,12 +914,12 @@ class ParquetStore:
         """Export statements to a sorted CSV file.
 
         Streams each ``(shard, bucket)`` partition straight from DuckDB as
-        Arrow batches (:meth:`_execute_partitioned`) into a ``pyarrow`` CSV
+        Arrow batches (`_execute_partitioned`) into a ``pyarrow`` CSV
         writer, so the export stays vectorised end to end – no per-row
         Python materialisation. Memory stays bounded per batch and the
         ``ORDER BY entity_id`` sort stays bounded to one partition.
 
-        Compression comes from :attr:`compression` (the dataset's config), not
+        Compression comes from `compression` (the dataset's config), not
         from the caller.
         """
         if not self.exists:
@@ -980,7 +984,7 @@ class ParquetStore:
     def _iter_shard_buckets(self) -> Iterator[tuple[str, str]]:
         """Yield unique ``(shard, bucket)`` pairs from existing partitions.
 
-        Reads (:meth:`_query_statement_data`) iterate per ``(shard,
+        Reads (`_query_statement_data`) iterate per ``(shard,
         bucket)`` because entity IDs (and thus statement IDs) are uniquely
         placed in one ``(shard, bucket)`` by the model layer. Adding
         ``WHERE shard = ? AND bucket = ?`` per iteration keeps a full-store
@@ -1013,8 +1017,8 @@ class ParquetStore:
         """Yield a streamed Arrow reader per ``(shard, bucket)`` partition.
 
         Hands back each partition's result (scoped via
-        :meth:`_scoped_partition_sql`) as a lazy
-        :class:`pyarrow.RecordBatchReader` streamed from DuckDB's execution
+        `_scoped_partition_sql`) as a lazy
+        `pyarrow.RecordBatchReader` streamed from DuckDB's execution
         pipeline, so memory stays bounded per batch instead of materialising
         the partition.
 
@@ -1023,10 +1027,10 @@ class ParquetStore:
         generator resumes for the following partition.
 
         Args:
-            sql: Optional SQLAlchemy ``Select`` (default: :meth:`_compile_query`).
+            sql: Optional SQLAlchemy ``Select`` (default: `_compile_query`).
 
         Yields:
-            One :class:`pyarrow.RecordBatchReader` per ``(shard, bucket)``
+            One `pyarrow.RecordBatchReader` per ``(shard, bucket)``
             partition.
         """
         if sql is None:
@@ -1040,13 +1044,13 @@ class ParquetStore:
         """Query statement dicts from the live view, bypassing FtM construction.
 
         Iterates ``(shard, bucket)`` partitions via
-        :meth:`_scoped_partition_sql`. Correctness assumes an optimized store –
+        `_scoped_partition_sql`. Correctness assumes an optimized store –
         on an un-merged store this can surface duplicate ids and rows whose
         delete has not been applied yet.
 
         Args:
             q: Optional ftmq ``Query`` (default: match-all), compiled via
-                :meth:`_compile_query`.
+                `_compile_query`.
 
         Yields:
             StatementDict instances.
@@ -1061,7 +1065,7 @@ class ParquetStore:
 
         Args:
             q: Optional ftmq ``Query`` (default: match-all), executed via
-                :meth:`_statement_data`.
+                `_statement_data`.
 
         Yields:
             EntityPayload instances

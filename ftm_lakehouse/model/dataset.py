@@ -30,7 +30,7 @@ class DatasetModel(Dataset):
     ``ensure_dataset("big_leak", shards=8)``). Fixed once the store is
     written: setting it here only changes where readers *look*, so changing
     it after the fact means a full rewrite –
-    :class:`~ftm_lakehouse.operation.maintenance.ShardOperation`."""
+    [`ShardOperation`][ftm_lakehouse.operation.maintenance.ShardOperation]."""
     compression: CompressKind | None = None
     """Compress exported artifacts (statements.csv, entities.ftm.json, diffs...)"""
 
@@ -49,11 +49,11 @@ _model_class: type[DatasetModel] = DatasetModel
 
 
 def set_model_class(model_class: type[DatasetModel]) -> None:
-    """Register a custom :class:`DatasetModel` subclass process-wide.
+    """Register a custom [`DatasetModel`][DatasetModel] subclass process-wide.
 
     Every config read – repository construction, ``get_dataset_model``,
     ``update_dataset``, the index export – constructs models via
-    :func:`get_model_class`, so downstream applications extend the dataset
+    `get_model_class`, so downstream applications extend the dataset
     config schema with one call at process start:
 
     ```python
@@ -70,12 +70,15 @@ def set_model_class(model_class: type[DatasetModel]) -> None:
     switch requires ``repository.factories.clear_caches()``.
 
     Args:
-        model_class: The :class:`DatasetModel` subclass to use.
+        model_class: The [`DatasetModel`][DatasetModel] subclass to use.
     """
     global _model_class
     _model_class = model_class
 
 
 def get_model_class() -> type[DatasetModel]:
-    """The registered :class:`DatasetModel` class (see :func:`set_model_class`)."""
+    """The registered [`DatasetModel`][DatasetModel] class.
+
+    See [`set_model_class`][set_model_class].
+    """
     return _model_class

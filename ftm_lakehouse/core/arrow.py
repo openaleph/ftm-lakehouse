@@ -3,7 +3,7 @@
 The stores speak Arrow, so the wire does too: endpoints that move statement
 rows carry an Arrow IPC *stream* – the same batches both sides already hold,
 with no row format in between. Framing lives here, next to the byte
-transport in :mod:`ftm_lakehouse.core.api`, so a second Arrow endpoint does
+transport in `api`, so a second Arrow endpoint does
 not have to reach into a storage module for it.
 """
 
@@ -38,7 +38,7 @@ def serialize_batches(
     a forward-only sequence of messages with no back-references (unlike the
     file format, whose footer indexes absolute offsets).
 
-    Record batch buffers are :data:`COMPRESSION`-compressed on the way out.
+    Record batch buffers are `COMPRESSION`-compressed on the way out.
 
     Args:
         batches: The tables or batches to write.

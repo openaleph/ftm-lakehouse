@@ -2,20 +2,20 @@
 
 Module functions own the ``config.yml`` lifecycle – existence, fresh model
 reads, merge-writes and get-or-create. Day-to-day data access goes through
-the repository factories (``get_entities("name")``); :class:`Catalog` covers
+the repository factories (``get_entities("name")``); [`Catalog`][Catalog] covers
 the remaining multi-dataset concerns: enumerating what exists under one
 storage root and resolving per-dataset uris (the API server keeps one as
 ``app.state.lake``).
 
 Config freshness contract: repositories snapshot their
-:class:`~ftm_lakehouse.model.dataset.DatasetModel` at construction and are
-LRU-cached, so :func:`update_dataset` invalidates the factory caches after
+[`DatasetModel`][ftm_lakehouse.model.dataset.DatasetModel] at construction and are
+LRU-cached, so [`update_dataset`][update_dataset] invalidates the factory caches after
 every write – repositories fetched *afterwards* see the new config, while
 instances held across the write keep their old snapshot. Config that affects
 the storage layout (``shards``, ``compression``) must be set at creation
 (``ensure_dataset("big_leak", shards=8)``); writing it here afterwards only
 changes what readers expect, not where the rows are. Moving them is
-:class:`~ftm_lakehouse.operation.maintenance.ShardOperation`, which rewrites
+[`ShardOperation`][ftm_lakehouse.operation.maintenance.ShardOperation], which rewrites
 the statement store and then records the new count through this module.
 """
 
@@ -166,5 +166,8 @@ class Catalog:
                 yield name
 
     def ensure_dataset(self, name: str, **data: Any) -> DatasetModel:
-        """Get or create a dataset under this catalog (see :func:`ensure_dataset`)."""
+        """Get or create a dataset under this catalog.
+
+        See [`ensure_dataset`][ensure_dataset].
+        """
         return ensure_dataset(name, self.dataset_uri(name), **data)

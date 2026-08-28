@@ -25,7 +25,7 @@ class ApiJournalStore(LakehouseApiMixin, BaseJournalStore[ApiJournalWriter]):
     """The client side of a remote journal – writes, counts, clears.
 
     Flushing is not part of it: the store that holds the rows drains them
-    (:meth:`BaseJournalStore.flush_batches` is ``@no_api``), and a repository
+    (`BaseJournalStore.flush_batches` is ``@no_api``), and a repository
     in api mode delegates its whole flush to the server. The mixin comes
     first so its ``_is_api`` wins over the base's default.
     """

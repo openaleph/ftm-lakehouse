@@ -15,9 +15,9 @@ def dedupe_key(id: str, origin: str, fragment: str) -> str:
     """Row identity of a stored statement: ``id``, ``origin``, ``fragment``.
 
     The same tab-joined key
-    :attr:`ftmq.store.lake.LakeStatement.dedupe_key` builds from a statement
+    `ftmq.store.lake.LakeStatement.dedupe_key` builds from a statement
     object, for the packed-row paths that never construct one
-    (:class:`~ftm_lakehouse.logic.entities.explode.RowBuffer`). Both write
+    (`RowBuffer`). Both write
     buffers collapse re-emissions on this key, matching the store's
     per-origin row identity – the same id under distinct fragments *or*
     origins stays a distinct row.
@@ -41,7 +41,7 @@ def make_base_id_statement(
     under the target dataset), so the checksum – and with it the stub's own
     content-addressed statement id – is stable across payload dataset
     contexts and round-trips. Both import paths
-    (:meth:`EntityBuffer.add_entity` and the unsafe explode) build their
+    (`EntityBuffer.add_entity` and the unsafe explode) build their
     stub through this one helper so the formula cannot drift between them.
 
     Args:
@@ -71,12 +71,12 @@ def make_base_id_statement(
 
 
 def read_csv_statements(uri: Uri) -> Generator[LakeStatement, None, None]:
-    """Stream a lakehouse ``statements.csv`` as :class:`LakeStatement` objects.
+    """Stream a lakehouse ``statements.csv`` as `LakeStatement` objects.
 
     followthemoney's ``read_csv_statements`` yields plain ``Statement`` objects
     and has no notion of the ``fragment`` supersession key, so the lakehouse
     needs its own reader. Rows are streamed as dicts via
-    :func:`anystore.io.read.smart_stream_csv` and mapped straight to
+    `anystore.io.read.smart_stream_csv` and mapped straight to
     ``LakeStatement``; ``fragment`` is read from its column when present and
     falls back to the empty-string (non-fragment) sentinel otherwise.
 

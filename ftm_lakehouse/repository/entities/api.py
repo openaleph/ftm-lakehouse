@@ -18,7 +18,7 @@ from ftm_lakehouse.repository.entities.main import EntityRepository
 class ApiEntityRepository(EntityRepository):
     """``EntityRepository`` against a remote lakehouse api.
 
-    Resolved by :func:`ftm_lakehouse.repository.factories.get_entities` for
+    Resolved by [`get_entities`][ftm_lakehouse.repository.factories.get_entities] for
     http uris – the same construction-time pick ``get_journal`` does for the
     journal. Overrides the api-capable methods with their http delegations
     under the public names; everything ``@no_api`` stays guarded by the

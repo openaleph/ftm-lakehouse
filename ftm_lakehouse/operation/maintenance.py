@@ -1,6 +1,6 @@
 """Statement-store maintenance: optimize and re-shard.
 
-:class:`OptimizeOperation` runs the three Delta Lake maintenance steps in
+[`OptimizeOperation`][OptimizeOperation] runs the three Delta Lake maintenance steps in
 order – the use case is always all of them together:
 
 1. merge – collapse duplicates / fold ``first_seen`` / reap tombstones
@@ -11,7 +11,7 @@ order – the use case is always all of them together:
 Exports and statistics assume an optimized store, so run this after large
 write batches.
 
-:class:`ShardOperation` is the rarer one: it changes the dataset's shard
+[`ShardOperation`][ShardOperation] is the rarer one: it changes the dataset's shard
 count, which means rewriting every partition and then recording the new
 count in ``config.yml``.
 """
@@ -48,12 +48,14 @@ class OptimizeOperation(DatasetJobOperation[OptimizeJob]):
         """Ask the statement store whether any partition is unmerged.
 
         The tag pair cannot answer this one. ``merge`` stamps
-        :data:`~ftm_lakehouse.core.conventions.tag.STATEMENTS_OPTIMIZED` on
+        [`STATEMENTS_OPTIMIZED`][ftm_lakehouse.core.conventions.tag.STATEMENTS_OPTIMIZED] on
         completion while the target tag records when this operation *started*,
         so a successful optimize always finishes behind its own dependency and
         reads as stale – costing a redundant full pass every time. The
-        per-partition tags :meth:`ParquetStore.merge` compares internally are
-        the sound predicate, and ``needs_merge`` is that comparison.
+        per-partition tags
+        [`ParquetStore.merge`][ftm_lakehouse.storage.parquet.ParquetStore.merge]
+        compares internally are the sound predicate, and ``needs_merge`` is
+        that comparison.
         """
         return not self.entities.needs_merge
 
@@ -86,7 +88,7 @@ class ShardOperation(DatasetJobOperation[ShardJob]):
 
     Two steps, in this order:
 
-    1. :meth:`~ftm_lakehouse.repository.entities.main.EntityRepository.shard`
+    1. `shard`
        drains the journal and rewrites every ``(bucket, origin)`` group
        into the new shard partitions, streamed, one atomic Delta commit
        per group.

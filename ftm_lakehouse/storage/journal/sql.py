@@ -91,7 +91,7 @@ class SqlJournalWriter(BaseJournalWriter["SqlJournalStore"]):
 
     Borrows one connection from the store for its lifetime and hands each
     packed batch to the store, whose dialect implementation owns the insert.
-    :meth:`close` gives it back.
+    `close` gives it back.
     """
 
     def __init__(
@@ -131,13 +131,13 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
     SQL-based journal for buffering writes.
 
     An append-only heap per dataset, carrying the producer statement columns
-    (:data:`~ftm_lakehouse.model.statement.JOURNAL_SCHEMA`). A flush claims
+    (`JOURNAL_SCHEMA`). A flush claims
     the whole table by renaming it to a timestamped segment and creating a
     fresh one in the same DDL transaction, streams the segment out as Arrow,
     and drops it – so cleanup is a catalog operation, never a ``DELETE``.
 
-    Dialect specifics live in the subclasses :class:`SqliteJournalStore` and
-    :class:`PostgresJournalStore`, picked once by :func:`sql_journal` – the
+    Dialect specifics live in the subclasses `SqliteJournalStore` and
+    `PostgresJournalStore`, picked once by `sql_journal` – the
     same construction-time choice ``get_journal`` makes for the api store.
     """
 
@@ -165,9 +165,9 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
     def acquire(self) -> Any:
         """Take a connection for a writer's inserts.
 
-        A plain :meth:`connect` here – the engines in this module all use
+        A plain [`connect`][SqlJournalStore.connect] here – the engines in this module all use
         non-caching pools, so a sqlite connection costs what it costs.
-        :class:`PostgresJournalStore` overrides it to borrow from a pool of
+        `PostgresJournalStore` overrides it to borrow from a pool of
         its own, because the ADBC write path bypasses the engine entirely
         and a cold ADBC connection is expensive.
         """
@@ -179,7 +179,7 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
         Closing is the whole of it in both dialects, though it means
         different things: file-backed sqlite drops the connection, in-memory
         sqlite returns the one shared connection to its ``StaticPool``, and
-        :class:`PostgresJournalStore` checks the ADBC connection back into
+        `PostgresJournalStore` checks the ADBC connection back into
         its pool – rolled back on the way in, so the next writer never
         inherits an aborted transaction.
         """
@@ -248,7 +248,7 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
 
         Raises:
             RuntimeError: If the lock could not be taken within
-                :data:`ROTATE_MAX_RETRIES` attempts.
+                `ROTATE_MAX_RETRIES` attempts.
         """
         name = self._segment_name()
         attempt = 0
@@ -291,16 +291,16 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
     def flush_batches(self) -> StatementTables:
         """Rotate the journal, then stream each segment as Arrow.
 
-        Held under :meth:`flush_lock` for the whole window – a second flush
-        on the same dataset yields nothing rather than draining the first
-        one's segment twice. Segments left by a crashed flush are picked up
+        Held under [`flush_lock`][SqlJournalStore.flush_lock] for the whole
+        window – a second flush on the same dataset yields nothing rather than
+        draining the first one's segment twice. Segments left by a crashed flush are picked up
         here, which is the whole of orphan recovery.
 
         Segments stream out unordered: rows carry no ``shard`` column to sort
         on, and the sort this used to do was an un-indexed pass over the whole
         segment that had to finish before the first row could be handed over.
         A drained table therefore spans shards and
-        :meth:`~ftm_lakehouse.storage.parquet.ParquetStore.append` writes one
+        [`append`][ftm_lakehouse.storage.parquet.ParquetStore.append] writes one
         file per partition it touches, which ``compact`` bin-packs.
         """
         with self.flush_lock() as acquired:
@@ -325,7 +325,7 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
         downstream. Yielding chunks the consumer has to buffer would lose the
         tail of a flush whenever the write fails, and a dropped segment is
         gone for good, while a kept one only costs duplicates that
-        :meth:`ParquetStore.merge` collapses.
+        [`ParquetStore.merge`][ftm_lakehouse.storage.parquet.ParquetStore.merge] collapses.
         """
         pending: list[pa.RecordBatch] = []
         rows = 0
@@ -347,7 +347,7 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
         """Iterate the live statements of one entity, across all segments.
 
         A scan of the journal per call – the heap carries no index by design
-        (see :func:`~ftm_lakehouse.model.statement.journal_table`). That is
+        (see [`journal_table`][ftm_lakehouse.model.statement.journal_table]). That is
         the delete path's cost, and it is bounded by how much sits unflushed.
         """
         with self.engine.connect() as conn:
@@ -434,7 +434,7 @@ class SqliteJournalStore(SqlJournalStore):
     def read_segment(self, name: str) -> RecordBatches:
         """Transpose each cursor chunk columnwise into Arrow.
 
-        Row tuples already arrive in :data:`JOURNAL_SCHEMA` column order –
+        Row tuples already arrive in `JOURNAL_SCHEMA` column order –
         the table is built from that schema – so the batch is one
         ``zip(*rows)`` away, with no dict per row and no keyed lookup per
         column (~1.6x a ``from_pylist`` of row dicts).
@@ -468,7 +468,7 @@ def _ping_on_checkout(conn: Any, record: Any, proxy: Any) -> None:
     an idle connection the server has since dropped – an
     ``idle_session_timeout``, a pgbouncer reap, a failover, a restart – sits
     in the pool looking fine, and the writer finds out when its insert
-    fails. :class:`~sqlalchemy.exc.DisconnectionError` is what the checkout
+    fails. `DisconnectionError` is what the checkout
     retry catches to retire that connection and dial a fresh one in its
     place, so the round trip here is what keeps the failure off the caller.
     """
@@ -537,7 +537,7 @@ class PostgresJournalStore(SqlJournalStore):
         """The writers' connection pool, built on first use.
 
         ADBC ships no pool of its own, so this is SQLAlchemy's over
-        :meth:`connect` (the upstream recipe – see
+        `connect` (the upstream recipe – see
         https://arrow.apache.org/adbc/current/python/recipe/postgresql.html).
         A cold ADBC connection costs way more than the liveness ping.
 
@@ -589,7 +589,7 @@ class PostgresJournalStore(SqlJournalStore):
     def read_segment(self, name: str) -> RecordBatches:
         """Stream a segment's rows through a pooled connection.
 
-        :meth:`SqlJournalStore._drain` drops the segment as soon as this
+        `SqlJournalStore._drain` drops the segment as soon as this
         returns, and that ``DROP`` needs a lock an open read transaction
         would hold. Releasing is what ends the transaction: check-in rolls
         back, so the connection is back in the pool with nothing held.

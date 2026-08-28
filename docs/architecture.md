@@ -125,7 +125,7 @@ The async `optimize` operation produces this canonical state by running the thre
 
 The `shard` partition key is the unit that keeps per-partition working sets bounded, independent of total dataset size. Everything expensive in the lakehouse operates one `(shard, bucket)` partition at a time:
 
-- **Writes:** producers hand over shard-scoped batches where they can – `EntityBuffer` groups its rows by shard – so `append` usually writes one file per partition. It is only a batching hint: a batch spanning shards is written correctly, just across more files.
+- **Writes:** producers hand over whole batches without a partition key and `append` derives each row's shard, writing one file per `(shard, bucket, origin)` partition the batch spans. Bigger batches therefore cost fewer files, not more.
 - **Reads:** statement queries iterate `(shard, bucket)` partitions in Python and push `WHERE shard = ?` into DuckDB; the live view is a plain scan, so filters push to file statistics and a full-store `ORDER BY entity_id` stays bounded to one partition. Single-entity lookups hash the entity id and scan just its own shard.
 - **Optimize:** the merge rewrite materializes one partition at a time – its memory and rewrite cost scale with the largest partition, not the whole table.
 
