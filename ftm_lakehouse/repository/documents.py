@@ -21,6 +21,7 @@ from ftm_lakehouse.repository.diff import ParquetDiffMixin
 from ftm_lakehouse.storage.parquet import ParquetStore
 
 Q_DOCUMENTS = [M(schemata="Document"), ~M(schema="Folder"), P(contentHash__null=False)]
+SELECT = [P("contentHash"), P("fileName"), P("fileSize"), P("parent")]
 
 
 class DocumentRepository(ParquetDiffMixin, DatasetHandle):
@@ -90,7 +91,7 @@ class DocumentRepository(ParquetDiffMixin, DatasetHandle):
     def collect(self, q: Query | None = None) -> Documents:
         paths = self.make_paths()
         public_prefix = self._model.get_public_prefix()
-        q = (q or Query()).where(*Q_DOCUMENTS)
+        q = (q or Query()).where(*Q_DOCUMENTS).select(*SELECT)
         for d in self._statements._query_data(q):
             d = d.to_dict()
             if d.get("schema") == "Folder":
@@ -115,7 +116,7 @@ class DocumentRepository(ParquetDiffMixin, DatasetHandle):
         # no documents – a single count(DISTINCT entity_id) that file-skips
         # on the schema filter, so a document-free dataset costs one fast query
         # instead of scanning every partition (twice, via the initial diff).
-        count_query = Query(*Q_DOCUMENTS)
+        count_query = Query(*Q_DOCUMENTS).select(*SELECT)
         if self._statements.count(count_query) == 0:
             return
         docs = self.collect()
