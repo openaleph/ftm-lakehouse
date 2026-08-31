@@ -82,6 +82,3 @@ def get_app(lake_uri: str | None = None) -> FastAPI:
     app.add_exception_handler(ValueError, _bad_request_handler)
 
     return app
-
-
-app = get_app()

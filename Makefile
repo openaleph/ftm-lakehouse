@@ -25,9 +25,10 @@ typecheck:
 	poetry run mypy --strict ftm_lakehouse
 
 test: start
-	@echo "── run 1: local + api variants (pytest_env LAKEHOUSE_URI) ──" ; \
-	poetry run pytest -v --capture=sys --cov=ftm_lakehouse --cov-report lcov \
-		-k "not docker" ; \
+	@echo "── run 1: local + api variants (LAKEHOUSE_URI=tests/fixtures/lake) ──" ; \
+	LAKEHOUSE_URI=tests/fixtures/lake \
+		poetry run pytest -v --capture=sys --cov=ftm_lakehouse --cov-report lcov \
+			-k "not docker" ; \
 	rc1=$$? ; \
 	echo "── run 2: docker variants (LAKEHOUSE_URI=$${LAKEHOUSE_TEST_URL:-http://127.0.0.1:8000}) ──" ; \
 	LAKEHOUSE_TEST_MODE=docker \

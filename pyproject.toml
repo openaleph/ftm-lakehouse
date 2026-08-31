@@ -106,7 +106,8 @@ FTM_FRAGMENTS_URI = "sqlite:///:memory:"
 # ``skip_if_set = true`` makes these defaults the CLI can override
 # (``make test``'s docker run exports ``LAKEHOUSE_URI=http://...`` so
 # the docker fixture variants pick ``ApiJournalStore`` via the global
-# ``Settings.api_mode``).
+# ``Settings.api_mode``). An ambient ``LAKEHOUSE_URI`` therefore leaks
+# into a plain ``pytest`` run – ``make test``'s non-docker run pins it.
 PUTFS_HTTPS = 0
 LAKEHOUSE_URI = {value = "tests/fixtures/lake", skip_if_set = true}
 LAKEHOUSE_JOURNAL_URI = {value = "sqlite:///:memory:", skip_if_set = true}
