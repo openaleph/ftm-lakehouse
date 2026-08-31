@@ -90,6 +90,12 @@ def test_validate_origin_accepts_valid(origin: str) -> None:
         "foo/bar",
         "..",
         "",
+        # quotes would close the SQL string literal an origin is interpolated
+        # into (the `origin = '...'` predicates in `logic/parquet.py` and
+        # `ParquetStore.delete_origin`)
+        "x' OR origin = 'a",
+        "o'brien",
+        'say "hi"',
     ],
 )
 def test_validate_origin_rejects_invalid(origin: str) -> None:

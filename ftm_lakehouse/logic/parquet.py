@@ -274,8 +274,8 @@ def build_merge_sql(
         shard: Target shard value (hex-padded).
         bucket: Target bucket (``thing`` / ``interval`` / ``document`` /
             ``page`` / ``pages`` / ``mention``).
-        origin: Target origin tag – validated at the write boundary;
-            single quotes are doubled here as defense in depth.
+        origin: Target origin tag – re-validated here, so it is safe to
+            interpolate: `validate_origin` rejects quote characters.
         grace_cutoff: Tombstones with ``deleted_at <= grace_cutoff`` are
             dropped. Typically ``now - LAKEHOUSE_GRACE_PERIOD_DAYS``.
         entity_id_range: Optional half-open ``[lo, hi)`` bound on
@@ -355,8 +355,8 @@ def build_shard_sql(shard: str, bucket: str, origin: str, shards: int) -> str:
     Args:
         shard: Source shard value (hex-padded) to read.
         bucket: Source bucket – invariant under re-sharding.
-        origin: Source origin tag – invariant under re-sharding; single
-            quotes are doubled as defense in depth.
+        origin: Source origin tag – invariant under re-sharding.
+            Re-validated here, so it is safe to interpolate.
         shards: Target shard count.
 
     Returns:

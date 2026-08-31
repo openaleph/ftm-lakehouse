@@ -866,6 +866,57 @@ class ParquetStore:
             for shard, bucket, origin in self._list_partitions():
                 self._tags.set(tag.statements_partition_updated(shard, bucket, origin))
 
+    def delete_origin(self, origin: str) -> int:
+        """Physically drop every row of one origin.
+
+        ``origin`` is a partition column, so the predicate prunes to whole
+        partitions and Delta drops their files instead of rewriting rows –
+        unlike [`merge`][ParquetStore.merge]'s tombstone reap this is
+        immediate, with no grace period and nothing left to collapse. Held
+        under the exclusive maintenance fence
+        (`_maintenance_fence`), like the other partition-level
+        rewrites.
+
+        Stamps
+        [`STATEMENTS_OPTIMIZED`][ftm_lakehouse.core.conventions.tag.STATEMENTS_OPTIMIZED]
+        on completion when rows were removed – dropping a partition moves the
+        store's canonical content exactly as a merge does, so exports,
+        statistics and diffs have to go stale against it. The append-side
+        ``STATEMENTS_UPDATED`` clock is deliberately left alone: no rows
+        landed. The dropped partitions' own tags are left behind too – they
+        no longer enumerate, and a later write to the same origin stamps a
+        fresh ``last_updated`` over the stale ``last_optimized``, so the
+        partition comes back dirty.
+
+        Args:
+            origin: The origin tag to drop.
+
+        Returns:
+            Number of rows removed.
+
+        Raises:
+            ValueError: If ``origin`` is not a safe origin name
+                (see `validate_origin`).
+            RuntimeError: When the write fence cannot be acquired.
+        """
+        origin = validate_origin(origin)
+        if not self.exists:
+            return 0
+        with self._maintenance_fence(), Took() as t:
+            # safe to interpolate: `validate_origin` rejects quotes
+            metrics = self.deltatable.delete(f"origin = '{origin}'")
+            deleted = int(metrics.get("num_deleted_rows") or 0)
+            if deleted:
+                self._tags.set(tag.STATEMENTS_OPTIMIZED)
+            self.log.info(
+                "Dropped origin.",
+                took=t.took,
+                origin=origin,
+                deleted=deleted,
+                **metrics,
+            )
+        return deleted
+
     def compact(self) -> None:
         """Bin-pack small parquet files within each partition.
 

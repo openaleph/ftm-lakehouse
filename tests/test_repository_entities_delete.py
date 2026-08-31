@@ -14,7 +14,7 @@ import pytest
 from followthemoney import EntityProxy, Statement
 from rigour.time import utc_now
 
-from ftm_lakehouse.core.conventions import path
+from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.repository.entities import EntityRepository
 from ftm_lakehouse.repository.factories import get_entities
 from tests.conftest import make_docker_repo, make_test_api
@@ -170,6 +170,75 @@ def test_delete_preserves_others(repo):
     assert len(stmts) > 0
 
 
+def test_delete_entity_with_origin(repo):
+    """``origin`` narrows the tombstones to that origin's rows.
+
+    Statement ids are content-hashed and carry no origin, so the same entity
+    written twice is two rows sharing an id – ``(id, origin, ...)`` is what
+    keeps them apart, and what the filter selects on.
+    """
+    repo, _ = repo
+    jane = EntityProxy.from_dict(JANE)
+    for origin in ("a", "b"):
+        with repo.writer(origin=origin) as writer:
+            writer.add_entity(jane)
+    repo.flush()
+    assert {s.origin for s in repo.query_statements()} == {"a", "b"}
+
+    count = repo.delete_entity("jane", origin="a")
+    assert count > 0
+    repo.flush()
+    repo.merge()
+
+    assert {s.origin for s in repo.query_statements()} == {"b"}
+    assert {e.id for e in repo.query()} == {"jane"}
+
+
+def test_delete_origin(repo):
+    """Dropping an origin is physical – no tombstone, no merge, no grace."""
+    repo, _ = repo
+    jane = EntityProxy.from_dict(JANE)
+    john = EntityProxy.from_dict(JOHN)
+    with repo.writer(origin="a") as writer:
+        writer.add_entity(jane)
+    with repo.writer(origin="b") as writer:
+        writer.add_entity(jane)
+        writer.add_entity(john)
+    repo.flush()
+    assert {e.id for e in repo.query()} == {"jane", "john"}
+
+    repo.delete_origin("a")
+
+    assert {s.origin for s in repo.query_statements()} == {"b"}
+    assert {e.id for e in repo.query()} == {"jane", "john"}
+
+
+def test_delete_origin_rejects_unsafe_name(repo):
+    """A traversal sequence never reaches the predicate – api mode included."""
+    repo, _ = repo
+    with pytest.raises(ValueError):
+        repo.delete_origin("../etc")
+
+
+def test_delete_origin_rejects_quotes(repo):
+    """A quoted origin never reaches the delta predicate.
+
+    Interpolated, this origin would close the string literal and widen the
+    predicate to ``origin = 'x' OR origin = 'a'`` – dropping a partition the
+    caller never named. ``validate_origin`` bans the character instead of
+    escaping it per site.
+    """
+    repo, _ = repo
+    with repo.writer(origin="a") as writer:
+        writer.add_entity(EntityProxy.from_dict(JANE))
+    repo.flush()
+
+    with pytest.raises(ValueError):
+        repo.delete_origin("x' OR origin = 'a")
+
+    assert {e.id for e in repo.query()} == {"jane"}
+
+
 # ---------------------------------------------------------------------------
 # Local-only tests (access _statements internals / DeltaTable directly)
 # ---------------------------------------------------------------------------
@@ -231,6 +300,82 @@ def test_deleted_at_appended_after_flush(tmp_path):
     raw = dt.to_pyarrow_table()
     deleted_rows = [r for r in raw.to_pylist() if r.get("deleted_at") is not None]
     assert deleted_rows
+
+
+def test_delete_origin_flushes_journal_first(tmp_path):
+    """Journalled rows are dropped too, not resurrected by the next flush.
+
+    The drop is physical and only sees parquet, so anything still buffered
+    would land *after* it. ``delete_origin`` drains the journal first.
+    """
+    repo = _make_local_repo(tmp_path)
+    with repo.writer(origin="a") as writer:
+        writer.add_entity(EntityProxy.from_dict(JANE))
+    with repo.writer(origin="b") as writer:
+        writer.add_entity(EntityProxy.from_dict(JOHN))
+    # nothing flushed yet – both entities live only in the journal
+
+    repo.delete_origin("a")
+
+    assert {e.id for e in repo.query()} == {"john"}
+    repo.flush()
+    assert {e.id for e in repo.query()} == {"john"}
+
+
+def test_delete_origin_stamps_optimized_tag(tmp_path):
+    """Dropping a partition moves canonical content, so exports go stale.
+
+    ``STATEMENTS_OPTIMIZED`` is the clock every export / statistic / diff
+    keys on. A physical delete changes what a merged store says without
+    ``merge`` running, so the drop stamps it itself.
+    """
+    repo = _make_local_repo(tmp_path)
+    with repo.writer(origin="a") as writer:
+        writer.add_entity(EntityProxy.from_dict(JANE))
+    with repo.writer(origin="b") as writer:
+        writer.add_entity(EntityProxy.from_dict(JOHN))
+    repo.flush()
+    repo.merge()
+
+    # an export taken now is fresh against the merged store
+    repo._tags.set(repo.EXPORTS_STATEMENTS)
+    assert repo._tags.is_latest(repo.EXPORTS_STATEMENTS, [tag.STATEMENTS_OPTIMIZED])
+    before = repo._tags.get(tag.STATEMENTS_OPTIMIZED)
+
+    repo.delete_origin("a")
+
+    assert repo._tags.get(tag.STATEMENTS_OPTIMIZED) > before
+    assert not repo._tags.is_latest(repo.EXPORTS_STATEMENTS, [tag.STATEMENTS_OPTIMIZED])
+    # the append-side clock is not the drop's to move – no rows landed
+    assert repo._tags.get(tag.STATEMENTS_UPDATED) < before
+
+
+def test_delete_origin_unknown_leaves_tags_alone(tmp_path):
+    """Nothing removed, nothing invalidated – no spurious re-export."""
+    repo = _make_local_repo(tmp_path)
+    _populate(repo)
+    repo.merge()
+    before = repo._tags.get(tag.STATEMENTS_OPTIMIZED)
+
+    repo.delete_origin("nope")
+
+    assert repo._tags.get(tag.STATEMENTS_OPTIMIZED) == before
+
+
+def test_delete_origin_blocked_by_maintenance_lock(tmp_path, monkeypatch):
+    """The drop rewrites partitions, so it takes the exclusive write fence."""
+    monkeypatch.setenv("LAKEHOUSE_LOCK_MAX_RETRIES", "1")
+    repo = _make_local_repo(tmp_path)
+    with repo.writer(origin="a") as writer:
+        writer.add_entity(EntityProxy.from_dict(JANE))
+    repo.flush()
+
+    repo._statements._store.touch(path.LOCK)
+    with pytest.raises(RuntimeError, match="Already locked"):
+        repo.delete_origin("a")
+
+    assert repo._statements.unlock() is True
+    assert {e.id for e in repo.query()} == {"jane"}
 
 
 def _future_stmt(prop: str, value: str, entity_id: str = "acme") -> Statement:

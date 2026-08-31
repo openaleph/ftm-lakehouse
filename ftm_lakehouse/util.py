@@ -10,6 +10,7 @@ RESERVED_DATASET_NAMES = frozenset({"catalog", "default"})
 SAFE_NAME_MAX_LEN = 255
 _SAFE_NAME_FORBIDDEN = re.compile(r"[\x00-\x1f\x7f/\\]")
 _CHECKSUM_RE = re.compile(r"\A[0-9a-f]{64}\Z")
+_QUOTES = re.compile(r"['\"]")
 
 
 def single_string(value: Any) -> str | None:
@@ -76,9 +77,15 @@ def validate_origin(origin: str) -> str:
     archive subtree or writes a parquet partition outside
     ``statements/``.
 
-    Built on `safe_name`; allows everything ``safe_name`` allows
-    (printable, no separators, no traversal), which covers conventional
-    origins like ``default``, ``crawl``, ``mapping:abc123…``, ``source-a``.
+    Built on `safe_name` (printable, no separators, no traversal) and
+    additionally rejects quote characters: an origin also reaches SQL as a
+    string literal – the ``origin = '...'`` predicate
+    [`ParquetStore.delete_origin`][ftm_lakehouse.storage.parquet.ParquetStore.delete_origin]
+    builds – where a quote closes the literal and widens the statement.
+    Escaping at each such site is one omission away from an injection, so
+    the character never enters the system. What remains covers every
+    conventional origin: ``default``, ``crawl``, ``mapping:abc123…``,
+    ``source-a``.
 
     Args:
         origin: The candidate origin tag.
@@ -87,9 +94,12 @@ def validate_origin(origin: str) -> str:
         ``origin`` unchanged if valid.
 
     Raises:
-        ValueError: As per `safe_name`.
+        ValueError: As per `safe_name`, or if ``origin`` contains ``'`` or ``"``.
     """
-    return safe_name(origin, "origin")
+    origin = safe_name(origin, "origin")
+    if _QUOTES.search(origin):
+        raise ValueError(f"origin `{origin!r}` contains a quote character")
+    return origin
 
 
 def validate_checksum(ch: str) -> str:

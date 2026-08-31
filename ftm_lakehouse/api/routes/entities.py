@@ -45,10 +45,22 @@ def entities_query(entities: Entities, body: QueryBody) -> StreamingResponse:
     return StreamingResponse(generate(), media_type=NDJSON_CONTENT_TYPE)
 
 
+@router.delete("/{dataset}/_api/entities/origins/{origin}")
+def entities_delete_origin(entities: Entities, origin: str) -> PlainTextResponse:
+    """Physically drop a whole origin partition from the parquet store."""
+    entities.delete_origin(origin)
+    return PlainTextResponse("ok")
+
+
 @router.delete("/{dataset}/_api/entities/{entity_id}")
-def entities_delete(entities: Entities, entity_id: str) -> PlainTextResponse:
-    """Delete all statements for an entity, return count of tombstones."""
-    count = entities.delete_entity(entity_id)
+def entities_delete(
+    entities: Entities, entity_id: str, origin: str | None = None
+) -> PlainTextResponse:
+    """Delete all statements for an entity, return count of tombstones.
+
+    ``origin`` narrows the delete to that origin's statements only.
+    """
+    count = entities.delete_entity(entity_id, origin)
     return PlainTextResponse(str(count))
 
 

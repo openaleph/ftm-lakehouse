@@ -33,6 +33,7 @@ from ftm_lakehouse.repository.diff import ParquetDiffMixin, make_envelope
 from ftm_lakehouse.storage.journal import get_journal
 from ftm_lakehouse.storage.journal.base import BaseJournalWriter
 from ftm_lakehouse.storage.parquet import ParquetStore
+from ftm_lakehouse.util import validate_origin
 
 settings = Settings()
 
@@ -417,7 +418,7 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
             return self._store.to_uri(self.EXPORTS_STATEMENTS)
         return None
 
-    def delete_entity(self, entity_id: str) -> int:
+    def delete_entity(self, entity_id: str, origin: str | None = None) -> int:
         """Delete all statements for an entity via journal tombstones.
 
         Reads statements from both parquet and journal, then UPSERTs
@@ -430,6 +431,7 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
 
         Args:
             entity_id: The entity ID to delete
+            origin: Only delete entity data from this origin
 
         Returns:
             Number of tombstone statements written
@@ -438,6 +440,8 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
         stmts = self._collect_entity_statements(entity_id)
         if not stmts:
             return 0
+        if origin:
+            stmts = [s for s in stmts if s.origin == origin]
         with self.writer() as w:
             for stmt in stmts:
                 w.add_statement(stmt, deleted_at=now)
@@ -464,6 +468,35 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
         """
         with self.writer() as w:
             w.add_statement(stmt, deleted_at=utc_now(), fragment=fragment, role=role)
+
+    def delete_origin(self, origin: str) -> None:
+        """Physically delete an entire origin – journal included.
+
+        Unlike [`delete_entity`][EntityRepository.delete_entity] this writes no
+        tombstones: ``origin`` is a partition column, so
+        [`ParquetStore.delete_origin`][ParquetStore.delete_origin] drops whole
+        partitions under the maintenance fence and the rows are gone at that
+        commit – no merge, no grace period.
+
+        The journal is flushed first, so rows written under ``origin`` and
+        still buffered land in parquet in time to be dropped rather than
+        resurrecting on the next [`flush`][EntityRepository.flush]. Flushing
+        happens *outside* the fence – its append takes the shared side, which
+        the exclusive one locks out – so a writer journalling into ``origin``
+        during the drop still survives it. Stop the writers to be sure.
+
+        Args:
+            origin: The origin tag to drop.
+
+        Raises:
+            ValueError: If ``origin`` is not a safe origin name
+                (see `validate_origin`).
+            RuntimeError: When the write fence cannot be acquired.
+        """
+        # validate before flushing – a bad origin must cost nothing
+        origin = validate_origin(origin)
+        self.flush()
+        self._statements.delete_origin(origin)
 
     @no_api
     def _collect_entity_statements(self, entity_id: str) -> list[LakehouseStatement]:

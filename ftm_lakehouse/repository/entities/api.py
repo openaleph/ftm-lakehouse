@@ -13,6 +13,7 @@ from ftmq.util import ensure_entity
 
 from ftm_lakehouse.model.statement import LakehouseStatement
 from ftm_lakehouse.repository.entities.main import EntityRepository
+from ftm_lakehouse.util import validate_origin
 
 
 class ApiEntityRepository(EntityRepository):
@@ -77,10 +78,17 @@ class ApiEntityRepository(EntityRepository):
         for line in self._api.stream_request(url, "POST", json=data):
             yield orjson.loads(line)
 
-    def delete_entity(self, entity_id: str) -> int:
+    def delete_entity(self, entity_id: str, origin: str | None = None) -> int:
         url = self._make_url(entity_id)
-        res = self._api.make_request(url, "DELETE")
+        params = {"origin": validate_origin(origin)} if origin else None
+        res = self._api.make_request(url, "DELETE", params=params)
         return int(res.text)
+
+    def delete_origin(self, origin: str) -> None:
+        # validate here too so a bad origin fails locally with the same
+        # `ValueError` the local repository raises, not as a remote 400
+        url = self._make_url(f"origins/{validate_origin(origin)}")
+        self._api.make_request(url, "DELETE")
 
     def stats(self) -> DatasetStats:
         url = self._make_url("stats")
