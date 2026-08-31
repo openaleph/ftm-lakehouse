@@ -5,7 +5,7 @@ from typing import Callable, Generator, TypeVar
 
 import httpx
 from anystore.decorators import error_handler
-from anystore.logic.uri import join_uri
+from anystore.logic.uri import UriHandler, join_uri
 from anystore.store.resource import UriResource
 from anystore.types import Uri
 from anystore.util import mask_uri
@@ -26,20 +26,18 @@ if _settings.api_key and _settings.api_secret:
     _default_headers["X-Api-Key"] = _settings.api_key
     _default_headers["X-Api-Secret"] = _settings.api_secret
 
-# Set default headers for all ApiFileSystem (anystore+http[s]) instances
+# Set default headers for all PutFSFileSystem (putfs://) instances
 _fsspec_client_kwargs = {"headers": _default_headers}
-fsspec_conf.setdefault("anystore+http", {})["client_kwargs"] = _fsspec_client_kwargs
-fsspec_conf.setdefault("anystore+https", {})["client_kwargs"] = _fsspec_client_kwargs
+fsspec_conf.setdefault("putfs", {})["client_kwargs"] = _fsspec_client_kwargs
 
 
 @cache
 def ensure_api_uri(uri: Uri) -> Uri:
-    """Convert http[s]:// URIs to anystore+http[s]:// for ApiFileSystem support."""
-    uri_str = str(uri)
-    if uri_str.startswith("https://"):
-        return f"anystore+{uri_str}"
-    if uri_str.startswith("http://"):
-        return f"anystore+{uri_str}"
+    """Convert http[s]:// URIs to putfs:// for PutFSFileSystem support."""
+    handler = UriHandler(uri)
+    if handler.is_http:
+        _uri = "".join(handler.parsed[1:])
+        return f"putfs://{_uri}"
     return uri
 
 

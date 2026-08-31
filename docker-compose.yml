@@ -120,12 +120,7 @@ configs:
             proxy_pass http://api;
           }
 
-          # Listing requests (trailing slash) → API.
-          location ~ /$ {
-            proxy_pass http://api$$request_uri;
-          }
-
-          # GET / HEAD: serve blobs from disk. PUT / DELETE / etc.: API.
+          # GET / HEAD: serve blobs from disk. PUT / DELETE / QUERY etc.: API.
           location / {
             limit_except GET HEAD {
               proxy_pass http://api$$request_uri;

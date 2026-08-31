@@ -1,7 +1,5 @@
-from anystore.api.routes import router as archive_router
 from anystore.exceptions import DoesNotExist
 from anystore.logging import get_logger
-from anystore.store import get_store
 from anystore.util import ensure_uri, uri_to_path
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
@@ -66,14 +64,13 @@ def get_app(lake_uri: str | None = None) -> FastAPI:
 
     # blob storage api
     if uri.startswith("file://"):
-        # local fs, so we can use putfs. Mount the whole Starlette app so putfs
-        # keeps its own exception handlers; its catch-all /{key:path} sits
-        # behind the /{dataset}/_api/* routes above.
+        # Mount the whole Starlette app so putfs keeps its own exception
+        # handlers; its catch-all /{key:path} sits behind the /{dataset}/_api/*
+        # routes above.
         putfs.ROOT = uri_to_path(uri).resolve()
         app.mount("/", putfs.app)
     else:
-        app.state.store = get_store(uri)
-        app.include_router(archive_router)
+        raise RuntimeError(f"Unsupported blob storage for api mode: `{uri}`")
 
     # middlewares
     if settings.on_zfs and settings.zfs_pool:
