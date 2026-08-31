@@ -117,21 +117,22 @@ def _dedupe_sql(
     group with each other):
 
     - **non-fragment** (``fragment = ''``): at most one row per statement
-      ``id`` per ``origin`` – ``QUALIFY ROW_NUMBER() OVER (... ORDER BY
-      last_seen DESC, deleted_at DESC NULLS LAST) = 1`` picks the row
-      with the latest ``last_seen``. Entity ids (and therefore statement
+      ``id`` per ``(origin, role)`` – ``QUALIFY ROW_NUMBER() OVER (...
+      ORDER BY last_seen DESC, deleted_at DESC NULLS LAST) = 1`` picks the
+      row with the latest ``last_seen``. Entity ids (and therefore statement
       ids) are uniquely placed in one ``(shard, bucket)`` by the model
       layer; ``origin`` in the key keeps the same id under two origins as
       two independent rows (matching the per-``(shard, bucket, origin)``
       scope of physical merge – load-bearing when the slice spans
-      origins, e.g. `build_changed_sql`). Tombstones bump
-      ``last_seen = deleted_at`` at write time, so the tombstone wins
-      ROW_NUMBER for a deleted statement – the ``deleted_at`` tiebreak
-      keeps that deterministic even when delete and emission share a
-      second – and the ``tombstone`` predicate decides whether it
-      survives the final projection.
+      origins, e.g. `build_changed_sql`). Tombstones bump ``last_seen``
+      to ``MAX(deleted_at, the shadowed row's last_seen)`` at write time,
+      so the tombstone can never rank below the row it deletes – the
+      ``deleted_at`` tiebreak resolves the tie that leaves, and the one a
+      delete and an emission sharing a second would produce – and the
+      ``tombstone`` predicate decides whether it survives the final
+      projection.
     - **fragment-bearing** (``fragment != ''``): supersession per
-      ``(origin, entity_id, prop, fragment)`` group – ``QUALIFY
+      ``(origin, entity_id, prop, fragment, role)`` group – ``QUALIFY
       last_seen = MAX(last_seen) OVER (...)`` admits the rows tied at
       the group's maximum ``last_seen`` (multi-valued props of one
       emission share their timestamp and survive together) and drops
@@ -141,11 +142,24 @@ def _dedupe_sql(
       is idempotent. ``origin`` in the group key keeps the same fragment
       under two origins as two independent supersession groups.
 
+    ``role`` sits in every window key of both branches, which is what makes
+    it the fourth row-identity dimension after ``id`` / ``origin`` /
+    ``fragment``: two roles asserting identical content survive as two rows
+    (full provenance) while one role re-asserting collapses. ``role`` is
+    nullable, and DuckDB groups NULLs together in a ``PARTITION BY``, so
+    role-less rows dedupe against each other rather than each surviving
+    alone.
+
     Both branches fold ``first_seen`` to ``MIN(first_seen)`` over the rows
-    carrying the same *content* – the statement ``id`` – via ``SELECT *
-    REPLACE``, so re-importing identical data keeps its original observation
-    date and does not read as a change (windows compute before ``QUALIFY``
-    filters, so dropped duplicates still contribute their timestamps).
+    carrying the same *content asserted by the same role* – ``(id, role)`` –
+    via ``SELECT * REPLACE``, so re-importing identical data keeps its
+    original observation date and does not read as a change (windows compute
+    before ``QUALIFY`` filters, so dropped duplicates still contribute their
+    timestamps). ``role`` belongs in the fold key for the same reason it
+    belongs in the identity key: a role's *first* assertion of content an
+    older role already wrote is a new row, and folding it onto the older
+    row's date would both misdate it and hide it from
+    `export_diff`, which detects change on ``first_seen``.
 
     The fragment branch folds by ``id`` too, not by its supersession group:
     the group spans *different* values, so folding across it would stamp a
@@ -171,28 +185,30 @@ WITH base AS (
 ),
 nonfragment_rows AS (
     SELECT * REPLACE (
-        MIN(first_seen) OVER (PARTITION BY shard, bucket, origin, id) AS first_seen
+        MIN(first_seen) OVER (
+            PARTITION BY shard, bucket, origin, id, role
+        ) AS first_seen
     )
     FROM base
     WHERE fragment = ''
     QUALIFY ROW_NUMBER() OVER (
-        PARTITION BY shard, bucket, origin, id
+        PARTITION BY shard, bucket, origin, id, role
         ORDER BY last_seen DESC, deleted_at DESC NULLS LAST
     ) = 1
 ),
 fragment_rows AS (
     SELECT * REPLACE (
         MIN(first_seen) OVER (
-            PARTITION BY shard, bucket, origin, entity_id, prop, fragment, id
+            PARTITION BY shard, bucket, origin, entity_id, prop, fragment, role, id
         ) AS first_seen
     )
     FROM base
     WHERE fragment != ''
     QUALIFY last_seen = MAX(last_seen) OVER (
-        PARTITION BY shard, bucket, origin, entity_id, prop, fragment
+        PARTITION BY shard, bucket, origin, entity_id, prop, fragment, role
     )
     AND ROW_NUMBER() OVER (
-        PARTITION BY shard, bucket, origin, entity_id, prop, fragment, id
+        PARTITION BY shard, bucket, origin, entity_id, prop, fragment, role, id
         ORDER BY last_seen DESC, deleted_at DESC NULLS LAST
     ) = 1
 )
@@ -250,7 +266,7 @@ def build_merge_sql(
     including tombstones within the grace window, which must persist
     physically to keep shadowing their live rows – scoped to one
     ``(shard, bucket, origin)`` partition. Output is ordered by
-    ``(entity_id, fragment, prop, id, last_seen DESC)`` – the file sort
+    ``(entity_id, fragment, role, prop, id, last_seen DESC)`` – the file sort
     key – so the rewritten parquet file is ready for future merges
     without re-sort.
 
@@ -287,7 +303,7 @@ def build_merge_sql(
             "(deleted_at IS NULL OR deleted_at > "
             f"TIMESTAMPTZ '{grace_cutoff.isoformat()}')"
         ),
-        order_by="ORDER BY entity_id, fragment, prop, id, last_seen DESC",
+        order_by="ORDER BY entity_id, fragment, role, prop, id, last_seen DESC",
     )
 
 

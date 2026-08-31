@@ -7,7 +7,7 @@ The entities repository is the primary way to work with [FollowTheMoney](https:/
 Entities in `ftm-lakehouse` are stored as **statements** – granular property-level records. This design enables:
 
 - **Versioning**: Track changes over time via `first_seen` / `last_seen`
-- **Provenance**: Know where each piece of data came from (`origin`, `original_value`, and other metadata from the [Statement model](https://followthemoney.tech/docs/statements/))
+- **Provenance**: Know where each piece of data came from (`origin`, `role`, `original_value`, and other metadata from the [Statement model](https://followthemoney.tech/docs/statements/))
 - **Incremental updates**: Add new data without reprocessing everything
 - **Simple identity**: entities are keyed on `entity_id`; this is a single-dataset store with no cross-source resolution, so `canonical_id` is not persisted (it always equals `entity_id`)
 
@@ -161,6 +161,80 @@ for entity in entities.query(Query(M(origin="source_a"))):
     print(entity.id)
 ```
 
+## The Role Field
+
+Where `origin` records *where* data came from, `role` records *who* asserted it – an identifier a submitting application supplies for the user, service account or other actor behind a write:
+
+```python
+with entities.writer(origin="webui", role="user:42") as writer:
+    writer.add_entity(entity)
+
+# a per-statement override, for producers that mix roles in one batch
+with entities.writer(origin="webui", role="user:42") as writer:
+    writer.add_statement(stmt, role="user:7")
+```
+
+`role` is optional – `None` (the default) means "no role", stored as NULL. It is not part of the statement `id`: identical content produces the same content-addressed id whoever asserts it.
+
+### Roles are row identity, not a last-writer-wins field
+
+`role` joins `origin` and `fragment` as the store's row identity, so **two roles asserting identical content survive as two rows** rather than the later one overwriting the earlier:
+
+```python
+with entities.writer(role="user:42") as writer:
+    writer.add_statement(stmt)
+with entities.writer(role="user:7") as writer:
+    writer.add_statement(stmt)  # same content
+
+entities.flush()
+entities.merge()
+# two rows, one per role - full provenance of who asserted what
+```
+
+One role re-asserting the same content still collapses to one row, and that row keeps its original `first_seen`. A role's *first* assertion of content another role already wrote is a new row with its own `first_seen`, so diff exports (which detect change on `first_seen`) surface it.
+
+Row multiplication is provenance only. The assembled entity is unchanged – its properties still hold one value per distinct value, whoever asserted it:
+
+```python
+entity = entities.get("acme")
+assert entity.get("name") == ["Acme Inc"]  # not duplicated per role
+```
+
+Because it is an ordinary storage column, filtering needs no special support – use the `C` (context / column) family:
+
+```python
+from ftmq.query import C, Query
+
+for entity in entities.query(Query(C(role="user:42"))):
+    print(entity.id)
+```
+
+Like `C(origin=...)`, this selects *entities* that have a matching statement, not individual rows.
+
+### Deletes are per row
+
+`delete_entity` reads the live rows and writes one matching tombstone each, so it deletes what *every* role asserted – deleting the entity means deleting the entity. To remove only one role's assertion, read that row back and tombstone it alone:
+
+```python
+target = next(
+    s for s in entities.query_statements(Query(M(entity_id="acme")))
+    if s.role == "user:42"
+)
+entities.delete_statement(target)  # the read-back statement carries its role
+```
+
+A tombstone that dropped the role would land in a different merge group and shadow nothing – which is why `delete_statement` takes a `role=` override for hand-built plain statements, mirroring `fragment=`.
+
+### Round-tripping
+
+`statements.csv` carries a `role` column, so a statement-level export/import keeps every role exactly. `entities.ftm.json` aggregates an entity's rows into one payload, so its `role` context key is a *list* – and on re-import a single role is recovered while multiple roles are ambiguous and fall back to the import default, exactly as `origin` behaves. Use the statement export when per-row role provenance has to survive a round-trip.
+
+On the CLI, `--role` supplies the default for input that carries none; a payload's own `role` wins. There is deliberately no `--override-role`: roles arrive inside submissions rather than from the command line.
+
+```bash
+ftm-lakehouse -d my_dataset entities import --role user:42 -i entities.ftm.json
+```
+
 ## Fragment Supersession
 
 Every statement is written in one of two modes, decided by the producer per statement. The default is **non-fragment**: content-addressed dedup, where each statement `id` lives or dies on its own `last_seen` and distinct ids never interact – everything described in this document so far.
@@ -186,7 +260,7 @@ The typical use is one fragment per source row in a CSV-style ingest (or per doc
 - **Scope is per `(entity_id, prop, fragment)`**, not per fragment as a whole. If the first emission had `name`, `address` and `country` and the re-emission only has `name` and `address`, the old `country` value survives – no newer row exists in its group. If you want whole-fragment replacement, emit explicit tombstones for the dropped props: statements read back from the store are `ftmq.store.lake.LakeStatement`s carrying their own fragment, so `delete_statement(stmt)` shadows the right group; the `fragment=` override is only needed for hand-built plain statements.
 - **Multi-valued props survive together.** All rows of one emission share a `last_seen`, so all values of the latest emission are kept (ties at the group maximum), and all values of older emissions go.
 - **The two modes are isolated.** A non-fragment row never supersedes a fragment row or vice versa, even with identical content. The same statement can legitimately exist under multiple fragments (and additionally without one) – `fragment` is part of the stored row identity, but not part of the statement `id`.
-- **Origins are isolated too.** The same fragment written under two different origins forms two independent supersession groups, matching the `(shard, bucket, origin)` partition scope of `merge`.
+- **Origins are isolated too.** The same fragment written under two different origins forms two independent supersession groups, matching the `(shard, bucket, origin)` partition scope of `merge`. **Roles isolate the same way** – two roles writing one fragment supersede independently.
 - **Tombstones participate.** A tombstone written with the fragment supersedes its group like any emission; the group disappears from queries immediately and is physically reaped once the tombstone passes the grace period. `delete_entity` handles this automatically – it reads each live row's fragment and writes fragment-matched tombstones.
 
 ### Producer contract
@@ -246,9 +320,9 @@ entities.flush()
 
 ## Deduplication
 
-**On write**: identical statements collapse only inside one writer batch, where the in-memory buffer keys rows by `(id, fragment, origin)`. The journal itself is append-only and keyless – re-emissions accumulate as rows.
+**On write**: identical statements collapse only inside one writer batch, where the in-memory buffer keys rows by `(id, origin, fragment, role)`. The journal itself is append-only and keyless – re-emissions accumulate as rows.
 
-**Across flushes**: re-flushing the same statement appends a new parquet row. The duplicates only collapse when `merge` runs. `merge` keeps the row with the latest `last_seen` per statement id (per supersession group for fragment rows) and folds `first_seen` to the minimum across the group.
+**Across flushes**: re-flushing the same statement appends a new parquet row. The duplicates only collapse when `merge` runs. `merge` keeps the row with the latest `last_seen` per statement id and role (per supersession group for fragment rows) and folds `first_seen` to the minimum across the group.
 
 ```python
 entities.add(entity)

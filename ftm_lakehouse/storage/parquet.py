@@ -64,7 +64,6 @@ from ftmq.store.base import View
 from ftmq.store.lake import (
     PRUNE,
     TARGET_SIZE,
-    LakeStatement,
     LakeStore,
     setup_duckdb_storage,
     storage_options,
@@ -97,6 +96,7 @@ from ftm_lakehouse.model.statement import (
     SHARDED_SCHEMA,
     TABLE,
     TABLE_RAW,
+    LakehouseStatement,
     statement_csv_select,
 )
 from ftm_lakehouse.storage.tags import TagStore
@@ -266,11 +266,14 @@ class ParquetStore:
                 (`_needs_global`).
 
         Yields:
-            `LakeStatement` objects matching the
-            query.
+            `LakehouseStatement` objects matching the query – carrying their
+            ``fragment`` and ``role``, so a statement read back here can be
+            handed straight to
+            [`delete_statement`][ftm_lakehouse.repository.EntityRepository.delete_statement]
+            and land in the merge group it came from.
         """
         for stmt_dict in self._statement_data(q):
-            yield LakeStatement.from_dict(stmt_dict)
+            yield LakehouseStatement.from_dict(stmt_dict)
 
     def stats(self) -> DatasetStats:
         """Compute statistics from the statement store.

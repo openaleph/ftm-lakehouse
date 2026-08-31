@@ -82,6 +82,7 @@ def _row_to_statement(row: Any) -> LakehouseStatement:
         last_seen=datetime_iso(row.last_seen),
         origin=row.origin,
         fragment=row.fragment or "",
+        role=row.role,
         deleted_at=row.deleted_at,
     )
 
@@ -98,8 +99,9 @@ class SqlJournalWriter(BaseJournalWriter["SqlJournalStore"]):
         self,
         store: "SqlJournalStore",
         origin: str | None = None,
+        role: str | None = None,
     ) -> None:
-        super().__init__(store, origin=origin)
+        super().__init__(store, origin=origin, role=role)
         self._conn: Any = None
 
     @property

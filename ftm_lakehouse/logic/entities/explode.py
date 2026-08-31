@@ -30,7 +30,7 @@ from ftmq.store.lake import get_schema_bucket
 from ftmq.util import iso_datetime
 
 from ftm_lakehouse.helpers.statements import dedupe_key, make_base_id_statement
-from ftm_lakehouse.model.statement import JOURNAL_SCHEMA
+from ftm_lakehouse.model.statement import JOURNAL_SCHEMA, clamp_first_seen
 from ftm_lakehouse.util import single_string, validate_origin
 
 
@@ -47,6 +47,7 @@ def explode_unsafe(
     origin: str,
     override_origin: bool = False,
     last_seen: datetime | None = None,
+    role: str | None = None,
 ) -> Iterator[SDict]:
     """Explode one aggregated FtM entity payload into packed parquet rows.
 
@@ -89,6 +90,7 @@ def explode_unsafe(
         return
 
     ctx_origin = None if override_origin else single_string(data.get("origin"))
+    ctx_role = single_string(data.get("role"))
     last_change = data.get("last_change")
     changed = iso_datetime(last_change) if isinstance(last_change, str) else None
     base = {
@@ -104,6 +106,7 @@ def explode_unsafe(
         "first_seen": changed or now,
         "last_seen": changed or last_seen or now,
         "fragment": single_string(data.get("fragment")) or "",
+        "role": ctx_role or role or None,
         "deleted_at": None,
     }
 
@@ -152,6 +155,7 @@ def statement_row_unsafe(
     now: datetime,
     origin: str,
     override_origin: bool = False,
+    role: str | None = None,
 ) -> SDict | None:
     """Map one ``statements.csv`` row dict to a packed parquet row.
 
@@ -170,6 +174,7 @@ def statement_row_unsafe(
         now: Run-level timestamp for missing ``first_seen`` / ``last_seen``.
         origin: Default origin tag if the row carries none.
         override_origin: Force ``origin`` over the row's own.
+        role: Default role if the row carries none.
 
     Returns:
         A packed row dict, or ``None`` for rows without entity id, schema
@@ -212,6 +217,7 @@ def statement_row_unsafe(
         "first_seen": first_seen,
         "last_seen": iso_datetime(row.get("last_seen") or None) or first_seen,
         "fragment": row.get("fragment") or "",
+        "role": row.get("role") or role or None,
         "deleted_at": None,
     }
 
@@ -221,7 +227,7 @@ class RowBuffer:
 
     The unsafe twin of `EntityBuffer`: collapses re-emissions within one batch
     on the same row identity that buffer uses – so the same id under distinct
-    fragments *or* origins stays distinct – and flushes a `JOURNAL_SCHEMA`
+    fragments, origins *or* roles stays distinct – and flushes a `JOURNAL_SCHEMA`
     table, the same currency the journal drain hands to
     [`write_batches`][ftm_lakehouse.repository.EntityRepository.write_batches].
     Memory is bounded by the caller, which flushes every ``bulk_size`` rows.
@@ -234,13 +240,19 @@ class RowBuffer:
         """Buffer a packed row; ``None`` (a skipped input row) is ignored."""
         if row is None:
             return
-        self._rows[dedupe_key(row["id"], row["origin"], row["fragment"])] = row
+        key = dedupe_key(row["id"], row["origin"], row["fragment"], row["role"])
+        self._rows[key] = row
 
     def flush(self) -> pa.Table:
-        """Pack the buffered rows, then clear the buffer."""
+        """Pack the buffered rows, then clear the buffer.
+
+        Clamped like the safe path: this builds its table directly and never
+        goes through `statements_to_arrow`, so without the call here the same
+        input would land with a different ``first_seen`` under ``--unsafe``.
+        """
         rows = list(self._rows.values())
         self._rows = {}
-        return pa.Table.from_pylist(rows, schema=JOURNAL_SCHEMA)
+        return clamp_first_seen(pa.Table.from_pylist(rows, schema=JOURNAL_SCHEMA))
 
     def __len__(self) -> int:
         return len(self._rows)

@@ -21,6 +21,7 @@ from ftm_lakehouse.cli import (
     OPT_ORIGIN,
     OPT_OUT,
     OPT_OVERRIDE_ORIGIN,
+    OPT_ROLE,
     OPT_UNSAFE,
     DatasetContext,
     settings,
@@ -32,7 +33,7 @@ from ftm_lakehouse.cli.io import (
     import_statements_unsafe,
     stream_export,
 )
-from ftm_lakehouse.helpers.statements import read_csv_statements
+from ftm_lakehouse.model.statement import read_csv_statements
 from ftm_lakehouse.repository.factories import get_entities
 
 statements = sub_typer("statements", "Read and write raw FtM statements")
@@ -66,6 +67,7 @@ def cli_statements_import(
     in_uri: OPT_IN = "-",
     origin: OPT_ORIGIN = BULK_ORIGIN,
     override_origin: OPT_OVERRIDE_ORIGIN = False,
+    role: OPT_ROLE = None,
     bulk_size: OPT_BULK_SIZE = settings.max_buffer_rows,
     last_seen: OPT_LAST_SEEN = None,
     unsafe: OPT_UNSAFE = False,
@@ -88,6 +90,7 @@ def cli_statements_import(
                 smart_stream_csv(in_uri),
                 origin=origin,
                 override_origin=override_origin,
+                role=role,
                 bulk_size=bulk_size,
                 last_seen=last_seen,
             )
@@ -97,6 +100,7 @@ def cli_statements_import(
                 read_csv_statements(in_uri),
                 origin=origin,
                 override_origin=override_origin,
+                role=role,
                 bulk_size=bulk_size,
                 last_seen=last_seen,
             )

@@ -1,11 +1,14 @@
 """Entity API routes: flush, query, delete, stats, version."""
 
+from typing import cast
+
 import orjson
 from fastapi import APIRouter
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from ftmq.model.stats import DatasetStats
 
 from ftm_lakehouse.api.dependencies import Entities, QueryBody
+from ftm_lakehouse.model.statement import LakehouseStatement
 
 NDJSON_CONTENT_TYPE = "application/x-ndjson"
 
@@ -72,7 +75,14 @@ def statements_query(entities: Entities, body: QueryBody) -> StreamingResponse:
 
     def generate():
         for statement in entities.query_statements(query):
-            data = {**statement.to_dict(), "fragment": statement.fragment}
+            # `to_dict` is FtM's and knows none of the lake columns, so
+            # `fragment` / `role` ride along explicitly
+            stmt = cast(LakehouseStatement, statement)
+            data = {
+                **stmt.to_dict(),
+                "fragment": stmt.fragment,
+                "role": stmt.role,
+            }
             yield orjson.dumps(data, option=orjson.OPT_APPEND_NEWLINE)
 
     return StreamingResponse(generate(), media_type=NDJSON_CONTENT_TYPE)

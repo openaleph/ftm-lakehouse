@@ -15,7 +15,6 @@ from anystore.io import logged_items, smart_open
 from anystore.logic.io import stream
 from anystore.types import SDict
 from followthemoney import EntityProxy
-from ftmq.store.lake import LakeStatement
 from rigour.time import utc_now
 
 from ftm_lakehouse.exceptions import BufferFullError
@@ -26,12 +25,13 @@ from ftm_lakehouse.logic.entities.explode import (
     explode_unsafe,
     statement_row_unsafe,
 )
+from ftm_lakehouse.model.statement import LakehouseStatement
 from ftm_lakehouse.repository.entities import EntityRepository
 from ftm_lakehouse.util import single_string, validate_origin
 
 BULK_ORIGIN = "bulk"
 
-Item = TypeVar("Item", EntityProxy, LakeStatement)
+Item = TypeVar("Item", EntityProxy, LakehouseStatement)
 
 
 def _extract_context_value(i: EntityProxy, key: str) -> str | None:
@@ -41,7 +41,7 @@ def _extract_context_value(i: EntityProxy, key: str) -> str | None:
     both defer to `single_string` (one-element
     lists count, multiple values are ambiguous) so per-statement provenance
     or the buffer default applies on fallback. ``StatementEntity`` has no
-    ``context`` slot at all; its statements carry origin / fragment
+    ``context`` slot at all; its statements carry origin / fragment / role
     themselves.
     """
     return single_string((getattr(i, "context", None) or {}).get(key))
@@ -57,6 +57,12 @@ def _extract_fragment(i: Item) -> str | None:
     if isinstance(i, EntityProxy):
         return _extract_context_value(i, "fragment")
     return i.fragment  # Statement
+
+
+def _extract_role(i: Item) -> str | None:
+    if isinstance(i, EntityProxy):
+        return _extract_context_value(i, "role")
+    return i.role  # Statement
 
 
 def stream_export(repo: EntityRepository, key: str, out_uri: str) -> None:
@@ -81,11 +87,14 @@ def _bulk_import(
     *,
     origin: str,
     override_origin: bool,
+    role: str | None,
     bulk_size: int,
     last_seen: datetime | None,
     item_name: str,
 ) -> None:
-    buffer = EntityBuffer(repo.dataset, origin, last_seen=last_seen, max_rows=bulk_size)
+    buffer = EntityBuffer(
+        repo.dataset, origin, last_seen=last_seen, max_rows=bulk_size, role=role
+    )
     now = last_seen or utc_now()
 
     for item in logged_items(
@@ -100,14 +109,17 @@ def _bulk_import(
         # origin, then the buffer default.
         item_origin = origin if override_origin else _extract_origin(item)
         fragment = _extract_fragment(item)
+        # `role` has no override flag: it arrives inside submissions, and the
+        # CLI value is only the fallback for input that carries none.
+        item_role = _extract_role(item)
         try:
-            add(buffer, item, origin=item_origin, fragment=fragment)
+            add(buffer, item, origin=item_origin, fragment=fragment, role=item_role)
         except BufferFullError:
             # Buffer hit its cap before we got to the bulk_size check
             # (e.g. bulk_size > LAKEHOUSE_MAX_BUFFER_ROWS). Drain and
             # retry the failed add so the item isn't dropped.
             repo.write_batches([buffer.flush_table(now)])
-            add(buffer, item, origin=item_origin, fragment=fragment)
+            add(buffer, item, origin=item_origin, fragment=fragment, role=item_role)
         if len(buffer) >= bulk_size:
             repo.write_batches([buffer.flush_table(now)])
 
@@ -122,6 +134,7 @@ def import_entities(
     bulk_size: int,
     origin: str = BULK_ORIGIN,
     override_origin: bool = False,
+    role: str | None = None,
     last_seen: datetime | None = None,
 ) -> None:
     """Bulk-import FtM entity proxies straight into the parquet store."""
@@ -131,6 +144,7 @@ def import_entities(
         EntityBuffer.add_entity,
         origin=origin,
         override_origin=override_origin,
+        role=role,
         bulk_size=bulk_size,
         last_seen=last_seen,
         item_name="Entity",
@@ -139,10 +153,11 @@ def import_entities(
 
 def import_statements(
     repo: EntityRepository,
-    statements: Iterable[LakeStatement],
+    statements: Iterable[LakehouseStatement],
     *,
     origin: str = BULK_ORIGIN,
     override_origin: bool = False,
+    role: str | None = None,
     bulk_size: int,
     last_seen: datetime | None = None,
 ) -> None:
@@ -153,6 +168,7 @@ def import_statements(
         EntityBuffer.add_statement,
         origin=origin,
         override_origin=override_origin,
+        role=role,
         bulk_size=bulk_size,
         last_seen=last_seen,
         item_name="Statement",
@@ -182,6 +198,7 @@ def import_entities_unsafe(
     *,
     origin: str = BULK_ORIGIN,
     override_origin: bool = False,
+    role: str | None = None,
     bulk_size: int,
     last_seen: datetime | None = None,
 ) -> None:
@@ -208,6 +225,7 @@ def import_entities_unsafe(
             origin=origin,
             override_origin=override_origin,
             last_seen=last_seen,
+            role=role,
         )
     )
     _bulk_import_rows(repo, rows, bulk_size=bulk_size)
@@ -219,6 +237,7 @@ def import_statements_unsafe(
     *,
     origin: str = BULK_ORIGIN,
     override_origin: bool = False,
+    role: str | None = None,
     bulk_size: int,
     last_seen: datetime | None = None,
 ) -> None:
@@ -239,6 +258,7 @@ def import_statements_unsafe(
             now=now,
             origin=origin,
             override_origin=override_origin,
+            role=role,
         )
         for data in logged_items(
             rows, "Import", item_name="Statement", logger=repo.log, chunk_size=100_000

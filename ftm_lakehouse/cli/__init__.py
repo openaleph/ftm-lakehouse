@@ -55,6 +55,10 @@ OPT_ORIGIN = Annotated[
 OPT_OVERRIDE_ORIGIN = Annotated[
     bool, typer.Option(help="Force the given origin over input-carried origins")
 ]
+OPT_ROLE = Annotated[
+    str | None,
+    typer.Option(help="Default role (who asserts) if the input carries none"),
+]
 OPT_BULK_SIZE = Annotated[
     int, typer.Option(help="Number of statements buffered before flush to parquet.")
 ]

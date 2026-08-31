@@ -24,11 +24,12 @@ namespace = Namespace()
 class EntityBuffer:
     """In-memory statement buffer, keyed by row identity.
 
-    Keys statements by `LakeStatement.dedupe_key` (``id``, ``origin``,
-    ``fragment``) – the store's per-origin row identity: re-emissions in a
-    single batch deduplicate, while the same id under distinct fragments *or*
-    distinct origins stays distinct (merge never crosses origin partitions, so
-    collapsing across origins here would silently drop provenance).
+    Keys statements by `LakehouseStatement.dedupe_key` (``id``, ``origin``,
+    ``fragment``, ``role``) – the store's row identity: re-emissions in a
+    single batch deduplicate, while the same id under distinct fragments,
+    distinct origins *or* distinct roles stays distinct (merge never crosses
+    origin partitions, so collapsing across origins here would silently drop
+    provenance; the same holds for roles, which merge keeps apart too).
 
     Nothing here knows the dataset's shard count. Rows are packed without a
     partition key and
@@ -50,9 +51,14 @@ class EntityBuffer:
         origin: str | None = None,
         max_rows: int | None = None,
         last_seen: datetime | None = None,
+        role: str | None = None,
     ) -> None:
         self.dataset: str = dataset
         self.origin: str = validate_origin(origin or DEFAULT_ORIGIN)
+        # Default role for statements that carry none of their own. Unlike
+        # `origin` this needs no name validation: it is neither a path
+        # segment nor a partition key, and never reaches SQL as a literal.
+        self.role: str | None = role or None
         self.max_rows: int = (
             max_rows if max_rows is not None else settings.max_buffer_rows
         )
@@ -75,6 +81,7 @@ class EntityBuffer:
         deleted_at: datetime | None = None,
         fragment: str | None = None,
         origin: str | None = None,
+        role: str | None = None,
     ) -> str | None:
         """Add a statement to the buffer.
 
@@ -102,6 +109,12 @@ class EntityBuffer:
                 non-fragment (empty-string sentinel) otherwise.
             origin: Origin tag override. Falls back to ``stmt.origin`` then
                 the buffer's default origin.
+            role: Who is asserting this statement. Falls back to the role of
+                a passed `LakehouseStatement`, then the buffer's default
+                role – except on a tombstone (``deleted_at`` set), which
+                takes the shadowed row's role verbatim, NULL included. Part
+                of row identity, so the same content asserted under two roles
+                stays two rows.
 
         Returns:
             The (re-keyed) statement id, or ``None`` if the statement was
@@ -113,7 +126,7 @@ class EntityBuffer:
             BufferFullError: If the buffer has reached `max_rows`
                 and has not been flushed.
         """
-        return self._add(stmt, deleted_at, fragment, origin)
+        return self._add(stmt, deleted_at, fragment, origin, role)
 
     def _add(
         self,
@@ -121,6 +134,7 @@ class EntityBuffer:
         deleted_at: datetime | None,
         fragment: str | None,
         origin: str | None,
+        role: str | None,
     ) -> str | None:
         """Buffer one statement – the shared implementation.
 
@@ -137,6 +151,14 @@ class EntityBuffer:
         origin = validate_origin(origin or stmt.origin or self.origin)
         if fragment is None and isinstance(stmt, LakeStatement):
             fragment = stmt.fragment
+        if role is None and isinstance(stmt, LakehouseStatement):
+            role = stmt.role
+        if not role and deleted_at is None:
+            # Content inherits the writer's default role – a tombstone never
+            # does. Its role is the row it shadows (NULL included), and one
+            # picked up from the buffer would land in a different merge group
+            # and shadow nothing, leaving the row it was meant to delete live.
+            role = self.role
 
         # Create new LakehouseStatement with correct values (Statement is immutable).
         # ``id`` is deliberately unset so the constructor content-hashes it
@@ -157,6 +179,7 @@ class EntityBuffer:
             origin=origin,
             fragment=fragment,
             deleted_at=deleted_at,
+            role=role,
         )
         if stmt.id is None:
             return None
@@ -175,6 +198,7 @@ class EntityBuffer:
         e: EntityProxy,
         origin: str | None = None,
         fragment: str | None = None,
+        role: str | None = None,
     ) -> None:
         """Add an entity's statements to the buffer.
 
@@ -187,6 +211,9 @@ class EntityBuffer:
             fragment: Supersession group key for this emission. A later
                 ``add_entity`` with the same fragment replaces the earlier
                 emission per ``(entity_id, prop, fragment)`` group.
+            role: Who is asserting this entity's statements. ``None`` falls
+                back to the buffer's default role. Applies to the whole
+                emission, the ``BASE_ID`` checksum stub included.
 
         Raises:
             BufferFullError: If the buffer is at capacity before this
@@ -226,7 +253,7 @@ class EntityBuffer:
             stmt.last_seen = last_seen if fragment else (stmt.last_seen or last_seen)
             # origin resolution delegates to _add:
             # override > stmt.origin > buffer default
-            stmt_id = self._add(stmt, None, fragment, origin)
+            stmt_id = self._add(stmt, None, fragment, origin, role)
             if stmt_id is None:
                 continue
             ids.add(stmt_id)
@@ -246,7 +273,7 @@ class EntityBuffer:
                 last_seen if fragment else (max(last_seens, default=None) or last_seen)
             ),
         )
-        self._add(base, None, fragment, origin)
+        self._add(base, None, fragment, origin, role)
 
     def flush_buffer(self) -> list[LakehouseStatement]:
         """Empty the buffer, handing over its statements in insertion order.

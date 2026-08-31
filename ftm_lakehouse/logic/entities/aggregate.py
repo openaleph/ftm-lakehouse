@@ -5,7 +5,7 @@ entities from statement streams.
 """
 
 from collections import defaultdict
-from typing import Any, Iterator, TypedDict
+from typing import Any, Iterator, TypedDict, cast
 
 from followthemoney import Schema, Statement, StatementEntity, model
 from followthemoney.exc import InvalidData
@@ -34,6 +34,7 @@ class EntityData(TypedDict):
     datasets: set[str]
     referents: set[str]
     origins: set[str]
+    roles: set[str]
     first_seens: set[str]
     last_seens: set[str]
     last_changes: set[str]
@@ -67,6 +68,7 @@ class EntityPayload:
             datasets=set(),
             referents=set(),
             origins=set(),
+            roles=set(),
             first_seens=set(),
             last_seens=set(),
             last_changes=set(),
@@ -81,6 +83,12 @@ class EntityPayload:
             origin = s.get("origin")
             if origin:
                 data["origins"].add(origin)
+
+            # `role` is a lakehouse column, not part of FtM's ``StatementDict``,
+            # so the lookup widens to ``object`` without the cast
+            role = cast(str | None, s.get("role"))
+            if role:
+                data["roles"].add(role)
 
             entity_id = s.get("entity_id")
             if entity_id and entity_id != self.id:
@@ -138,6 +146,10 @@ class EntityPayload:
 
         if compiled["origins"]:
             data["origin"] = list(compiled["origins"])
+        # A list, like `origin`: one entity's rows can span roles, and the
+        # CLI reads it back off the context on re-import.
+        if compiled["roles"]:
+            data["role"] = list(compiled["roles"])
         if compiled["first_seens"]:
             data["first_seen"] = min(compiled["first_seens"])
         if compiled["last_seens"]:

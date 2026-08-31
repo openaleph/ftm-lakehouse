@@ -18,6 +18,7 @@ from ftm_lakehouse.cli import (
     OPT_OUT,
     OPT_OVERRIDE_ORIGIN,
     OPT_QUERY,
+    OPT_ROLE,
     OPT_RQL,
     OPT_UNSAFE,
     DatasetContext,
@@ -72,6 +73,7 @@ def cli_entities_import(
     in_uri: OPT_IN = "-",
     origin: OPT_ORIGIN = BULK_ORIGIN,
     override_origin: OPT_OVERRIDE_ORIGIN = False,
+    role: OPT_ROLE = None,
     bulk_size: OPT_BULK_SIZE = settings.max_buffer_rows,
     last_seen: OPT_LAST_SEEN = None,
     unsafe: OPT_UNSAFE = False,
@@ -92,6 +94,7 @@ def cli_entities_import(
                 smart_stream_json(in_uri),
                 origin=origin,
                 override_origin=override_origin,
+                role=role,
                 bulk_size=bulk_size,
                 last_seen=last_seen,
             )
@@ -101,6 +104,7 @@ def cli_entities_import(
                 smart_read_proxies(in_uri),
                 origin=origin,
                 override_origin=override_origin,
+                role=role,
                 bulk_size=bulk_size,
                 last_seen=last_seen,
             )

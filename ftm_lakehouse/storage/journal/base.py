@@ -49,8 +49,10 @@ class BaseJournalWriter(EntityBuffer, Generic[S]):
     already-packed arrow table straight through.
     """
 
-    def __init__(self, store: S, origin: str | None = None) -> None:
-        super().__init__(store.dataset, origin)
+    def __init__(
+        self, store: S, origin: str | None = None, role: str | None = None
+    ) -> None:
+        super().__init__(store.dataset, origin, role=role)
         self.store = store
 
     def _insert(self, batch: pa.Table) -> None:
@@ -171,13 +173,14 @@ class BaseJournalStore(Generic[W]):
         self.dataset = dataset
         self.uri = uri or settings.resolved_journal_uri
 
-    def writer(self, origin: str | None = None) -> W:
+    def writer(self, origin: str | None = None, role: str | None = None) -> W:
         """Get a bulk writer for adding rows.
 
         Args:
             origin: Origin tag for statements written through this writer.
+            role: Default role for statements written through this writer.
         """
-        return self._writer_cls(self, origin=origin)
+        return self._writer_cls(self, origin=origin, role=role)
 
     @no_api
     def flush_batches(self) -> StatementTables:

@@ -170,7 +170,7 @@ def test_cli_statements_iterate_local_and_api(tmp_path):
     lake = tmp_path / "lake"
     jane = make_entity(JANE)
     repo = get_entities("iterate_ds", str(lake / "iterate_ds"))
-    repo.add(jane, origin="test")
+    repo.add(jane, origin="test", role="user:42")
     repo.flush()
 
     local_rows = _iterate_statements(str(lake), "iterate_ds", tmp_path / "local.csv")
@@ -178,7 +178,16 @@ def test_cli_statements_iterate_local_and_api(tmp_path):
     with make_test_api(lake) as base_url:
         api_rows = _iterate_statements(base_url, "iterate_ds", tmp_path / "api.csv")
 
-    common = ["id", "entity_id", "prop", "schema", "value", "origin", "fragment"]
+    common = [
+        "id",
+        "entity_id",
+        "prop",
+        "schema",
+        "value",
+        "origin",
+        "fragment",
+        "role",
+    ]
     assert all(c in local_rows[0] for c in common)
     assert all(c in api_rows[0] for c in common)
 
@@ -187,3 +196,4 @@ def test_cli_statements_iterate_local_and_api(tmp_path):
 
     assert content(local_rows) == content(api_rows)
     assert {r["entity_id"] for r in local_rows} == {jane.id}
+    assert {r["role"] for r in local_rows} == {"user:42"}

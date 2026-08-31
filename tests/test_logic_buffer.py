@@ -15,8 +15,9 @@ from followthemoney import StatementEntity, ValueEntity
 from ftmq.store.lake import LakeStatement
 from ftmq.util import make_dataset, make_entity
 
-from ftm_lakehouse.cli.io import _extract_fragment, _extract_origin
+from ftm_lakehouse.cli.io import _extract_fragment, _extract_origin, _extract_role
 from ftm_lakehouse.logic.entities.buffer import EntityBuffer
+from ftm_lakehouse.model.statement import LakehouseStatement
 from tests.shared import JANE
 
 DATASET = "test"
@@ -205,3 +206,68 @@ def test_extract_origin_value_entity_lists():
         }
     )
     assert _extract_origin(plain) == "crawl"
+
+
+def test_add_statement_keeps_distinct_roles():
+    """The same content asserted by two roles stays two buffered rows.
+
+    ``role`` is the fourth dimension of the store's row identity
+    ``(origin, id, fragment, role)``; collapsing here would drop the
+    provenance the column exists to record.
+    """
+    buffer = EntityBuffer(DATASET)
+    stmt = _lake_stmt("name", "Acme Inc", T1, "orig_a")
+    buffer.add_statement(stmt, role="user:42")
+    buffer.add_statement(stmt, role="user:7")
+    buffer.add_statement(stmt, role="user:7")  # dedupes
+    buffer.add_statement(stmt)  # no role - distinct again
+    stmts = _buffered(buffer)
+    assert len(stmts) == 3
+    assert {s.role for s in stmts} == {"user:42", "user:7", None}
+    assert len({s.id for s in stmts}) == 1  # same content-hashed id
+
+
+def test_add_statement_role_resolution():
+    """Explicit role > the statement's own > the buffer default."""
+    buffer = EntityBuffer(DATASET, role="default_role")
+    plain = _lake_stmt("name", "Acme Inc", T1, "orig_a")
+    assert buffer.add_statement(plain) is not None
+    assert _buffered(buffer)[-1].role == "default_role"
+
+    carried = LakehouseStatement.from_statement(plain)
+    carried.role = "carried"
+    buffer.add_statement(carried)
+    assert _buffered(buffer)[-1].role == "carried"
+
+    buffer.add_statement(carried, role="forced")
+    assert _buffered(buffer)[-1].role == "forced"
+
+
+def test_add_entity_role_applies_to_whole_emission():
+    """``add_entity`` stamps one role across the emission, BASE_ID stub
+    included – the stub is a statement like any other and would otherwise
+    land in a different merge group than the props it checksums."""
+    buffer = EntityBuffer(DATASET, origin="importer")
+    buffer.add_entity(make_entity(JANE), role="user:42")
+    stmts = _buffered(buffer)
+    assert {s.role for s in stmts} == {"user:42"}
+    assert "id" in {s.prop for s in stmts}  # the BASE_ID stub is in there
+
+
+def test_extract_role_from_entity_context():
+    """The CLI reads a role back off an exported entity's context, the way
+    it reads `origin` – what makes an entities.ftm.json round-trip keep it."""
+    data = {
+        "id": "x",
+        "schema": "Person",
+        "properties": {"name": ["X"]},
+        "datasets": [DATASET],
+    }
+    assert _extract_role(ValueEntity.from_dict({**data, "role": ["user:42"]})) == (
+        "user:42"
+    )
+    # multiple roles are ambiguous, like multiple origins - buffer default wins
+    assert _extract_role(ValueEntity.from_dict({**data, "role": ["a", "b"]})) is None
+    assert _extract_role(ValueEntity.from_dict(data)) is None
+    # StatementEntity has no context slot; its statements carry their own
+    assert _extract_role(_read_back_entity()) is None

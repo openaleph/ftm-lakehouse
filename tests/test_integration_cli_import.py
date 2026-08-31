@@ -267,6 +267,71 @@ def test_cli_entities_import_per_item_origin(tmp_path, cli_runner):
     assert origins == {"a": {"crawl"}, "b": {"bulk"}, "c": {"bulk"}}
 
 
+def test_cli_entities_import_role(tmp_path, cli_runner):
+    """``--role`` is the fallback, a payload's own ``role`` context wins.
+
+    There is deliberately no ``--override-role``: roles arrive inside
+    submissions, so the flag only covers input that carries none.
+    """
+    in_uri = str(tmp_path / "entities.ftm.json")
+    rows = [
+        {
+            "id": "a",
+            "schema": "Person",
+            "properties": {"name": ["A"]},
+            "role": ["user:42"],
+        },
+        {"id": "b", "schema": "Person", "properties": {"name": ["B"]}},
+        # multiple roles are ambiguous - the CLI default applies
+        {
+            "id": "c",
+            "schema": "Person",
+            "properties": {"name": ["C"]},
+            "role": ["x", "y"],
+        },
+    ]
+    with open(in_uri, "wb") as fh:
+        for row in rows:
+            fh.write(orjson.dumps(row, option=orjson.OPT_APPEND_NEWLINE))
+
+    for root, flags in (("safe", []), ("unsafe", ["--unsafe"])):
+        result = cli_runner.invoke(
+            cli_app,
+            ["--uri", str(tmp_path / root), "-d", "dst"]
+            + ["entities", "import", *flags, "--role", "cli", "-i", in_uri],
+        )
+        assert result.exit_code == 0, result.output
+
+        dst = EntityRepository("dst", tmp_path / root / "dst")
+        roles: dict[str, set[str]] = {}
+        for stmt in dst._statements.query_statements():
+            roles.setdefault(stmt.entity_id, set()).add(stmt.role)
+        assert roles == {"a": {"user:42"}, "b": {"cli"}, "c": {"cli"}}, root
+
+
+def test_cli_statements_import_role_roundtrip(tmp_path, cli_runner):
+    """``role`` survives an export → import round-trip through
+    ``statements.csv``, on the safe and the ``--unsafe`` path alike."""
+    src = _seed_source(tmp_path)
+    with src.writer(origin="test", role="user:42") as w:
+        w.add_entity(make_entity(JANE))
+    src.flush()
+    src.merge()
+    src.export_statements_csv()
+    csv_uri = str(tmp_path / "src" / path.EXPORTS_STATEMENTS)
+
+    for root, flags in (("root_safe", []), ("root_unsafe", ["--unsafe"])):
+        result = cli_runner.invoke(
+            cli_app,
+            ["--uri", str(tmp_path / root), "-d", "ds"]
+            + ["statements", "import", *flags, "-i", csv_uri],
+        )
+        assert result.exit_code == 0, result.output
+        dst = EntityRepository("ds", tmp_path / root / "ds")
+        roles = {s.role for s in dst._statements.query_statements()}
+        assert roles == {None, "user:42"}, root
+
+
 def test_cli_stream_commands(tmp_path, cli_runner):
     """``entities stream`` / ``statements stream`` pipe the exported files
     byte-for-byte to the output."""

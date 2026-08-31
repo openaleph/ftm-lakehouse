@@ -8,10 +8,10 @@ from followthemoney import StatementEntity
 from followthemoney.statement import StatementDict
 from ftmq.model.stats import DatasetStats
 from ftmq.query import Query
-from ftmq.store.lake import LakeStatement
 from ftmq.types import StatementEntities, Statements
 from ftmq.util import ensure_entity
 
+from ftm_lakehouse.model.statement import LakehouseStatement
 from ftm_lakehouse.repository.entities.main import EntityRepository
 
 
@@ -63,10 +63,10 @@ class ApiEntityRepository(EntityRepository):
         flush_first: bool = False,
     ) -> Statements:
         for data in self._stream_statements(q, flush_first):
-            yield LakeStatement.from_dict(data)
+            yield LakehouseStatement.from_dict(data)
 
     def query_statements_data(self, q: Query | None = None) -> Iterator[StatementDict]:
-        """The wire rows as they arrive – no ``LakeStatement`` round-trip."""
+        """The wire rows as they arrive – no ``LakehouseStatement`` round-trip."""
         return self._stream_statements(q, False)
 
     def _stream_statements(

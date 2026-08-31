@@ -16,7 +16,7 @@ from ftmq.io import smart_read_proxies
 from ftmq.store.lake import LakeStatement, pack_statement
 from rigour.time import iso_datetime
 
-from ftm_lakehouse.cli.io import _extract_fragment, _extract_origin
+from ftm_lakehouse.cli.io import _extract_fragment, _extract_origin, _extract_role
 from ftm_lakehouse.logic.entities.buffer import EntityBuffer
 from ftm_lakehouse.logic.entities.explode import (
     RowBuffer,
@@ -37,6 +37,7 @@ PAYLOADS = [
         "properties": {"name": ["Jane Doe", "Jane Doe"], "proof": ["doc-1.beef"]},
         "last_change": "2024-01-01T00:00:00",
         "origin": ["crawl"],
+        "role": ["user:42"],
     },
     {
         # payload with its own dataset (statement ids hash under it) + fragment
@@ -65,13 +66,18 @@ def _safe_rows(tmp_path, datas) -> list[dict]:
     buffer = EntityBuffer("test", "bulk", last_seen=PIN)
     for proxy in smart_read_proxies(str(fp)):
         buffer.add_entity(
-            proxy, origin=_extract_origin(proxy), fragment=_extract_fragment(proxy)
+            proxy,
+            origin=_extract_origin(proxy),
+            fragment=_extract_fragment(proxy),
+            role=_extract_role(proxy),
         )
     rows = []
     for stmt in buffer.flush_buffer():
         data = pack_statement(stmt)
         data["first_seen"] = data.get("first_seen") or NOW
         data["deleted_at"] = stmt.deleted_at
+        # ftmq's `pack_statement` knows nothing of the lakehouse-only columns
+        data["role"] = stmt.role
         data["last_seen"] = stmt.deleted_at or data.get("last_seen") or NOW
         data.pop("canonical_id", None)
         rows.append(data)
@@ -180,6 +186,7 @@ def test_statement_row_unsafe_fields():
         "external": "true",
         "first_seen": "2024-01-01T00:00:00",
         "fragment": "f1",
+        "role": "user:42",
     }
     packed = statement_row_unsafe(row, "dst", now=NOW, origin="bulk")
     assert packed is not None
@@ -188,6 +195,14 @@ def test_statement_row_unsafe_fields():
     assert packed["external"] is True
     assert packed["fragment"] == "f1"
     assert packed["origin"] == "bulk"
+    # the row's own role wins over the CLI default
+    assert packed["role"] == "user:42"
+    assert (
+        statement_row_unsafe(
+            {**row, "role": ""}, "dst", now=NOW, origin="b", role="cli"
+        )
+        or {}
+    ).get("role") == "cli"
     # the id is always re-keyed under the target dataset; the row's own id
     # and source dataset are ignored
     assert packed["id"] == Statement.make_key(
@@ -215,6 +230,7 @@ def test_statement_row_unsafe_parity_with_safe_path():
         "first_seen": "2024-01-01T00:00:00",
         "last_seen": "2024-06-01T00:00:00",
         "fragment": "",
+        "role": "user:42",
         "id": "given-id",
     }
     buffer = EntityBuffer("dst", "bulk")
@@ -231,12 +247,14 @@ def test_statement_row_unsafe_parity_with_safe_path():
             last_seen=row["last_seen"],
             origin=row["origin"],
             fragment=row["fragment"],
-        )
+        ),
+        role=row["role"],
     )
     (safe_stmt,) = list(buffer.flush_buffer())
     safe = pack_statement(safe_stmt)
     safe["first_seen"] = safe.get("first_seen") or NOW
     safe["deleted_at"] = safe_stmt.deleted_at
+    safe["role"] = safe_stmt.role
     safe["last_seen"] = safe_stmt.deleted_at or safe.get("last_seen") or NOW
     safe.pop("canonical_id", None)
 
@@ -247,17 +265,72 @@ def test_statement_row_unsafe_parity_with_safe_path():
     assert safe["id"] == Statement.make_key("dst", "jane", "name", "Jane Doe", False)
 
 
+@pytest.mark.parametrize(
+    "first_seen,last_seen",
+    [
+        pytest.param(None, "2020-01-01T00:00:00", id="only-last-seen-in-the-past"),
+        pytest.param(
+            "2027-01-01T00:00:00", "2020-01-01T00:00:00", id="both-supplied-inverted"
+        ),
+    ],
+)
+def test_row_buffer_clamps_first_seen_like_the_safe_path(first_seen, last_seen):
+    """``last_seen >= first_seen`` holds under ``--unsafe`` too.
+
+    ``RowBuffer.flush`` builds its table directly instead of going through
+    ``statements_to_arrow``, so the clamp has to be applied on both sides or
+    the same payload lands with a different ``first_seen`` depending on the
+    flag – exactly the parity this module exists to pin.
+    """
+    row = {
+        "entity_id": "jane",
+        "schema": "Person",
+        "prop": "name",
+        "value": "Jane Doe",
+        "first_seen": first_seen,
+        "last_seen": last_seen,
+    }
+    packed = statement_row_unsafe(row, "dst", now=NOW, origin="bulk")
+    buffer = RowBuffer()
+    buffer.add(packed)
+    (out,) = buffer.flush().to_pylist()
+
+    expected = iso_datetime(last_seen)
+    assert out["last_seen"] == expected  # untouched
+    assert out["first_seen"] == expected
+
+    safe = EntityBuffer("dst", "bulk")
+    safe.add_statement(
+        Statement(
+            entity_id="jane",
+            prop="name",
+            schema="Person",
+            value="Jane Doe",
+            dataset="dst",
+            first_seen=first_seen,
+            last_seen=last_seen,
+        )
+    )
+    (safe_row,) = safe.flush_table(NOW).to_pylist()
+    assert (safe_row["first_seen"], safe_row["last_seen"]) == (
+        out["first_seen"],
+        out["last_seen"],
+    )
+
+
 def test_row_buffer_dedupes_and_sorts():
     buffer = RowBuffer()
     buffer.add(None)
     assert not buffer
-    buffer.add({"id": "a", "fragment": "", "origin": "x"})
-    buffer.add({"id": "a", "fragment": "", "origin": "x", "value": "v2"})  # wins
-    buffer.add({"id": "a", "fragment": "f1", "origin": "x"})  # distinct fragment
-    buffer.add(
-        {"id": "a", "fragment": "", "origin": "y"}
-    )  # distinct origin survives - the store keys rows per origin
-    assert len(buffer) == 3
+    base = {"id": "a", "fragment": "", "origin": "x", "role": None}
+    buffer.add(base)
+    buffer.add({**base, "value": "v2"})  # wins
+    buffer.add({**base, "fragment": "f1"})  # distinct fragment
+    # distinct origin survives - the store keys rows per origin
+    buffer.add({**base, "origin": "y"})
+    # so does a distinct role - the fourth identity dimension
+    buffer.add({**base, "role": "user:42"})
+    assert len(buffer) == 4
 
     table = buffer.flush()
     assert table.schema.equals(JOURNAL_SCHEMA)

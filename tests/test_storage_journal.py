@@ -191,13 +191,14 @@ def test_storage_journal_statement_fields(journal):
         origin="import",
     )
     with journal.writer() as w:
-        w.add_statement(stmt)
+        w.add_statement(stmt, role="user:42")
 
     rows = [r for r in flush(journal) if r["prop"] == "name"]
     assert len(rows) == 1
     row = rows[0]
     assert row["entity_id"] == "jane"
     assert row["prop"] == "name"
+    assert row["role"] == "user:42"
     assert row["schema"] == "Person"
     assert row["value"] == "Jane Doe"
     assert row["dataset"] == DATASET
@@ -327,6 +328,34 @@ def test_storage_journal_duplicate_statements_accumulate(journal):
     assert len(rows) == 3
     assert len({r["id"] for r in rows}) == 1  # same content, same statement id
     assert sorted(r["origin"] for r in rows) == ["import", "import", "updated"]
+
+
+def test_storage_journal_same_content_distinct_roles(journal):
+    """Two roles asserting one statement survive a single batch, the way two
+    origins do – ``role`` is part of the journal's keyless row identity."""
+    stmt = make_statement("jane", "name", "Jane Doe")
+    with journal.writer() as w:
+        w.add_statement(stmt, role="user:42")
+        w.add_statement(stmt, role="user:7")
+        w.add_statement(stmt)  # no role - a third distinct row
+
+    rows = flush(journal)
+    assert sorted(r["role"] or "" for r in rows) == ["", "user:42", "user:7"]
+    assert len({r["id"] for r in rows}) == 1
+
+
+def test_storage_journal_role_round_trips_to_statement(journal):
+    """``iterate_entity`` rebuilds statements from journal rows – ``role``
+    has to come back or `delete_entity` cannot tombstone the right row."""
+    if isinstance(journal, ApiJournalStore):
+        pytest.skip("`iterate_entity` is @no_api")
+    stmt = make_statement("jane", "name", "Jane Doe")
+    with journal.writer() as w:
+        w.add_statement(stmt, role="user:42")
+
+    (back,) = list(journal.iterate_entity("jane"))
+    assert back.role == "user:42"
+    assert back.dedupe_key.endswith("\tuser:42")
 
 
 def test_storage_journal_same_content_distinct_origins(journal):

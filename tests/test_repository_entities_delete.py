@@ -6,11 +6,13 @@ hidden as soon as a tombstone row for ALL its statements lands in parquet.
 cutoff.
 """
 
+from datetime import timedelta
 from pathlib import Path
 from typing import Generator
 
 import pytest
-from followthemoney import EntityProxy
+from followthemoney import EntityProxy, Statement
+from rigour.time import utc_now
 
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.repository.entities import EntityRepository
@@ -229,3 +231,67 @@ def test_deleted_at_appended_after_flush(tmp_path):
     raw = dt.to_pyarrow_table()
     deleted_rows = [r for r in raw.to_pylist() if r.get("deleted_at") is not None]
     assert deleted_rows
+
+
+def _future_stmt(prop: str, value: str, entity_id: str = "acme") -> Statement:
+    """A statement whose ``last_seen`` lies a year ahead of the wall clock."""
+    return Statement(
+        entity_id=entity_id,
+        prop=prop,
+        schema="Company",
+        value=value,
+        dataset=DATASET,
+        last_seen=(utc_now() + timedelta(days=365)).isoformat(),
+    )
+
+
+@pytest.mark.parametrize("fragment", [None, "f"])
+def test_delete_entity_dated_in_the_future(tmp_path, fragment):
+    """A row dated ahead of the wall clock is still deletable.
+
+    ``last_seen`` comes from input – a skewed crawler host, a CSV with a bad
+    clock, ``--last-seen`` – so nothing bounds it by ``now``. A tombstone
+    stamped with the delete time alone would rank *below* such a row in
+    ``merge``'s window and be dropped instead of it, and since ``merge``
+    rewrites the partition from the window's winners, the retraction record
+    would be destroyed rather than merely ignored – making every retry
+    identical and the entity undeletable. Both dedupe branches are exposed:
+    non-fragment ranks on ``ROW_NUMBER``, fragment on the group's
+    ``MAX(last_seen)``.
+    """
+    repo = _make_local_repo(tmp_path)
+    with repo.writer() as w:
+        w.add_statement(_future_stmt("name", "Acme Inc"), fragment=fragment)
+    repo.flush()
+    repo.merge()
+    assert repo.get("acme") is not None
+
+    repo.delete_entity("acme")
+    repo.flush()
+    repo.merge()
+
+    assert repo.get("acme") is None
+    assert list(repo.query_statements()) == []
+
+
+def test_delete_then_readd_still_resurrects(tmp_path):
+    """Tombstones stay time-ranked, so a later emission still wins.
+
+    The guard against the future-dated row above is a ``MAX``, not "tombstones
+    always win" – that would make a deleted entity unre-addable for the whole
+    grace period.
+    """
+    repo = _make_local_repo(tmp_path)
+    _populate(repo)
+    repo.merge()
+    repo.delete_entity("jane")
+    repo.flush()
+    repo.merge()
+    assert repo.get("jane") is None
+
+    with repo.writer() as w:
+        w.add_entity(EntityProxy.from_dict(JANE))
+    repo.flush()
+    repo.merge()
+
+    assert repo.get("jane") is not None

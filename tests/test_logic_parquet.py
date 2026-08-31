@@ -405,6 +405,165 @@ def test_merge_fragment_identical_duplicates_collapse(now):
     assert sorted(r["id"] for r in out.to_pylist()) == ["h1", "h2"]
 
 
+def test_merge_roles_keep_content_distinct(now):
+    """Two roles asserting identical content survive as two rows.
+
+    ``role`` is the fourth row-identity dimension after id / origin /
+    fragment: without it in the window key the later assertion would win
+    ``ROW_NUMBER`` and the earlier role's provenance would be lost.
+    """
+    t2 = now + timedelta(hours=1)
+    table = _table(
+        [
+            _row(now, id="s1", entity_id="acme", prop="name", role="user:42"),
+            _row(
+                now,
+                id="s1",
+                entity_id="acme",
+                prop="name",
+                role="user:7",
+                first_seen=t2,
+                last_seen=t2,
+            ),
+        ]
+    )
+    out = _run(table, shard="0", bucket="thing", origin="ingest", grace_cutoff=now)
+    assert out.num_rows == 2
+    assert sorted(r["role"] for r in out.to_pylist()) == ["user:42", "user:7"]
+
+
+def test_merge_same_role_reasserting_collapses(now):
+    """One role re-asserting the same content still dedupes to one row."""
+    t2 = now + timedelta(hours=1)
+    table = _table(
+        [
+            _row(now, id="s1", entity_id="acme", prop="name", role="user:42"),
+            _row(
+                now,
+                id="s1",
+                entity_id="acme",
+                prop="name",
+                role="user:42",
+                first_seen=t2,
+                last_seen=t2,
+            ),
+        ]
+    )
+    out = _run(table, shard="0", bucket="thing", origin="ingest", grace_cutoff=now)
+    assert out.num_rows == 1
+    row = out.to_pylist()[0]
+    assert row["role"] == "user:42"
+    # re-asserting keeps the original observation date
+    assert row["first_seen"] == now
+
+
+def test_merge_roleless_rows_collapse_together(now):
+    """``role`` is nullable, and DuckDB groups NULLs in a PARTITION BY – so
+    role-less duplicates dedupe against each other rather than each
+    surviving alone."""
+    t2 = now + timedelta(hours=1)
+    table = _table(
+        [
+            _row(now, id="s1", entity_id="acme", prop="name"),
+            _row(now, id="s1", entity_id="acme", prop="name", last_seen=t2),
+        ]
+    )
+    out = _run(table, shard="0", bucket="thing", origin="ingest", grace_cutoff=now)
+    assert out.num_rows == 1
+    assert out.to_pylist()[0]["role"] is None
+
+
+def test_merge_first_seen_folds_per_role(now):
+    """A role's *first* assertion of content an older role already wrote
+    keeps its own ``first_seen``.
+
+    The fold key is ``(id, role)``, not ``id``: folding across roles would
+    stamp the new row with the old role's date, which both misdates it and
+    hides it from `first_seen`-based diff change detection.
+    """
+    t2 = now + timedelta(days=30)
+    table = _table(
+        [
+            _row(now, id="s1", entity_id="acme", prop="name", role="user:42"),
+            _row(
+                now,
+                id="s1",
+                entity_id="acme",
+                prop="name",
+                role="user:7",
+                first_seen=t2,
+                last_seen=t2,
+            ),
+        ]
+    )
+    out = _run(table, shard="0", bucket="thing", origin="ingest", grace_cutoff=now)
+    by_role = {r["role"]: r for r in out.to_pylist()}
+    assert by_role["user:42"]["first_seen"] == now
+    assert by_role["user:7"]["first_seen"] == t2
+
+
+def test_merge_fragment_supersession_isolated_per_role(now):
+    """Two roles writing the same fragment form independent supersession
+    groups, exactly as two origins do."""
+    t2 = now + timedelta(hours=1)
+    table = _table(
+        [
+            _row(
+                now,
+                id="h1",
+                entity_id="acme",
+                prop="name",
+                fragment="row42",
+                role="user:42",
+            ),
+            _row(
+                now,
+                id="h2",
+                entity_id="acme",
+                prop="name",
+                fragment="row42",
+                role="user:7",
+                first_seen=t2,
+                last_seen=t2,
+            ),
+        ]
+    )
+    out = _run(table, shard="0", bucket="thing", origin="ingest", grace_cutoff=now)
+    # user:7's newer emission does not supersede user:42's group
+    assert sorted(r["id"] for r in out.to_pylist()) == ["h1", "h2"]
+
+
+def test_merge_tombstone_shadows_only_its_own_role(now):
+    """A tombstone lands in its role's merge group – deleting what one role
+    asserted leaves the other role's identical row live."""
+    table = _table(
+        [
+            _row(now, id="s1", entity_id="acme", prop="name", role="user:42"),
+            _row(now, id="s1", entity_id="acme", prop="name", role="user:7"),
+            _row(
+                now,
+                id="s1",
+                entity_id="acme",
+                prop="name",
+                role="user:42",
+                last_seen=now,
+                deleted_at=now,
+            ),
+        ]
+    )
+    # grace_cutoff before the delete, so the tombstone is retained physically
+    out = _run(
+        table,
+        shard="0",
+        bucket="thing",
+        origin="ingest",
+        grace_cutoff=now - timedelta(days=1),
+    )
+    by_role = {r["role"]: r for r in out.to_pylist()}
+    assert by_role["user:42"]["deleted_at"] == now
+    assert by_role["user:7"]["deleted_at"] is None
+
+
 def test_merge_idempotent(now):
     """Feeding merge output through the merge again changes nothing – the
     per-id tiebreak makes repeated optimize passes converge."""

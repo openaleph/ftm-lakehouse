@@ -102,7 +102,7 @@ The parquet statement store is partitioned by `(shard, bucket, origin)`:
 - `bucket` – coarse FtM schema group (thing / interval / document / page / pages / mention)
 - `origin` – caller-supplied source tag
 
-Each row carries `first_seen`, `last_seen`, `fragment`, and `deleted_at` directly in the parquet schema (no separate translog). The live `statement` query view is a plain `WHERE deleted_at IS NULL` scan – **no read-time dedupe** – so a filter (`schema` / `prop` / `entity_id`) pushes straight through to DuckDB's per-file statistics.
+Each row carries `first_seen`, `last_seen`, `fragment`, `role`, and `deleted_at` directly in the parquet schema (no separate translog). The live `statement` query view is a plain `WHERE deleted_at IS NULL` scan – **no read-time dedupe** – so a filter (`schema` / `prop` / `entity_id`) pushes straight through to DuckDB's per-file statistics.
 
 Writes are **append-only**: `append` derives each row's `shard` from its `entity_id`, then writes one parquet file per `(shard, bucket, origin)` partition the batch spans. It deliberately does not sort – nothing reads in physical order, and `merge` rewrites every partition an append touched anyway. Duplicates and tombstones land as additional rows.
 
@@ -111,13 +111,15 @@ Deriving the partition key at the last moment is what keeps the layout honest. R
 **Correctness assumes an optimized store.** Dedupe, fragment supersession, `first_seen`/`last_seen` folding, and tombstone reaping all happen in `merge`; between a write and the next merge, reads can surface duplicate ids and rows whose delete has not been applied. Run `optimize` before you query or export. `merge` routes every row into one of two isolated branches on the `fragment` column (empty-string sentinel, never NULL):
 
 - **non-fragment** (`fragment = ''`, the default): content-addressed dedup – latest `last_seen` per statement `id` wins; distinct ids never interact. Scoped per `(shard, bucket, origin)` partition, so the *same* statement observed under two origins is kept once per origin (merge cannot cross origin partitions).
-- **fragment-bearing** (`fragment != ''`): supersession per `(origin, entity_id, prop, fragment)` group – every row tied at the group's max `last_seen` survives (the latest emission, multi-valued props included), older emissions go. See [Fragment Supersession](usage/entities.md#fragment-supersession) for semantics and the producer contract.
+- **fragment-bearing** (`fragment != ''`): supersession per `(origin, entity_id, prop, fragment, role)` group – every row tied at the group's max `last_seen` survives (the latest emission, multi-valued props included), older emissions go. See [Fragment Supersession](usage/entities.md#fragment-supersession) for semantics and the producer contract.
+
+`role` – who asserted the statement, as opposed to `origin`'s where – sits in the window key of both branches, making it the fourth row-identity dimension after `id` / `origin` / `fragment`: two roles asserting identical content survive as two rows (full provenance) while one role re-asserting collapses. It is nullable, and DuckDB groups NULLs together in a `PARTITION BY`, so role-less rows dedupe against each other. `first_seen` folds per `(id, role)` rather than per `id`, so a role's first assertion of content an older role already wrote keeps its own date and stays visible to `first_seen`-based diffs. See [The Role Field](usage/entities.md#the-role-field).
 
 The async `optimize` operation produces this canonical state by running the three storage primitives in order. Each acquires the exclusive maintenance fence – the dataset-wide `.LOCK` plus a drain of in-flight append markers (`.LOCK-APPENDS/`) – so maintenance never races other maintenance or an append it could tombstone. Appends themselves only register a marker and run concurrently; Delta's optimistic concurrency serializes their commits:
 
 | Step | Cost | What it does |
 |------|------|--------------|
-| `merge()` | expensive | Per-partition rewrite: keep latest row per id (`ROW_NUMBER`) / latest emission per fragment group, fold `first_seen` to min, drop tombstones past grace |
+| `merge()` | expensive | Per-partition rewrite: keep latest row per `(id, role)` (`ROW_NUMBER`) / latest emission per fragment group, fold `first_seen` to min, drop tombstones past grace |
 | `compact()` | cheap | Delta `OPTIMIZE compact` per partition – bin-packs small files |
 | `vacuum()` | cheap | Delta `VACUUM` – delete files no longer referenced in the Delta log |
 

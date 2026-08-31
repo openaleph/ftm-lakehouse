@@ -18,7 +18,6 @@ from ftmq import C
 from ftmq.io import smart_read_proxies
 from ftmq.model.stats import DatasetStats
 from ftmq.query import M, Query
-from ftmq.store.lake import LakeStatement
 from ftmq.types import StatementEntities, Statements, ValueEntities
 from rigour.time import utc_now
 
@@ -28,6 +27,7 @@ from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.logic.compress import compress_stream, decompress_stream
 from ftm_lakehouse.logic.entities.aggregate import aggregate_unsafe
 from ftm_lakehouse.logic.parquet import QUERY_IN_BATCH_SIZE
+from ftm_lakehouse.model.statement import LakehouseStatement
 from ftm_lakehouse.repository.base import DatasetHandle
 from ftm_lakehouse.repository.diff import ParquetDiffMixin, make_envelope
 from ftm_lakehouse.storage.journal import get_journal
@@ -92,7 +92,7 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
 
     @contextmanager
     def writer(
-        self, origin: str | None = None
+        self, origin: str | None = None, role: str | None = None
     ) -> Generator[BaseJournalWriter, None, None]:
         """Get a bulk writer for adding entities/statements.
 
@@ -107,12 +107,17 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
                 writer.add_entity(entity)
             ```
 
+        Args:
+            origin: Origin tag for statements written through this writer.
+            role: Default role – who is asserting these statements – for
+                statements that carry none of their own.
+
         Yields:
             The journal writer, open for the duration of the block.
         """
         with (
             self._tags.touch(tag.JOURNAL_UPDATED),
-            self._journal.writer(origin) as writer,
+            self._journal.writer(origin, role) as writer,
         ):
             yield writer
 
@@ -121,18 +126,20 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
         entity: EntityProxy,
         origin: str | None = None,
         fragment: str | None = None,
+        role: str | None = None,
     ) -> None:
         """Add a single entity to the journal."""
-        self.add_many([entity], origin, fragment)
+        self.add_many([entity], origin, fragment, role)
 
     def add_many(
         self,
         entities: Iterable[EntityProxy],
         origin: str | None = None,
         fragment: str | None = None,
+        role: str | None = None,
     ) -> None:
         """Add an entity iterator to the journal."""
-        with self.writer(origin) as writer:
+        with self.writer(origin, role) as writer:
             for entity in entities:
                 writer.add_entity(entity, fragment=fragment)
 
@@ -265,7 +272,7 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
     def query_statements_data(self, q: Query | None = None) -> Iterator[StatementDict]:
         """Query raw statement dicts from the parquet store.
 
-        The fast read: no `LakeStatement` construction – use
+        The fast read: no `LakehouseStatement` construction – use
         [`query_statements`][EntityRepository.query_statements] for model
         objects. Same execution strategy as
         [`query_statements`][EntityRepository.query_statements], so a sorted or
@@ -312,7 +319,7 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
             flush_first: Flush the journal to parquet before querying.
 
         Yields:
-            `LakeStatement` objects.
+            `LakehouseStatement` objects.
         """
         if flush_first:
             self.flush()
@@ -415,9 +422,11 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
 
         Reads statements from both parquet and journal, then UPSERTs
         tombstone rows (with deleted_at set) into the journal. Each
-        tombstone carries the live row's ``fragment`` so it lands in the
-        same supersession group – a bare tombstone would sit in the
-        isolated non-fragment branch and never shadow a fragment row.
+        tombstone carries the live row's ``fragment`` and ``role`` – both
+        are row identity, so a tombstone missing either lands in a different
+        merge group and shadows nothing. Reading the live rows first is what
+        makes that automatic: one tombstone per row means every role's
+        assertion is deleted, which is what deleting the entity means.
 
         Args:
             entity_id: The entity ID to delete
@@ -434,35 +443,44 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
                 w.add_statement(stmt, deleted_at=now)
         return len(stmts)
 
-    def delete_statement(self, stmt: Statement, fragment: str | None = None) -> None:
+    def delete_statement(
+        self,
+        stmt: Statement,
+        fragment: str | None = None,
+        role: str | None = None,
+    ) -> None:
         """Delete a single statement via journal tombstone.
 
         Args:
             stmt: The Statement to delete. A
-                `ftmq.store.lake.LakeStatement` (e.g. read back via
-                `ParquetStore.get_statements`) carries its own
-                fragment.
+                `ftm_lakehouse.model.statement.LakehouseStatement` (e.g. read
+                back via `ParquetStore.get_statements`) carries its own
+                fragment and role.
             fragment: Fragment override – required to shadow a
                 fragment-bearing row when passing a plain ``Statement``;
                 leave unset otherwise.
+            role: Role override – likewise required to shadow a row written
+                under a role when passing a plain ``Statement``.
         """
         with self.writer() as w:
-            w.add_statement(stmt, deleted_at=utc_now(), fragment=fragment)
+            w.add_statement(stmt, deleted_at=utc_now(), fragment=fragment, role=role)
 
     @no_api
-    def _collect_entity_statements(self, entity_id: str) -> list[LakeStatement]:
+    def _collect_entity_statements(self, entity_id: str) -> list[LakehouseStatement]:
         """Read all statements for an entity from parquet + journal.
 
         Uses shard-partitioned query for efficient single-entity lookup.
-        Statements are keyed by `LakeStatement.dedupe_key` – the same
-        statement content under distinct fragments is distinct for
-        tombstoning purposes.
+        Statements are keyed by
+        `ftm_lakehouse.model.statement.LakehouseStatement.dedupe_key` – the
+        same statement content under distinct fragments, origins or roles is
+        distinct for tombstoning purposes, so each live row gets its own
+        matching tombstone.
         """
-        stmts_by_key: dict[str, LakeStatement] = {}
+        stmts_by_key: dict[str, LakehouseStatement] = {}
 
         q = Query(M(entity_id=entity_id))
         for stmt in self.query_statements(q):
-            stmt = cast(LakeStatement, stmt)
+            stmt = cast(LakehouseStatement, stmt)
             if stmt.id:
                 stmts_by_key[stmt.dedupe_key] = stmt
 
