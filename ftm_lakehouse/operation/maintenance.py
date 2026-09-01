@@ -1,4 +1,4 @@
-"""Statement-store maintenance: optimize and re-shard.
+"""Statement-store maintenance: optimize, re-shard and migrate.
 
 [`OptimizeOperation`][OptimizeOperation] runs the three Delta Lake maintenance steps in
 order – the use case is always all of them together:
@@ -14,16 +14,23 @@ write batches.
 [`ShardOperation`][ShardOperation] is the rarer one: it changes the dataset's shard
 count, which means rewriting every partition and then recording the new
 count in ``config.yml``.
+
+[`MigrateOperation`][MigrateOperation] applies the storage-layout migrations a
+dataset has not seen yet – the registry is
+``ftm_lakehouse.operation.migrations``.
 """
 
 from typing import Any
 
+from anystore.util import Took
 from pydantic import Field
 
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.model.job import DatasetJobModel
 from ftm_lakehouse.operation.base import DatasetJobOperation
+from ftm_lakehouse.operation.migrations import MIGRATIONS, Migration
 from ftm_lakehouse.repository import factories
+from ftm_lakehouse.repository.base import DatasetRef
 from ftm_lakehouse.repository.job import JobRun
 
 
@@ -129,3 +136,54 @@ class ShardOperation(DatasetJobOperation[ShardJob]):
         )
         factories.clear_caches()
         run.job.done += 1
+
+
+class MigrateJob(DatasetJobModel):
+    """No parameters – a migrate run is always "everything outstanding"."""
+
+
+class MigrateOperation(DatasetJobOperation[MigrateJob]):
+    """Apply the storage-layout migrations this dataset has not seen yet.
+
+    Runs the functions registered in ``ftm_lakehouse.operation.migrations`` in
+    registry order, stamping each with
+    [`tag.migration`][ftm_lakehouse.core.conventions.tag.migration] on
+    completion. Per-migration tags rather than one version number: a run that
+    dies halfway keeps what it finished and the next one picks up at the first
+    untagged migration. ``force`` re-runs the whole registry – migrations are
+    idempotent.
+    """
+
+    target = tag.OP_MIGRATE
+
+    @property
+    def outstanding(self) -> tuple[Migration, ...]:
+        """The registered migrations this dataset carries no tag for."""
+        return tuple(
+            m for m in MIGRATIONS if self._tags.get(tag.migration(m.__name__)) is None
+        )
+
+    def is_fresh(self) -> bool:
+        """Whether every registered migration has run against this dataset.
+
+        Not a tag pair: a migration is done or not, and no dependency's
+        timestamp can make an applied one stale again.
+        """
+        return not self.outstanding
+
+    def handle(
+        self, run: JobRun[MigrateJob], force: bool = False, **kwargs: Any
+    ) -> None:
+        migrations = MIGRATIONS if force else self.outstanding
+        ref = DatasetRef(self.dataset, str(self.uri))
+        run.job.pending = len(migrations)
+        run.save()
+        for migration in migrations:
+            name = migration.__name__
+            with self._tags.touch(tag.migration(name)), Took() as t:
+                self.log.info(f"Running migration `{name}` ...", migration=name)
+                migration(ref)
+                run.job.pending -= 1
+                run.job.done += 1
+                run.save()
+                self.log.info(f"Migration `{name}` done", migration=name, took=t.took)

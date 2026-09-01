@@ -33,3 +33,8 @@ COPY ftm_lakehouse /src/ftm_lakehouse
 COPY setup.py pyproject.toml README.md VERSION LICENSE NOTICE /src/
 
 RUN pip install --no-cache-dir --no-deps -q .
+
+# Applies outstanding dataset migrations, then execs the container command.
+COPY docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+ENTRYPOINT ["docker-entrypoint.sh"]

@@ -8,6 +8,8 @@ from ftm_lakehouse.operation.download import (
 )
 from ftm_lakehouse.operation.export import ExportJob, ExportOperation
 from ftm_lakehouse.operation.maintenance import (
+    MigrateJob,
+    MigrateOperation,
     OptimizeJob,
     OptimizeOperation,
     ShardJob,
@@ -28,6 +30,7 @@ def test_operations_registry_derived():
         "DownloadArchiveJob": (DownloadArchiveJob, DownloadArchiveOperation),
         "ExportJob": (ExportJob, ExportOperation),
         "MakeJob": (MakeJob, MakeOperation),
+        "MigrateJob": (MigrateJob, MigrateOperation),
         "OptimizeJob": (OptimizeJob, OptimizeOperation),
         "ShardJob": (ShardJob, ShardOperation),
     }

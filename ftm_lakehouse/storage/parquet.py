@@ -56,7 +56,7 @@ from anystore.logging import get_logger
 from anystore.store import get_store
 from anystore.types import Uri
 from anystore.util import Took, join_uri, mask_uri
-from deltalake import DeltaTable, write_deltalake
+from deltalake import DeltaTable, Schema, write_deltalake
 from followthemoney.statement import StatementDict
 from ftmq.model.stats import DatasetStats
 from ftmq.query import Query, Sql, SqlSource
@@ -464,6 +464,37 @@ class ParquetStore:
             self._store.delete(marker, ignore_errors=True)
             released = True
         return released
+
+    def evolve_schema(self) -> list[str]:
+        """Add the `SHARDED_SCHEMA` columns this table was created without.
+
+        Metadata-only Delta schema evolution – one commit against the table's
+        schema, no parquet file rewritten: ``delta_scan`` reads a column the
+        older files don't carry as NULL, which is the "absent" sentinel of
+        every nullable column anyway, so nothing is owed a re-merge.
+
+        Additive only – Delta has no metadata-only drop without column mapping,
+        so a column *removed* from `SHARDED_SCHEMA` needs a full rewrite
+        instead. Idempotent, and held under the exclusive maintenance fence.
+
+        Returns:
+            Names of the columns added – empty if the table is already current
+            or does not exist yet.
+        """
+        if not self.exists:
+            return []
+        deltatable = self.deltatable
+        known = {f.name for f in deltatable.schema().fields}
+        missing = [
+            f for f in Schema.from_arrow(SHARDED_SCHEMA).fields if f.name not in known
+        ]
+        if not missing:
+            return []
+        names = [f.name for f in missing]
+        with self._maintenance_fence():
+            deltatable.alter.add_columns(missing)
+        self.log.info("Evolved parquet schema.", columns=names)
+        return names
 
     def _with_shard(self, batch: pa.Table) -> pa.Table:
         """Derive the ``shard`` partition key from ``entity_id``.

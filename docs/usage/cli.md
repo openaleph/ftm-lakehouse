@@ -59,6 +59,12 @@ ftm-lakehouse -d my_dataset maintenance optimize
 # then records the new count in config.yml. Run with writers stopped, and
 # follow up with `maintenance optimize`.
 ftm-lakehouse -d my_dataset maintenance shard --shards 8
+
+# Bring a store written by an older version up to the current layout. No-op on
+# an up-to-date dataset; `--all` sweeps the catalog (what the docker entrypoint
+# runs). Run with writers stopped.
+ftm-lakehouse -d my_dataset maintenance migrate
+ftm-lakehouse maintenance migrate --all
 ```
 
 ### `configure`

@@ -70,6 +70,20 @@ Change the dataset's shard count after the fact: drain the journal, rewrite ever
         heading_level: 3
         show_root_heading: true
 
+## MigrateOperation
+
+Apply the storage-layout migrations a dataset has not seen yet – the functions registered in `ftm_lakehouse.operation.migrations`, run in registry order and stamped with a `migrations/<function name>` tag each, so the function name is the migration id. Migrations are forward-only (no down-migration, no compatibility shim in the read path) and idempotent: `force` re-runs the whole registry, and a run that dies halfway resumes at the first untagged migration.
+
+::: ftm_lakehouse.operation.maintenance.MigrateJob
+    options:
+        heading_level: 3
+        show_root_heading: true
+
+::: ftm_lakehouse.operation.MigrateOperation
+    options:
+        heading_level: 3
+        show_root_heading: true
+
 ## MakeOperation
 
 Full workflow: flush journal + all exports.

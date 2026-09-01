@@ -26,6 +26,8 @@ from ftm_lakehouse.operation.download import (
 )
 from ftm_lakehouse.operation.export import ExportJob, ExportKind, ExportOperation
 from ftm_lakehouse.operation.maintenance import (
+    MigrateJob,
+    MigrateOperation,
     OptimizeJob,
     OptimizeOperation,
     ShardJob,
@@ -121,6 +123,31 @@ def shard(
     """
     job = ShardJob.make(dataset=dataset, shards=shards)
     return ShardOperation(job, uri).run(force=force)
+
+
+def migrate(
+    dataset: str,
+    uri: Uri | None = None,
+    force: bool = False,
+) -> MigrateJob:
+    """
+    Apply the storage-layout migrations this dataset has not seen yet.
+
+    Each migration is stamped with its own tag on completion, so this is a
+    cheap no-op on an up-to-date dataset. See
+    ``ftm_lakehouse.operation.migrations`` for the registry.
+
+    Args:
+        dataset: Name of the dataset to migrate
+        uri: Dataset storage root override
+        force: Re-run every registered migration, applied or not – they are
+            idempotent
+
+    Returns:
+        The completed job result
+    """
+    job = MigrateJob.make(dataset=dataset)
+    return MigrateOperation(job, uri).run(force=force)
 
 
 def make(dataset: str, uri: Uri | None = None, force: bool = False) -> MakeJob:

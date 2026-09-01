@@ -10,6 +10,7 @@ Everything else groups under ``maintenance``:
     ftm-lakehouse maintenance flush [--all]
     ftm-lakehouse maintenance optimize
     ftm-lakehouse maintenance shard --shards <n>
+    ftm-lakehouse maintenance migrate [--all]
     ftm-lakehouse maintenance unlock
 """
 
@@ -200,6 +201,40 @@ def cli_shard(
     with DatasetContext() as (name, uri):
         res = op.shard(name, int(shards), uri, force=bool(force))
         console.print(res)
+
+
+@maintenance.command("migrate")
+def cli_migrate(
+    all_: Annotated[
+        bool,
+        typer.Option(
+            "--all", help="Sweep the whole catalog (not combinable with `-d`)"
+        ),
+    ] = False,
+    force: OPT_FORCE = False,
+) -> None:
+    """Apply the storage-layout migrations a dataset hasn't seen yet.
+
+    Migrations bring a store written by an older version up to the layout the
+    current code reads. Each is stamped when it completes, so this is a no-op
+    on an up-to-date dataset and a half-finished run resumes where it stopped.
+
+    With ``--all`` every dataset in the catalog is swept in turn – how the
+    docker entrypoint runs it. Run with writers stopped: a migration takes the
+    exclusive write fence.
+    """
+    if all_:
+        if STATE["dataset"]:
+            console.print("[red]Use either `-d <dataset>` or `--all`, not both.[/red]")
+            raise typer.Exit(code=1)
+        with CatalogContext() as catalog:
+            for name in catalog.list_datasets():
+                res = op.migrate(name, catalog.dataset_uri(name), force=bool(force))
+                console.print(res)
+    else:
+        with DatasetContext() as (name, uri):
+            res = op.migrate(name, uri, force=bool(force))
+            console.print(res)
 
 
 @maintenance.command("unlock")

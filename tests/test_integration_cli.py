@@ -5,7 +5,7 @@ from ftmq.util import make_entity
 from typer.testing import CliRunner
 
 from ftm_lakehouse.catalog import get_dataset_model
-from ftm_lakehouse.cli import cli
+from ftm_lakehouse.cli import STATE, cli
 from ftm_lakehouse.repository.entities.main import EntityRepository
 from ftm_lakehouse.repository.factories import clear_caches, get_entities
 from tests.conftest import make_test_api
@@ -102,6 +102,32 @@ def test_cli_maintenance_unlock_api_guard(tmp_path):
         assert isinstance(res.exception, RuntimeError)
         assert "Lock released" not in res.output
         assert "No lock held" not in res.output
+
+
+def test_cli_maintenance_migrate(tmp_path):
+    """``maintenance migrate`` applies outstanding migrations and stamps them,
+    so a second run has nothing left to do."""
+    lake, name = str(tmp_path / "lake"), "migrate_dataset"
+    args = ["--uri", lake, "-d", name, "maintenance", "migrate"]
+
+    res = runner.invoke(cli, args)
+    assert res.exit_code == 0
+    stamp = tmp_path / "lake" / name / "tags/lakehouse/migrations"
+    assert (stamp / "migrate_parquet_add_role").exists()
+
+    clear_caches()
+    res = runner.invoke(cli, args)
+    assert res.exit_code == 0
+    assert "done=0" in res.output
+
+    # `--all` sweeps the catalog – how the docker entrypoint runs it – and
+    # excludes `-d`
+    assert runner.invoke(cli, args + ["--all"]).exit_code == 1
+    clear_caches()
+    STATE["dataset"] = None  # the callback only sets it when `-d` is given
+    res = runner.invoke(cli, ["--uri", lake, "maintenance", "migrate", "--all"])
+    assert res.exit_code == 0
+    assert "MigrateJob" in res.output
 
 
 def test_cli_entities_iterate_query(tmp_path):

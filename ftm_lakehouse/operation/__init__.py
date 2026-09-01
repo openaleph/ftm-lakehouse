@@ -21,10 +21,13 @@ from ftm_lakehouse.operation.factories import (
     download_archive,
     export,
     make,
+    migrate,
     optimize,
     shard,
 )
 from ftm_lakehouse.operation.maintenance import (
+    MigrateJob,
+    MigrateOperation,
     OptimizeJob,
     OptimizeOperation,
     ShardJob,
@@ -41,6 +44,8 @@ __all__ = [
     "ExportOperation",
     "MakeJob",
     "MakeOperation",
+    "MigrateJob",
+    "MigrateOperation",
     "OptimizeJob",
     "OptimizeOperation",
     "ShardJob",
@@ -50,6 +55,7 @@ __all__ = [
     "download_archive",
     "export",
     "make",
+    "migrate",
     "optimize",
     "shard",
 ]

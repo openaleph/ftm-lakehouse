@@ -282,6 +282,18 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
         yield from self._statements._statement_data(q)
 
     @no_api
+    def evolve_schema(self) -> list[str]:
+        """Add statement columns the parquet store was created without.
+
+        Delegates to [`ParquetStore.evolve_schema`][ParquetStore.evolve_schema],
+        the primitive behind the schema migrations.
+
+        Returns:
+            Names of the columns added – empty if the store is already current.
+        """
+        return self._statements.evolve_schema()
+
+    @no_api
     def unlock(self) -> bool:
         """Forcibly release the dataset write fence.
 
