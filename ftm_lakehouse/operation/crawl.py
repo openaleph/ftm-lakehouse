@@ -49,6 +49,7 @@ class CrawlJob(DatasetJobModel):
     glob: str | None = None
     exclude_glob: str | None = None
     make_entities: bool = False
+    store_metadata: bool = True
     existing: HandleExistingMode | None = HandleExistingMode.skip_path
 
 
@@ -137,6 +138,8 @@ class CrawlOperation(DatasetJobOperation[CrawlJob]):
             file = self.archive.store(
                 self.source.to_uri(uri),
                 checksum=checksum,
+                store_metadata=self.job.store_metadata,
+                tag_updated=False,
                 key=uri,
                 origin=tag.CRAWL_ORIGIN,
             )
@@ -154,9 +157,11 @@ class CrawlOperation(DatasetJobOperation[CrawlJob]):
                     done=self.job.done,
                 )
                 run.save()
+                self.archive._tags.set(tag.ARCHIVE_UPDATED)
             self.handle_crawl(task, run)
             run.job.pending -= 1
             run.job.touch()
+        self.archive._tags.set(tag.ARCHIVE_UPDATED)
         if self.job.make_entities:
             self.entities.flush()
 
@@ -188,7 +193,8 @@ def crawl(
     exclude_prefix: str | None = None,
     glob: str | None = None,
     exclude_glob: str | None = None,
-    make_entities: bool | None = False,
+    make_entities: bool = False,
+    store_metadata: bool = True,
     existing: HandleExistingMode | None = HandleExistingMode.skip_path,
     *,
     uri: Uri | None = None,
@@ -221,6 +227,7 @@ def crawl(
         glob=glob,
         exclude_glob=exclude_glob,
         make_entities=make_entities,
+        store_metadata=store_metadata,
         existing=existing,
     )
     return CrawlOperation(job, uri).run()

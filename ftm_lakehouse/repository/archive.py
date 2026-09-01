@@ -130,6 +130,8 @@ class ArchiveRepository(DatasetHandle):
         uri: Uri,
         file: File | None = None,
         checksum: str | None = None,
+        tag_updated: bool = True,
+        store_metadata: bool = True,
         **metadata: Any,
     ) -> File:
         """
@@ -169,10 +171,12 @@ class ArchiveRepository(DatasetHandle):
         file.dataset = self.dataset
         file.origin = file.origin or ARCHIVE_ORIGIN
 
-        # Store metadata
-        self._files.put(file.meta_path, file)
-        # Notify archive was updated
-        self._tags.set(tag.ARCHIVE_UPDATED)
+        if store_metadata:
+            # Store metadata
+            self._files.put(file.meta_path, file)
+        if tag_updated:
+            # Notify archive was updated
+            self._tags.set(tag.ARCHIVE_UPDATED)
 
         self.log.info(
             f"Archived `{file.key} ({file.checksum})`",
