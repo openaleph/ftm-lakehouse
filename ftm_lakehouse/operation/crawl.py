@@ -172,7 +172,10 @@ class CrawlOperation(DatasetJobOperation[CrawlJob]):
             return False
         if checksum is None:
             return False
-        if self.job.existing == HandleExistingMode.skip_checksum:
+        if (
+            self.job.existing == HandleExistingMode.skip_checksum
+            or not self.job.store_metadata
+        ):
             return self.archive.exists(checksum)
         if self.job.existing == HandleExistingMode.skip_path:
             if self.archive.exists(checksum):
