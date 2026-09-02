@@ -7,7 +7,7 @@ from pydantic_settings import SettingsConfigDict
 
 CHECKSUM_ALGORITHM = "sha256"  # never change this! ;)
 
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 
 SECRETS_DIR = Path("/run/secrets")
 """Docker secrets mount"""

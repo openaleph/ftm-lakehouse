@@ -14,7 +14,7 @@ from ftm_lakehouse.lake import (
 )
 from ftm_lakehouse.model.dataset import DatasetModel, set_model_class
 
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 
 __all__ = [
     "Catalog",
