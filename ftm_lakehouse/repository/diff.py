@@ -30,7 +30,10 @@ class ParquetDiffMixin:
     Subclasses must implement:
         - _get_changed_ids: get entity IDs changed since a timestamp
         - _write_diff: write the diff output
-        - _write_initial_diff: write the initial diff file
+
+    A subclass that supports origin-scoped diffs additionally overrides
+    `_get_diff_base_path` – each scope keeps its own paths, freshness tag and
+    diff state, so scopes advance independently.
     """
 
     log: BoundLogger
@@ -44,12 +47,16 @@ class ParquetDiffMixin:
         raise NotImplementedError
 
     @abstractmethod
-    def _get_changed_ids(self, since: datetime) -> Iterator[str]:
+    def _get_changed_ids(
+        self, since: datetime, origin: str | None = None
+    ) -> Iterator[str]:
         """Get entity IDs with statements added since the given timestamp."""
         ...
 
     @abstractmethod
-    def _write_diff(self, entity_ids: Iterator[str], ts: datetime) -> tuple[str, int]:
+    def _write_diff(
+        self, entity_ids: Iterator[str], ts: datetime, origin: str | None = None
+    ) -> tuple[str, int]:
         """Write the diff file for the given changed entity ids.
 
         ``entity_ids`` streams in from `_get_changed_ids`; the impl owns
@@ -62,22 +69,32 @@ class ParquetDiffMixin:
         """
         ...
 
-    @abstractmethod
-    def _write_initial_diff(self, ts: datetime) -> None:
-        """Create initial diff."""
-        ...
+    def _get_diff_base_path(self, origin: str | None = None) -> str:
+        """Base path of the diff variant – its freshness tag and state key.
 
-    @property
-    def _diff_state_key(self) -> str:
+        Args:
+            origin: Source tag the diff is scoped to.
+
+        Raises:
+            NotImplementedError: when the repository has no origin-scoped
+                diffs (the default – only `DocumentRepository` overrides this).
+        """
+        if origin:
+            raise NotImplementedError(
+                f"`{self._diff_base_path}` diffs are not origin-scoped."
+            )
+        return self._diff_base_path
+
+    def _diff_state_key(self, origin: str | None = None) -> str:
         """Tag key for storing current diff state."""
-        return f"{self._diff_base_path}-current"
+        return f"{self._get_diff_base_path(origin)}-current"
 
-    def _get_diff_state(self) -> tuple[datetime, int] | None:
+    def _get_diff_state(self, origin: str | None = None) -> tuple[datetime, int] | None:
         """Get last diff state: (timestamp, version).
 
         Format: {TS}:{version}
         """
-        state = self._tags.get(self._diff_state_key)
+        state = self._tags.get(self._diff_state_key(origin))
         if state is None:
             return None
         ts_str, main_v = state.split(":")
@@ -86,12 +103,14 @@ class ParquetDiffMixin:
             int(main_v),
         )
 
-    def _set_diff_state(self, ts: datetime, version: int) -> None:
+    def _set_diff_state(
+        self, ts: datetime, version: int, origin: str | None = None
+    ) -> None:
         """Store the diff export state."""
         ts_str = ts.strftime(path.TS_FORMAT)
-        self._tags.put(self._diff_state_key, f"{ts_str}:{version}")
+        self._tags.put(self._diff_state_key(origin), f"{ts_str}:{version}")
 
-    def export_diff(self) -> str | None:
+    def export_diff(self, origin: str | None = None) -> str | None:
         """Export only the data changed since the last diff export.
 
         Changed entities are identified by their statements' ``first_seen``;
@@ -99,17 +118,30 @@ class ParquetDiffMixin:
         view (`ParquetStore.source_raw`). Each changed entity is then
         re-read *whole*, so an ADD carries its current state.
 
+        The first run writes no file – it only records the state the next diff
+        is taken against. The full picture at that point is the export itself
+        (``documents.csv`` / ``entities.ftm.json``), so a consumer starts from
+        that and follows the diffs; a copy of it under ``diffs/`` would be the
+        same bytes under a second name.
+
         Requires an optimized store: reads are canonical only after ``merge``
         (the live view does no read-time dedupe), and change detection reads
         ``first_seen``, which ``merge`` folds per statement id.
+
+        Args:
+            origin: Only diff statements from this source tag, into the
+                origin-scoped diff paths. ``None`` covers every origin.
 
         Returns:
             Timestamp string of the created diff, or None if nothing created
 
         Raises:
             RuntimeError: If the statement store has un-merged writes.
+            NotImplementedError: If ``origin`` is given and the repository has
+                no origin-scoped diffs.
         """
-        with self._tags.touch(self._diff_base_path) as now:
+        base_path = self._get_diff_base_path(origin)
+        with self._tags.touch(base_path) as now:
             current_version = self._statements.version
 
             # No table yet - nothing to diff
@@ -123,20 +155,19 @@ class ParquetDiffMixin:
             # than publish a wrong delta.
             if self._statements.needs_merge:
                 raise RuntimeError(
-                    f"Cannot export `{self._diff_base_path}`: the statement "
+                    f"Cannot export `{base_path}`: the statement "
                     "store has un-merged writes and a diff publishes canonical "
                     "entities. Run `ftm-lakehouse maintenance optimize` first."
                 )
 
-            state = self._get_diff_state()
+            state = self._get_diff_state(origin)
 
-            # No prior state – create initial diff
+            # No prior state – only record where the next diff starts
             if state is None:
-                self._write_initial_diff(now)
-                self._set_diff_state(now, current_version)
+                self._set_diff_state(now, current_version, origin)
                 ts_label = now.strftime(path.TS_FORMAT)
                 self.log.info(
-                    f"Exported initial diff for `{self._diff_base_path}`.",
+                    f"Initialized diff state for `{base_path}`.",
                     version=ts_label,
                 )
                 return ts_label
@@ -152,19 +183,21 @@ class ParquetDiffMixin:
             # first: if the version bumped but no entity has a new first_seen
             # >= last_timestamp (e.g. ``merge`` folded ``first_seen`` back)
             # there's no diff content, and no file should be opened for it.
-            changed_ids = self._get_changed_ids(last_timestamp)
+            changed_ids = self._get_changed_ids(last_timestamp, origin)
             first = next(changed_ids, None)
             if first is None:
-                self._set_diff_state(now, current_version)
+                self._set_diff_state(now, current_version, origin)
                 return
 
-            diff_uri, changed = self._write_diff(chain([first], changed_ids), now)
+            diff_uri, changed = self._write_diff(
+                chain([first], changed_ids), now, origin
+            )
 
-            self._set_diff_state(now, current_version)
+            self._set_diff_state(now, current_version, origin)
 
             ts_label = now.strftime(path.TS_FORMAT)
             self.log.info(
-                f"Exported {self._diff_base_path} diff.",
+                f"Exported {base_path} diff.",
                 version=ts_label,
                 diff_uri=mask_uri(diff_uri),
                 added_entities=changed,

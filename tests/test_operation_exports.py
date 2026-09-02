@@ -248,10 +248,11 @@ def test_operation_export_documents(tmp_path, fixtures_path):
     archive = ArchiveRepository(dataset=DATASET, uri=tmp_path)
     repo = EntityRepository(dataset=DATASET, uri=tmp_path)
 
-    # Archive files and write their entities
-    for key in ["utf.txt", "companies.csv"]:
+    # Archive files and write their entities – one of them as a crawl would,
+    # so the origin-scoped export has something to pick up
+    for key, origin in (("utf.txt", tag.CRAWL_ORIGIN), ("companies.csv", None)):
         doc = archive.store(fixtures_path / "src" / key)
-        with repo.writer() as writer:
+        with repo.writer(origin=origin) as writer:
             for entity in doc.make_entities():
                 writer.add_entity(entity)
     repo.flush()
@@ -285,3 +286,9 @@ def test_operation_export_documents(tmp_path, fixtures_path):
     assert len(docs) == 2
     for doc in docs:
         assert doc.public_url.startswith(f"https://data.example.org/{DATASET}/archive/")
+
+    # ... and the same run wrote the crawl-scoped csv next to it
+    crawl_csv = tmp_path / path.export_documents(tag.CRAWL_ORIGIN)
+    assert crawl_csv.exists()
+    crawl_docs = list(smart_stream_csv_models(crawl_csv, Document))
+    assert {d.name for d in crawl_docs} == {"utf.txt"}

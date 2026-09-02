@@ -31,7 +31,7 @@ class DownloadArchiveOperation(DatasetJobOperation[DownloadArchiveJob]):
         self.log.info(
             "Downloading archive ...",
             target=mask_uri(target.uri),
-            documents=mask_uri(self.documents.csv_uri),
+            documents=mask_uri(self.documents.csv_uri()),
         )
         for document in self.documents.stream():
             if target.exists(document.relative_path):

@@ -7,8 +7,6 @@ from itertools import chain, islice
 from typing import Generator, Iterator
 
 from anystore.io import smart_stream_csv_models, smart_write_csv, smart_write_models
-from anystore.logic.constants import CHUNK_SIZE
-from anystore.logic.io import stream
 from anystore.types import Uri
 from anystore.util import join_uri
 from ftmq.query import C, M, P, Query
@@ -48,12 +46,13 @@ class DocumentRepository(ParquetDiffMixin, DatasetHandle):
             self.uri, self.dataset, self._model.shards, self._model.compression
         )
 
-    @property
-    def csv_uri(self) -> Uri:
-        return self._store.to_uri(path.EXPORTS_DOCUMENTS)
+    def csv_uri(self, origin: str | None = None) -> Uri:
+        """Uri of the exported documents csv, optionally scoped to ``origin``."""
+        return self._store.to_uri(path.export_documents(origin))
 
-    def stream(self) -> Documents:
-        yield from smart_stream_csv_models(self.csv_uri, model=Document)
+    def stream(self, origin: str | None = None) -> Documents:
+        """Stream the exported documents csv, optionally scoped to ``origin``."""
+        yield from smart_stream_csv_models(self.csv_uri(origin), model=Document)
 
     def make_paths(self) -> dict[str, str]:
         """Compute folder structure from Folder (parent) entities.
@@ -94,8 +93,6 @@ class DocumentRepository(ParquetDiffMixin, DatasetHandle):
         q = (q or Query()).where(*Q_DOCUMENTS).select(*SELECT)
         for d in self._statements._query_data(q):
             d = d.to_dict()
-            if d.get("schema") == "Folder":
-                continue
             document = Document.from_entity_dict(d)
             if public_prefix:
                 document.public_url = join_uri(
@@ -111,56 +108,74 @@ class DocumentRepository(ParquetDiffMixin, DatasetHandle):
             if not yielded:
                 yield document
 
-    def export_csv(self) -> None:
+    def export_csv(self, origin: str | None = None) -> None:
+        """Export the document metadata csv, optionally scoped to ``origin``.
+
+        Args:
+            origin: Only export documents asserted by this source tag, into
+                the origin-scoped export path. ``None`` exports every origin.
+        """
         # Short-circuit before the per-partition iteration when the dataset has
         # no documents – a single count(DISTINCT entity_id) that file-skips
-        # on the schema filter, so a document-free dataset costs one fast query
-        # instead of scanning every partition (twice, via the initial diff).
-        count_query = Query(*Q_DOCUMENTS).select(*SELECT)
-        if self._statements.count(count_query) == 0:
+        # on the schema filter (and prunes to the origin partition when
+        # scoped), so a document-free dataset costs one fast query instead of
+        # scanning every partition.
+        q = Query(C(origin=origin)) if origin else Query()
+        if self._statements.count(q.where(*Q_DOCUMENTS).select(*SELECT)) == 0:
             return
-        docs = self.collect()
+        docs = self.collect(q)
         first = next(docs, None)
         if first is None:
             return
-        smart_write_models(self.csv_uri, chain([first], docs), output_format="csv")
+        smart_write_models(
+            self.csv_uri(origin), chain([first], docs), output_format="csv"
+        )
 
     # DiffMixin implementation
 
     _diff_base_path = path.DIFFS_DOCUMENTS
 
-    def _get_changed_ids(self, since: datetime) -> Iterator[str]:
+    def _get_diff_base_path(self, origin: str | None = None) -> str:
+        """Each origin scope diffs into its own path, tag and state key."""
+        return path.diffs_documents(origin)
+
+    def _get_changed_ids(
+        self, since: datetime, origin: str | None = None
+    ) -> Iterator[str]:
         """Get Document entity IDs with contentHash changes since the given timestamp."""
         q = Query(*Q_DOCUMENTS, (C(first_seen__gte=since) | C(deleted_at__gte=since)))
+        if origin:
+            q = q.where(C(origin=origin))
         return self._statements.get_entity_ids(q, source=self._statements.source_raw)
 
-    def _write_diff(self, entity_ids: Iterator[str], ts: datetime) -> tuple[str, int]:
+    def _write_diff(
+        self, entity_ids: Iterator[str], ts: datetime, origin: str | None = None
+    ) -> tuple[str, int]:
         """Write documents as CSV with an op column."""
-        key = path.documents_diff(ts)
+        key = path.documents_diff(ts, origin)
         changed: set[str] = set(entity_ids)
         with self._store.open(key, "w") as o:
-            smart_write_csv(o, self._get_delta_documents(changed))
+            smart_write_csv(o, self._get_delta_documents(changed, origin))
         return self._store.to_uri(key), len(changed)
 
-    def _get_delta_documents(self, entity_ids: set[str]) -> Generator[dict, None, None]:
+    def _get_delta_documents(
+        self, entity_ids: set[str], origin: str | None = None
+    ) -> Generator[dict, None, None]:
+        """ADD the changed documents as they stand, DEL the ones that are gone.
+
+        The lookup carries the same ``origin`` scope as the export it belongs
+        to, so a diff describes exactly the csv next to it: a document whose
+        statements for this origin are all tombstoned falls out of the ADD set
+        and is published as a DEL, even when other origins still assert it.
+        """
         seen_ids: set[str] = set()
         it = iter(entity_ids)
         while batch := set(islice(it, QUERY_IN_BATCH_SIZE)):
-            for doc in self.collect(Query(M(entity_id__in=batch))):
+            q = Query(M(entity_id__in=batch))
+            if origin:
+                q = q.where(C(origin=origin))
+            for doc in self.collect(q):
                 seen_ids.add(doc.id)
                 yield {"op": "ADD", **doc.model_dump(by_alias=True, mode="json")}
         for entity_id in entity_ids - seen_ids:
             yield {"op": "DEL", "id": entity_id}
-
-    def _write_initial_diff(self, ts: datetime) -> None:
-        """Copy over exported documents.csv to initial diff version"""
-        if not self._store.exists(path.EXPORTS_DOCUMENTS):
-            self.log.info(
-                f"Exporting `{path.EXPORTS_DOCUMENTS}` first to create initial diff."
-            )
-            self.export_csv()
-        if not self._store.exists(path.EXPORTS_DOCUMENTS):
-            return
-        with self._store.open(path.EXPORTS_DOCUMENTS, "rb") as i:
-            with self._store.open(path.documents_diff(ts), "wb") as o:
-                stream(i, o, CHUNK_SIZE * 4)  # 1MB

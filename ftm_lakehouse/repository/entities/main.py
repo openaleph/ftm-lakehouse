@@ -7,7 +7,6 @@ from functools import cached_property
 from itertools import islice
 from typing import IO, Generator, Iterable, Iterator, cast
 
-import orjson
 import pyarrow as pa
 from anystore.io import smart_open, smart_write_json
 from anystore.types import SDict, Uri
@@ -551,13 +550,21 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
     _diff_base_path = path.DIFFS_ENTITIES
 
     @no_api
-    def _get_changed_ids(self, since: datetime) -> Iterator[str]:
-        """Get entity IDs with statements added since the given timestamp."""
+    def _get_changed_ids(
+        self, since: datetime, origin: str | None = None
+    ) -> Iterator[str]:
+        """Get entity IDs with statements added since the given timestamp.
+
+        ``origin`` is never set – entity diffs are not origin-scoped, and
+        `ParquetDiffMixin._get_diff_base_path` refuses one upfront.
+        """
         q = Query(C(first_seen__gte=since) | C(deleted_at__gte=since))
         return self._statements.get_entity_ids(q, source=self._statements.source_raw)
 
     @no_api
-    def _write_diff(self, entity_ids: Iterator[str], ts: datetime) -> tuple[str, int]:
+    def _write_diff(
+        self, entity_ids: Iterator[str], ts: datetime, origin: str | None = None
+    ) -> tuple[str, int]:
         """Write entities as line-based JSON with operation envelopes."""
         key = path.entities_diff(ts, self.compression)
         changed: set[str] = set(entity_ids)
@@ -605,24 +612,3 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
                 yield make_envelope(entity.to_dict())
         for entity_id in entity_ids - seen_ids:
             yield make_envelope({"id": entity_id}, op="DEL")
-
-    @no_api
-    def _write_initial_diff(self, ts: datetime) -> None:
-        """Copy over exported entities.ftm.json to initial diff version.
-
-        Both artifacts carry the dataset's codec, so the payload is decoded
-        on the way in and re-encoded on the way out – the envelope is added
-        per line, so this cannot be a byte copy.
-        """
-        with (
-            self._store.open(self.ENTITIES_JSON, "rb") as i,
-            decompress_stream(i, self.compression) as raw,
-            self._store.open(path.entities_diff(ts, self.compression), "wb") as o,
-            compress_stream(o, self.compression) as out,
-        ):
-            for data in raw:
-                line = orjson.dumps(
-                    make_envelope(orjson.loads(data)),
-                    option=orjson.OPT_APPEND_NEWLINE,
-                )
-                out.write(line)

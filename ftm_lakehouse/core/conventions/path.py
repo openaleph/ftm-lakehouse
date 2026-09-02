@@ -55,6 +55,7 @@ Dataset Layout
                 statistics.json             # entity counts, facets
                 statements.csv              # sorted statements
                 documents.csv               # document metadata
+                documents.{origin}.csv      # document metadata (origin-scoped)
                 graph.cypher                # neo4j export (optional)
 
             diffs/
@@ -63,6 +64,8 @@ Dataset Layout
                 exports/
                     documents.csv/
                         20240116T103000000000Z.diff.csv  # documents delta
+                    documents.{origin}.csv/
+                        20240116T103000000000Z.diff.csv  # origin-scoped delta
 
             jobs/
                 runs/
@@ -301,24 +304,61 @@ def exports_statements(suffix: str | None = None) -> str:
 EXPORTS_DOCUMENTS = f"{EXPORTS}/documents.csv"
 """documents metadata to stream"""
 
+
+def export_documents(origin: str | None = None) -> str:
+    """Get path for the documents metadata export, optionally origin-scoped.
+
+    Layout: ``exports/documents.csv`` / ``exports/documents.{origin}.csv``
+
+    Args:
+        origin: Source tag to scope the export to – validated so it stays a
+            single path segment. ``None`` exports every origin.
+
+    Returns:
+        Path to the documents csv
+    """
+    if not origin:
+        return EXPORTS_DOCUMENTS
+    validate_origin(origin)
+    return f"{EXPORTS}/documents.{origin}.csv"
+
+
 DIFFS = "diffs"
 """Base path for diff exports"""
 
 DIFFS_DOCUMENTS = f"{DIFFS}/{EXPORTS_DOCUMENTS}"
 """Base path for document.csv diffs"""
 
+
+def diffs_documents(origin: str | None = None) -> str:
+    """Get the base path for documents diffs, optionally origin-scoped.
+
+    Layout: ``diffs/exports/documents.csv`` /
+    ``diffs/exports/documents.{origin}.csv``
+
+    Args:
+        origin: Source tag the diffs are scoped to. ``None`` covers every
+            origin.
+
+    Returns:
+        Base path for the diff files (which doubles as their freshness tag)
+    """
+    return f"{DIFFS}/{export_documents(origin)}"
+
+
 DIFFS_ENTITIES = f"{DIFFS}/{ENTITIES_JSON}"
 """Base path for entities.ftm.json diffs"""
 
 
-def documents_diff(ts: datetime | None = None) -> str:
+def documents_diff(ts: datetime | None = None, origin: str | None = None) -> str:
     """
     Get path for a documents diff export file.
 
-    Layout: diffs/exports/documents.csv/{ts}.diff.csv
+    Layout: diffs/exports/documents[.{origin}].csv/{ts}.diff.csv
 
     Args:
         ts: Compact timestamp (YYYYMMDDTHHMMSSZ), defaults to current time
+        origin: Source tag the diff is scoped to. ``None`` covers every origin.
 
     Returns:
         Path to diff file
@@ -326,7 +366,7 @@ def documents_diff(ts: datetime | None = None) -> str:
     if ts is None:
         ts = utc_now()
     ts_iso = ts.strftime(TS_FORMAT)
-    return f"{DIFFS_DOCUMENTS}/{ts_iso}.diff.csv"
+    return f"{diffs_documents(origin)}/{ts_iso}.diff.csv"
 
 
 def entities_diff(ts: datetime | None = None, suffix: str | None = None) -> str:

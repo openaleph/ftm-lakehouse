@@ -29,7 +29,8 @@ lakehouse/
     ├── exports/
     │   ├── statements.csv[.gz|.zst]  # Sorted statements export
     │   ├── statistics.json           # Entity counts, facets
-    │   └── documents.csv             # Document metadata
+    │   ├── documents.csv             # Document metadata
+    │   └── documents.{origin}.csv    # Document metadata, one origin only
     │
     ├── diffs/                    # Timestamped delta diff exports
     ├── versions/                 # Versioned snapshots (config, index, ...)

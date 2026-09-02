@@ -82,12 +82,19 @@ def _export_entities(
         op.entities.export_diff()
 
 
+DOCUMENT_ORIGINS: tuple[str | None, ...] = (None, tag.CRAWL_ORIGIN)
+"""Scopes the documents export is written for – every origin, plus a csv /
+diff series restricted to crawled files, so a consumer of the crawl can follow
+it without the archive's other sources bleeding in."""
+
+
 def _export_documents(
     op: "ExportOperation", run: JobRun[ExportJob], **kwargs: Any
 ) -> None:
-    op.documents.export_csv()
-    if run.job.make_diff:
-        op.documents.export_diff()
+    for origin in DOCUMENT_ORIGINS:
+        op.documents.export_csv(origin)
+        if run.job.make_diff:
+            op.documents.export_diff(origin)
 
 
 def _export_statistics(op: "ExportOperation", *args, **kwargs) -> None:
@@ -105,7 +112,7 @@ def _export_index(op: "ExportOperation", *args, **kwargs) -> None:
         for key, mime_type in (
             (entities.EXPORTS_STATEMENTS, CSV),
             (entities.ENTITIES_JSON, FTM),
-            (path.EXPORTS_DOCUMENTS, CSV),
+            *((path.export_documents(o), CSV) for o in DOCUMENT_ORIGINS),
             (path.EXPORTS_STATISTICS, JSON),
         ):
             _apply_resource(dataset, store, key, public_prefix, mime_type)

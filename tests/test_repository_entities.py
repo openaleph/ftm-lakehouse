@@ -145,15 +145,14 @@ def test_repository_entities_multi_origin(repo):
 def test_repository_entities_export_diff(tmp_path):
     """Test incremental diff export using change detection.
 
-    Initial diff copies entities.ftm.json regardless of Delta table version.
-    Subsequent diffs capture incremental changes via translog timestamps.
+    The first export writes no file - it only records the state the next diff
+    is taken against. Subsequent diffs capture incremental changes via
+    translog timestamps.
 
     Sleeps cross second boundaries because FtM truncates timestamps to seconds
     and diff detection uses first_seen >= floor(since).
     """
     import time
-
-    from ftmq.io import smart_write_proxies
 
     repo = EntityRepository("test", tmp_path)
 
@@ -173,24 +172,14 @@ def test_repository_entities_export_diff(tmp_path):
     # a diff reads canonical rows, so the store has to be merged first
     repo.merge()
 
-    # Export entities.ftm.json (required for initial diff)
-    smart_write_proxies(repo._store.open(path.ENTITIES_JSON, "wb"), repo.query())
-
-    # Initial diff - copies entities.ftm.json even though table is at v1
+    # First export - only records the diff state, writes no file
     diff_name_1 = repo.export_diff()
     assert diff_name_1 is not None
     assert diff_name_1.endswith("Z")  # timestamp format
     diff_files = list(
         repo._store.iterate_keys(prefix=path.DIFFS_ENTITIES, glob="*.delta.json")
     )
-    assert len(diff_files) == 1  # Initial diff file created
-
-    # Verify initial diff contains both JANE and JOHN (full export)
-    with repo._store.open(diff_files[0]) as f:
-        lines = f.readlines()
-    assert len(lines) == 2
-    entities = {json.loads(line)["entity"]["id"] for line in lines}
-    assert entities == {"jane", "john"}
+    assert len(diff_files) == 0
 
     # Add more data: creates Delta table v2
     with repo.writer() as writer:
@@ -206,11 +195,11 @@ def test_repository_entities_export_diff(tmp_path):
     diff_files = list(
         repo._store.iterate_keys(prefix=path.DIFFS_ENTITIES, glob="*.delta.json")
     )
-    assert len(diff_files) == 2
+    assert len(diff_files) == 1
 
     # Find and verify the incremental diff contains only BOB
     diff_files_sorted = sorted(diff_files)
-    with repo._store.open(diff_files_sorted[1]) as f:
+    with repo._store.open(diff_files_sorted[0]) as f:
         lines = f.readlines()
     assert len(lines) == 1
     delta = json.loads(lines[0])
@@ -227,7 +216,7 @@ def test_repository_entities_export_diff(tmp_path):
     diff_files = list(
         repo._store.iterate_keys(prefix=path.DIFFS_ENTITIES, glob="*.delta.json")
     )
-    assert len(diff_files) == 2
+    assert len(diff_files) == 1
 
     # Updating Jane firstName creates diff
     with repo.writer() as writer:
@@ -240,13 +229,13 @@ def test_repository_entities_export_diff(tmp_path):
     diff_files = list(
         repo._store.iterate_keys(prefix=path.DIFFS_ENTITIES, glob="*.delta.json")
     )
-    assert len(diff_files) == 3
+    assert len(diff_files) == 2
 
     # Find and verify the incremental diff contains only JANE - and carries
     # her whole current state, not just the statement that changed: consumers
     # index an ADD payload wholesale, so a partial one would drop `name`
     diff_files_sorted = sorted(diff_files)
-    with repo._store.open(diff_files_sorted[2]) as f:
+    with repo._store.open(diff_files_sorted[1]) as f:
         lines = f.readlines()
     assert len(lines) == 1
     delta = json.loads(lines[0])
@@ -264,8 +253,6 @@ def test_repository_entities_export_diff_delete(tmp_path):
     The merge is what applies the tombstone – until it runs, the deleted
     entity's rows are still live – which is why a diff requires an optimized
     store (covered by ``..._requires_optimized_store``)."""
-    from ftmq.io import smart_write_proxies
-
     repo = EntityRepository("test", tmp_path)
 
     # Add two entities and flush
@@ -275,11 +262,7 @@ def test_repository_entities_export_diff_delete(tmp_path):
     repo.flush()
     repo.merge()
 
-    # Export entities.ftm.json (required for initial diff)
-    entities_json_path = tmp_path / path.ENTITIES_JSON
-    smart_write_proxies(str(entities_json_path), repo.query())
-
-    # Initial diff
+    # First export - only records the diff state
     diff_name_1 = repo.export_diff()
     assert diff_name_1 is not None
 
@@ -302,10 +285,10 @@ def test_repository_entities_export_diff_delete(tmp_path):
         (tmp_path / path.DIFFS_ENTITIES).glob("*.delta.json"),
         key=lambda p: p.name,
     )
-    assert len(diff_files) == 2
+    assert len(diff_files) == 1
 
-    # Read the incremental diff (second file)
-    with open(diff_files[1]) as f:
+    # Read the incremental diff
+    with open(diff_files[0]) as f:
         lines = f.readlines()
 
     ops = [json.loads(line) for line in lines]
@@ -352,8 +335,6 @@ def test_repository_entities_export_diff_fragment_update(tmp_path):
     into the ADD entity - and the superseding row keeps its own ``first_seen``
     (``_dedupe_sql`` folds per statement id), so the update is detected at
     all."""
-    from ftmq.io import smart_write_proxies
-
     repo = EntityRepository("test", tmp_path)
 
     t1 = datetime.now(timezone.utc).isoformat()
@@ -370,8 +351,6 @@ def test_repository_entities_export_diff_fragment_update(tmp_path):
     repo.flush()
     repo.merge()
 
-    entities_json_path = tmp_path / path.ENTITIES_JSON
-    smart_write_proxies(str(entities_json_path), repo.query())
     assert repo.export_diff() is not None
 
     # Re-emit the same fragment with a changed name; no merge before diffing.
@@ -402,8 +381,6 @@ def test_repository_entities_export_diff_fragment_update(tmp_path):
 
 def test_repository_entities_export_diff_no_changes(tmp_path):
     """Test diff export when there are no new changes after initial setup."""
-    from ftmq.io import smart_write_proxies
-
     repo = EntityRepository("test", tmp_path)
 
     # Create data and flush
@@ -421,11 +398,7 @@ def test_repository_entities_export_diff_no_changes(tmp_path):
     # a diff reads canonical rows, so the store has to be merged first
     repo.merge()
 
-    # Export entities.ftm.json for initial diff
-    entities_json_path = tmp_path / path.ENTITIES_JSON
-    smart_write_proxies(str(entities_json_path), repo.query())
-
-    # Initial diff - copies entities.ftm.json
+    # First export - only records the diff state
     diff_name_1 = repo.export_diff()
     assert diff_name_1 is not None
     assert diff_name_1.endswith("Z")
@@ -433,9 +406,9 @@ def test_repository_entities_export_diff_no_changes(tmp_path):
     # Second diff without any new data - no new diff file
     assert repo.export_diff() is None
 
-    # Only one diff file should exist (initial)
+    # No diff file at all - the first export writes none
     diff_files = list((tmp_path / path.DIFFS_ENTITIES).glob("*.delta.json"))
-    assert len(diff_files) == 1
+    assert len(diff_files) == 0
 
 
 def test_repository_entities_export_diff_partial_delete_keeps_the_entity(tmp_path):
@@ -444,8 +417,6 @@ def test_repository_entities_export_diff_partial_delete_keeps_the_entity(tmp_pat
     ``DEL`` means the entity is gone entirely; the entity here still exists,
     so a whole-entity DEL would tell consumers to drop something live.
     """
-    from ftmq.io import smart_write_proxies
-
     repo = EntityRepository("test", tmp_path)
     jane = EntityProxy.from_dict(
         {
@@ -459,7 +430,6 @@ def test_repository_entities_export_diff_partial_delete_keeps_the_entity(tmp_pat
     repo.flush()
     repo.merge()
 
-    smart_write_proxies(str(tmp_path / path.ENTITIES_JSON), repo.query())
     assert repo.export_diff() is not None
 
     victim = next(
@@ -500,7 +470,4 @@ def test_repository_entities_export_diff_requires_optimized_store(tmp_path):
     repo.merge()
     assert not repo._statements.needs_merge
 
-    from ftmq.io import smart_write_proxies
-
-    smart_write_proxies(str(tmp_path / path.ENTITIES_JSON), repo.query())
     assert repo.export_diff() is not None

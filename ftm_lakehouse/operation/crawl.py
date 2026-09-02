@@ -216,6 +216,7 @@ def crawl(
         exclude_glob: Glob pattern for keys to exclude
         make_entities: Create file entities from crawled files
         existing: Ignore already existing (by relative path, checksum) or overwrite
+        store_metadata: Create metadata json for each file
         uri: Dataset storage root override (keyword-only – ``source`` is the
             crawl origin, this is where the dataset lives)
 

@@ -18,7 +18,7 @@ from ftm_lakehouse.logic.compress import CompressKind, decompress_stream
 from ftm_lakehouse.operation import ExportKind, export
 from ftm_lakehouse.repository.base import DatasetRef
 from ftm_lakehouse.repository.factories import get_entities
-from tests.shared import JANE, JOHN
+from tests.shared import BOB, JANE, JOHN
 
 MAGIC = {CompressKind.gz: b"\x1f\x8b", CompressKind.zst: b"\x28\xb5\x2f\xfd"}
 
@@ -80,16 +80,22 @@ def test_export_compression_from_dataset_config(tmp_path, algorithm):
         ids = {orjson.loads(line)["id"] for line in fh}
     assert ids == {"jane", "john"}
 
-    # the initial diff carries the same codec (it re-encodes per line, since
-    # each entity gets an envelope)
-    store = get_entities(*dataset)._store
-    (diff_key,) = list(store.iterate_keys(prefix=path.DIFFS_ENTITIES))
+    # a diff carries the same codec (it re-encodes per line, since each
+    # entity gets an envelope). The first export only records the state, so
+    # write one more entity to get an actual diff file.
+    entities_repo = get_entities(*dataset)
+    with entities_repo.writer() as bulk:
+        bulk.add_entity(make_entity(BOB))
+    entities_repo.flush()
+    export(dataset.name, ExportKind.entities, dataset.uri, force=True)
+
+    (diff_key,) = list(entities_repo._store.iterate_keys(prefix=path.DIFFS_ENTITIES))
     diff = _read(dataset, diff_key)
     assert diff.startswith(MAGIC[algorithm])
     with decompress_stream(io.BytesIO(diff), algorithm) as fh:
         envelopes = [orjson.loads(line) for line in fh]
-    assert {e["entity"]["id"] for e in envelopes} == {"jane", "john"}
+    assert {e["entity"]["id"] for e in envelopes} == {"bob"}
     assert {e["op"] for e in envelopes} == {"ADD"}
 
-    # and the read-back path decodes it again
-    assert {e.id for e in get_entities(*dataset).stream()} == {"jane", "john"}
+    # and the read-back path decodes it again (the re-export carries bob too)
+    assert {e.id for e in get_entities(*dataset).stream()} == {"jane", "john", "bob"}

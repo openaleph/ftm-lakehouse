@@ -25,7 +25,7 @@ Batch file ingestion from a source location.
 
 ## ExportOperation
 
-One operation for all exports, dispatched by `ExportKind`: `statements` (`exports/statements.csv`), `entities` (`entities.ftm.json`), `documents` (`exports/documents.csv`), `statistics` (`exports/statistics.json`), `index` (`index.json`).
+One operation for all exports, dispatched by `ExportKind`: `statements` (`exports/statements.csv`), `entities` (`entities.ftm.json`), `documents` (`exports/documents.csv`, plus `exports/documents.crawl.csv` scoped to crawled files – each with its own diff series), `statistics` (`exports/statistics.json`), `index` (`index.json`).
 
 ::: ftm_lakehouse.operation.export.ExportKind
     options:

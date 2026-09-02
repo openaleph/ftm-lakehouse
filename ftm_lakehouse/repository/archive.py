@@ -208,12 +208,14 @@ class ArchiveRepository(DatasetHandle):
                 return fh.checksum
 
             self.log.info(f"Storing blob `{fh.checksum}` ...", checksum=fh.checksum)
-            self.write_blob(fh, fh.checksum)
+            self.write_blob(fh, fh.checksum, check_exists=False)
             return fh.checksum
 
-    def write_blob(self, fh: BinaryIO, checksum: str | None = None) -> str:
+    def write_blob(
+        self, fh: BinaryIO, checksum: str | None = None, check_exists: bool = True
+    ) -> str:
         """Write a blob from the given open file-handler"""
-        if checksum and self.exists(checksum):
+        if check_exists and checksum and self.exists(checksum):
             self.log.debug("Blob already exists, skipping", checksum=checksum)
             return checksum
         if not checksum:
