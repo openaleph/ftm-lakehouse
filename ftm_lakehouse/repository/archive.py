@@ -1,6 +1,7 @@
 """ArchiveRepository - file archive operations using content-addressed blob
 storage, JSON metadata, and optional extracted fulltext."""
 
+from datetime import datetime
 from pathlib import Path
 from typing import IO, Any, BinaryIO, ContextManager
 
@@ -176,7 +177,7 @@ class ArchiveRepository(DatasetHandle):
             self._files.put(file.meta_path, file)
         if tag_updated:
             # Notify archive was updated
-            self._tags.set(tag.ARCHIVE_UPDATED)
+            self.touch()
 
         self.log.info(
             f"Archived `{file.key} ({file.checksum})`",
@@ -272,3 +273,7 @@ class ArchiveRepository(DatasetHandle):
         """Get raw data at the given path"""
         key = join_relpaths(make_checksum_key(checksum), path)
         return self._store.get(key)
+
+    def touch(self) -> datetime:
+        with self._tags.touch(tag.ARCHIVE_UPDATED) as now:
+            return now
