@@ -28,7 +28,7 @@ Dataset Layout
 
             .LOCK                           # dataset-wide maintenance lock
             .LOCK-APPENDS/                  # in-flight append markers
-            locks/{tenant}/                 # operation-specific locks
+            .locks/{tenant}/                 # operation-specific locks
             tags/{tenant}/                  # workflow state / cache
 
             archive/                        # content-addressed file storage
@@ -36,12 +36,6 @@ Dataset Layout
                     blob                    # file blob (stored once)
                     {file_id}.json          # metadata (one per source path)
                     {origin}.txt            # extracted text (one per engine)
-
-            mappings/
-                {content_hash}/
-                    mapping.yml             # current CSV mapping configuration
-                    versions/               # versioned snapshots
-                        YYYY/MM/...
 
             statements/                     # statement store (shard-partitioned)
                 shard={shard}/
@@ -53,19 +47,19 @@ Dataset Layout
 
             exports/
                 statistics.json             # entity counts, facets
-                statements.csv              # sorted statements
-                documents.csv               # document metadata
-                documents.{origin}.csv      # document metadata (origin-scoped)
+                statements.csv[.zst|gzip]   # sorted statements
+                documents.csv[.zst|gzip]    # document metadata
+                documents.{origin}.csv[...] # document metadata (origin-scoped)
                 graph.cypher                # neo4j export (optional)
 
-            diffs/
-                entities.ftm.json/
-                    20240116T103000000000Z.delta.json  # entities delta
+            diffs/                          # dirs are codec-free (they double
+                entities.ftm.json/          #   as freshness tags); the files
+                    {ts}.delta.json[.zst|gzip]         # entities delta
                 exports/
                     documents.csv/
-                        20240116T103000000000Z.diff.csv  # documents delta
+                        {ts}.diff.csv[.zst|gzip]       # documents delta
                     documents.{origin}.csv/
-                        20240116T103000000000Z.diff.csv  # origin-scoped delta
+                        {ts}.diff.csv[.zst|gzip]       # origin-scoped delta
 
             jobs/
                 runs/
@@ -75,75 +69,71 @@ Dataset Layout
 
 from datetime import datetime
 
-from anystore.util import ensure_uuid, join_relpaths
-from banal import hash_data
-from rigour.time import utc_now
-
+from ftm_lakehouse.logic.path import (
+    CallableKey,
+    DateTimeKey,
+    JobsKey,
+    ScopedKey,
+    StoreKey,
+    make_ts,
+)
 from ftm_lakehouse.util import make_checksum_key, safe_name, validate_origin
 
 TENANT = "lakehouse"
 """Default tenant name"""
 
-INDEX = "index.json"
+INDEX = StoreKey("index.json")
 """generated index filename"""
 
-CONFIG = "config.yml"
+CONFIG = StoreKey("config.yml")
 """user editable config filename"""
 
-STATISTICS = "statistics.json"
+STATISTICS = StoreKey("statistics.json")
 """computed statistics filename"""
 
 TS_FORMAT = "%Y%m%dT%H%M%S%fZ"
 """Global format for timestamps in files"""
 
-VERSIONS = "versions"
-"""Base path for versions"""
+
+class VersionsKey(CallableKey):
+    """``versions/``: a prefix to iterate, and a factory for one snapshot."""
+
+    def __init__(self) -> None:
+        super().__init__("versions")
+
+    def __call__(self, name: str, ts: datetime | str | None = None) -> StoreKey:
+        """Get a versioned snapshot path for a file (``index.json``, ``config.yml``).
+
+        Layout: ``versions/YYYY/MM/{TS_FORMAT}/<name>``
+
+        Args:
+            name: The file name to version (e.g. ``config.yml``, ``index.json``)
+            ts: Timestamp of the snapshot, omit to use current time
+
+        Returns:
+            Key like ``versions/2025/01/20250115T103000000000Z/config.yml``
+        """
+        if not isinstance(ts, str):
+            ts = make_ts(ts, TS_FORMAT)
+        return self / ts[:4] / ts[4:6] / ts / name
 
 
-def version(name: str, ts: str | None = None) -> str:
-    """
-    Get a versioned snapshot path for a file, e.g. for index.json or config.yml
+VERSIONS = VersionsKey()
+"""Base path for versions, and the factory for one snapshot"""
 
-    Layout: versions/YYYY/MM/{TS_FORMAT}/<name>
-
-    Args:
-        name: The file name to version (e.g. "config.yml", "index.json")
-        ts: ISO timestamp, omit to use current time
-
-    Returns:
-        Path like "versions/2025/01/20250115T103000/config.yml"
-    """
-    if ts is None:
-        ts = utc_now().strftime(TS_FORMAT)
-
-    year = ts[:4]
-    month = ts[4:6]
-    return f"{VERSIONS}/{year}/{month}/{ts}/{name}"
-
-
-LOCK = ".LOCK"
+LOCK = StoreKey(".LOCK")
 """dataset-wide maintenance lock key name"""
 
-LOCK_APPENDS = ".LOCK-APPENDS"
+LOCK_APPENDS = StoreKey(".LOCK-APPENDS")
 """Prefix for per-writer append marker keys (shared side of the write fence)"""
 
-LOCKS = "locks"
-"""Base path for storing locks"""
+LOCKS = ScopedKey(".locks", TENANT)
+"""Locks, under the default tenant: ``.locks/lakehouse/``.
+``LOCKS["other"]`` for another tenant."""
 
-
-def lock(*parts: str, tenant: str | None = TENANT) -> str:
-    """Generate a path to store a lock"""
-    return join_relpaths(LOCKS, tenant or TENANT, *parts)
-
-
-TAGS = "tags"
-"""Base path for dataset tags cache"""
-
-
-def tag(*parts: str, tenant: str | None = TENANT) -> str:
-    """Generate a path to store a tag"""
-    return join_relpaths(TAGS, tenant or TENANT, *parts)
-
+TAGS = ScopedKey("tags", TENANT)
+"""Freshness tags, under the default tenant: ``tags/lakehouse/``
+``TAGS["other"]`` for another tenant."""
 
 ARCHIVE = "archive"
 """Base path for archive"""
@@ -152,259 +142,104 @@ ARCHIVE_BLOB = "blob"
 """blob filename within checksum directory"""
 
 
-def archive_prefix(checksum: str) -> str:
-    """
-    Get the directory path for a file in the archive.
+class ArchiveKey(StoreKey):
+    """The directory holding one archived file, and the files in it.
 
-    Layout: archive/5a/6a/cf/5a6acf229ba576d9a40b09292595658bbb74ef56/
+    Layout: ``archive/5a/6a/cf/5a6acf229ba576d9a40b09292595658bbb74ef56/``
 
-    Args:
-        checksum: SHA256 checksum of file
-    """
-    return f"{ARCHIVE}/{make_checksum_key(checksum)}"
-
-
-def archive_blob(checksum: str) -> str:
-    """
-    Get the blob path for a file in the archive.
-
-    Layout: archive/5a/6a/cf/5a6acf229ba576d9a40b09292595658bbb74ef56/blob
+    One checksum is stored once, but it can have arrived by several source
+    paths and been read by several text extractors – hence
+    [`meta`][ArchiveKey.meta] and [`txt`][ArchiveKey.txt] being keyed rather
+    than fixed like [`blob`][ArchiveKey.blob].
 
     Args:
-        checksum: SHA256 checksum of file
+        checksum: SHA256 checksum of the file
     """
-    return f"{archive_prefix(checksum)}/{ARCHIVE_BLOB}"
+
+    def __init__(self, checksum: str) -> None:
+        super().__init__(ARCHIVE, make_checksum_key(checksum))
+
+    @property
+    def blob(self) -> StoreKey:
+        """The file's content, stored once per checksum."""
+        return self / ARCHIVE_BLOB
+
+    def meta(self, file_id: str) -> StoreKey:
+        """Metadata for one file instance.
+
+        Several files with the same checksum but different source paths each
+        get their own metadata, keyed by their ``File.id``.
+
+        Layout: ``archive/5a/6a/cf/.../file-abc123.json``
+
+        Args:
+            file_id: The ``File.id`` (hash of source path + checksum)
+
+        Raises:
+            ValueError: If ``file_id`` is malformed.
+        """
+        return self / f"{safe_name(file_id, 'file_id')}.json"
+
+    def txt(self, origin: str) -> StoreKey:
+        """Extracted text for one extraction origin.
+
+        Several extractions can exist per file, keyed by origin (different OCR
+        engines or extraction methods).
+
+        Layout: ``archive/5a/6a/cf/.../{origin}.txt``
+
+        Args:
+            origin: The extraction origin / engine name
+
+        Raises:
+            ValueError: If ``origin`` is malformed.
+        """
+        return self / f"{validate_origin(origin)}.txt"
 
 
-def archive_meta(checksum: str, file_id: str) -> str:
-    """
-    Get a file metadata path for a specific file instance.
-
-    Multiple files with the same checksum but different source paths
-    each get their own metadata file, keyed by their File.id.
-
-    Layout: archive/5a/6a/cf/.../file-abc123.json
-
-    Args:
-        checksum: SHA256 checksum of file
-        file_id: The File.id (hash of source path + checksum)
-
-    Raises:
-        ValueError: If ``checksum`` or ``file_id`` is malformed.
-    """
-    safe_name(file_id, "file_id")
-    return f"{archive_prefix(checksum)}/{file_id}.json"
-
-
-def archive_txt(checksum: str, origin: str) -> str:
-    """
-    Get a file text content path for a specific extraction origin.
-
-    Multiple text extractions can exist per file, keyed by origin
-    (e.g., different OCR engines or extraction methods).
-
-    Layout: archive/5a/6a/cf/.../{origin}.txt
-
-    Args:
-        checksum: SHA256 checksum of file
-        origin: The extraction origin/engine name
-
-    Raises:
-        ValueError: If ``checksum`` or ``origin`` is malformed.
-    """
-    validate_origin(origin)
-    return f"{archive_prefix(checksum)}/{origin}.txt"
-
-
-MAPPINGS = "mappings"
-"""Base path for storing mappings"""
-
-MAPPING = "mapping.yml"
-"""mapping file name"""
-
-
-def mapping(content_hash: str) -> str:
-    """
-    Get the mapping.yml path for the given file SHA256.
-
-    Layout: mappings/{content_hash}/mapping.yml
-    """
-    return f"{MAPPINGS}/{content_hash}/{MAPPING}"
-
-
-ENTITIES_JSON = "entities.ftm.json"
-"""aggregated entities file name"""
-
-
-def entities_json(suffix: str | None = None) -> str:
-    if not suffix:
-        return ENTITIES_JSON
-    return f"{ENTITIES_JSON}.{suffix}"
+ENTITIES_JSON = StoreKey("entities.ftm.json")
+"""aggregated entities export – the identity; ``+ compression`` for the artifact"""
 
 
 STATEMENTS = "statements"
 """Base path for storing statement data (partitioned by shard, bucket, origin)"""
 
 
-def shard_hex_width(shards: int) -> int:
-    """Hex width required to represent `shards-1` (zero-padded).
-
-    Examples: 1→1, 8→1, 16→1, 32→2, 256→2, 4096→3.
-    """
-    if shards <= 1:
-        return 1
-    return max(1, ((shards - 1).bit_length() + 3) // 4)
-
-
-def entity_shard(entity_id: str, shards: int) -> str:
-    """Hex shard key for an entity id under a uniform shard count.
-
-    Uses the first 8 hex chars of the entity_id hash, taken mod ``shards``,
-    then zero-padded to ``shard_hex_width(shards)``.
-    """
-    if shards <= 1:
-        return "0"
-    bucket = int(hash_data(entity_id)[:8], 16) % shards
-    return f"{bucket:0{shard_hex_width(shards)}x}"
-
-
-def statement_origin(origin: str) -> str:
-    """
-    Get path prefix for given origin, following parquet partition pattern
-
-    Args:
-        origin: The origin, or phase, or stage
-
-    Raises:
-        ValueError: If ``origin`` is malformed.
-    """
-    validate_origin(origin)
-    return f"{STATEMENTS}/origin={origin}"
-
-
-EXPORTS = "exports"
+EXPORTS = StoreKey("exports")
 """Base path for exports"""
 
-EXPORTS_STATISTICS = f"{EXPORTS}/{STATISTICS}"
+EXPORTS_STATISTICS = EXPORTS / STATISTICS
 """entity counts, pre-computed facts file path"""
 
-EXPORTS_CYPHER = f"{EXPORTS}/graph.cypher"
+EXPORTS_CYPHER = EXPORTS / "graph.cypher"
 """neo4j data export file path"""
 
-EXPORTS_STATEMENTS = f"{EXPORTS}/statements.csv"
-"""complete sorted statements file path"""
+EXPORTS_STATEMENTS = EXPORTS / "statements.csv"
+"""complete sorted statements export – codec-free"""
+
+EXPORTS_DOCUMENTS = EXPORTS / "documents.csv"
+"""documents metadata export – codec-free, unscoped"""
 
 
-def exports_statements(suffix: str | None = None) -> str:
-    if not suffix:
-        return EXPORTS_STATEMENTS
-    return f"{EXPORTS_STATEMENTS}.{suffix}"
-
-
-EXPORTS_DOCUMENTS = f"{EXPORTS}/documents.csv"
-"""documents metadata to stream"""
-
-
-def export_documents(origin: str | None = None) -> str:
-    """Get path for the documents metadata export, optionally origin-scoped.
-
-    Layout: ``exports/documents.csv`` / ``exports/documents.{origin}.csv``
-
-    Args:
-        origin: Source tag to scope the export to – validated so it stays a
-            single path segment. ``None`` exports every origin.
-
-    Returns:
-        Path to the documents csv
-    """
-    if not origin:
-        return EXPORTS_DOCUMENTS
-    validate_origin(origin)
-    return f"{EXPORTS}/documents.{origin}.csv"
-
-
-DIFFS = "diffs"
+DIFFS = StoreKey("diffs")
 """Base path for diff exports"""
 
-DIFFS_DOCUMENTS = f"{DIFFS}/{EXPORTS_DOCUMENTS}"
-"""Base path for document.csv diffs"""
+EXT_ENTITIES_DELTA = "delta.json"
+"""Extension of one entities diff file"""
+
+EXT_DOCUMENTS_DELTA = "diff.csv"
+"""Extension of one documents diff file"""
 
 
-def diffs_documents(origin: str | None = None) -> str:
-    """Get the base path for documents diffs, optionally origin-scoped.
+DIFFS_ENTITIES = DateTimeKey(DIFFS / ENTITIES_JSON, TS_FORMAT, EXT_ENTITIES_DELTA)
+"""Entities diff series: ``DIFFS_ENTITIES(ts) + compression``"""
 
-    Layout: ``diffs/exports/documents.csv`` /
-    ``diffs/exports/documents.{origin}.csv``
-
-    Args:
-        origin: Source tag the diffs are scoped to. ``None`` covers every
-            origin.
-
-    Returns:
-        Base path for the diff files (which doubles as their freshness tag)
-    """
-    return f"{DIFFS}/{export_documents(origin)}"
+DIFFS_DOCUMENTS = DateTimeKey(DIFFS / EXPORTS_DOCUMENTS, TS_FORMAT, EXT_DOCUMENTS_DELTA)
+"""Documents diff series: ``DIFFS_DOCUMENTS[origin](ts) + compression``"""
 
 
-DIFFS_ENTITIES = f"{DIFFS}/{ENTITIES_JSON}"
-"""Base path for entities.ftm.json diffs"""
-
-
-def documents_diff(ts: datetime | None = None, origin: str | None = None) -> str:
-    """
-    Get path for a documents diff export file.
-
-    Layout: diffs/exports/documents[.{origin}].csv/{ts}.diff.csv
-
-    Args:
-        ts: Compact timestamp (YYYYMMDDTHHMMSSZ), defaults to current time
-        origin: Source tag the diff is scoped to. ``None`` covers every origin.
-
-    Returns:
-        Path to diff file
-    """
-    if ts is None:
-        ts = utc_now()
-    ts_iso = ts.strftime(TS_FORMAT)
-    return f"{diffs_documents(origin)}/{ts_iso}.diff.csv"
-
-
-def entities_diff(ts: datetime | None = None, suffix: str | None = None) -> str:
-    """
-    Get path for an entities diff export file.
-
-    Layout: diffs/entities.ftm.json/{ts}.delta.json
-
-    The delta file contains line-based JSON with operation envelopes:
-        {"op": "ADD", "entity": {"id": "...", "schema": "...", "properties": {...}}}
-        {"op": "MOD", "entity": {"id": "...", "schema": "...", "properties": {...}}}
-        {"op": "DEL", "entity": {"id": "..."}}
-
-    Args:
-        ts: Compact timestamp (YYYYMMDDTHHMMSSZ), defaults to current time
-
-    Returns:
-        Path to delta file
-    """
-    if ts is None:
-        ts = utc_now()
-    ts_iso = ts.strftime(TS_FORMAT)
-    path = f"{DIFFS_ENTITIES}/{ts_iso}.delta.json"
-    if suffix:
-        path = f"{path}.{suffix}"
-    return path
-
-
-JOBS = "jobs"
+JOBS = StoreKey("jobs")
 """Job data prefix"""
 
-JOB_RUNS = f"{JOBS}/runs"
-"""Job runs result storage prefix"""
-
-
-def job_prefix(name: str) -> str:
-    return f"{JOB_RUNS}/{name}"
-
-
-def job_run(name: str, run_id: str | None = None) -> str:
-    return f"{job_prefix(name)}/{run_id or ensure_uuid()}.json"
+JOB_RUNS = JobsKey(JOBS / "runs")
+"""Job runs result storage prefix, and the factory for one run"""
