@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        python-version: ["3.12", "3.13", "3.14"]
 
     # The docker-compose stack the test target boots provides its own
     # postgres for the lakehouse journal. A second postgres service is

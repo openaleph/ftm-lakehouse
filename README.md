@@ -16,7 +16,7 @@
 
 ## Installation
 
-Requires python 3.11 or later.
+Requires python 3.12 or later.
 
 ```bash
 pip install ftm-lakehouse

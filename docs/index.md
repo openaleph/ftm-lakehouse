@@ -92,7 +92,7 @@ with archive.open(file.checksum) as fh:
 
 ## Installation
 
-Requires Python 3.11 or later.
+Requires Python 3.12 or later.
 
 ```bash
 pip install ftm-lakehouse
