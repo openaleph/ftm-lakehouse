@@ -21,9 +21,9 @@ classifiers = [
 ]
 requires-python = ">=3.11,<3.15"
 dependencies = [
-    "ftmq[lake] (>=5.0.0,<6.0.0)",
-    "followthemoney (>=4.10.2,<5.0.0)",
-    "anystore @ git+https://github.com/dataresearchcenter/anystore.git",
+    "ftmq[lake] (>=5.1.0,<6.0.0)",
+    "followthemoney (>=4.11.0,<5.0.0)",
+    "anystore (>=1.4.0,<2.0.0)",
     "httpx (>=0.28.1,<0.29.0)",
     "zfs-agent (>=0.0.1,<0.0.2)",
     "putfs (>=0.4.2,<0.5.0)",
