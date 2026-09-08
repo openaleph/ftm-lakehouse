@@ -25,7 +25,11 @@ Batch file ingestion from a source location.
 
 ## ExportOperation
 
-One operation for all exports, dispatched by `ExportKind`: `statements` (`exports/statements.csv`), `entities` (`entities.ftm.json`), `documents` (`exports/documents.csv`, plus `exports/documents.crawl.csv` scoped to crawled files – each with its own diff series), `statistics` (`exports/statistics.json`), `index` (`index.json`).
+One operation for all exports, selected by `ExportKind`. `all` (the default) writes every artifact that is a function of the entity stream from a **single pass** over the statement store – `exports/statements.csv`, `entities.ftm.json`, `exports/documents.csv` and `exports/documents.crawl.csv` (scoped to crawled files), each with its own diff series. A diff entry costs nothing extra: the payload a diff publishes is the payload the export just wrote, so it is emitted from the same loop rather than re-read afterwards.
+
+The individual kinds open a subset of the same writers: `statements`, `entities`, `documents`. The two artifacts that are not functions of the entity stream stay outside the sweep – `statistics` (`exports/statistics.json`, a global SQL aggregate) and `index` (`index.json`, store metadata, which registers what the others produced and so runs last).
+
+Diff entries carry one of three ops, per the [OpenSanctions delta format](https://www.opensanctions.org/docs/bulk/delta/): `ADD` for an entity whose every statement is new, `MOD` for one that predates the diff window and changed in it, and `DEL` for one that is gone. `ADD` and `MOD` both carry the entity whole, so a consumer indexes either the same way.
 
 ::: ftm_lakehouse.operation.export.ExportKind
     options:
@@ -38,6 +42,11 @@ One operation for all exports, dispatched by `ExportKind`: `statements` (`export
         show_root_heading: true
 
 ::: ftm_lakehouse.operation.ExportOperation
+    options:
+        heading_level: 3
+        show_root_heading: true
+
+::: ftm_lakehouse.repository.artifacts.DiffOp
     options:
         heading_level: 3
         show_root_heading: true

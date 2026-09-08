@@ -41,6 +41,8 @@ class CrawlJob(DatasetJobModel):
         exclude_prefix: Exclude keys with this prefix
         glob: Include only keys matching this glob pattern
         exclude_glob: Exclude keys matching this glob pattern
+        make_entities: Add document entities to statement store
+        store_metadata: Write file.json metadata alongside archive blobs
     """
 
     uri: Uri

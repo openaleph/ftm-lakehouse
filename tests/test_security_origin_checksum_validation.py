@@ -10,6 +10,7 @@ from followthemoney import model
 from ftm_lakehouse import util
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.logic.entities.buffer import EntityBuffer
+from ftm_lakehouse.repository.factories import get_artifacts
 
 VALID_CHECKSUM = "bbb1f047ff1f0c333560e09cff0c4a052eb87a2998d6d16775a276645877c5b7"
 
@@ -138,22 +139,17 @@ def test_validate_checksum_rejects_non_string() -> None:
 
 def test_archive_txt_rejects_traversal_origin() -> None:
     with pytest.raises(ValueError):
-        path.archive_txt(VALID_CHECKSUM, "../../../etc/passwd")
-
-
-def test_statement_origin_rejects_traversal() -> None:
-    with pytest.raises(ValueError):
-        path.statement_origin("../escape")
+        path.ArchiveKey(VALID_CHECKSUM).txt("../../../etc/passwd")
 
 
 def test_archive_meta_rejects_traversal_file_id() -> None:
     with pytest.raises(ValueError):
-        path.archive_meta(VALID_CHECKSUM, "../evil")
+        path.ArchiveKey(VALID_CHECKSUM).meta("../evil")
 
 
 def test_archive_blob_rejects_invalid_checksum() -> None:
     with pytest.raises(ValueError):
-        path.archive_blob("not-a-valid-checksum")
+        path.ArchiveKey("not-a-valid-checksum")
 
 
 # --- EntityBuffer call sites -----------------------------------------------
@@ -172,3 +168,14 @@ def test_entity_buffer_add_entity_rejects_traversal_origin() -> None:
 
     with pytest.raises(ValueError):
         buf.add_entity(entity, origin="../../evil")
+
+
+def test_documents_artifact_scope_rejects_unsafe_origin(tmp_path) -> None:
+    """An export scope names a file *and* reaches SQL as an ``origin`` filter,
+    so it is validated where it enters like every other origin."""
+    artifacts = get_artifacts("test", tmp_path)
+    with pytest.raises(ValueError):
+        artifacts.documents["../escape"]
+    with pytest.raises(ValueError):
+        artifacts.documents["a' OR 1=1"]
+    assert artifacts.documents["crawl"].key == "exports/documents.crawl.csv"

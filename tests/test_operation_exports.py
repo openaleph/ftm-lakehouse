@@ -10,7 +10,7 @@ from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.model.file import Document
 from ftm_lakehouse.operation.export import ExportJob, ExportKind, ExportOperation
 from ftm_lakehouse.repository import ArchiveRepository, EntityRepository
-from tests.shared import BOB, JANE, JOHN
+from tests.shared import JANE, JOHN
 
 DATASET = "export_test"
 
@@ -185,31 +185,27 @@ def test_operation_export_index(tmp_path):
     assert len(versions) >= 1
 
 
-def test_export_entities_reuses_fresh_statements_csv(tmp_path):
-    """The entities export reuses statements.csv while it's fresh.
-
-    Regression: the freshness check used the dead ``exports/statements``
-    tag instead of the export's actual target key, so the reuse path
-    never fired.
-    """
+def test_export_sweep_writes_every_artifact_once(tmp_path):
+    """`ExportKind.all` produces the streamed artifacts from a single pass."""
     repo = EntityRepository(dataset=DATASET, uri=tmp_path)
     setup_entities(repo)
 
-    assert repo._fresh_statements_csv() is None  # nothing exported yet
+    op = make_op(ExportKind.all, tmp_path)
+    assert op.get_target() == tag.OP_EXPORT
+    assert op.get_target() == "operations/export/last_run"
+    assert op.get_dependencies() == [tag.STATEMENTS_OPTIMIZED]
 
-    make_op(ExportKind.statements, tmp_path).run()
-    fresh = repo._fresh_statements_csv()
-    assert fresh is not None
-    assert fresh.endswith(path.EXPORTS_STATEMENTS)
+    result = op.run()
+    assert result.done == 1
 
-    # New statements invalidate the exported CSV once they are canonical:
-    # the shortcut keys on the merge clock, and an export only ever reads it
-    # from inside a run whose `prepare()` has already flushed and merged.
-    with repo.writer(origin="test") as writer:
-        writer.add_entity(make_entity(BOB))
-    repo.flush()
-    repo.merge()
-    assert repo._fresh_statements_csv() is None
+    assert (tmp_path / path.EXPORTS_STATEMENTS).exists()
+    assert (tmp_path / path.ENTITIES_JSON).exists()
+    # every artifact the sweep wrote carries its own freshness tag, so a
+    # single-kind export afterwards sees itself up to date
+    assert (tmp_path / "tags/lakehouse" / path.EXPORTS_STATEMENTS).exists()
+    assert (tmp_path / "tags/lakehouse" / path.ENTITIES_JSON).exists()
+    assert repo._tags.is_latest(path.ENTITIES_JSON, [tag.STATEMENTS_OPTIMIZED])
+    assert make_op(ExportKind.entities, tmp_path).is_fresh()
 
 
 def test_export_stale_after_optimize(tmp_path):
@@ -220,26 +216,28 @@ def test_export_stale_after_optimize(tmp_path):
     setup_entities(repo)
     setup_entities(repo)  # duplicate physical rows -> merge will rewrite
 
+    def is_fresh() -> bool:
+        return repo._tags.is_latest(path.EXPORTS_STATEMENTS, [tag.STATEMENTS_OPTIMIZED])
+
     make_op(ExportKind.statements, tmp_path).run()
     # the run prepared itself: the duplicates were merged *before* the CSV was
     # written, so it is canonical and fresh straight away
     assert not repo.needs_merge
-    assert repo._fresh_statements_csv() is not None
+    assert is_fresh()
 
     # a merge with nothing to rewrite does not dirty anything
     repo.merge()
-    assert repo._fresh_statements_csv() is not None
+    assert is_fresh()
 
     # new duplicate rows, then a merge that rewrites them: the CSV predates
     # the canonical content it claims to hold
     setup_entities(repo)
     repo.merge()
-    assert not repo._tags.is_latest(path.EXPORTS_STATEMENTS, [tag.STATEMENTS_OPTIMIZED])
-    assert repo._fresh_statements_csv() is None
+    assert not is_fresh()
 
     # a re-run regenerates instead of skipping, and is fresh once more
     make_op(ExportKind.statements, tmp_path).run()
-    assert repo._fresh_statements_csv() is not None
+    assert is_fresh()
 
 
 def test_operation_export_documents(tmp_path, fixtures_path):
@@ -288,7 +286,38 @@ def test_operation_export_documents(tmp_path, fixtures_path):
         assert doc.public_url.startswith(f"https://data.example.org/{DATASET}/archive/")
 
     # ... and the same run wrote the crawl-scoped csv next to it
-    crawl_csv = tmp_path / path.export_documents(tag.CRAWL_ORIGIN)
+    crawl_csv = tmp_path / path.EXPORTS_DOCUMENTS[tag.CRAWL_ORIGIN]
     assert crawl_csv.exists()
     crawl_docs = list(smart_stream_csv_models(crawl_csv, Document))
     assert {d.name for d in crawl_docs} == {"utf.txt"}
+
+
+def test_export_empty_sweep_truncates_stale_artifact(tmp_path):
+    """An export is a whole picture of the store, so a sweep that yields
+    nothing has to leave an empty artifact – not the previous run's file,
+    freshly stamped as current."""
+    repo = EntityRepository(dataset=DATASET, uri=tmp_path)
+    setup_entities(repo)
+    make_op(ExportKind.all, tmp_path).run()
+
+    entities = tmp_path / path.ENTITIES_JSON
+    assert "jane" in entities.read_text()
+
+    repo.delete_entity("jane")
+    repo.delete_entity("john")
+    repo.merge()
+    make_op(ExportKind.all, tmp_path).run(force=True)
+
+    assert entities.exists()
+    assert entities.read_text() == ""
+
+
+def test_export_result_counts_each_entity_once(tmp_path):
+    """The session counts the sweep, the runs count their diff ops – folding a
+    run total back into its own name would double the entity count."""
+    repo = EntityRepository(dataset=DATASET, uri=tmp_path)
+    setup_entities(repo)
+
+    result = make_op(ExportKind.all, tmp_path).run().result
+    assert result["entities"] == 2
+    assert result["statements"] == sum(1 for _ in repo.query_statements())

@@ -7,11 +7,13 @@ from anystore.types import Uri
 
 from ftm_lakehouse.model.job import DJ
 from ftm_lakehouse.repository.archive import ArchiveRepository
+from ftm_lakehouse.repository.artifacts import ArtifactsRepository
 from ftm_lakehouse.repository.base import DatasetHandle, dataset_uri
 from ftm_lakehouse.repository.documents import DocumentRepository
 from ftm_lakehouse.repository.entities.main import EntityRepository
 from ftm_lakehouse.repository.factories import (
     get_archive,
+    get_artifacts,
     get_documents,
     get_entities,
     get_jobs,
@@ -44,6 +46,10 @@ class DatasetJobOperation(DatasetHandle, Generic[DJ]):
     @cached_property
     def archive(self) -> ArchiveRepository:
         return get_archive(self.dataset, self.uri)
+
+    @cached_property
+    def artifacts(self) -> ArtifactsRepository:
+        return get_artifacts(self.dataset, self.uri)
 
     @cached_property
     def entities(self) -> EntityRepository:

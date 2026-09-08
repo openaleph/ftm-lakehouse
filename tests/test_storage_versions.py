@@ -22,7 +22,7 @@ def test_storage_versions_make(tmp_path):
     assert not (tmp_path / "tags/lakehouse/config.json").exists()
 
     data = VersionedData(name="test_dataset")
-    versioned_path = store.make("config.json", data)
+    versioned_path = str(store.make("config.json", data))
 
     # Main file should exist
     assert (tmp_path / "config.json").exists()
@@ -51,7 +51,7 @@ def test_storage_versions_make_hardcoded_path(tmp_path):
     # We can't easily inject a timestamp, but we can verify the path structure
     # by checking the year/month directories match current time
     now = datetime.now(timezone.utc)
-    versioned_path = store.make("index.json", data)
+    versioned_path = str(store.make("index.json", data))
 
     # Path should contain current year and month
     year = str(now.year)
@@ -132,7 +132,7 @@ def test_storage_versions_nested_path(tmp_path):
     store = VersionedModelStore(tmp_path, model=VersionedData)
 
     data = VersionedData(name="nested")
-    versioned_path = store.make("exports/statistics.json", data)
+    versioned_path = str(store.make("exports/statistics.json", data))
 
     # Main file should exist in nested path
     assert (tmp_path / "exports" / "statistics.json").exists()

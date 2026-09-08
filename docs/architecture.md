@@ -185,7 +185,7 @@ Multi-step workflows that coordinate across repositories. This is where "action 
 ```
 operation/
   base.py          # DatasetJobOperation - base class with freshness checks
-  export.py        # ExportOperation - all exports, dispatched by ExportKind
+  export.py        # ExportOperation - every export from one entity sweep
   crawl.py         # CrawlOperation - source → files → entities
   maintenance.py   # OptimizeOperation - merge + compact + vacuum in one pass
   make.py          # MakeOperation - flush + all exports + index
@@ -291,7 +291,7 @@ ftm_lakehouse/
 │   ├── entities/            # EntityRepository (main.py) + API delegate (api.py)
 │   ├── archive.py           # ArchiveRepository (content-addressed files)
 │   ├── documents.py         # DocumentRepository
-│   ├── diff.py              # Delta diff export mixin
+│   ├── artifacts.py         # Export artifacts, their writers and diff series
 │   └── job.py               # JobRepository
 │
 ├── operation/               # Layer 4: Multi-step workflow operations

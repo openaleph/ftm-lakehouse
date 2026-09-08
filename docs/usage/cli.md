@@ -14,7 +14,7 @@ ftm-lakehouse [OPTIONS] <group> <command> [ARGS]
 | `maintenance` | Storage maintenance (flush, optimize, unlock) |
 | `zfs` | ZFS dataset management |
 
-Top-level (no group), as frequently-used shortcuts: `ls` (dataset names), `datasets` (metadata), `configure` (write dataset configuration), `make` (build/update a dataset), `export` (produce a single export kind), `crawl` (ingest documents into the archive).
+Top-level (no group), as frequently-used shortcuts: `ls` (dataset names), `datasets` (metadata), `configure` (write dataset configuration), `make` (build/update a dataset), `export` (produce the exports, or a single kind), `crawl` (ingest documents into the archive).
 
 Environment variables configure storage locations and behavior – see the [configuration reference](../deployment/configuration.md).
 
@@ -42,7 +42,10 @@ cat entities.ftm.json | ftm-lakehouse -d my_dataset entities import --unsafe
 # Flush the journal, optimize the store and build all exports – the default
 ftm-lakehouse -d my_dataset make
 
-# A single export kind on its own
+# The export sweep on its own – every streamed artifact from one pass
+ftm-lakehouse -d my_dataset export
+
+# ... or a single kind
 ftm-lakehouse -d my_dataset export statistics
 
 # Drain the journal on its own – one dataset, or the whole catalog

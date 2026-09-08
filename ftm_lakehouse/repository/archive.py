@@ -63,7 +63,7 @@ class ArchiveRepository(DatasetHandle):
 
     def exists(self, checksum: str) -> bool:
         """Check if blob exists for the given checksum."""
-        return self._store.exists(path.archive_blob(checksum))
+        return self._store.exists(path.ArchiveKey(checksum).blob)
 
     def get_file(self, checksum: str, file_id: str | None = None) -> File:
         """
@@ -77,7 +77,7 @@ class ArchiveRepository(DatasetHandle):
             FileNotFoundError: When no metadata file exists
         """
         if file_id is not None:
-            key = path.archive_meta(checksum, file_id)
+            key = path.ArchiveKey(checksum).meta(file_id)
             return self._files.get(key)
 
         # Return first found metadata
@@ -92,7 +92,7 @@ class ArchiveRepository(DatasetHandle):
         Multiple crawlers may have archived the same file content from
         different source paths, each creating their own metadata file.
         """
-        prefix = path.archive_prefix(checksum)
+        prefix = path.ArchiveKey(checksum)
         yield from self._files.iterate_values(prefix, glob="*.json")
 
     def iterate_files(self) -> Files:
@@ -108,14 +108,14 @@ class ArchiveRepository(DatasetHandle):
 
     def stream(self, checksum: str) -> BytesGenerator:
         """Stream blob contents as bytes."""
-        yield from self._store.stream(path.archive_blob(checksum))
+        yield from self._store.stream(path.ArchiveKey(checksum).blob)
 
     def open(self, checksum: str) -> ContextManager[IO[bytes]]:
         """Get a file-like handle for reading."""
-        return self._store.open(path.archive_blob(checksum), mode=DEFAULT_MODE)
+        return self._store.open(path.ArchiveKey(checksum).blob, mode=DEFAULT_MODE)
 
     def to_uri(self, checksum: str) -> str:
-        return self._store.to_uri(path.archive_blob(checksum))
+        return self._store.to_uri(path.ArchiveKey(checksum).blob)
 
     def local_path(self, checksum: str) -> ContextManager[Path]:
         """
@@ -124,7 +124,7 @@ class ArchiveRepository(DatasetHandle):
         If storage is local, returns actual path. Otherwise, creates
         a temporary local copy that is cleaned up after context exit.
         """
-        return self._store.local_path(path.archive_blob(checksum))
+        return self._store.local_path(path.ArchiveKey(checksum).blob)
 
     def store(
         self,
@@ -225,7 +225,7 @@ class ArchiveRepository(DatasetHandle):
                 self.log.debug("Blob already exists, skipping", checksum=checksum)
                 return checksum
             fh.seek(0)
-        with self._store.open(path.archive_blob(checksum), "wb") as out:
+        with self._store.open(path.ArchiveKey(checksum).blob, "wb") as out:
             stream(fh, out)
         return checksum
 
@@ -250,17 +250,17 @@ class ArchiveRepository(DatasetHandle):
                 ``origin`` is not a safe path component
                 (see `validate_origin`).
         """
-        key = path.archive_txt(checksum, origin)
+        key = path.ArchiveKey(checksum).txt(origin)
         self._txts.put(key, text)
 
     def get_txt(self, checksum: str, origin: str | None = None) -> str | None:
         """Get extracted text for a file. If `origin`, get by this specific
         extraction, otherwise get the first txt value (no guaranteed order)"""
         if origin:
-            key = path.archive_txt(checksum, origin)
+            key = path.ArchiveKey(checksum).txt(origin)
             return self._txts.get(key)
         for value in self._txts.iterate_values(
-            prefix=path.archive_prefix(checksum), glob="*.txt"
+            prefix=path.ArchiveKey(checksum), glob="*.txt"
         ):
             return value
 

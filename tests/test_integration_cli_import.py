@@ -11,6 +11,8 @@ from ftm_lakehouse.cli import cli as cli_app
 from ftm_lakehouse.cli.io import import_entities_unsafe
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.lake import get_lakehouse
+from ftm_lakehouse.operation import factories as op
+from ftm_lakehouse.operation.export import ExportKind
 from ftm_lakehouse.repository.entities.main import EntityRepository
 from ftm_lakehouse.repository.factories import get_entities
 from tests.shared import JANE, JOHN
@@ -47,7 +49,7 @@ def test_cli_statements_import_roundtrip(tmp_path, cli_runner):
     and crashed the parquet append (and would have been truthy otherwise).
     """
     src = _seed_source(tmp_path)
-    src.export_statements_csv()
+    op.export(src.dataset, ExportKind.statements, uri=tmp_path / "src")
     csv_uri = str(tmp_path / "src" / path.EXPORTS_STATEMENTS)
 
     result = cli_runner.invoke(
@@ -72,7 +74,7 @@ def test_cli_statements_import_override_origin(tmp_path, cli_runner):
     """--override-origin forces the CLI origin over CSV-carried origins – on
     both the safe and the --unsafe path."""
     src = _seed_source(tmp_path)
-    src.export_statements_csv()
+    op.export(src.dataset, ExportKind.statements, uri=tmp_path / "src")
     csv_uri = str(tmp_path / "src" / path.EXPORTS_STATEMENTS)
 
     for dst_name, flags in (("dst_safe", []), ("dst_unsafe", ["--unsafe"])):
@@ -205,7 +207,7 @@ def test_cli_statements_import_unsafe_roundtrip(tmp_path, cli_runner):
     roots via ``--uri`` – statement ids content-hash under the target
     dataset)."""
     src = _seed_source(tmp_path)
-    src.export_statements_csv()
+    op.export(src.dataset, ExportKind.statements, uri=tmp_path / "src")
     csv_uri = str(tmp_path / "src" / path.EXPORTS_STATEMENTS)
 
     for root, flags in (("root_safe", []), ("root_unsafe", ["--unsafe"])):
@@ -315,9 +317,7 @@ def test_cli_statements_import_role_roundtrip(tmp_path, cli_runner):
     src = _seed_source(tmp_path)
     with src.writer(origin="test", role="user:42") as w:
         w.add_entity(make_entity(JANE))
-    src.flush()
-    src.merge()
-    src.export_statements_csv()
+    op.export(src.dataset, ExportKind.statements, uri=tmp_path / "src")
     csv_uri = str(tmp_path / "src" / path.EXPORTS_STATEMENTS)
 
     for root, flags in (("root_safe", []), ("root_unsafe", ["--unsafe"])):
@@ -339,11 +339,9 @@ def test_cli_stream_commands(tmp_path, cli_runner):
     repo = EntityRepository("dst", tmp_path / "dst")
     with repo.writer(origin="test") as writer:
         writer.add_entity(make_entity(JANE))
-    repo.flush()
-    repo.export_statements_csv()
-    entities_json = tmp_path / "dst" / path.ENTITIES_JSON
-    smart_write_proxies(str(entities_json), repo.query())
+    op.make(repo.dataset, repo.uri)
 
+    entities_json = tmp_path / "dst" / path.ENTITIES_JSON
     out = tmp_path / "streamed.ftm.json"
     result = cli_runner.invoke(
         cli_app, ["-d", "dst", "entities", "stream", "-o", str(out)]

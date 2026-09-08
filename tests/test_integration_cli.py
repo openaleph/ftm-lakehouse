@@ -1,4 +1,5 @@
 import csv
+import re
 
 import orjson
 from ftmq.util import make_entity
@@ -10,6 +11,14 @@ from ftm_lakehouse.repository.entities.main import EntityRepository
 from ftm_lakehouse.repository.factories import clear_caches, get_entities
 from tests.conftest import make_test_api
 from tests.shared import JANE
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def plain(output: str) -> str:
+    """CLI output with styling stripped."""
+    return _ANSI.sub("", output)
+
 
 runner = CliRunner()
 
@@ -118,7 +127,7 @@ def test_cli_maintenance_migrate(tmp_path):
     clear_caches()
     res = runner.invoke(cli, args)
     assert res.exit_code == 0
-    assert "done=0" in res.output
+    assert "done=0" in plain(res.output)
 
     # `--all` sweeps the catalog – how the docker entrypoint runs it – and
     # excludes `-d`
@@ -127,7 +136,7 @@ def test_cli_maintenance_migrate(tmp_path):
     STATE["dataset"] = None  # the callback only sets it when `-d` is given
     res = runner.invoke(cli, ["--uri", lake, "maintenance", "migrate", "--all"])
     assert res.exit_code == 0
-    assert "MigrateJob" in res.output
+    assert "MigrateJob" in plain(res.output)
 
 
 def test_cli_entities_iterate_query(tmp_path):

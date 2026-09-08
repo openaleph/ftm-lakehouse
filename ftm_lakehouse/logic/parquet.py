@@ -23,12 +23,19 @@ from ftmq.query.leaves import IdLeaf
 from ftmq.query.sql import PruneFn
 from ftmq.store.lake import TARGET_SIZE
 
-from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.core.settings import Settings
+from ftm_lakehouse.helpers.shards import entity_shard, shard_hex_width
 from ftm_lakehouse.model.statement import TABLE_RAW
 from ftm_lakehouse.util import parse_byte_size, validate_origin
 
 QUERY_IN_BATCH_SIZE = 5_000
+
+SWEEP_BATCH_SIZE = 50_000
+"""Rows per Arrow batch when `ParquetStore.sweep` materialises them as
+Python dicts. DuckDB's own default (1M) is sized for a columnar consumer;
+turning a batch that size into dicts would hold a million of them at once, so
+the fused export asks for a smaller one. Bounds rows in flight, not bytes
+scanned – the scan stays streaming either way."""
 
 MERGE_SPILL_FACTOR = 32
 """Estimated peak DuckDB footprint of the merge pipeline per compressed
@@ -158,15 +165,14 @@ def _dedupe_sql(
     timestamps). ``role`` belongs in the fold key for the same reason it
     belongs in the identity key: a role's *first* assertion of content an
     older role already wrote is a new row, and folding it onto the older
-    row's date would both misdate it and hide it from
-    `export_diff`, which detects change on ``first_seen``.
+    row's date would both misdate it and hide it from the export sweep's
+    diff, which detects change on ``first_seen``.
 
     The fragment branch folds by ``id`` too, not by its supersession group:
     the group spans *different* values, so folding across it would stamp a
     superseding value with the date of the row it replaced – both a false
-    ``first_seen`` and, because ``first_seen`` is what
-    `export_diff`
-    detects change with, a silently undiffable update. Only the ``QUALIFY``
+    ``first_seen`` and, because ``first_seen`` is what the export sweep's
+    diff detects change with, a silently undiffable update. Only the ``QUALIFY``
     windows below work at group scope, which is what supersession means.
 
     Args:
@@ -310,7 +316,7 @@ def build_merge_sql(
 def shard_expr_sql(shards: int, column: str = "entity_id") -> str:
     """DuckDB expression computing the shard key of ``column``.
 
-    The SQL twin of [`entity_shard`][ftm_lakehouse.core.conventions.path.entity_shard],
+    The SQL twin of `helpers.shards.entity_shard`,
     used by [`build_shard_sql`][build_shard_sql] so a re-shard recomputes every row's
     partition inside DuckDB's vectorised pipeline instead of marshaling
     ids into Python. ``banal.hash_data`` of a ``str`` is a plain SHA-1 of
@@ -328,7 +334,7 @@ def shard_expr_sql(shards: int, column: str = "entity_id") -> str:
     """
     if shards <= 1:
         return "'0'"
-    width = path.shard_hex_width(shards)
+    width = shard_hex_width(shards)
     return (
         f"printf('%0{width}x', "
         f"(('0x' || substr(sha1({column}), 1, 8))::BIGINT) % {int(shards)})"
@@ -502,7 +508,7 @@ def make_prune_by_shard(shards: int = 0) -> PruneFn:
             if isinstance(f, IdLeaf):
                 if f.comparator in ("eq", "in"):
                     for v in ensure_list(f.value):
-                        values.add(path.entity_shard(v, shards))
+                        values.add(entity_shard(v, shards))
         return values
 
     return prune

@@ -18,6 +18,7 @@ from anystore.types import Uri
 
 from ftm_lakehouse.core.api import ensure_api_uri, get_api
 from ftm_lakehouse.repository.archive import ArchiveRepository
+from ftm_lakehouse.repository.artifacts import ArtifactsRepository
 from ftm_lakehouse.repository.base import dataset_uri
 from ftm_lakehouse.repository.documents import DocumentRepository
 from ftm_lakehouse.repository.entities import EntityRepository
@@ -29,6 +30,7 @@ from ftm_lakehouse.storage.versions import VersionStore
 __all__ = [
     "dataset_uri",
     "get_archive",
+    "get_artifacts",
     "get_entities",
     "get_documents",
     "get_jobs",
@@ -77,6 +79,14 @@ def get_archive(dataset: str, uri: Uri | None = None) -> ArchiveRepository:
     return cast(
         ArchiveRepository,
         _resolve(ArchiveRepository, dataset, dataset_uri(dataset, uri)),
+    )
+
+
+def get_artifacts(dataset: str, uri: Uri | None = None) -> ArtifactsRepository:
+    """Get the export artifacts repository for a dataset (cached)."""
+    return cast(
+        ArtifactsRepository,
+        _resolve(ArtifactsRepository, dataset, dataset_uri(dataset, uri)),
     )
 
 

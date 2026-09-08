@@ -83,16 +83,40 @@ def test_conventions_path_is_a_store_key():
     assert str(pickle.loads(pickle.dumps(key))) == "exports/documents.csv"
 
 
-def test_conventions_path_does_not_equal_str():
-    """A key is not its string – compare `str(key)`, don't mix them as dict keys.
+def test_conventions_path_equals_str():
+    """A key equals its own spelling, so the two are interchangeable as keys.
 
-    Pinned because the hashes *do* collide, so a dict mixing the two looks
-    like it works right up until the lookup silently misses.
+    `PurePosixPath` hashes as its string but compares only to paths, which
+    puts a string lookup in the right bucket and then rejects it – a silent
+    miss. `StoreKey.__eq__` closes that.
     """
     key = StoreKey("exports/documents.csv")
-    assert key != "exports/documents.csv"
-    assert str(key) == "exports/documents.csv"
-    assert {key: 1}.get("exports/documents.csv") is None
+    assert key == "exports/documents.csv"
+    assert "exports/documents.csv" == key  # via the reflected operand
+    assert key != "exports/other.csv"
+    assert [key] == ["exports/documents.csv"]
+    # ... whichever type keys the collection
+    assert {key: 1}.get("exports/documents.csv") == 1
+    assert {"exports/documents.csv": 1}.get(key) == 1
+    assert "exports/documents.csv" in {key}
+    # the normalised spelling is what compares, which is the key's identity
+    assert StoreKey("exports//documents.csv") == "exports/documents.csv"
+    # key-to-key comparison is untouched
+    assert key == StoreKey("exports/documents.csv")
+
+
+def test_conventions_path_str_apis_still_raise():
+    """What `__eq__` cannot reach fails loudly, so no silent mode is left."""
+    key = StoreKey("exports/documents.csv")
+    text = "prefix/exports/documents.csv"
+    for op in (
+        lambda: key in text,
+        lambda: text.startswith(key),
+        lambda: text.endswith(key),
+        lambda: "prefix/" + key,
+    ):
+        with pytest.raises(TypeError):
+            op()
 
 
 def test_conventions_path_scoped_key():
@@ -342,3 +366,16 @@ def test_conventions_path_archive_validates_checksum():
     for bad in ("not-a-checksum", "", "../escape", CHECKSUM[:-1]):
         with pytest.raises(ValueError):
             path.ArchiveKey(bad)
+
+
+def test_store_key_is_not_a_sequence():
+    """`__getitem__` makes a key look subscriptable to the legacy iteration
+    protocol – and since an infix never raises `IndexError`, ``in`` would spin
+    forever. `__iter__` closes that."""
+    key = path.EXPORTS_STATEMENTS
+    with pytest.raises(TypeError):
+        iter(key)
+    with pytest.raises(TypeError):
+        "exports" in key  # noqa: B015
+    with pytest.raises(TypeError):
+        list(key)

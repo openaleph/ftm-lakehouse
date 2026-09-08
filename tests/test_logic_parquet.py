@@ -8,7 +8,7 @@ import pytest
 from ftmq.query import M, P, Query
 from ftmq.store.lake import TARGET_SIZE
 
-from ftm_lakehouse.core.conventions import path
+from ftm_lakehouse.helpers.shards import entity_shard
 from ftm_lakehouse.logic.parquet import (
     MERGE_SPILL_FACTOR,
     SHARD_MIN_FILE_SIZE,
@@ -805,7 +805,7 @@ def test_shard_expr_sql_parity(shards):
     expr = shard_expr_sql(shards, "id")
     con.register("ids", pa.table({"id": ids}))
     got = [r[0] for r in con.execute(f"SELECT {expr} FROM ids").fetchall()]
-    assert got == [path.entity_shard(i, shards) for i in ids]
+    assert got == [entity_shard(i, shards) for i in ids]
 
 
 def test_build_shard_sql_rekeys_partition(now):
@@ -860,7 +860,7 @@ def test_build_shard_sql_rekeys_partition(now):
     assert len(rows) == 4
     assert sorted(r["id"] for r in rows) == ["s0", "s1", "s2", "s3"]
     for row in rows:
-        assert row["shard"] == path.entity_shard(row["entity_id"], 8)
+        assert row["shard"] == entity_shard(row["entity_id"], 8)
     assert sum(1 for r in rows if r["deleted_at"] is not None) == 1
 
 

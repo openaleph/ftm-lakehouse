@@ -29,11 +29,11 @@ class TagStore(AnyTags):
     store = Store[datetime, Literal[False]]
 
     def __init__(self, uri: Uri, tenant: str | None = None) -> None:
-        uri = join_uri(uri, path.tag(tenant=tenant))
+        uri = join_uri(uri, path.TAGS[tenant])
         store = get_store(uri, raise_on_nonexist=False)
         super().__init__(store)
 
-    def is_latest(self, key: str, dependencies: Iterable[str]) -> bool:
+    def is_latest(self, key: Uri, dependencies: Iterable[Uri]) -> bool:
         """
         Check if the tag is more recent than all dependencies.
 
@@ -52,7 +52,7 @@ class TagStore(AnyTags):
             return False
         return all(last_updated > i for i in updated_dependencies)
 
-    def set(self, key: str, timestamp: datetime | None = None) -> datetime:
+    def set(self, key: Uri, timestamp: datetime | None = None) -> datetime:
         """Set a tag to the given timestamp (or now, in UTC)."""
         ts = timestamp or utc_now()
         self.put(key, ts)

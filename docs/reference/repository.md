@@ -67,3 +67,37 @@ Document metadata assembled from archived files and their entities.
     options:
         heading_level: 3
         show_root_heading: true
+
+## ArtifactsRepository
+
+The export artifacts one dataset produces – `statements.csv`, `entities.ftm.json`, `documents.csv` (one per origin scope), `statistics.json`, `index.json` – and the diff series that ride alongside the streamed ones.
+
+```python
+from ftm_lakehouse.repository import get_artifacts
+
+artifacts = get_artifacts("my_dataset")
+artifacts.entities.is_fresh()
+artifacts.documents["crawl"].key
+```
+
+::: ftm_lakehouse.repository.ArtifactsRepository
+    options:
+        heading_level: 3
+        show_root_heading: true
+
+An artifact is a stateless declaration bound to a dataset; everything true only while an export runs – the open writer, the diff window, the counts – lives on its run, driven by `ExportSession` as one loop.
+
+::: ftm_lakehouse.repository.artifacts.Artifact
+    options:
+        heading_level: 3
+        show_root_heading: true
+
+::: ftm_lakehouse.repository.artifacts.DiffableArtifact
+    options:
+        heading_level: 3
+        show_root_heading: true
+
+::: ftm_lakehouse.repository.artifacts.DocumentsArtifact
+    options:
+        heading_level: 3
+        show_root_heading: true

@@ -11,7 +11,7 @@ from ftmq.store.lake import pack_statement
 from ftmq.types import Statements
 
 from ftm_lakehouse.core.conventions import tag
-from ftm_lakehouse.core.conventions.path import entity_shard
+from ftm_lakehouse.helpers.shards import entity_shard
 from ftm_lakehouse.logic import parquet as logic_parquet
 from ftm_lakehouse.model.statement import JOURNAL_SCHEMA, TABLE_RAW
 from ftm_lakehouse.storage.parquet import ParquetStore

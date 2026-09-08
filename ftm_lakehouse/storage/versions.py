@@ -1,6 +1,6 @@
 """VersionStore - timestamped snapshot storage."""
 
-from typing import Any, Generator, Generic
+from typing import Generic
 
 from anystore.exceptions import DoesNotExist
 from anystore.logging import get_logger
@@ -39,7 +39,11 @@ class VersionedModelStore(Generic[M]):
         self._tags = TagStore(uri)
         self.model = model
 
-    def make(self, key: Uri, data: M) -> str:
+        self.exists = self._store.exists
+        self.delete = self._store.delete
+        self.iterate_keys = self._store.iterate_keys
+
+    def make(self, key: Uri, data: M) -> Uri:
         """
         Write obj to key and create a versioned snapshot.
 
@@ -61,25 +65,16 @@ class VersionedModelStore(Generic[M]):
             log.debug("Already up-to-date", key=key, checksum=checksum)
             return self.list_versions(str(key))[-1]
         with self._tags.touch(key), self._tags.touch(checksum_tag):
-            versioned_path = path.version(str(key))
+            versioned_path = path.VERSIONS(str(key))
             self._store.put(versioned_path, raw)
             self._store.put(key, raw)
             return versioned_path
 
-    def get(self, key: str) -> M:
+    def get(self, key: Uri) -> M:
         """Get the current version of a file."""
         return load_model(key, self._store.get(key), model=self.model)
 
-    def exists(self, key: str) -> bool:
-        return self._store.exists(key)
-
-    def delete(self, key: str) -> None:
-        self._store.delete(key)
-
-    def iterate_keys(self, **kwargs: Any) -> Generator[str, None, None]:
-        yield from self._store.iterate_keys(**kwargs)
-
-    def list_versions(self, key: str) -> list[str]:
+    def list_versions(self, key: Uri) -> list[str]:
         """
         List all versioned copies of a file.
 
@@ -98,19 +93,19 @@ class VersionStore:
     def __init__(self, uri: Uri) -> None:
         self.uri = uri
         self._store = get_store(uri, serialization_mode="raw")
-        self.versions: dict[str, VersionedModelStore] = {}
+        self.versions: dict[Uri, VersionedModelStore] = {}
 
-    def exists(self, key: str) -> bool:
+    def exists(self, key: Uri) -> bool:
         return self._store.exists(key)
 
-    def make(self, key: str, obj: BaseModel) -> str:
+    def make(self, key: Uri, obj: BaseModel) -> str:
         clz = obj.__class__.__name__
         if clz not in self.versions:
             self.versions[clz] = VersionedModelStore(self.uri, obj.__class__)
         return self.versions[clz].make(key, obj)
 
     def get(
-        self, key: str, model: type[M], raise_on_nonexist: bool | None = True
+        self, key: Uri, model: type[M], raise_on_nonexist: bool | None = True
     ) -> M | None:
         clz = model.__name__
         if clz not in self.versions:

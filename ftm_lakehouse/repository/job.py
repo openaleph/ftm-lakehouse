@@ -72,11 +72,11 @@ class JobRepository(DatasetHandle, Generic[J]):
 
     def put(self, job: JobModel) -> None:
         """Store a job run."""
-        self._store.put(path.job_run(self.job_type, job.run_id), job)
+        self._store.put(path.JOB_RUNS(self.job_type, job.run_id), job)
 
     def get(self, run_id: str) -> J:
         """Get a specific job run by type and run ID."""
-        key = path.job_run(self.job_type, run_id)
+        key = path.JOB_RUNS(self.job_type, run_id)
         return self._store.get(key)
 
     def latest(self) -> J | None:
@@ -87,7 +87,7 @@ class JobRepository(DatasetHandle, Generic[J]):
         so the latest is the last in alphabetical order.
         """
         for key in sorted(
-            self._store.iterate_keys(prefix=path.job_prefix(self.job_type)),
+            self._store.iterate_keys(prefix=path.JOB_RUNS[self.job_type]),
             reverse=True,
         ):
             return self._store.get(key)
@@ -95,7 +95,7 @@ class JobRepository(DatasetHandle, Generic[J]):
 
     def iterate(self) -> Generator[J, None, None]:
         """Iterate all runs for the current job type."""
-        yield from self._store.iterate_values(prefix=path.job_prefix(self.job_type))
+        yield from self._store.iterate_values(prefix=path.JOB_RUNS[self.job_type])
 
     @contextlib.contextmanager
     def run(self, job: J) -> Generator[JobRun[J], None, None]:
@@ -118,6 +118,6 @@ class JobRepository(DatasetHandle, Generic[J]):
 
     def delete(self, job: J) -> None:
         """Delete a job run."""
-        key = path.job_run(self.job_type, job.run_id)
+        key = path.JOB_RUNS(self.job_type, job.run_id)
         self._store.delete(key)
         self.log.warning("Deleted job run", job=job.name, run_id=job.run_id)

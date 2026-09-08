@@ -5,7 +5,8 @@ from ftmq.query import M, Query
 from ftmq.util import make_entity
 
 from ftm_lakehouse.catalog import get_dataset_model
-from ftm_lakehouse.core.conventions import path, tag
+from ftm_lakehouse.core.conventions import tag
+from ftm_lakehouse.helpers.shards import entity_shard
 from ftm_lakehouse.operation.maintenance import (
     OptimizeJob,
     OptimizeOperation,
@@ -62,7 +63,7 @@ def test_operation_shard(tmp_path):
     assert get_dataset_model(DATASET, tmp_path).shards == 8
     # ... and the physical layout agrees with it
     assert _shards_on_disk(repo) == {
-        path.entity_shard(f"entity-{i}", 8) for i in range(ENTITIES)
+        entity_shard(f"entity-{i}", 8) for i in range(ENTITIES)
     }
     for _, bucket, origin in repo._statements._list_partitions():
         assert bucket == "thing"
@@ -154,7 +155,7 @@ def test_operation_shard_empty_store(tmp_path):
     reread = EntityRepository(dataset=DATASET, uri=tmp_path)
     _fill(reread, origins=("a",))
     assert _shards_on_disk(reread) == {
-        path.entity_shard(f"entity-{i}", 8) for i in range(ENTITIES)
+        entity_shard(f"entity-{i}", 8) for i in range(ENTITIES)
     }
 
 

@@ -15,6 +15,7 @@ from pydantic import ConfigDict, computed_field, field_validator, model_validato
 
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.helpers.file import (
+    get_filename,
     make_file_id,
     make_folders,
     mime_to_schema,
@@ -46,19 +47,24 @@ class Document(BaseModel):
 
     @classmethod
     def from_entity_dict(cls, d: dict[str, Any], public_url: str | None = None) -> Self:
-        """Create a Document from an entity dict (as returned by query_raw)."""
+        """Create a Document from an entity dict (as returned by query_raw).
+
+        ``name`` is the entity's file name (`get_filename`), not its
+        caption – it is what [`relative_path`][Document.relative_path] builds a
+        path out of, and the mime type is guessed off the same value.
+        """
         props = d.get("properties", {})
         checksums = props.get("contentHash", [])
         if not checksums or not d.get("id"):
             raise ValueError(f"Missing contentHash for entity id `{d.get('id')}`")
-        caption = d.get("caption", "")
+        name = get_filename(d)
         mimetypes = props.get("mimeType", [])
         file_sizes = props.get("fileSize", [])
         return cls(
             id=d["id"],
             checksum=checksums[0],
-            name=caption,
-            mimetype=pick_mime(mimetypes, guess_mimetype(caption)),
+            name=name,
+            mimetype=pick_mime(mimetypes, guess_mimetype(name)),
             size=int(file_sizes[0]) if file_sizes else 0,
             updated_at=d.get("last_change"),
             public_url=public_url,
@@ -167,12 +173,12 @@ class File(Stats):
     @property
     def blob_path(self) -> str:
         """Relative path to blob in dataset archive"""
-        return path.archive_blob(self.checksum)
+        return path.ArchiveKey(self.checksum).blob
 
     @property
     def meta_path(self) -> str:
         """Relative path for this file's metadata json in dataset archive"""
-        return path.archive_meta(self.checksum, self.id)
+        return path.ArchiveKey(self.checksum).meta(self.id)
 
     @classmethod
     def from_info(cls, info: Stats, checksum: str, **data) -> Self:

@@ -41,6 +41,27 @@ class StoreKey(PurePosixPath):
         """Build a derived key, dropping any builder identity."""
         return StoreKey(*segments)
 
+    def __eq__(self, other: object) -> bool:
+        """A key equals its own spelling, so a string can address it.
+
+        `PurePosixPath` compares only to other paths while hashing as its
+        string – which puts a string lookup into the right bucket and then
+        rejects it, a *silent* miss. Closing that leaves no silent failure
+        mode: the string APIs a key still cannot reach (``key in text``,
+        ``text.startswith(key)``, ``"a" + key``) all raise instead.
+
+        The comparison is against the normalised spelling, so
+        ``StoreKey("a//b") == "a/b"`` – which is the right answer for a key.
+        """
+        if isinstance(other, str):
+            return str(self) == other
+        return super().__eq__(other)
+
+    # defining `__eq__` would otherwise drop the inherited hash, and it is
+    # already the hash of the string – which is what makes the two
+    # interchangeable as dict keys
+    __hash__ = PurePosixPath.__hash__
+
     def __getitem__(self, infix: Any | None = None) -> "StoreKey":
         """``DOCUMENTS["crawl"]`` -> ``documents.crawl.csv``"""
         infix_ = stringify(infix)
@@ -48,6 +69,15 @@ class StoreKey(PurePosixPath):
             return StoreKey(self)
         stem, dot, extension = self.name.partition(".")
         return self.with_name(f"{stem}.{safe_name(infix_, 'infix')}{dot}{extension}")
+
+    def __iter__(self) -> Any:
+        """A key is one path, not a sequence of them.
+
+        Without this, `__getitem__` makes the legacy iteration protocol apply –
+        and since subscripting never raises `IndexError`, ``"a" in key`` would
+        spin forever building infixes.
+        """
+        raise TypeError(f"{type(self).__name__} is not iterable")
 
     def __add__(self, suffix: Any | None = None) -> "StoreKey":
         """``STATEMENTS + "zst"`` -> ``statements.csv.zst``"""

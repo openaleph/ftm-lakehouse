@@ -97,12 +97,16 @@ def cli_make(
 
 @cli.command("export")
 def cli_export(
-    kind: Annotated[ExportKind, typer.Argument(help="Which export to produce.")],
+    kind: Annotated[
+        ExportKind, typer.Argument(help="Which export to produce.")
+    ] = ExportKind.all,
     force: OPT_FORCE = False,
 ):
-    """Export the dataset: ``statements`` (statements.csv), ``entities``
+    """Export the dataset: ``all`` (the default – statements.csv,
+    entities.ftm.json and documents.csv from a single pass, with their diffs),
+    or one of ``statements`` (statements.csv), ``entities``
     (entities.ftm.json), ``documents`` (documents.csv), ``statistics``
-    (statistics.json) or ``index`` (index.json)."""
+    (statistics.json), ``index`` (index.json)."""
     with DatasetContext() as (name, uri):
         res = op.export(name, kind, uri, force=bool(force))
         console.print(res)

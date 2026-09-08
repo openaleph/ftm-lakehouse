@@ -1,15 +1,12 @@
 """EntityRepository - entity/statement operations using JournalStore + ParquetStore."""
 
-import csv
 from contextlib import contextmanager
 from datetime import datetime
 from functools import cached_property
-from itertools import islice
-from typing import IO, Generator, Iterable, Iterator, cast
+from typing import Generator, Iterable, Iterator, cast
 
 import pyarrow as pa
-from anystore.io import smart_open, smart_write_json
-from anystore.types import SDict, Uri
+from anystore.types import Uri
 from anystore.util import Took, mask_uri
 from followthemoney import EntityProxy, Statement, StatementEntity
 from followthemoney.statement import StatementDict
@@ -21,14 +18,15 @@ from ftmq.types import StatementEntities, Statements, ValueEntities
 from rigour.time import utc_now
 
 from ftm_lakehouse.core.api import no_api
-from ftm_lakehouse.core.conventions import path, tag
+from ftm_lakehouse.core.conventions import tag
 from ftm_lakehouse.core.settings import Settings
-from ftm_lakehouse.logic.compress import compress_stream, decompress_stream
-from ftm_lakehouse.logic.entities.aggregate import aggregate_unsafe
-from ftm_lakehouse.logic.parquet import QUERY_IN_BATCH_SIZE
+from ftm_lakehouse.logic.compress import decompress_stream
 from ftm_lakehouse.model.statement import LakehouseStatement
+from ftm_lakehouse.repository.artifacts import (
+    EntitiesArtifact,
+    StatementsArtifact,
+)
 from ftm_lakehouse.repository.base import DatasetHandle
-from ftm_lakehouse.repository.diff import ParquetDiffMixin, make_envelope
 from ftm_lakehouse.storage.journal import get_journal
 from ftm_lakehouse.storage.journal.base import BaseJournalWriter
 from ftm_lakehouse.storage.parquet import ParquetStore
@@ -37,7 +35,7 @@ from ftm_lakehouse.util import validate_origin
 settings = Settings()
 
 
-class EntityRepository(ParquetDiffMixin, DatasetHandle):
+class EntityRepository(DatasetHandle):
     """
     Repository for entity/statement operations.
 
@@ -78,8 +76,8 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
         self.shards = self._model.shards
         self.compression = self._model.compression
         self._journal = get_journal(dataset)
-        self.ENTITIES_JSON = path.entities_json(self.compression)
-        self.EXPORTS_STATEMENTS = path.exports_statements(self.compression)
+        self.ENTITIES_JSON = EntitiesArtifact(self).key
+        self.EXPORTS_STATEMENTS = StatementsArtifact(self).key
 
     @cached_property
     def _statements(self) -> ParquetStore:
@@ -247,9 +245,24 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
         self._statements.vacuum(retention_hours=retention_hours)
 
     @no_api
-    def export_statements_csv(self) -> None:
-        """Export the statement store to the ``statements.csv`` artifact."""
-        self._statements.export_csv(self.EXPORTS_STATEMENTS)
+    def sweep(
+        self, with_csv_export: bool = True, tee: bool = True
+    ) -> Iterator[StatementDict]:
+        """One scan of the store, optionally writing ``statements.csv`` from it.
+
+        Delegates to [`ParquetStore.sweep`][ParquetStore.sweep] with this
+        dataset's csv key, so the artifact carries the configured codec.
+
+        Args:
+            with_csv_export: Write the ``statements.csv`` artifact from the same
+                Arrow batches the rows come from.
+            tee: Yield row dicts. ``False`` keeps the scan columnar.
+
+        Yields:
+            ``StatementDict`` rows, unless ``tee`` is off.
+        """
+        key = self.EXPORTS_STATEMENTS if with_csv_export else None
+        yield from self._statements.sweep(key, tee)
 
     @property
     @no_api
@@ -264,7 +277,7 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
         [`merge`][EntityRepository.merge] has not collapsed yet – local only.
 
         Reads are canonical only on a merged store, so anything publishing
-        canonical rows (the exports, and `export_diff` strictly) checks
+        canonical rows (the exports, and their diffs strictly) checks
         this first. See [`ParquetStore.needs_merge`][ParquetStore.needs_merge].
         """
         return self._statements.needs_merge
@@ -358,76 +371,6 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
                 decompress_stream(fh, self.compression) as raw,
             ):
                 yield from smart_read_proxies(raw)
-
-    @no_api
-    def export_entities(self) -> None:
-        """Export entities to a JSON lines file without FtM object construction.
-
-        Uses [`aggregate_unsafe`][aggregate_unsafe] to bypass Statement/StatementEntity/
-        ``to_dict()`` and writes directly to orjson output.
-
-        The statement source defaults to a **fresh** ``statements.csv`` when one
-        exists – streaming the pre-sorted CSV into ``aggregate_unsafe`` is ~2x
-        faster than re-scanning the parquet store, which pays per-row
-        DuckDB→Python marshaling – and falls back to the live parquet view
-        otherwise.
-
-        Compression comes from `compression` (the dataset's config), not
-        from the caller.
-        """
-        statements_csv_uri = self._fresh_statements_csv()
-        if statements_csv_uri is not None:
-            rows = self._stream_statements_csv(statements_csv_uri)
-        else:
-            rows = self.query_statements_data()
-
-        entities = aggregate_unsafe(rows, self.dataset)
-        entities = (e.to_dict() for e in entities)
-
-        with (
-            self._store.open(self.ENTITIES_JSON, "wb") as fh,
-            compress_stream(fh, self.compression) as out,
-        ):
-            smart_write_json(out, entities)
-
-    def _stream_statements_csv(self, uri: str) -> Iterator[StatementDict]:
-        """Stream the exported ``statements.csv`` as row dicts.
-
-        Applies the dataset's codec on the way in: the CSV this reads is the
-        artifact [`ParquetStore.export_csv`][ParquetStore.export_csv] just wrote, so on a
-        compressed dataset it is a codec frame – and anystore's
-        ``smart_stream_csv`` opens in text mode with no notion of
-        compression. ``mode="r"`` asks for the text stream
-        `csv.DictReader` needs; an uncompressed dataset takes the same
-        path, so there is no branch here.
-        """
-        with (
-            # anystore types the handle as IO[Never] without a mode binding
-            smart_open(uri, "rb") as fh,
-            decompress_stream(cast(IO[bytes], fh), self.compression, "r") as raw,
-        ):
-            for row in csv.DictReader(raw):
-                yield cast(StatementDict, row)
-
-    def _fresh_statements_csv(self) -> str | None:
-        """URI of the exported ``statements.csv`` if it's current, else ``None``.
-
-        Current = its freshness tag (its own target key) is newer than
-        ``statements/last_optimized``, the canonical-content clock every
-        export goes stale against. Unflushed journal rows and un-merged
-        appends need no separate check: an export only runs on a store its
-        [`ExportOperation.prepare`][ftm_lakehouse.operation.ExportOperation.prepare]
-        has already drained and merged, and that merge moves this very tag.
-        Within a full export run
-        statements.csv is written first, so entity export streams it instead
-        of re-scanning parquet.
-        """
-        if not self._store.exists(self.EXPORTS_STATEMENTS):
-            return None
-        deps = [tag.STATEMENTS_OPTIMIZED]
-        if self._tags.is_latest(self.EXPORTS_STATEMENTS, deps):
-            return self._store.to_uri(self.EXPORTS_STATEMENTS)
-        return None
 
     def delete_entity(self, entity_id: str, origin: str | None = None) -> int:
         """Delete all statements for an entity via journal tombstones.
@@ -545,70 +488,12 @@ class EntityRepository(ParquetDiffMixin, DatasetHandle):
         """Current version of the main Delta table."""
         return self._statements.version
 
-    # DiffMixin implementation
-
-    _diff_base_path = path.DIFFS_ENTITIES
-
     @no_api
-    def _get_changed_ids(
-        self, since: datetime, origin: str | None = None
-    ) -> Iterator[str]:
-        """Get entity IDs with statements added since the given timestamp.
+    def deleted_ids(self, since: datetime) -> Iterator[str]:
+        """Entity ids with statements tombstoned since the given timestamp.
 
-        ``origin`` is never set – entity diffs are not origin-scoped, and
-        `ParquetDiffMixin._get_diff_base_path` refuses one upfront.
+        Reads `ParquetStore.source_raw`, since the live view hides exactly
+        the rows this asks about
         """
-        q = Query(C(first_seen__gte=since) | C(deleted_at__gte=since))
+        q = Query(C(deleted_at__gte=since))
         return self._statements.get_entity_ids(q, source=self._statements.source_raw)
-
-    @no_api
-    def _write_diff(
-        self, entity_ids: Iterator[str], ts: datetime, origin: str | None = None
-    ) -> tuple[str, int]:
-        """Write entities as line-based JSON with operation envelopes."""
-        key = path.entities_diff(ts, self.compression)
-        changed: set[str] = set(entity_ids)
-        with (
-            self._store.open(key, "wb") as o,
-            compress_stream(o, self.compression) as out,
-        ):
-            smart_write_json(out, self._get_delta_entities(changed))
-        return self._store.to_uri(key), len(changed)
-
-    @no_api
-    def _get_delta_entities(self, entity_ids: set[str]) -> Generator[SDict, None, None]:
-        """Envelopes for the changed entities: their current state, or a delete.
-
-        Consumers index an envelope's payload wholesale, so the two ops mean
-        exactly one thing each:
-
-        - ``ADD`` – the entity as it stands now, **whole**. Not the statements
-          that changed: a consumer overwrites its copy with this payload, so a
-          partial one would drop every property that did not change.
-        - ``DEL`` – the entity is gone entirely. Tombstoning *some* of an
-          entity's statements leaves it live, and it round-trips here as an
-          ADD carrying what remains.
-
-        Both fall out of one lookup. Each changed id is re-read whole from the
-        live view – canonical, because `export_diff` requires a merged
-        store – so what comes back is the entity's current state, and an entity
-        whose statements are all gone simply does not come back. Ids are
-        batched into ``entity_id IN (...)`` lookups, which the source prunes to
-        the shards they fall in.
-
-        The lookup is what makes DEL correct, and no timestamp filter can
-        replace it: "has a statement newer than ``since``" is not "is still
-        live", so a partially deleted entity – tombstone reaped, other
-        statements untouched – would fall out of the ADD set and be published
-        as a delete. Detecting *change* is `_get_changed_ids`' job, over
-        the raw rows.
-        """
-        seen_ids: set[str] = set()
-        ids = iter(entity_ids)
-        while batch := set(islice(ids, QUERY_IN_BATCH_SIZE)):
-            for entity in self._statements._query_data(Query(M(entity_id__in=batch))):
-                if entity.id:
-                    seen_ids.add(entity.id)
-                yield make_envelope(entity.to_dict())
-        for entity_id in entity_ids - seen_ids:
-            yield make_envelope({"id": entity_id}, op="DEL")

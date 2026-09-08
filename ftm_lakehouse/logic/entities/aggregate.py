@@ -39,6 +39,8 @@ class EntityData(TypedDict):
     last_seens: set[str]
     last_changes: set[str]
     properties: defaultdict
+    min_first_seen: str | None
+    max_first_seen: str | None
 
 
 class EntityPayload:
@@ -52,15 +54,53 @@ class EntityPayload:
         "id",
         "dataset",
         "statements",
+        "_data",
+        "_dict",
     )
 
     def __init__(self, id: str | None = None, dataset: str | None = None) -> None:
         self.id = id
         self.statements: list[StatementDict] = []
         self.dataset = make_dataset(dataset or DEFAULT_DATASET)
+        self._data: EntityData | None = None
+        self._dict: dict[str, Any] | None = None
 
     def add(self, s: StatementDict) -> None:
         self.statements.append(s)
+
+    @property
+    def compiled(self) -> EntityData:
+        """The folded statement data, built once per payload."""
+        if self._data is None:
+            self._data = self._build()
+        return self._data
+
+    @property
+    def origins(self) -> set[str]:
+        """Every source tag that asserts something about this entity."""
+        return self.compiled["origins"]
+
+    @property
+    def min_first_seen(self) -> str | None:
+        """Earliest ``first_seen`` across **all** statements, ``id`` rows included.
+
+        The diff's ADD/MOD discriminator: when this is at or after a diff's
+        ``since``, every statement the entity has is new, so the entity itself
+        is new. Deliberately not the ``first_seen`` of
+        [`to_dict`][EntityPayload.to_dict], which folds non-``id`` statements
+        only – an entity that existed as a bare id and just gained its first
+        properties would read as brand new there.
+        """
+        return self.compiled["min_first_seen"]
+
+    @property
+    def max_first_seen(self) -> str | None:
+        """Latest ``first_seen`` across **all** statements, ``id`` rows included.
+
+        The diff's change predicate: when this is at or after a diff's
+        ``since``, the entity gained at least one statement in the window.
+        """
+        return self.compiled["max_first_seen"]
 
     def _build(self) -> EntityData:
         data = EntityData(
@@ -73,6 +113,8 @@ class EntityPayload:
             last_seens=set(),
             last_changes=set(),
             properties=defaultdict(set),
+            min_first_seen=None,
+            max_first_seen=None,
         )
 
         # collect statements
@@ -97,6 +139,20 @@ class EntityPayload:
             first_seen = datetime_iso(s.get("first_seen"))
             last_seen = datetime_iso(s.get("last_seen"))
 
+            # the diff bounds span every statement, `id` rows included – a
+            # bare-id entity that just gained properties predates the window
+            if first_seen is not None:
+                if (
+                    data["min_first_seen"] is None
+                    or first_seen < data["min_first_seen"]
+                ):
+                    data["min_first_seen"] = first_seen
+                if (
+                    data["max_first_seen"] is None
+                    or first_seen > data["max_first_seen"]
+                ):
+                    data["max_first_seen"] = first_seen
+
             if s["prop"] == BASE_ID:
                 # last_change = max of BASE_ID statement first_seen values
                 if first_seen is not None:
@@ -114,10 +170,15 @@ class EntityPayload:
         return data
 
     def to_dict(self) -> dict[str, Any]:
-        compiled = self._build()
+        """The entity as an FtM-shaped dict, built once per payload."""
+        if self._dict is None:
+            self._dict = self._to_dict()
+        return self._dict
+
+    def _to_dict(self) -> dict[str, Any]:
         # Schema merging – pick the most specific schema
         schema = None
-        for name in compiled["schemata"]:
+        for name in self.compiled["schemata"]:
             if schema is None:
                 schema = model.get(name)
             elif schema.name != name:
@@ -130,7 +191,7 @@ class EntityPayload:
         # (simplified: no pick_lang_name language detection)
         caption = schema.label
         for prop_name in schema.caption:
-            values = compiled["properties"].get(prop_name)
+            values = self.compiled["properties"].get(prop_name)
             if values:
                 caption = next(iter(sorted(values)))
                 break
@@ -139,23 +200,23 @@ class EntityPayload:
             "id": self.id,
             "caption": caption,
             "schema": schema.name,
-            "properties": {k: list(v) for k, v in compiled["properties"].items()},
-            "referents": list(compiled["referents"]),
-            "datasets": list(compiled["datasets"]),
+            "properties": {k: list(v) for k, v in self.compiled["properties"].items()},
+            "referents": list(self.compiled["referents"]),
+            "datasets": list(self.compiled["datasets"]),
         }
 
-        if compiled["origins"]:
-            data["origin"] = list(compiled["origins"])
+        if self.compiled["origins"]:
+            data["origin"] = list(self.compiled["origins"])
         # A list, like `origin`: one entity's rows can span roles, and the
         # CLI reads it back off the context on re-import.
-        if compiled["roles"]:
-            data["role"] = list(compiled["roles"])
-        if compiled["first_seens"]:
-            data["first_seen"] = min(compiled["first_seens"])
-        if compiled["last_seens"]:
-            data["last_seen"] = max(compiled["last_seens"])
-        if compiled["last_changes"]:
-            data["last_change"] = max(compiled["last_changes"])
+        if self.compiled["roles"]:
+            data["role"] = list(self.compiled["roles"])
+        if self.compiled["first_seens"]:
+            data["first_seen"] = min(self.compiled["first_seens"])
+        if self.compiled["last_seens"]:
+            data["last_seen"] = max(self.compiled["last_seens"])
+        if self.compiled["last_changes"]:
+            data["last_change"] = max(self.compiled["last_changes"])
 
         return data
 
@@ -172,9 +233,7 @@ def aggregate_unsafe(
 
     Completely circumvents the dict -> Statement -> StatementEntity -> dict
     Python path, but therefore has no validation checks. Input must be sorted
-    by entity_id (this store never resolves, so canonical_id == entity_id;
-    the ftmq entity query still orders by canonical_id, which is the same
-    ordering via the ``entity_id AS canonical_id`` view alias).
+    by entity_id.
     """
     current: EntityPayload | None = None
     for statement in data:

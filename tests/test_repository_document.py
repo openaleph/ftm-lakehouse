@@ -2,11 +2,19 @@ from anystore.io import smart_stream_csv_models
 
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.model.file import Document
+from ftm_lakehouse.operation.export import ExportJob, ExportKind, ExportOperation
 from ftm_lakehouse.repository import (
     ArchiveRepository,
     DocumentRepository,
     EntityRepository,
 )
+from ftm_lakehouse.repository.factories import get_artifacts
+
+
+def _export(tmp_path, make_diff: bool = True) -> None:
+    """Run the documents export sweep, which writes every origin scope."""
+    job = ExportJob.make(dataset="test", kind=ExportKind.documents, make_diff=make_diff)
+    ExportOperation(job=job, uri=tmp_path).run(force=True)
 
 
 def _archive_with_entities(archive: ArchiveRepository, entities: EntityRepository, uri):
@@ -18,8 +26,8 @@ def _archive_with_entities(archive: ArchiveRepository, entities: EntityRepositor
     return file
 
 
-def test_repository_document_collect(tmp_path, fixtures_path):
-    """Test collecting documents from archived files."""
+def test_repository_document_iterate(tmp_path, fixtures_path):
+    """Test iterate documents from archived files."""
     archive = ArchiveRepository("test", tmp_path)
     entities = EntityRepository("test", tmp_path)
 
@@ -30,9 +38,9 @@ def test_repository_document_collect(tmp_path, fixtures_path):
     # Flush journal to parquet
     entities.flush()
 
-    # Now collect documents from the repository
+    # Now iterate documents from the repository
     repo = DocumentRepository("test", tmp_path)
-    documents = list(repo.collect())
+    documents = list(repo.iterate())
 
     assert len(documents) == 2
 
@@ -46,7 +54,7 @@ def test_repository_document_collect(tmp_path, fixtures_path):
         assert doc.mimetype
         assert (
             doc.public_url
-            == f"https://data.example.org/test/{path.archive_blob(doc.checksum)}"
+            == f"https://data.example.org/test/{path.ArchiveKey(doc.checksum).blob}"
         )  # pytest-env global prefix var
 
     # Check specific file
@@ -72,7 +80,7 @@ def test_repository_document_export_csv(tmp_path, fixtures_path):
 
     # Export to CSV
     repo = DocumentRepository("test", tmp_path)
-    repo.export_csv()
+    _export(tmp_path)
 
     # Verify CSV was created
     csv_path = tmp_path / path.EXPORTS_DOCUMENTS
@@ -90,13 +98,13 @@ def test_repository_document_export_csv(tmp_path, fixtures_path):
 def test_repository_document_csv_uri(tmp_path):
     """Test csv_uri property returns correct path."""
     repo = DocumentRepository("test", tmp_path)
-    assert path.EXPORTS_DOCUMENTS in str(repo.csv_uri())
+    assert str(path.EXPORTS_DOCUMENTS) in str(repo.csv_uri())
 
 
 def test_repository_document_empty(tmp_path):
-    """Test collecting from empty repository."""
+    """Test iterate from empty repository."""
     repo = DocumentRepository("test", tmp_path)
-    documents = list(repo.collect())
+    documents = list(repo.iterate())
     assert documents == []
 
 
@@ -122,7 +130,7 @@ def test_repository_document_multi_metadata(tmp_path):
 
     # Both should produce documents
     repo = DocumentRepository("test", tmp_path)
-    documents = list(repo.collect())
+    documents = list(repo.iterate())
 
     assert len(documents) == 2
     assert result1.checksum == result2.checksum
@@ -145,11 +153,8 @@ def test_repository_document_export_diff(tmp_path, fixtures_path):
     Sleeps cross second boundaries because FtM truncates timestamps to seconds
     and diff detection uses first_seen >= floor(since).
     """
-    import time
-
     archive = ArchiveRepository("test", tmp_path)
     entities = EntityRepository("test", tmp_path)
-    repo = DocumentRepository("test", tmp_path)
 
     assert entities._statements.version is None
 
@@ -168,9 +173,7 @@ def test_repository_document_export_diff(tmp_path, fixtures_path):
     entities.merge()
 
     # First export - only records the diff state, writes no file
-    diff_name_1 = repo.export_diff()
-    assert diff_name_1 is not None
-    assert diff_name_1.endswith("Z")
+    _export(tmp_path)
 
     diff_files = list((tmp_path / path.DIFFS_DOCUMENTS).glob("*.diff.csv"))
     assert len(diff_files) == 0
@@ -183,9 +186,7 @@ def test_repository_document_export_diff(tmp_path, fixtures_path):
     entities.merge()  # a diff reads canonical rows
 
     # Incremental diff - captures changes via translog
-    diff_name_2 = repo.export_diff()
-    assert diff_name_2 is not None
-    assert diff_name_2 != diff_name_1
+    _export(tmp_path)
 
     diff_files = list((tmp_path / path.DIFFS_DOCUMENTS).glob("*.diff.csv"))
     assert len(diff_files) == 1
@@ -203,7 +204,6 @@ def test_repository_document_export_diff_no_changes(tmp_path, fixtures_path):
     """Test diff export when there are no new changes after initial setup."""
     archive = ArchiveRepository("test", tmp_path)
     entities = EntityRepository("test", tmp_path)
-    repo = DocumentRepository("test", tmp_path)
 
     # Create data and flush
     _archive_with_entities(archive, entities, fixtures_path / "src" / "utf.txt")
@@ -214,17 +214,14 @@ def test_repository_document_export_diff_no_changes(tmp_path, fixtures_path):
     entities.flush()  # v1
     entities.merge()  # a diff reads canonical rows
 
-    repo.export_csv()
-
     # First export - only records the diff state
-    diff_name_1 = repo.export_diff()
-    assert diff_name_1 is not None
-    assert diff_name_1.endswith("Z")
+    _export(tmp_path)
 
-    # Second diff without any new data - no new diff file
-    assert repo.export_diff() is None
+    # Second export without any new data - no new diff file
+    _export(tmp_path)
 
-    # No diff file at all - the first export writes none
+    # No diff file at all - the first export writes none, and the second
+    # finds nothing changed
     diff_files = list((tmp_path / path.DIFFS_DOCUMENTS).glob("*.diff.csv"))
     assert len(diff_files) == 0
 
@@ -253,25 +250,20 @@ def test_repository_document_export_csv_origin(tmp_path, fixtures_path):
     )
     entities.flush()
 
-    repo.export_csv()
-    repo.export_csv(tag.CRAWL_ORIGIN)
+    # one run writes every origin scope
+    _export(tmp_path)
 
     assert (tmp_path / path.EXPORTS_DOCUMENTS).exists()
-    assert (tmp_path / path.export_documents(tag.CRAWL_ORIGIN)).exists()
+    assert (tmp_path / path.EXPORTS_DOCUMENTS[tag.CRAWL_ORIGIN]).exists()
 
     assert {d.name for d in repo.stream()} == {"utf.txt", "companies.csv"}
     assert {d.name for d in repo.stream(tag.CRAWL_ORIGIN)} == {"utf.txt"}
-
-    # an origin without documents writes no file
-    repo.export_csv("empty")
-    assert not (tmp_path / path.export_documents("empty")).exists()
 
 
 def test_repository_document_export_diff_origin(tmp_path, fixtures_path):
     """Origin-scoped diffs keep their own state and only see their origin."""
     archive = ArchiveRepository("test", tmp_path)
     entities = EntityRepository("test", tmp_path)
-    repo = DocumentRepository("test", tmp_path)
 
     _archive_with_origin(
         archive, entities, fixtures_path / "src" / "utf.txt", tag.CRAWL_ORIGIN
@@ -280,9 +272,8 @@ def test_repository_document_export_diff_origin(tmp_path, fixtures_path):
     entities.merge()
 
     # first export only records the state both scopes diff against
-    assert repo.export_diff() is not None
-    assert repo.export_diff(tag.CRAWL_ORIGIN) is not None
-    assert not (tmp_path / path.diffs_documents(tag.CRAWL_ORIGIN)).exists()
+    _export(tmp_path)
+    assert not (tmp_path / path.DIFFS_DOCUMENTS[tag.CRAWL_ORIGIN]).exists()
 
     # a crawled document lands in both diffs ...
     file3 = tmp_path / "new_file.txt"
@@ -291,10 +282,9 @@ def test_repository_document_export_diff_origin(tmp_path, fixtures_path):
     entities.flush()
     entities.merge()
 
-    assert repo.export_diff() is not None
-    assert repo.export_diff(tag.CRAWL_ORIGIN) is not None
+    _export(tmp_path)
 
-    crawl_diffs = sorted((tmp_path / path.diffs_documents(tag.CRAWL_ORIGIN)).glob("*"))
+    crawl_diffs = sorted((tmp_path / path.DIFFS_DOCUMENTS[tag.CRAWL_ORIGIN]).glob("*"))
     assert len(crawl_diffs) == 1
     docs = list(smart_stream_csv_models(crawl_diffs[0], model=Document))
     assert {d.name for d in docs} == {"new_file.txt"}
@@ -306,8 +296,34 @@ def test_repository_document_export_diff_origin(tmp_path, fixtures_path):
     entities.flush()
     entities.merge()
 
-    assert repo.export_diff() is not None
-    assert repo.export_diff(tag.CRAWL_ORIGIN) is None
+    _export(tmp_path)
 
     assert len(list((tmp_path / path.DIFFS_DOCUMENTS).glob("*.diff.csv"))) == 2
-    assert len(list((tmp_path / path.diffs_documents(tag.CRAWL_ORIGIN)).glob("*"))) == 1
+    assert len(list((tmp_path / path.DIFFS_DOCUMENTS[tag.CRAWL_ORIGIN]).glob("*"))) == 1
+
+
+def test_make_documents_yields_distinct_rows_per_parent(tmp_path):
+    """A file in two folders is two rows, and both survive materialising.
+
+    The diff writes the rows the csv wrote, so it has to hold them – yielding
+    one mutated object would collapse both to the last folder.
+    """
+    artifact = get_artifacts("test", tmp_path).documents
+    data = {
+        "id": "doc",
+        "schema": "Pages",
+        "caption": "doc.pdf",
+        "properties": {
+            "contentHash": ["a" * 64],
+            "fileName": ["doc.pdf"],
+            "parent": ["folder-a", "folder-b", "unknown"],
+        },
+    }
+    paths = {"folder-a": "one", "folder-b": "two"}
+
+    rows = list(artifact.make_documents(data, paths))
+    assert [r.path for r in rows] == ["one", "two"]
+    assert rows[0] is not rows[1]
+
+    # nothing resolvable -> one unpathed row
+    assert [r.path for r in artifact.make_documents(data, {})] == [None]

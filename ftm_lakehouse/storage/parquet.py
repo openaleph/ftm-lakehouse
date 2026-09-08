@@ -41,7 +41,7 @@ Layout:
     statements/shard={s}/bucket={b}/origin={o}/part-*.parquet
 """
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import timedelta
 from functools import cache, cached_property
 from typing import Callable, Iterator, cast
@@ -76,10 +76,12 @@ from sqlalchemy import Select, column
 
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.core.settings import Settings
+from ftm_lakehouse.helpers.shards import entity_shard
 from ftm_lakehouse.logic.compress import CompressKind, compress_stream
 from ftm_lakehouse.logic.entities import aggregate_unsafe
 from ftm_lakehouse.logic.entities.aggregate import EntityPayload
 from ftm_lakehouse.logic.parquet import (
+    SWEEP_BATCH_SIZE,
     build_bounds_sample_sql,
     build_merge_sql,
     build_shard_sql,
@@ -362,7 +364,7 @@ class ParquetStore:
 
     def _append_markers(self) -> list[str]:
         """Keys of all currently registered append markers."""
-        return list(self._store.iterate_keys(prefix=path.LOCK_APPENDS))
+        return list(self._store.iterate_keys(prefix=str(path.LOCK_APPENDS)))
 
     @contextmanager
     def _append_fence(self) -> Iterator[None]:
@@ -513,7 +515,7 @@ class ParquetStore:
         """
         ids = pc.dictionary_encode(batch.column("entity_id").combine_chunks())
         shards = pa.array(
-            [path.entity_shard(e, self.shards) for e in ids.dictionary.to_pylist()],
+            [entity_shard(e, self.shards) for e in ids.dictionary.to_pylist()],
             pa.string(),
         )
         return batch.append_column(
@@ -995,33 +997,63 @@ class ParquetStore:
             )
             self.log.info("Vacuumed.", took=t.took)
 
-    def export_csv(self, key: str) -> None:
-        """Export statements to a sorted CSV file.
+    def sweep(
+        self, csv_key: str | None = None, tee: bool = True
+    ) -> Iterator[StatementDict]:
+        """One scan of the live view, teeing Arrow batches two ways.
 
-        Streams each ``(shard, bucket)`` partition straight from DuckDB as
-        Arrow batches (`_execute_partitioned`) into a ``pyarrow`` CSV
-        writer, so the export stays vectorised end to end – no per-row
-        Python materialisation. Memory stays bounded per batch and the
-        ``ORDER BY entity_id`` sort stays bounded to one partition.
+        Each ``(shard, bucket)`` partition streams straight from DuckDB as
+        Arrow batches (`_execute_partitioned`). Every batch can go to a
+        ``pyarrow`` CSV writer *and* be handed on as row dicts, so a caller
+        that wants both ``statements.csv`` and the rows behind it pays for one
+        scan rather than writing the csv and reading it back.
 
-        Compression comes from `compression` (the dataset's config), not
-        from the caller.
+        Rows come from ``RecordBatch.to_pylist`` – a bulk conversion in C,
+        cheaper than the ``Row``-object marshalling of
+        `_query_statement_data` – and
+        carry `STATEMENT_CSV_COLUMNS`, which covers everything an entity
+        aggregation needs. They arrive entity-contiguous (the select orders by
+        ``entity_id`` and an entity lives in one partition), so
+        ``aggregate_unsafe`` can fold them directly.
+
+        The csv handle lives for the generator's lifetime; abandoning the
+        generator closes it through the usual ``GeneratorExit`` unwind, so the
+        codec trailer is always written.
+
+        Args:
+            csv_key: Store key to write the sorted statements csv to.
+                ``None`` scans without writing one. Compression comes from
+                `compression` (the dataset's config), not from the caller.
+            tee: Yield row dicts. ``False`` keeps the scan purely
+                columnar – nothing is materialised in Python – which is what
+                a csv-only export wants.
+
+        Yields:
+            ``StatementDict`` rows, unless ``tee`` is off.
         """
         if not self.exists:
             return
         sql = statement_csv_select()
-        with (
-            self._store.open(key, "wb") as fh,
-            compress_stream(fh, self.compression) as out,
-        ):
+        # a batch is materialised as Python objects only when rows are asked
+        # for, so the cap is on rows-in-flight, not on bytes scanned
+        batch_size = SWEEP_BATCH_SIZE if tee else None
+        with ExitStack() as stack:
+            out = None
+            if csv_key is not None:
+                fh = stack.enter_context(self._store.open(csv_key, "wb"))
+                out = stack.enter_context(compress_stream(fh, self.compression))
             writer: CSVWriter | None = None
-            for reader in self._execute_partitioned(sql):
+            for reader in self._execute_partitioned(sql, batch_size):
                 for batch in reader:
-                    if writer is None:
-                        writer = CSVWriter(out, batch.schema)
-                    writer.write(batch)
-            if writer is not None:
-                writer.close()
+                    if out is not None:
+                        if writer is None:
+                            writer = CSVWriter(out, batch.schema)
+                            # on the stack, so an abandoned generator flushes
+                            # the writer's buffer *before* the codec closes
+                            stack.callback(writer.close)
+                        writer.write(batch)
+                    if tee:
+                        yield from cast(list[StatementDict], batch.to_pylist())
 
     def get_entity_ids(
         self, q: Query | None = None, *, source: SqlSource | None = None
@@ -1097,7 +1129,7 @@ class ParquetStore:
             yield sql.where(column("shard") == s, column("bucket") == b)
 
     def _execute_partitioned(
-        self, sql: Select | None = None
+        self, sql: Select | None = None, batch_size: int | None = None
     ) -> Iterator[pa.RecordBatchReader]:
         """Yield a streamed Arrow reader per ``(shard, bucket)`` partition.
 
@@ -1113,6 +1145,10 @@ class ParquetStore:
 
         Args:
             sql: Optional SQLAlchemy ``Select`` (default: `_compile_query`).
+            batch_size: Rows per Arrow batch. DuckDB's default of 1M is right
+                for a purely columnar consumer, but a consumer that turns
+                batches into Python objects wants a smaller one – the cap is
+                on *materialised rows*, not bytes.
 
         Yields:
             One `pyarrow.RecordBatchReader` per ``(shard, bucket)``
@@ -1123,7 +1159,11 @@ class ParquetStore:
         for scoped in self._scoped_partition_sql(sql):
             compiled = str(scoped.compile(compile_kwargs={"literal_binds": True}))
             with self._lake.cursor() as cur:
-                yield cur.execute(compiled).to_arrow_reader()
+                res = cur.execute(compiled)
+                if batch_size is None:
+                    yield res.to_arrow_reader()
+                else:
+                    yield res.to_arrow_reader(batch_size)
 
     def _query_statement_data(self, q: Query | None = None) -> Iterator[StatementDict]:
         """Query statement dicts from the live view, bypassing FtM construction.

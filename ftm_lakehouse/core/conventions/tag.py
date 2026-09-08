@@ -32,6 +32,13 @@ OP_DOWNLOAD_ARCHIVE = "operations/download_archive/last_run"
 OP_MAKE = "operations/make/last_run"
 """Last make (full workflow) execution"""
 
+OP_EXPORT = "operations/export/last_run"
+"""Last fused export sweep (`ExportKind.all`).
+
+The individual artifacts keep their own freshness tags – the sweep stamps
+every one it writes – so this is the tag for "the sweep as a whole ran", which
+is what a subsequent ``export all`` checks itself against."""
+
 OP_SHARD = "operations/shard/last_run"
 """Last re-shard (statement store rewritten onto a new shard count)"""
 

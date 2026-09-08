@@ -1,6 +1,6 @@
 from functools import cache, lru_cache
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from anystore.util import make_data_checksum
 from followthemoney import Schema, StatementEntity, model
@@ -111,3 +111,19 @@ def pick_mime(mimetypes: Iterable[str], default: str | None = None) -> str:
     if default:
         return normalize_mimetype(default)
     return types.DEFAULT
+
+
+def get_filename(d: dict[str, Any]) -> str:
+    """Pick the file name of an entity dict: its ``fileName``, else its caption.
+
+    Args:
+        d: Entity dict, as ``EntityProxy.to_dict`` (and all descendants)
+            returns.
+
+    Returns:
+        The file name, caption, or the schema string when the entity has neither.
+    """
+    file_names = d.get("properties", {}).get("fileName", [])
+    if file_names:
+        return str(file_names[0])
+    return str(d.get("caption") or d.get("schema") or "")

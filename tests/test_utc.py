@@ -7,6 +7,7 @@ naive/local leak in the read path fails the suite at large; these tests pin
 the remaining surfaces directly.
 """
 
+from collections import deque
 from datetime import datetime, timedelta, timezone
 
 from ftmq.util import make_entity
@@ -71,7 +72,8 @@ def test_statement_roundtrip_timestamps_are_utc(tmp_path):
         else:
             assert "+00:00" in last_seen or last_seen.endswith("Z"), last_seen
 
-    repo.export_statements_csv()
+    # the csv is written by the sweep's Arrow tee; nothing needs the rows here
+    deque(repo.sweep(with_csv_export=True, tee=False), maxlen=0)
     csv_content = (tmp_path / path.EXPORTS_STATEMENTS).read_text()
     header, first_row = csv_content.splitlines()[:2]
     # UTC may be rendered as `+00:00` or the `Z` (Zulu) suffix – both are UTC.

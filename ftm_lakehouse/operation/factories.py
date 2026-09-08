@@ -38,13 +38,13 @@ from ftm_lakehouse.operation.make import MakeJob, MakeOperation
 
 def export(
     dataset: str,
-    kind: ExportKind | str,
+    kind: ExportKind | str = ExportKind.all,
     uri: Uri | None = None,
     force: bool = False,
     make_diff: bool = True,
 ) -> ExportJob:
     """
-    Run a single export operation.
+    Run an export operation.
 
     Compression of the exported artifacts is the dataset's own
     ``compression`` config value – there is deliberately no runtime
@@ -52,11 +52,13 @@ def export(
 
     Args:
         dataset: Name of the dataset to export from
-        kind: What to export – one of ``statements``, ``entities``,
-            ``documents``, ``statistics``, ``index``
+        kind: What to export – ``all`` (the default: statements, entities and
+            documents from one sweep, with their diffs), or one of
+            ``statements``, ``entities``, ``documents``, ``statistics``,
+            ``index``
         uri: Dataset storage root override
         force: Force export even if up-to-date
-        make_diff: Also export a delta diff file (``entities`` / ``documents``)
+        make_diff: Also export delta diff files (``entities`` / ``documents``)
 
     Returns:
         The completed job result

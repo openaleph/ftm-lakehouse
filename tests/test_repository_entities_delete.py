@@ -6,6 +6,7 @@ hidden as soon as a tombstone row for ALL its statements lands in parquet.
 cutoff.
 """
 
+from collections import deque
 from datetime import timedelta
 from pathlib import Path
 from typing import Generator
@@ -253,7 +254,8 @@ def test_delete_entity_filters_from_export_csv(tmp_path):
     repo.flush()
     repo.merge()
 
-    repo._statements.export_csv(path.EXPORTS_STATEMENTS)
+    # `sweep` is a generator – the csv is written as it is drained
+    deque(repo._statements.sweep(path.EXPORTS_STATEMENTS, tee=False), maxlen=0)
 
     csv_path = str(tmp_path / path.EXPORTS_STATEMENTS)
     with open(csv_path) as f:

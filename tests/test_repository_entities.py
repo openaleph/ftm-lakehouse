@@ -10,8 +10,18 @@ from ftmq.query import M, P, Query
 from ftmq.util import make_entity
 
 from ftm_lakehouse.core.conventions import path, tag
+from ftm_lakehouse.helpers.shards import entity_shard
+from ftm_lakehouse.operation.export import ExportJob, ExportKind, ExportOperation
 from ftm_lakehouse.repository import EntityRepository
-from ftm_lakehouse.repository.factories import get_entities
+
+
+def _export(tmp_path, make_diff: bool = True) -> None:
+    """Run the entities export sweep, which writes the diff alongside."""
+    job = ExportJob.make(dataset="test", kind=ExportKind.entities, make_diff=make_diff)
+    ExportOperation(job=job, uri=tmp_path).run(force=True)
+
+
+from ftm_lakehouse.repository.factories import get_artifacts, get_entities
 from tests.conftest import make_docker_repo, make_test_api
 from tests.shared import BOB, JANE, JANE_FIRSTNAME, JOHN
 
@@ -152,8 +162,6 @@ def test_repository_entities_export_diff(tmp_path):
     Sleeps cross second boundaries because FtM truncates timestamps to seconds
     and diff detection uses first_seen >= floor(since).
     """
-    import time
-
     repo = EntityRepository("test", tmp_path)
 
     # Create multiple flushes to simulate real usage where table is at v > 0
@@ -173,9 +181,7 @@ def test_repository_entities_export_diff(tmp_path):
     repo.merge()
 
     # First export - only records the diff state, writes no file
-    diff_name_1 = repo.export_diff()
-    assert diff_name_1 is not None
-    assert diff_name_1.endswith("Z")  # timestamp format
+    _export(tmp_path)
     diff_files = list(
         repo._store.iterate_keys(prefix=path.DIFFS_ENTITIES, glob="*.delta.json")
     )
@@ -188,9 +194,7 @@ def test_repository_entities_export_diff(tmp_path):
     repo.merge()
 
     # Incremental diff - captures changes via translog
-    diff_name_2 = repo.export_diff()
-    assert diff_name_2 is not None
-    assert diff_name_2 != diff_name_1
+    _export(tmp_path)
 
     diff_files = list(
         repo._store.iterate_keys(prefix=path.DIFFS_ENTITIES, glob="*.delta.json")
@@ -203,6 +207,7 @@ def test_repository_entities_export_diff(tmp_path):
         lines = f.readlines()
     assert len(lines) == 1
     delta = json.loads(lines[0])
+    # bob is genuinely new - every statement he has arrived in this window
     assert delta["op"] == "ADD"
     assert delta["entity"]["id"] == "bob"
 
@@ -212,7 +217,7 @@ def test_repository_entities_export_diff(tmp_path):
     repo.flush()
     repo.merge()
 
-    assert repo.export_diff() is None
+    _export(tmp_path)
     diff_files = list(
         repo._store.iterate_keys(prefix=path.DIFFS_ENTITIES, glob="*.delta.json")
     )
@@ -224,8 +229,7 @@ def test_repository_entities_export_diff(tmp_path):
     repo.flush()
     repo.merge()
 
-    diff_name_3 = repo.export_diff()
-    assert diff_name_3 is not None
+    _export(tmp_path)
     diff_files = list(
         repo._store.iterate_keys(prefix=path.DIFFS_ENTITIES, glob="*.delta.json")
     )
@@ -239,7 +243,8 @@ def test_repository_entities_export_diff(tmp_path):
         lines = f.readlines()
     assert len(lines) == 1
     delta = json.loads(lines[0])
-    assert delta["op"] == "ADD"
+    # jane predates the diff state, so gaining a property is a MOD
+    assert delta["op"] == "MOD"
     assert delta["entity"]["id"] == "jane"
     assert delta["entity"]["properties"] == {
         "firstName": ["Jane"],
@@ -263,8 +268,7 @@ def test_repository_entities_export_diff_delete(tmp_path):
     repo.merge()
 
     # First export - only records the diff state
-    diff_name_1 = repo.export_diff()
-    assert diff_name_1 is not None
+    _export(tmp_path)
 
     # Delete jane, flush the tombstones and collapse the partition (the
     # tombstone rows themselves survive the grace period).
@@ -273,13 +277,11 @@ def test_repository_entities_export_diff_delete(tmp_path):
     repo.flush()
     repo.merge()
 
-    # jane is in changed entity ids
-    assert list(repo._get_changed_ids(since)) == ["jane"]
+    # jane is in the delete candidates the sweep looks out for
+    assert list(repo.deleted_ids(since)) == ["jane"]
 
     # Incremental diff should contain a DEL for jane
-    diff_name_2 = repo.export_diff()
-    assert diff_name_2 is not None
-    assert diff_name_2 != diff_name_1
+    _export(tmp_path)
 
     diff_files = sorted(
         (tmp_path / path.DIFFS_ENTITIES).glob("*.delta.json"),
@@ -317,7 +319,7 @@ def test_repository_entities_query_slice_multi_shard(tmp_path):
     repo.flush()
 
     # the fixture entities actually spread over multiple shards
-    shards = {path.entity_shard(f"e{i}", 4) for i in range(8)}
+    shards = {entity_shard(f"e{i}", 4) for i in range(8)}
     assert len(shards) > 1
 
     assert len(list(repo.query(Query()[:3]))) == 3
@@ -351,7 +353,7 @@ def test_repository_entities_export_diff_fragment_update(tmp_path):
     repo.flush()
     repo.merge()
 
-    assert repo.export_diff() is not None
+    _export(tmp_path)
 
     # Re-emit the same fragment with a changed name; no merge before diffing.
     t2 = datetime.now(timezone.utc).isoformat()
@@ -368,12 +370,15 @@ def test_repository_entities_export_diff_fragment_update(tmp_path):
     repo.flush()
     repo.merge()
 
-    assert repo.export_diff() is not None
+    _export(tmp_path)
     diff_files = sorted(
         (tmp_path / path.DIFFS_ENTITIES).glob("*.delta.json"), key=lambda p: p.name
     )
     ops = [json.loads(line) for line in open(diff_files[-1])]
     assert len(ops) == 1
+    # ADD, not MOD: the re-emission superseded *every* row jane had, her `id`
+    # statement included (it carries the fragment too), so nothing older than
+    # the diff window survives to mark her as pre-existing
     assert ops[0]["op"] == "ADD"
     # only the superseding emission's value – v1 is shadowed, not accumulated
     assert ops[0]["entity"]["properties"]["name"] == ["Jane D. Doe"]
@@ -399,12 +404,10 @@ def test_repository_entities_export_diff_no_changes(tmp_path):
     repo.merge()
 
     # First export - only records the diff state
-    diff_name_1 = repo.export_diff()
-    assert diff_name_1 is not None
-    assert diff_name_1.endswith("Z")
+    _export(tmp_path)
 
-    # Second diff without any new data - no new diff file
-    assert repo.export_diff() is None
+    # Second export without any new data - no new diff file
+    _export(tmp_path)
 
     # No diff file at all - the first export writes none
     diff_files = list((tmp_path / path.DIFFS_ENTITIES).glob("*.delta.json"))
@@ -430,7 +433,7 @@ def test_repository_entities_export_diff_partial_delete_keeps_the_entity(tmp_pat
     repo.flush()
     repo.merge()
 
-    assert repo.export_diff() is not None
+    _export(tmp_path)
 
     victim = next(
         s
@@ -441,13 +444,15 @@ def test_repository_entities_export_diff_partial_delete_keeps_the_entity(tmp_pat
     repo.flush()
     repo.merge()
 
-    assert repo.export_diff() is not None
+    _export(tmp_path)
     diff_files = sorted(
         (tmp_path / path.DIFFS_ENTITIES).glob("*.delta.json"), key=lambda p: p.name
     )
     ops = [json.loads(line) for line in open(diff_files[-1])]
     assert len(ops) == 1
-    assert ops[0]["op"] == "ADD"
+    # the entity is still here, so it is a change - never a DEL - and it
+    # predates the diff state, so it is a MOD rather than an ADD
+    assert ops[0]["op"] == "MOD"
     assert ops[0]["entity"]["properties"] == {"name": ["Jane Doe"]}
 
 
@@ -464,10 +469,51 @@ def test_repository_entities_export_diff_requires_optimized_store(tmp_path):
     repo.flush()
 
     assert repo._statements.needs_merge
+    # `export` directly, so the operation's `prepare()` does not merge first
+    job = ExportJob.make(dataset="test", kind=ExportKind.entities)
+    op = ExportOperation(job=job, uri=tmp_path)
     with pytest.raises(RuntimeError, match="un-merged writes"):
-        repo.export_diff()
+        op.export(datetime.now(timezone.utc))
 
     repo.merge()
     assert not repo._statements.needs_merge
 
-    assert repo.export_diff() is not None
+    _export(tmp_path)
+
+
+def test_export_no_diff_keeps_the_diff_watermark(tmp_path):
+    """``--no-diff`` skips the diff, so it must not move the window either.
+
+    Advancing the state without writing a file would make the *next* diff
+    start after changes nothing ever published – silent, permanent loss.
+    """
+    repo = EntityRepository("test", tmp_path)
+    artifacts = get_artifacts("test", tmp_path).entities
+
+    with repo.writer() as writer:
+        writer.add_entity(make_entity(JANE))
+    repo.flush()
+    repo.merge()
+    _export(tmp_path)  # first run only records where the series starts
+    state = artifacts.get_state()
+    assert state is not None
+
+    with repo.writer() as writer:
+        writer.add_entity(make_entity(JOHN))
+    repo.flush()
+    repo.merge()
+
+    _export(tmp_path, make_diff=False)
+    assert artifacts.get_state() == state
+    assert not list(
+        repo._store.iterate_keys(prefix=path.DIFFS_ENTITIES, glob="*.delta.json")
+    )
+
+    # the window survived, so john is still in the next diff
+    _export(tmp_path)
+    diffs = list(
+        repo._store.iterate_keys(prefix=path.DIFFS_ENTITIES, glob="*.delta.json")
+    )
+    assert len(diffs) == 1
+    with repo._store.open(diffs[0]) as fh:
+        assert [json.loads(line)["entity"]["id"] for line in fh] == ["john"]

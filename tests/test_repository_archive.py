@@ -115,11 +115,11 @@ def test_repository_archive_multi_metadata(repo, tmp_path):
 
     # Verify storage layout on local backends
     if base_path:
-        blob_path = base_path / path.archive_blob(checksum)
+        blob_path = base_path / path.ArchiveKey(checksum).blob
         assert blob_path.exists()
 
-        meta1_path = base_path / path.archive_meta(checksum, result1.id)
-        meta2_path = base_path / path.archive_meta(checksum, result2.id)
+        meta1_path = base_path / path.ArchiveKey(checksum).meta(result1.id)
+        meta2_path = base_path / path.ArchiveKey(checksum).meta(result2.id)
         assert meta1_path.exists()
         assert meta2_path.exists()
 
@@ -226,9 +226,9 @@ def test_repository_archive_put_text_multi_origin(repo, fixtures_path):
 
     # Verify storage layout on local backends
     if base_path:
-        text_tesseract = base_path / path.archive_txt(checksum, "tesseract")
-        text_azure = base_path / path.archive_txt(checksum, "azure")
-        text_default = base_path / path.archive_txt(checksum, "default")
+        text_tesseract = base_path / path.ArchiveKey(checksum).txt("tesseract")
+        text_azure = base_path / path.ArchiveKey(checksum).txt("azure")
+        text_default = base_path / path.ArchiveKey(checksum).txt("default")
 
         assert text_tesseract.exists()
         assert text_azure.exists()

@@ -3,7 +3,7 @@
 from ftm_lakehouse.core.conventions import tag
 from ftm_lakehouse.model.job import DatasetJobModel
 from ftm_lakehouse.operation.base import DatasetJobOperation
-from ftm_lakehouse.operation.export import ExportJob, ExportKind, ExportOperation
+from ftm_lakehouse.operation.export import MAKE_KINDS, ExportJob, ExportOperation
 from ftm_lakehouse.repository.job import JobRun
 
 
@@ -21,8 +21,9 @@ class MakeOperation(DatasetJobOperation[MakeJob]):
         self.entities.flush()
 
     def handle(self, run: JobRun, *args, **kwargs) -> None:
+        """Run the export sweep, then the two artifacts computed from it."""
         force = kwargs.get("force", False)
-        for kind in ExportKind:
+        for kind in MAKE_KINDS:
             job = ExportJob.make(dataset=self.dataset, kind=kind)
             ExportOperation(job, self.uri).run(force=force)
         run.job.done = 1
