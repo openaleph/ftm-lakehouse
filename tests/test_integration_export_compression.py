@@ -10,17 +10,43 @@ import io
 
 import orjson
 import pytest
+from anystore.logic.compress import CompressKind, get_codec, open_codec
 from ftmq.util import make_entity
 
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.lake import get_lakehouse
-from ftm_lakehouse.logic.compress import CompressKind, decompress_stream
 from ftm_lakehouse.operation import ExportKind, export
 from ftm_lakehouse.repository.base import DatasetRef
 from ftm_lakehouse.repository.factories import get_archive, get_documents, get_entities
 from tests.shared import BOB, JANE, JOHN
 
-MAGIC = {CompressKind.gz: b"\x1f\x8b", CompressKind.zst: b"\x28\xb5\x2f\xfd"}
+MAGIC = {
+    CompressKind.gz: b"\x1f\x8b",
+    CompressKind.bz2: b"BZh",
+    CompressKind.xz: b"\xfd7zXZ\x00",
+    CompressKind.zst: b"\x28\xb5\x2f\xfd",
+    CompressKind.lz4: b"\x04\x22\x4d\x18",
+}
+
+
+def _available() -> list[CompressKind]:
+    """The codecs this install can actually run.
+
+    A dataset may configure any `CompressKind`, but some are optional extras
+    upstream (`lz4`) or need an interpreter built with the library (`xz`), so
+    an export is only exercised for what is importable here.
+    """
+    available = []
+    for kind in CompressKind:
+        try:
+            get_codec(kind)
+        except ImportError:
+            continue
+        available.append(kind)
+    return available
+
+
+CODECS = _available()
 
 
 def _seed(tmp_path, name: str, **config):
@@ -58,7 +84,7 @@ def test_export_uncompressed_by_default(tmp_path):
     }
 
 
-@pytest.mark.parametrize("algorithm", list(CompressKind))
+@pytest.mark.parametrize("algorithm", CODECS)
 def test_export_compression_from_dataset_config(tmp_path, algorithm):
     """The codec recorded in config.yml drives both exports, with no runtime
     argument anywhere in the export path."""
@@ -72,11 +98,11 @@ def test_export_compression_from_dataset_config(tmp_path, algorithm):
     assert statements.startswith(MAGIC[algorithm])
     assert entities.startswith(MAGIC[algorithm])
 
-    with decompress_stream(io.BytesIO(statements), algorithm) as fh:
+    with open_codec(io.BytesIO(statements), algorithm) as fh:
         rows = list(csv.DictReader(io.TextIOWrapper(fh)))
     assert {r["entity_id"] for r in rows} == {"jane", "john"}
 
-    with decompress_stream(io.BytesIO(entities), algorithm) as fh:
+    with open_codec(io.BytesIO(entities), algorithm) as fh:
         ids = {orjson.loads(line)["id"] for line in fh}
     assert ids == {"jane", "john"}
 
@@ -92,7 +118,7 @@ def test_export_compression_from_dataset_config(tmp_path, algorithm):
     (diff_key,) = list(entities_repo._store.iterate_keys(prefix=path.DIFFS_ENTITIES))
     diff = _read(dataset, diff_key)
     assert diff.startswith(MAGIC[algorithm])
-    with decompress_stream(io.BytesIO(diff), algorithm) as fh:
+    with open_codec(io.BytesIO(diff), algorithm) as fh:
         envelopes = [orjson.loads(line) for line in fh]
     assert {e["entity"]["id"] for e in envelopes} == {"bob"}
     assert {e["op"] for e in envelopes} == {"ADD"}
@@ -101,7 +127,7 @@ def test_export_compression_from_dataset_config(tmp_path, algorithm):
     assert {e.id for e in get_entities(*dataset).stream()} == {"jane", "john", "bob"}
 
 
-@pytest.mark.parametrize("algorithm", list(CompressKind))
+@pytest.mark.parametrize("algorithm", CODECS)
 def test_export_compression_documents(tmp_path, fixtures_path, algorithm):
     """documents.csv and its diffs carry the dataset codec like the others."""
     lake = get_lakehouse(str(tmp_path))
@@ -143,7 +169,7 @@ def test_export_compression_documents(tmp_path, fixtures_path, algorithm):
     assert diff_key.endswith(algorithm.value)
     diff = _read(dataset, diff_key)
     assert diff.startswith(MAGIC[algorithm])
-    with decompress_stream(io.BytesIO(diff), algorithm, "r") as fh:
+    with open_codec(io.BytesIO(diff), algorithm, "r") as fh:
         rows = list(csv.DictReader(fh))
     assert {r["name"] for r in rows} == {"second.txt"}
     assert {r["op"] for r in rows} == {"ADD"}

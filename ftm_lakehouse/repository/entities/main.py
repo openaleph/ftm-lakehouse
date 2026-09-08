@@ -20,7 +20,6 @@ from rigour.time import utc_now
 from ftm_lakehouse.core.api import no_api
 from ftm_lakehouse.core.conventions import tag
 from ftm_lakehouse.core.settings import Settings
-from ftm_lakehouse.logic.compress import decompress_stream
 from ftm_lakehouse.model.statement import LakehouseStatement
 from ftm_lakehouse.repository.artifacts import (
     EntitiesArtifact,
@@ -366,10 +365,9 @@ class EntityRepository(DatasetHandle):
         codec, since that artifact is written compressed when configured.
         """
         if self._store.exists(self.ENTITIES_JSON):
-            with (
-                self._store.open(self.ENTITIES_JSON, "rb") as fh,
-                decompress_stream(fh, self.compression) as raw,
-            ):
+            with self._store.open(
+                self.ENTITIES_JSON, "rb", compression=self.compression
+            ) as raw:
                 yield from smart_read_proxies(raw)
 
     def delete_entity(self, entity_id: str, origin: str | None = None) -> int:

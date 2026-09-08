@@ -306,7 +306,6 @@ ftm_lakehouse/
 ├── logic/                   # Pure business logic (no storage deps)
 │   ├── entities/            # aggregate.py, buffer.py, explode.py
 │   ├── parquet.py           # DuckDB view / merge SQL builders
-│   └── compress.py          # Streaming (de)compression (gz / zst)
 │
 ├── helpers/                 # FtM-domain building blocks
 │   ├── statements.py        # Statement wire format, BASE_ID stub

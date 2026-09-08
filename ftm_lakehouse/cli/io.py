@@ -18,7 +18,6 @@ from followthemoney import EntityProxy
 from rigour.time import utc_now
 
 from ftm_lakehouse.exceptions import BufferFullError
-from ftm_lakehouse.logic.compress import decompress_stream
 from ftm_lakehouse.logic.entities.buffer import EntityBuffer
 from ftm_lakehouse.logic.entities.explode import (
     RowBuffer,
@@ -73,8 +72,7 @@ def stream_export(repo: EntityRepository, key: str, out_uri: str) -> None:
     """
     in_uri = repo._store.to_uri(key)
     with (
-        smart_open(in_uri, "rb") as fh,
-        decompress_stream(fh, repo.compression) as i,
+        smart_open(in_uri, "rb", compression=repo.compression) as i,
         smart_open(out_uri, "wb") as o,
     ):
         stream(i, o)

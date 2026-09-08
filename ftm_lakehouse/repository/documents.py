@@ -5,12 +5,12 @@ from datetime import datetime
 from functools import cached_property
 from typing import Iterator
 
+from anystore.logic.compress import CompressKind
 from anystore.types import Uri
 from ftmq.query import C, M, P, Query
 
 from ftm_lakehouse.helpers.file import get_filename
 from ftm_lakehouse.helpers.schema import CAPTION_PROPS
-from ftm_lakehouse.logic.compress import CompressKind
 from ftm_lakehouse.logic.path import StoreKey
 from ftm_lakehouse.model.file import Documents
 from ftm_lakehouse.repository.artifacts import DocumentsArtifact

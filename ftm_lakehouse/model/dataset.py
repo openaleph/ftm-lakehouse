@@ -2,12 +2,12 @@
 
 from string import Template
 
+from anystore.logic.compress import CompressKind
 from anystore.model import StoreModel
 from anystore.types import HttpUrlStr
 from ftmq.model import Dataset
 
 from ftm_lakehouse.core.settings import Settings
-from ftm_lakehouse.logic.compress import CompressKind
 
 settings = Settings()
 

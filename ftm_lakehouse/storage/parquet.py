@@ -53,6 +53,7 @@ import pyarrow.compute as pc
 from anystore.decorators import error_handler
 from anystore.interface.lock import Lock
 from anystore.logging import get_logger
+from anystore.logic.compress import CompressKind
 from anystore.store import get_store
 from anystore.types import Uri
 from anystore.util import Took, join_uri, mask_uri
@@ -77,7 +78,6 @@ from sqlalchemy import Select, column
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.helpers.shards import entity_shard
-from ftm_lakehouse.logic.compress import CompressKind, compress_stream
 from ftm_lakehouse.logic.entities import aggregate_unsafe
 from ftm_lakehouse.logic.entities.aggregate import EntityPayload
 from ftm_lakehouse.logic.parquet import (
@@ -1040,8 +1040,9 @@ class ParquetStore:
         with ExitStack() as stack:
             out = None
             if csv_key is not None:
-                fh = stack.enter_context(self._store.open(csv_key, "wb"))
-                out = stack.enter_context(compress_stream(fh, self.compression))
+                out = stack.enter_context(
+                    self._store.open(csv_key, "wb", compression=self.compression)
+                )
             writer: CSVWriter | None = None
             for reader in self._execute_partitioned(sql, batch_size):
                 for batch in reader:

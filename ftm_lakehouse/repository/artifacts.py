@@ -30,8 +30,9 @@ from typing import IO, Any, ClassVar, Generator, Iterable, Iterator, Self, cast
 
 from anystore.io import Writer
 from anystore.io.write import Formats
+from anystore.logic.compress import CompressKind
 from anystore.model.base import BaseModel
-from anystore.types import SDict, Uri
+from anystore.types import SDict
 from anystore.util import join_uri
 from followthemoney import model
 from followthemoney.dataset import DataResource
@@ -40,11 +41,6 @@ from rigour.mime.types import CSV, FTM, JSON
 
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.core.settings import CHECKSUM_ALGORITHM
-from ftm_lakehouse.logic.compress import (
-    CompressKind,
-    compress_stream,
-    decompress_stream,
-)
 from ftm_lakehouse.logic.entities.aggregate import EntityPayload
 from ftm_lakehouse.logic.path import DateTimeKey, StoreKey
 from ftm_lakehouse.model.file import Document, Documents
@@ -104,69 +100,6 @@ def make_envelope(data: SDict, op: DiffOp | str = DiffOp.ADD) -> SDict:
     Ref. https://www.opensanctions.org/docs/bulk/delta/
     """
     return {"op": str(op), "entity": data}
-
-
-class LazyWriter:
-    """A `Writer` that creates its artifact on the first row.
-
-    An export writes no file at all when it has nothing to put in one: a diff
-    run that finds no changes leaves no empty diff behind, and a dataset with
-    no documents gets no documents csv. Deferring the ``open`` is what makes
-    that fall out rather than needing a peek at the stream first.
-
-    Wraps `anystore.io.Writer`, which opens eagerly and has no notion of
-    compression – both of which belong upstream, at which point this goes away.
-    """
-
-    def __init__(
-        self,
-        store: Any,
-        key: Uri,
-        output_format: Formats = "json",
-        compression: CompressKind | None = None,
-        fieldnames: list[str] | None = None,
-    ) -> None:
-        self.store = store
-        self.key = key
-        self.output_format = output_format
-        self.compression = compression
-        self.fieldnames = fieldnames
-        self._stack: ExitStack | None = None
-        self._writer: Writer | None = None
-
-    def _open(self) -> Writer:
-        self._stack = ExitStack()
-        fh = self._stack.enter_context(self.store.open(self.key, "wb"))
-        # csv needs a text stream; `compress_stream` layers the wrapper
-        # outside the codec, and hands back the handle itself when there is none
-        mode = "w" if self.output_format == "csv" else "wb"
-        out = self._stack.enter_context(
-            compress_stream(cast(IO[bytes], fh), self.compression, mode)
-        )
-        return self._stack.enter_context(
-            Writer(
-                cast(Any, out),
-                mode=mode,
-                output_format=self.output_format,
-                fieldnames=self.fieldnames,
-            )
-        )
-
-    def open(self) -> Writer:
-        """The open writer, creating the artifact on first ask."""
-        if self._writer is None:
-            self._writer = self._open()
-        return self._writer
-
-    def write(self, row: SDict) -> None:
-        """Write one row, creating the artifact if this is the first."""
-        self.open().write(row)
-
-    def close(self) -> None:
-        """Flush and close the artifact, if one was ever opened."""
-        if self._stack is not None:
-            self._stack.close()
-            self._stack = None
 
 
 class Artifact:
@@ -250,24 +183,30 @@ class Artifact:
         """Stamp the freshness tag"""
         self.dataset._tags.set(self.tag, ts)
 
-    def writer(self) -> LazyWriter:
-        """A writer for this artifact, in its own format and codec."""
-        return LazyWriter(
-            self.dataset._store,
-            self.key,
-            self.format,
-            self.compression,
-            self.fieldnames,
+    def writer(self, lazy: bool = False) -> Writer:
+        """A writer for this artifact, in its own format and codec.
+
+        Args:
+            lazy: Defer creating the file to the first row. An artifact is a
+                whole picture of the store, so it opens eagerly – an empty
+                sweep must truncate a stale one rather than leave it. A diff
+                is the opposite: no changes means no file.
+        """
+        return Writer(
+            self.dataset._store.to_uri(self.key),
+            output_format=self.format,
+            compression=self.compression,
+            fieldnames=self.fieldnames,
+            lazy=lazy,
         )
 
     @contextmanager
     def reader(self, mode: str = "rb") -> Generator[IO[Any], None, None]:
         """Open the artifact for reading, decoded with the dataset's codec."""
-        with (
-            self.dataset._store.open(self.key, "rb") as fh,
-            decompress_stream(cast(IO[bytes], fh), self.compression, mode) as raw,
-        ):
-            yield raw
+        with self.dataset._store.open(
+            self.key, mode, compression=self.compression
+        ) as fh:
+            yield fh
 
     def make_resource(self, public_prefix: str | None = None) -> DataResource | None:
         """Describe the artifact for ``index.json``, or ``None`` if unwritten."""
@@ -331,15 +270,16 @@ class DiffableArtifact(Artifact):
         ts_str = ts.strftime(path.TS_FORMAT)
         self.dataset._tags.put(self.state_key, f"{ts_str}:{version}")
 
-    def diff_writer(self, ts: datetime) -> LazyWriter:
+    def diff_writer(self, ts: datetime) -> Writer:
         """A writer for one diff file in this series."""
         fieldnames = ["op", *self.fieldnames] if self.fieldnames else None
-        return LazyWriter(
-            self.dataset._store,
-            self.series(ts) + self.compression,
-            self.format,
-            self.compression,
-            fieldnames,
+        return Writer(
+            self.dataset._store.to_uri(self.series(ts) + self.compression),
+            output_format=self.format,
+            compression=self.compression,
+            fieldnames=fieldnames,
+            # a series with no changes in the window leaves no file at all
+            lazy=True,
         )
 
 
@@ -578,7 +518,7 @@ class DiffableRun(WritingRun):
         self.since_iso: str | None = None
         self.active = False
         self.pending: set[str] = set()
-        self.diff: LazyWriter | None = None
+        self.diff: Writer | None = None
 
     def prepare(self, version: int | None) -> None:
         """Decide whether this run writes a diff, and against what.
@@ -699,7 +639,7 @@ class EntitiesRun(DiffableRun):
         self.counts[op.lower()] += 1
 
     def write_delete(self, entity_id: str) -> None:
-        cast(LazyWriter, self.diff).write(make_envelope({"id": entity_id}, DiffOp.DEL))
+        cast(Writer, self.diff).write(make_envelope({"id": entity_id}, DiffOp.DEL))
 
 
 class DocumentsRun(DiffableRun):
@@ -741,7 +681,7 @@ class DocumentsRun(DiffableRun):
             self.counts[op.lower()] += 1
 
     def write_delete(self, entity_id: str) -> None:
-        cast(LazyWriter, self.diff).write({"op": str(DiffOp.DEL), "id": entity_id})
+        cast(Writer, self.diff).write({"op": str(DiffOp.DEL), "id": entity_id})
 
 
 class ExportSession:

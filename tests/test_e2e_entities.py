@@ -4,13 +4,13 @@ from collections import Counter
 from typing import Generator
 
 import pytest
+from anystore.logic.compress import CompressKind
 from followthemoney import Statement, model
 from ftmq.model.stats import DatasetStats
 from ftmq.util import make_entity
 
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.lake import get_lakehouse
-from ftm_lakehouse.logic.compress import CompressKind, decompress_stream
 from ftm_lakehouse.operation import ExportKind, export, optimize
 from ftm_lakehouse.repository.base import DatasetRef
 from ftm_lakehouse.repository.factories import get_entities
@@ -92,10 +92,9 @@ def test_entities(dataset):
         dataset.name, ExportKind.statements, dataset.uri
     )  # Operation's ensure_flush handles flushing
 
-    with (
-        entities._store.open(entities.EXPORTS_STATEMENTS) as fh,
-        decompress_stream(fh, entities.compression, "r") as out,
-    ):
+    with entities._store.open(
+        entities.EXPORTS_STATEMENTS, "r", compression=entities.compression
+    ) as out:
         reader = csv.DictReader(out)
         data = [r for r in reader]
     assert len(data) == 6  # 2 jane (default) + 2 jane (update) + 2 john
@@ -293,10 +292,9 @@ def test_entity_multi_origin_statements(dataset):
     assert "enrichment" in origins
 
     # Verify statements.csv contains all origins
-    with (
-        entities._store.open(entities.EXPORTS_STATEMENTS) as fh,
-        decompress_stream(fh, entities.compression, "r") as out,
-    ):
+    with entities._store.open(
+        entities.EXPORTS_STATEMENTS, "r", compression=entities.compression
+    ) as out:
         reader = csv.DictReader(out)
         rows = [r for r in reader]
 
