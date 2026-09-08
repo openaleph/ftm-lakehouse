@@ -81,7 +81,8 @@ markdown_extensions:
 plugins:
   - search
   - autorefs
-  - markdown-exec
+  - macros:
+      module_name: contrib/docs_macros
   - mkdocstrings:
       default_handler: python
       handlers:

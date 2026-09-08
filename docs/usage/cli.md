@@ -99,21 +99,4 @@ Layout-affecting settings (`shards`) belong in the config *before* a dataset is 
 
 The following reference is generated from the CLI itself at docs build time:
 
-```python exec="on"
-# In-process generation: `python -m typer <module> utils docs` loads the
-# module standalone, so the sub-typer groups (registered by the trailing
-# submodule imports) land on a second module instance and go missing.
-import click
-from typer import cli as typer_cli
-from typer.main import get_command
-
-from ftm_lakehouse.cli import cli as app
-
-command = get_command(app)
-with click.Context(command) as ctx:
-    docs = typer_cli.get_docs_for_click(obj=command, ctx=ctx, name="ftm-lakehouse")
-
-# demote headings one level so the generated tree nests under "## Commands"
-for line in docs.splitlines():
-    print("#" + line if line.startswith("#") else line)
-```
+{{ cli_docs() }}

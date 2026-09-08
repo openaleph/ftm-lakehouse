@@ -44,7 +44,7 @@ ftm-lakehouse -d my_dataset entities stream
 ftm-lakehouse -d my_dataset maintenance optimize
 ```
 
-Every group and flag: [CLI Reference](usage/cli.md).
+Every group and flag: [CLI Reference](./usage/cli.md).
 
 ## Using the Python API
 
@@ -153,11 +153,11 @@ For persistent journal storage (recommended for production):
 export LAKEHOUSE_JOURNAL_URI=postgresql://user:pass@localhost/journal
 ```
 
-Full settings reference: [Configuration](deployment/configuration.md).
+Full settings reference: [Configuration](./deployment/configuration.md).
 
 ## Next Steps
 
-- [Working with Entities](usage/entities.md) - Deep dive into entity operations
-- [Working with Files](usage/archive.md) - Learn about the file archive
-- [CLI Reference](usage/cli.md) - Complete CLI documentation
-- [Configuration](deployment/configuration.md) - Advanced configuration options
+- [Working with Entities](./usage/entities.md) - Deep dive into entity operations
+- [Working with Files](./usage/archive.md) - Learn about the file archive
+- [CLI Reference](./usage/cli.md) - Complete CLI documentation
+- [Configuration](./deployment/configuration.md) - Advanced configuration options
