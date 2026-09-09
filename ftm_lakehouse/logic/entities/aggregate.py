@@ -5,7 +5,7 @@ entities from statement streams.
 """
 
 from collections import defaultdict
-from typing import Any, Iterator, TypedDict, cast
+from typing import Any, Iterator, TypedDict
 
 from followthemoney import Schema, Statement, StatementEntity, model
 from followthemoney.exc import InvalidData
@@ -117,24 +117,36 @@ class EntityPayload:
             max_first_seen=None,
         )
 
+        # speed up when using locals here
+        schemata = data["schemata"]
+        datasets = data["datasets"]
+        origins = data["origins"]
+        roles = data["roles"]
+        referents = data["referents"]
+        properties = data["properties"]
+        first_seens = data["first_seens"]
+        last_seens = data["last_seens"]
+        last_changes = data["last_changes"]
+        min_first_seen: str | None = None
+        max_first_seen: str | None = None
+        entity = self.id
+
         # collect statements
         for s in self.statements:
-            data["schemata"].add(s["schema"])
-            data["datasets"].add(s["dataset"])
+            schemata.add(s["schema"])
+            datasets.add(s["dataset"])
 
             origin = s.get("origin")
             if origin:
-                data["origins"].add(origin)
+                origins.add(origin)
 
-            # `role` is a lakehouse column, not part of FtM's ``StatementDict``,
-            # so the lookup widens to ``object`` without the cast
-            role = cast(str | None, s.get("role"))
+            role = s.get("role")
             if role:
-                data["roles"].add(role)
+                roles.add(role)
 
             entity_id = s.get("entity_id")
-            if entity_id and entity_id != self.id:
-                data["referents"].add(entity_id)
+            if entity_id and entity_id != entity:
+                referents.add(entity_id)
 
             first_seen = datetime_iso(s.get("first_seen"))
             last_seen = datetime_iso(s.get("last_seen"))
@@ -142,31 +154,26 @@ class EntityPayload:
             # the diff bounds span every statement, `id` rows included – a
             # bare-id entity that just gained properties predates the window
             if first_seen is not None:
-                if (
-                    data["min_first_seen"] is None
-                    or first_seen < data["min_first_seen"]
-                ):
-                    data["min_first_seen"] = first_seen
-                if (
-                    data["max_first_seen"] is None
-                    or first_seen > data["max_first_seen"]
-                ):
-                    data["max_first_seen"] = first_seen
+                if min_first_seen is None or first_seen < min_first_seen:
+                    min_first_seen = first_seen
+                if max_first_seen is None or first_seen > max_first_seen:
+                    max_first_seen = first_seen
 
             if s["prop"] == BASE_ID:
                 # last_change = max of BASE_ID statement first_seen values
                 if first_seen is not None:
-                    data["last_changes"].add(first_seen)
+                    last_changes.add(first_seen)
             else:
-                data["properties"][s["prop"]].add(s["value"])
+                properties[s["prop"]].add(s["value"])
                 # first_seen/last_seen only from non-id statements
-                # (matches StatementEntity.to_context_dict which iterates _statements,
-                # which excludes BASE_ID)
+                # (matches StatementEntity.to_context_dict which excludes BASE_ID)
                 if first_seen is not None:
-                    data["first_seens"].add(first_seen)
+                    first_seens.add(first_seen)
                 if last_seen is not None:
-                    data["last_seens"].add(last_seen)
+                    last_seens.add(last_seen)
 
+        data["min_first_seen"] = min_first_seen
+        data["max_first_seen"] = max_first_seen
         return data
 
     def to_dict(self) -> dict[str, Any]:
@@ -176,9 +183,11 @@ class EntityPayload:
         return self._dict
 
     def _to_dict(self) -> dict[str, Any]:
+        compiled = self.compiled
+
         # Schema merging – pick the most specific schema
         schema = None
-        for name in self.compiled["schemata"]:
+        for name in compiled["schemata"]:
             if schema is None:
                 schema = model.get(name)
             elif schema.name != name:
@@ -188,35 +197,34 @@ class EntityPayload:
             return {}
 
         # Caption – first caption property with values, or schema label
-        # (simplified: no pick_lang_name language detection)
-        caption = schema.label
+        properties = compiled["properties"]
+        caption = None
         for prop_name in schema.caption:
-            values = self.compiled["properties"].get(prop_name)
-            if values:
-                caption = next(iter(sorted(values)))
+            for value in properties.get(prop_name, []):
+                caption = value
                 break
+        if caption is None:
+            caption = schema.label
 
         data: dict[str, Any] = {
             "id": self.id,
             "caption": caption,
             "schema": schema.name,
-            "properties": {k: list(v) for k, v in self.compiled["properties"].items()},
-            "referents": list(self.compiled["referents"]),
-            "datasets": list(self.compiled["datasets"]),
+            "properties": {k: list(v) for k, v in properties.items()},
+            "referents": list(compiled["referents"]),
+            "datasets": list(compiled["datasets"]),
         }
 
-        if self.compiled["origins"]:
-            data["origin"] = list(self.compiled["origins"])
-        # A list, like `origin`: one entity's rows can span roles, and the
-        # CLI reads it back off the context on re-import.
-        if self.compiled["roles"]:
-            data["role"] = list(self.compiled["roles"])
-        if self.compiled["first_seens"]:
-            data["first_seen"] = min(self.compiled["first_seens"])
-        if self.compiled["last_seens"]:
-            data["last_seen"] = max(self.compiled["last_seens"])
-        if self.compiled["last_changes"]:
-            data["last_change"] = max(self.compiled["last_changes"])
+        if compiled["origins"]:
+            data["origin"] = list(compiled["origins"])
+        if compiled["roles"]:
+            data["role"] = list(compiled["roles"])
+        if compiled["first_seens"]:
+            data["first_seen"] = min(compiled["first_seens"])
+        if compiled["last_seens"]:
+            data["last_seen"] = max(compiled["last_seens"])
+        if compiled["last_changes"]:
+            data["last_change"] = max(compiled["last_changes"])
 
         return data
 
