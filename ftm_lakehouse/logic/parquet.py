@@ -64,6 +64,10 @@ byte size (e.g. a DuckDB percentage limit) – mirrors the conservative
 def duckdb_config() -> dict[str, str]:
     """LakeStore DuckDB config derived from lakehouse settings.
 
+    The session timezone is pinned to UTC – every stored timestamp is a UTC
+    instant, and DuckDB otherwise renders (and parses) them in the host's
+    local zone.
+
     Per-query memory is bounded by `Settings.duckdb_memory_limit`
     (env: ``LAKEHOUSE_DUCKDB_MEMORY_LIMIT``, default ``8GB``); queries
     exceeding the limit spill to `Settings.duckdb_temp_directory`
@@ -75,7 +79,13 @@ def duckdb_config() -> dict[str, str]:
     `LakeStore` via the ``duckdb_config`` kwarg.
     """
     settings = Settings()
-    config: dict[str, str] = {"memory_limit": settings.duckdb_memory_limit}
+    config: dict[str, str] = {
+        "memory_limit": settings.duckdb_memory_limit,
+        # the store holds UTC instants; an unpinned session renders and parses
+        # them in the host's local zone, so the same query would answer
+        # differently per deployment
+        "TimeZone": "UTC",
+    }
     if settings.duckdb_temp_directory:
         config["temp_directory"] = settings.duckdb_temp_directory
     if settings.duckdb_extension_directory:

@@ -2,14 +2,17 @@
 
 from datetime import datetime, timedelta, timezone
 
+import duckdb
 import pytest
 from followthemoney import Statement
 from rigour.time import utc_now
 from sqlalchemy import MetaData
 
+from ftm_lakehouse.logic.parquet import duckdb_config
 from ftm_lakehouse.model.statement import (
     JOURNAL_SCHEMA,
     LakehouseStatement,
+    _iso_column,
     journal_table,
     statements_to_arrow,
 )
@@ -204,3 +207,31 @@ def test_model_statement_role_read_back():
     back = LakehouseStatement.from_dict({**stmt.to_dict(), "role": "user:42"})
     assert back.role == "user:42"
     assert LakehouseStatement.from_dict(stmt.to_dict()).role is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        datetime(2025, 4, 17, 16, 53, 31, tzinfo=timezone.utc),  # whole second
+        datetime(2026, 9, 9, 6, 24, 36, 614993, tzinfo=timezone.utc),
+        datetime(2026, 1, 1, 0, 0, 0, 1, tzinfo=timezone.utc),  # smallest fraction
+        datetime(2026, 6, 30, 23, 59, 59, 999999, tzinfo=timezone.utc),
+        datetime(2026, 6, 30, 23, 59, 59, tzinfo=timezone(timedelta(hours=2))),
+    ],
+)
+def test_model_statement_iso_column_matches_isoformat(value):
+    """The exported seen-timestamps must be ``datetime.isoformat()`` exactly.
+
+    ``ftmq.util.datetime_iso`` passes a string through untouched, so whatever
+    this renders *is* the value ``entities.ftm.json`` carries and the value a
+    diff window compares against lexically – a spelling that differs from what
+    a ``datetime`` would have produced moves the diff boundary silently.
+    """
+    con = duckdb.connect(":memory:", config=duckdb_config())
+    con.execute("CREATE TABLE t (first_seen TIMESTAMPTZ)")
+    con.execute("INSERT INTO t VALUES (?)", [value])
+    expr = str(
+        _iso_column("first_seen").compile(compile_kwargs={"literal_binds": True})
+    )
+    (rendered,) = con.execute(f"SELECT {expr} FROM t").fetchone()
+    assert rendered == value.astimezone(timezone.utc).isoformat()

@@ -45,6 +45,7 @@ from sqlalchemy import (
     TableClause,
     Text,
     column,
+    literal_column,
     select,
     table,
 )
@@ -209,12 +210,61 @@ _STATEMENT_CSV_TABLE = table(
     nks.STATEMENT_TABLE, *(column(c) for c in STATEMENT_CSV_COLUMNS)
 )
 
+SEEN_COLUMNS = ("first_seen", "last_seen")
+"""The stored timestamp columns – everything else in the csv is already text."""
+
+_ISO_SECONDS = "%Y-%m-%dT%H:%M:%S+00:00"
+_ISO_MICROS = "%Y-%m-%dT%H:%M:%S.%f+00:00"
+"""``datetime.isoformat()`` spelled for DuckDB's ``strftime``, in its two
+shapes: python omits the fractional part when it is zero, and these seen
+timestamps compare *lexically* against a diff window
+(`ftm_lakehouse.repository.artifacts.DiffableRun.op_for`), so emitting
+``.000000`` where python emits nothing would silently move the boundary."""
+
+
+def _iso_column(name: str) -> Any:
+    """Render a stored timestamp as the ISO string the entity fold wants.
+
+    The sweep hands its Arrow batches to ``to_pylist()``, which turns a
+    timestamp column into one ``datetime`` per row – 5x the cost of a string
+    column, for values `ftm_lakehouse.logic.entities.aggregate.aggregate_unsafe`
+    immediately spells back as ISO through ``datetime_iso``. Formatting in SQL
+    keeps the whole path in string-land, and the csv gets proper ISO-8601
+    instead of DuckDB's ``2026-09-08 16:53:31.000000Z`` rendering.
+
+    The output is ``datetime.isoformat()`` character for character – that is
+    the contract, not a spelling choice: ``datetime_iso`` passes a string
+    through untouched, so whatever lands here *is* what the diff window
+    compares against and what ``entities.ftm.json`` carries.
+
+    ``AT TIME ZONE 'UTC'`` is not redundant with the pinned session zone
+    (`ftm_lakehouse.logic.parquet.duckdb_config`): it makes the offset the
+    format string claims true of the value whatever connection this runs on.
+    """
+    utc = f"\"{name}\" AT TIME ZONE 'UTC'"
+    return literal_column(
+        f'CASE WHEN epoch_us("{name}") % 1000000 = 0'
+        f" THEN strftime({utc}, '{_ISO_SECONDS}')"
+        f" ELSE strftime({utc}, '{_ISO_MICROS}') END"
+    ).label(name)
+
+
+_STATEMENT_CSV_SELECT = [
+    _iso_column(c) if c in SEEN_COLUMNS else _STATEMENT_CSV_TABLE.c[c]
+    for c in STATEMENT_CSV_COLUMNS
+]
+
 
 def statement_csv_select() -> Select[Any]:
     """SELECT of `STATEMENT_CSV_COLUMNS` from the live ``statement`` view,
     ordered by ``entity_id`` (so an entity's rows stay contiguous for
-    per-partition streaming exports)."""
-    return select(_STATEMENT_CSV_TABLE).order_by(_STATEMENT_CSV_TABLE.c.entity_id)
+    per-partition streaming exports), with `SEEN_COLUMNS` rendered as ISO
+    strings (`_iso_column`)."""
+    return (
+        select(*_STATEMENT_CSV_SELECT)
+        .select_from(_STATEMENT_CSV_TABLE)
+        .order_by(_STATEMENT_CSV_TABLE.c.entity_id)
+    )
 
 
 class LakehouseStatement(LakeStatement):

@@ -19,6 +19,7 @@ entity stream – ``statistics.json`` (a global SQL aggregate) and ``index.json`
 (store metadata) – are written directly, outside the sweep.
 """
 
+import warnings
 from datetime import datetime
 from functools import cached_property
 from typing import Any, Iterator
@@ -26,6 +27,8 @@ from typing import Any, Iterator
 from anystore.util import mask_uri
 from ftmq.model.stats import DatasetStats
 from rigour.time import utc_now
+from tqdm import TqdmExperimentalWarning
+from tqdm.rich import tqdm
 
 from ftm_lakehouse.core.conventions import tag
 from ftm_lakehouse.core.settings import Settings
@@ -122,10 +125,21 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
                 "`ftm-lakehouse maintenance optimize` first."
             )
         session = self.artifacts.session(now, self.kinds, version, self.job.make_diff)
-        with session:
+        count = self.entities._statements.deltatable.count()
+        with session, self.progress(count) as bar:
             for payload in self.iterate():
                 session.consume(payload)
+                bar.update(len(payload.statements))
         return session.result()
+
+    @staticmethod
+    def progress(total: int) -> tqdm:
+        """Progress bar over the sweep, counted in statements."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", TqdmExperimentalWarning)
+            return tqdm(
+                total=total, unit="Statement", dynamic_ncols=True, smoothing=0.1
+            )
 
     def export_statistics(self) -> None:
         """Write ``statistics.json`` from the store's global SQL aggregate."""

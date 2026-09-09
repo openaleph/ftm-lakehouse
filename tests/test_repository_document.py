@@ -327,3 +327,36 @@ def test_make_documents_yields_distinct_rows_per_parent(tmp_path):
 
     # nothing resolvable -> one unpathed row
     assert [r.path for r in artifact.make_documents(data, {})] == [None]
+
+
+def test_repository_document_make_paths_memoised(tmp_path, fixtures_path, monkeypatch):
+    """The folder map is built once per delta version, not once per caller.
+
+    The export sweep asks for it once per documents origin scope, and both
+    scopes share one repository through the factories cache – so a second ask
+    against an unchanged store must not re-scan the Folder entities.
+    """
+    archive = ArchiveRepository("test", tmp_path)
+    entities = EntityRepository("test", tmp_path)
+    _archive_with_entities(archive, entities, fixtures_path / "src" / "utf.txt")
+    entities.flush()
+
+    repo = DocumentRepository("test", tmp_path)
+    builds = 0
+    build = repo._build_paths
+
+    def counted() -> dict[str, str]:
+        nonlocal builds
+        builds += 1
+        return build()
+
+    monkeypatch.setattr(repo, "_build_paths", counted)
+
+    assert repo.make_paths() == repo.make_paths()
+    assert builds == 1
+
+    # a new commit invalidates it
+    _archive_with_entities(archive, entities, fixtures_path / "src" / "companies.csv")
+    entities.flush()
+    repo.make_paths()
+    assert builds == 2

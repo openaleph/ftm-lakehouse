@@ -49,6 +49,12 @@ class DocumentRepository(DatasetHandle):
         ```
     """
 
+    _paths: dict[str, str] | None = None
+    """Memoised `make_paths` result, keyed by `_paths_version`."""
+
+    _paths_version: int | None = None
+    """Delta table version `_paths` was built against."""
+
     @cached_property
     def _statements(self) -> ParquetStore:
         return ParquetStore(
@@ -78,11 +84,19 @@ class DocumentRepository(DatasetHandle):
         yield from self._artifact[origin].stream()
 
     def make_paths(self) -> dict[str, str]:
-        """Compute folder structure from Folder (parent) entities.
+        """Folder id to path map, memoised per delta table version.
 
         Returns:
             Mapping of folder ID to complete path (e.g. "root/sub/folder")
         """
+        version = self._statements.version
+        if self._paths is None or self._paths_version != version:
+            self._paths_version = version
+            self._paths = self._build_paths()
+        return self._paths
+
+    def _build_paths(self) -> dict[str, str]:
+        """Walk the Folder entities into a folder id to path map."""
         # First pass: collect caption and parent for each folder
         folders: dict[str, tuple[str, str | None]] = {}
         for d in self._statements._query_data(
