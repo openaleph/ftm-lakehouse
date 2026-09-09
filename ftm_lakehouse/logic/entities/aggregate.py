@@ -7,24 +7,12 @@ entities from statement streams.
 from collections import defaultdict
 from typing import Any, Iterator, TypedDict
 
-from followthemoney import Schema, Statement, StatementEntity, model
-from followthemoney.exc import InvalidData
+from followthemoney import Statement, StatementEntity, model
 from followthemoney.statement import StatementDict
 from followthemoney.statement.util import BASE_ID
-from ftmq.aggregate import common_ancestor
 from ftmq.util import DEFAULT_DATASET, datetime_iso, make_dataset
 
-
-def _merge_schema(s1: str | Schema, s2: str | Schema) -> Schema:
-    """Lenient merge: Find common ancestors if schemata can't merge"""
-    _s1 = model.get(s1)
-    _s2 = model.get(s2)
-    if _s1 is None or _s2 is None:
-        raise RuntimeError("Invalid schema, can't merge")
-    try:
-        return model.common_schema(s1, s2)
-    except InvalidData:
-        return common_ancestor(_s1, _s2)
+from ftm_lakehouse.helpers.schema import merge_schema
 
 
 class EntityData(TypedDict):
@@ -191,7 +179,7 @@ class EntityPayload:
             if schema is None:
                 schema = model.get(name)
             elif schema.name != name:
-                schema = _merge_schema(schema, name)
+                schema = merge_schema(schema, name)
 
         if schema is None:
             return {}
