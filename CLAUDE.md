@@ -244,7 +244,7 @@ Settings via environment variables with `LAKEHOUSE_` prefix:
 - `LAKEHOUSE_JOURNAL_POOL_SIZE`: Postgres journal connections kept warm between writers, per *cached dataset journal*; `0` pools nothing. Bounds idle connections only – writers beyond it open their own rather than queueing (default: `5`)
 - `LAKEHOUSE_LOCK_MAX_RETRIES`: Retry bound for every write-fence wait (exclusive `.LOCK` acquisition, appends waiting out a held `.LOCK`, maintenance draining `.LOCK-APPENDS/` markers); total wait ≈ N²/2 seconds, then `RuntimeError`. Stale locks/markers need `maintenance unlock` (default: `22`)
 - `LAKEHOUSE_DUCKDB_MEMORY_LIMIT`: Per-DuckDB-connection RAM ceiling; queries beyond it spill to disk (default: `8GB`)
-- `LAKEHOUSE_DUCKDB_TEMP_DIRECTORY`: Spill-to-disk path for DuckDB; unset = OS temp dir
+- `LAKEHOUSE_DUCKDB_TEMP_DIRECTORY`: Spill-to-disk path for DuckDB – chiefly the sweep's per-partition sort (default: `{OS temp dir}/duckdb`; DuckDB's own default is `.tmp` relative to the working directory, so this is set explicitly. Empty falls back to that)
 - `LAKEHOUSE_DUCKDB_EXTENSION_DIRECTORY`: Where DuckDB loads/auto-installs extensions; unset = `$HOME/.duckdb/extensions` (breaks without a writable `HOME` – the Docker image pre-installs `delta` into `/opt/duckdb/extensions` and sets this)
 - `LAKEHOUSE_ON_ZFS`: Enable ZFS dataset creation (default: `false`)
 - `LAKEHOUSE_ZFS_POOL`: ZFS pool path for dataset creation

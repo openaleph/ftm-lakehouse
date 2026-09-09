@@ -71,8 +71,9 @@ def duckdb_config() -> dict[str, str]:
     Per-query memory is bounded by `Settings.duckdb_memory_limit`
     (env: ``LAKEHOUSE_DUCKDB_MEMORY_LIMIT``, default ``8GB``); queries
     exceeding the limit spill to `Settings.duckdb_temp_directory`
-    (env: ``LAKEHOUSE_DUCKDB_TEMP_DIRECTORY``) when set, otherwise to
-    the OS temp directory DuckDB picks by default. Extensions (notably
+    (env: ``LAKEHOUSE_DUCKDB_TEMP_DIRECTORY``), which defaults to
+    ``{OS temp dir}/duckdb`` – DuckDB's own default is ``.tmp`` relative to
+    the working directory. Extensions (notably
     ``delta``) are loaded from `Settings.duckdb_extension_directory`
     (env: ``LAKEHOUSE_DUCKDB_EXTENSION_DIRECTORY``) when set, otherwise
     from ``$HOME/.duckdb/extensions``. Passed to

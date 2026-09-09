@@ -1,8 +1,10 @@
 from pathlib import Path
+from tempfile import gettempdir
 
 from anystore.exceptions import DoesNotExist
 from anystore.io import smart_read
 from anystore.settings import BaseSettings
+from pydantic import Field
 from pydantic_settings import SettingsConfigDict
 
 CHECKSUM_ALGORITHM = "sha256"  # never change this! ;)
@@ -51,7 +53,12 @@ class Settings(BaseSettings):
     operations unlock``."""
 
     duckdb_memory_limit: str = "8GB"
-    duckdb_temp_directory: str | None = None
+
+    duckdb_temp_directory: str | None = Field(
+        default_factory=lambda: str(Path(gettempdir()) / "duckdb")
+    )
+    """Where DuckDB spills a query that outgrows `duckdb_memory_limit`."""
+
     duckdb_extension_directory: str | None = None
 
     public_url_prefix: str | None = None
