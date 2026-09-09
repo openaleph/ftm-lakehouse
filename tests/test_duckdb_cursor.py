@@ -10,6 +10,7 @@ connection so a single complex query can't OOM the worker.
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from tempfile import gettempdir
 
 import pyarrow as pa
 from followthemoney import Statement
@@ -93,10 +94,10 @@ def test_make_duckdb_applies_temp_directory(monkeypatch, tmp_path) -> None:
     assert configured == str(tmp_path)
 
 
-def test_make_duckdb_default_temp_directory_unset(monkeypatch) -> None:
-    """When unset, ``temp_directory`` is not forced – DuckDB picks its own
-    default rather than being told to spill to an empty path."""
+def test_make_duckdb_default_temp_directory(monkeypatch) -> None:
+    """When unset, ``temp_directory`` is in the OS default"""
     monkeypatch.delenv("LAKEHOUSE_DUCKDB_TEMP_DIRECTORY", raising=False)
-    assert Settings().duckdb_temp_directory is None
+    tmp = gettempdir()
+    assert Settings().duckdb_temp_directory.startswith(tmp)
     # Constructor must not raise.
     make_duckdb()
