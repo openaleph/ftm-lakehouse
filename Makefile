@@ -55,4 +55,4 @@ clean:
 
 documentation:
 	zensical build
-	aws --profile nbg1 --endpoint-url https://s3.investigativedata.org s3 sync ./site s3://openaleph.org/docs/lib/ftm-lakehouse
+	putfs sync --overwrite ./site putfs://static.darc.zone/openaleph.org/docs/lib/ftm-lakehouse
