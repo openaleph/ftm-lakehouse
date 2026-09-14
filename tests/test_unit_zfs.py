@@ -30,7 +30,7 @@ def clear_ensure_cache():
 def test_dataset_configs():
     """The tuned per-storage-type properties are a deliberate contract."""
     assert ARCHIVE.to_props()["compression"] == "zstd-9"
-    assert ARCHIVE.to_props()["recordsize"] == "128K"
+    assert ARCHIVE.to_props()["recordsize"] == "1M"
     # parquet compresses itself - ZFS compression on top burns CPU for nothing
     assert STATEMENTS.to_props()["compression"] == "off"
     assert STATEMENTS.to_props()["recordsize"] == "1M"
