@@ -20,9 +20,9 @@ classifiers = [
 ]
 requires-python = ">=3.12,<3.15"
 dependencies = [
-    "ftmq[lake] (>=5.1.0,<6.0.0)",
+    "ftmq[lake] (>=5.1.1,<6.0.0)",
     "followthemoney (>=4.11.0,<5.0.0)",
-    "anystore (>=1.4.0,<2.0.0)",
+    "anystore (>=1.4.2,<2.0.0)",
     "httpx (>=0.28.1,<0.29.0)",
     "zfs-agent (>=0.0.1,<0.0.2)",
     "putfs (>=0.4.2,<0.5.0)",
@@ -30,15 +30,15 @@ dependencies = [
 
 [project.optional-dependencies]
 api = [
-    "fastapi (>=0.138.2,<0.139.0)",
-    "granian (>=2.7.7,<3.0.0)",
+    "fastapi (>=0.141.1,<0.142.0)",
+    "granian (>=2.8.3,<3.0.0)",
     "uvloop (>=0.22.1,<0.23.0)",
     "aiohttp (!=4.0.0a0,!=4.0.0a1)",
-    "putfs (>=0.4.0,<0.5.0)",
+    "putfs (>=0.4.4,<0.5.0)",
 ]
 http = ["aiohttp (!=4.0.0a0,!=4.0.0a1)"]
 postgres = [
-    "adbc-driver-postgresql (>=1.12,<2)",
+    "adbc-driver-postgresql (>=1.12.0,<2.0.0)",
     "psycopg2-binary (>=2.9,<3)",
 ]
 s3 = ["s3fs (>2024.2.0)"]
