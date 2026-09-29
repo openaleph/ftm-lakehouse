@@ -227,6 +227,10 @@ def cli_ftm_lakehouse(
     settings_ = Settings()
     configure_logging(level=settings_.log_level)
     if ctx.invoked_subcommand in SKIP_CATALOG_COMMANDS:
+        # no catalog, but `-d` still addresses the dataset (validated by
+        # the command)
+        STATE["dataset"] = dataset
+        STATE["dataset_uri"] = None
         return
     try:
         catalog = get_lakehouse(uri)

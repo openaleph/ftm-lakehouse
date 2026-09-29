@@ -24,7 +24,7 @@ dependencies = [
     "followthemoney (>=4.11.0,<5.0.0)",
     "anystore (>=1.4.2,<2.0.0)",
     "httpx (>=0.28.1,<0.29.0)",
-    "zfs-agent (>=0.0.1,<0.0.2)",
+    "zfs-agent @ git+https://github.com/dataresearchcenter/zfs-agent.git@feat/stream",
     "putfs (>=0.4.2,<0.5.0)",
 ]
 

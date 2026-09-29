@@ -325,14 +325,14 @@ ftm_lakehouse/
 │   ├── archive.py           # archive get / ls / download
 │   ├── maintenance.py       # make, export, maintenance flush / optimize / unlock
 │   ├── crawl.py             # crawl (top level)
-│   └── zfs.py               # zfs init (agent lives in the zfs-agent package)
+│   └── zfs.py               # zfs init, serve, status, push, pull (agent: zfs-agent package)
 │
 └── core/                    # Cross-cutting concerns
     ├── settings.py          # LAKEHOUSE_* env configuration
     ├── config.py            # config.yml loading
     ├── api.py               # API-mode delegation mixin
     ├── conventions/         # path.py, tag.py
-    └── zfs.py               # ZFS tuning + zfs-agent package caller
+    └── zfs/                 # ZFS tuning + replication (push / pull), over the zfs-agent package
 ```
 
 ## Storage Layout & Tags

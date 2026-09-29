@@ -1,13 +1,17 @@
 from pathlib import Path
 from tempfile import gettempdir
+from typing import Annotated
 
 from anystore.exceptions import DoesNotExist
 from anystore.io import smart_read
 from anystore.settings import BaseSettings
-from pydantic import Field
+from pydantic import ByteSize, Field
 from pydantic_settings import SettingsConfigDict
 
 CHECKSUM_ALGORITHM = "sha256"  # never change this! ;)
+
+ZfsBuffer = Annotated[ByteSize, Field(ge=1024**2)]
+"""A ZFS stream buffer size, e.g. ``2GiB`` – at least ``1MiB``."""
 
 __version__ = "0.8.3"
 
@@ -34,6 +38,23 @@ class Settings(BaseSettings):
     """ZFS dataset path the lakehouse's tuned datasets are created under.
     Transport / agent configuration (socket, owner, peer auth) lives in the
     external ``zfs-agent`` package's own ``ZFS_*`` environment."""
+
+    zfs_api: bool = False
+    """Mount the ZFS replication routes (``/{dataset}/_api/zfs/...``) into the
+    API (``LAKEHOUSE_ZFS_API``). Needs ``zfs_pool``, and – in a container – a
+    ``zfs-agent`` serving ``status,snapshot,send,receive``."""
+
+    zfs_buffer: ZfsBuffer = ByteSize(512 * 1024**2)
+    """Memory a ZFS stream may buffer per transfer (``LAKEHOUSE_ZFS_BUFFER``,
+    e.g. ``2GiB``, at least ``1MiB``), on either end – what ``mbuffer -m``
+    did for a ``zfs send | mbuffer`` pipe."""
+
+    zfs_peer_key: str | None = None
+    zfs_peer_secret: str | None = None
+    """Api key and secret ``zfs push`` / ``pull`` / ``status`` send to the
+    other host (``LAKEHOUSE_ZFS_PEER_KEY`` / ``_SECRET``) – for a peer behind
+    the nginx api-key gate. Separate from ``LAKEHOUSE_API_KEY`` so that
+    credential never reaches a peer."""
 
     grace_period_days: int = 30
     max_buffer_rows: int = 1_000_000

@@ -1,15 +1,16 @@
 from anystore.exceptions import DoesNotExist
 from anystore.logging import get_logger
 from anystore.util import ensure_uri, uri_to_path
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from putfs import api as putfs
-from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ftm_lakehouse.api.routes.ensure import router as ensure_router
 from ftm_lakehouse.api.routes.entities import router as entities_router
 from ftm_lakehouse.api.routes.journal import router as journal_router
 from ftm_lakehouse.api.routes.operations import router as operations_router
+from ftm_lakehouse.api.routes.zfs import router as zfs_router
 from ftm_lakehouse.core.settings import ApiSettings, Settings, __version__
 from ftm_lakehouse.core.zfs import ensure_zfs_dataset
 from ftm_lakehouse.lake import get_lakehouse
@@ -21,18 +22,25 @@ log = get_logger(__name__)
 _WRITE_METHODS = {"PUT", "POST", "DELETE", "PATCH"}
 
 
-class ZfsEnsureMiddleware(BaseHTTPMiddleware):
-    """Ensure ZFS datasets exist before any write hits storage."""
+class ZfsEnsureMiddleware:
+    """Ensure ZFS datasets exist before any write hits storage.
 
-    async def dispatch(
-        self, request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
-        if request.method in _WRITE_METHODS:
-            path = request.url.path.lstrip("/")
+    Plain ASGI rather than ``BaseHTTPMiddleware``, which re-wraps every
+    chunk of a streamed body – replication streams pass through here.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and scope["method"] in _WRITE_METHODS:
+            path = scope["path"].lstrip("/")
             dataset = path.split("/")[0] if path else None
-            if dataset:
+            # A replication receive creates its datasets itself – ensuring
+            # them first would leave the full receive nothing to create.
+            if dataset and not path.startswith(f"{dataset}/_api/zfs/"):
                 ensure_zfs_dataset(settings.zfs_pool, dataset)
-        return await call_next(request)
+        await self.app(scope, receive, send)
 
 
 async def _not_found_handler(_: Request, exc: Exception) -> JSONResponse:
@@ -41,6 +49,18 @@ async def _not_found_handler(_: Request, exc: Exception) -> JSONResponse:
 
 async def _bad_request_handler(_: Request, exc: Exception) -> JSONResponse:
     return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
+def _add_error_handlers(app: FastAPI) -> None:
+    app.add_exception_handler(DoesNotExist, _not_found_handler)
+    app.add_exception_handler(FileNotFoundError, _not_found_handler)
+    app.add_exception_handler(ValueError, _bad_request_handler)
+
+
+def _zfs_pool() -> str:
+    if not settings.zfs_pool:
+        raise RuntimeError("The ZFS api needs `LAKEHOUSE_ZFS_POOL`")
+    return settings.zfs_pool
 
 
 def get_app(lake_uri: str | None = None) -> FastAPI:
@@ -61,6 +81,9 @@ def get_app(lake_uri: str | None = None) -> FastAPI:
     app.include_router(entities_router)
     app.include_router(journal_router)
     app.include_router(operations_router)
+    if settings.zfs_api:
+        app.state.zfs_pool = _zfs_pool()
+        app.include_router(zfs_router)
 
     # blob storage api
     if uri.startswith("file://"):
@@ -76,9 +99,28 @@ def get_app(lake_uri: str | None = None) -> FastAPI:
     if settings.on_zfs and settings.zfs_pool:
         app.add_middleware(ZfsEnsureMiddleware)
 
-    # error handlers
-    app.add_exception_handler(DoesNotExist, _not_found_handler)
-    app.add_exception_handler(FileNotFoundError, _not_found_handler)
-    app.add_exception_handler(ValueError, _bad_request_handler)
+    _add_error_handlers(app)
 
+    return app
+
+
+def get_zfs_app() -> FastAPI:
+    """Serve only the ZFS replication routes (``ftm-lakehouse zfs serve``).
+
+    For hosts that don't expose the lakehouse api. No blob storage, no
+    authentication – bind it to an interface only trusted peers reach. The
+    catalog (``LAKEHOUSE_URI``) is still needed: a snapshot for a pull
+    flushes the dataset's journal first.
+    """
+    app = FastAPI(
+        debug=settings.debug,
+        docs_url=None,
+        redoc_url="/",
+        version=__version__,
+        title=f"{api_settings.title} – ZFS replication",
+    )
+    app.state.zfs_pool = _zfs_pool()
+    app.state.lake = get_lakehouse()
+    app.include_router(zfs_router)
+    _add_error_handlers(app)
     return app

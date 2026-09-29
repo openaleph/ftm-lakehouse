@@ -7943,12 +7943,16 @@ name = "zfs-agent"
 version = "0.0.1"
 description = "ZFS management for unprivileged user via socket"
 optional = false
-python-versions = "<3.15,>=3.10"
+python-versions = ">=3.10,<3.15"
 groups = ["main"]
-files = [
-    {file = "zfs_agent-0.0.1-py3-none-any.whl", hash = "sha256:195fa645250dda296461ba014db0bd83e20faa59382ad318ce350e20ebdc98f8"},
-    {file = "zfs_agent-0.0.1.tar.gz", hash = "sha256:b68e3ece30d8bc41d894706b2d564accfb5b94be21c016accc9d1fc1bd977d71"},
-]
+files = []
+develop = false
+
+[package.source]
+type = "git"
+url = "https://github.com/dataresearchcenter/zfs-agent.git"
+reference = "feat/stream"
+resolved_reference = "5794b2738cee010d400df91ca0854963efd4469d"
 
 [extras]
 api = ["aiohttp", "fastapi", "granian", "putfs", "uvloop"]
@@ -7961,4 +7965,4 @@ s3 = ["s3fs"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.15"
-content-hash = "e556ef10313780197c15136c6e16021e13da36a46fe0522e955e87cdcc87b95d"
+content-hash = "74300481d90e4ee46a59c6b0bb757fb9d9a66a3c50da461ba49f03d038e9e923"

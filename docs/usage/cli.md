@@ -12,7 +12,7 @@ ftm-lakehouse [OPTIONS] <group> <command> [ARGS]
 | `entities` | Read and write FtM entities |
 | `statements` | Read and write raw FtM statements |
 | `maintenance` | Storage maintenance (flush, optimize, unlock) |
-| `zfs` | ZFS dataset management |
+| `zfs` | ZFS dataset management and replication between hosts (`init`, `serve`, `status`, `push`, `pull`) – see [ZFS Integration](../deployment/zfs.md) |
 
 Top-level (no group), as frequently-used shortcuts: `ls` (dataset names), `datasets` (metadata), `configure` (write dataset configuration), `make` (build/update a dataset), `export` (produce the exports, or a single kind), `crawl` (ingest documents into the archive).
 

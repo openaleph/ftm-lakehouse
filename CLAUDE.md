@@ -148,7 +148,7 @@ ftm_lakehouse/
 │   ├── entities.py      # `entities` group (iterate, stream, import)
 │   ├── statements.py    # `statements` group (iterate, stream, import, sql)
 │   ├── archive.py       # `archive` group (get, head, ls, download)
-│   └── zfs.py           # `zfs` group (init)
+│   └── zfs.py           # `zfs` group (init, serve, status, push, pull)
 │
 └── core/                # Cross-cutting concerns
     ├── settings.py      # Configuration (LAKEHOUSE_* env vars)
@@ -156,7 +156,12 @@ ftm_lakehouse/
     ├── api.py           # Outgoing lakehouse-api client + `no_api` guard
     ├── arrow.py         # Arrow IPC framing for the api wire
     ├── conventions/     # Path and tag conventions
-    └── zfs.py           # ZFS tuning + zfs-agent package caller
+    └── zfs/             # ZFS tuning + replication, over the zfs-agent package
+        ├── main.py      #   dataset layout (tuning, parts) + zfs-agent calls on it
+        ├── plan.py      #   pure decisions: what to send, may a target take it
+        ├── stream.py    #   data path: zfs send / receive through a buffer
+        ├── util.py      #   pipe + queue plumbing under stream.py
+        └── client.py    #   push / pull against another host's routes
 ```
 
 ### Layer Dependencies
@@ -183,7 +188,7 @@ Below the layers sit two utility tiers with a strict rule:
   - `repository.base.dataset_uri(name, uri)` canonicalizes AND validates the name – no caller-supplied name reaches path construction unchecked.
 - **Config lifecycle** (`catalog.py` module fns): `ensure_dataset` (get-or-create), `update_dataset` (merge-write + versioned snapshot; calls `factories.clear_caches()` so newly fetched repos see fresh config – held instances keep their snapshot), `get_dataset_model` (fresh read), `get_dataset_index`, `dataset_exists`. Repositories snapshot `_model` (shards, compression) at construction; layout-affecting config must be set at creation – `shards` is the one exception, changeable after the fact by `ShardOperation`, which rewrites the store *before* writing the new count. Custom `DatasetModel` subclasses register process-wide via `set_model_class()` (module hook, no generics).
 - **Catalog** (slim): `list_datasets()` + `dataset_uri(name)`; the API server keeps one as `app.state.lake`. There is no Dataset class – the former `Dataset`/`get_dataset` surface was removed pre-release.
-- **API app** (`api/main.py`): lakehouse routes live under `/{dataset}/_api/...`; blob storage is served by mounting the whole putfs Starlette app at `/` when the lake URI is a local path (its catch-all `/{key:path}` sits behind the `_api` routes), or anystore's `archive_router` for other backends. `ValueError` → 400, `DoesNotExist` → 404 via exception handlers.
+- **API app** (`api/main.py`): lakehouse routes live under `/{dataset}/_api/...` (the ZFS replication routes only with `LAKEHOUSE_ZFS_API`; `get_zfs_app()` serves them alone for `zfs serve`, and `ZfsEnsureMiddleware` – plain ASGI, not `BaseHTTPMiddleware`, which re-wraps every streamed chunk – skips `/_api/zfs/` writes – a receive creates its own datasets); blob storage is served by mounting the whole putfs Starlette app at `/` when the lake URI is a local path (its catch-all `/{key:path}` sits behind the `_api` routes), or anystore's `archive_router` for other backends. `ValueError` → 400, `DoesNotExist` → 404 via exception handlers.
 
 ### Data Flow
 
@@ -228,9 +233,10 @@ Each dataset's parquet store is partitioned by `(shard, bucket, origin)`:
 
 When deployed on ZFS (`LAKEHOUSE_ON_ZFS=1`), the lakehouse auto-creates ZFS datasets with tuned properties per storage type. The transport (local subprocess vs. socket agent, chown, peer auth) is the external `zfs-agent` package (github.com/dataresearchcenter/zfs-agent, its own `ZFS_*` env + `zfs-agent` host command); the lakehouse only owns the tuning and the caller.
 
-- **`core/zfs.py`**: `DatasetConfig` tuning + `ensure_zfs_dataset(pool, dataset)` calling `zfs_agent.zfs_create`. `archive` uses `zstd-9`; `statements` uses `compression=off` because parquet handles compression internally.
-- **`cli/zfs.py`**: `ftm-lakehouse zfs init` (manual dataset creation). The agent daemon is the package's own `zfs-agent` command.
-- **Settings**: `LAKEHOUSE_ON_ZFS`, `LAKEHOUSE_ZFS_POOL` only – socket/owner/peer-auth are the package's `ZFS_*` env.
+- **`core/zfs/`** (package; `__init__` re-exports the public api, so callers import from `ftm_lakehouse.core.zfs`): `main.py` holds `DatasetConfig` tuning + `ensure_zfs_dataset(pool, dataset)` calling `zfs_agent.zfs_create`. `archive` uses `zstd-9`; `statements` uses `compression=off` because parquet handles compression internally.
+- **Replication** (`core/zfs/` + `api/routes/zfs.py`): `push` / `pull` move a dataset between hosts over HTTP, one `zfs send` stream per *part* (`PARTS`: `base`, `archive`, `statements`, in that order – a child needs its parent; `ensure_zfs_dataset` walks the same `PARTS` / `PART_PROPS`). Not `zfs send -R`: a replication stream received with `-F` destroys the datasets it doesn't carry, which would make `--no-archive` destructive. **Receive safety** is `check_target(target, base_guid, force, replace)`: every receive runs `zfs receive -s -F`, whose rollback discards live changes since the base (fine – a mounted replica) but also destroys target snapshots newer than the base (needs `force`); a full stream onto a target that exists without snapshots replaces it (needs `replace` – separate from `force` so accepting a pre-created empty target doesn't also lift the snapshot guard); a snapshotless target *carrying a resume token* is not that case – an interrupted receive that was creating the dataset leaves it behind like this (real ZFS, found by the zfs-agent docker phase; `FakeZfs` mirrors it), and resuming only finishes a receive that was let in). `plan.py` is pure (no `zfs` calls), so these rules are a test table. It runs on the *receiving* side right before the stream is read – the receive route via `check_receive`, pull's local receive likewise – because the client's plan is no guarantee. `plan_transfer` picks the newest common snapshot **by guid** (named as on the source, since that's where `send -i` looks it up), refuses a same-named different-guid target snapshot, and plans a pending resume token like any transfer (`Transfer.base` = the common guid), so a resume onto a target that got newer snapshots is refused too. `_replicate` checks every part against the current source history *before* taking the snapshot (so a refused run leaves no orphan snapshot), then plans every part before the first byte moves (no half-replicated parts), resumes tokens first and, with `force`, discards pending partial state instead (`abort` – a token whose snapshot is gone can't be resumed at all). The snapshot callable flushes the journal first: `push` via the CLI's `prepare` hook, `pull` via the snapshot route. The sender snapshots only the parts it sends, so each part's newest snapshot stays the one it was last sent at. Names are `%Y%m%d%H%M%S` UTC – one-second resolution, a second snapshot in the same second is a zfs "exists" error. **Data path** (`stream.py` over `util.py`): a `util.Worker` thread runs the blocking `zfs_agent.zfs_send` / `zfs_receive` on one end of an `os.pipe()` and closes it when the call returns (that close is the other end's EOF / EPIPE). `SendStream` (sync and async iteration, `first()`, `close()` safe from any thread) and `ReceiveFeed` (`put` blocking, `offer` non-blocking for async callers so a backpressured transfer doesn't hold an anyio worker thread) put a byte-bounded queue of `CHUNK_SIZE` chunks between the pipe and HTTP – the `mbuffer -m` role, sized by `LAKEHOUSE_ZFS_BUFFER`. Pipe writes loop on short writes (`util.write_all` – a signal can cut one short); the send reader `select`s with a `util.POLL` timeout so `close()` reaches it even while `zfs send` stalls. A client gone mid-download never gets Starlette's body iterator closed, so the send route returns a `SendResponse` that closes its `SendStream` in the `finally` of its ASGI call. `arun_receive` **drains** the rest of the request body when the receive fails early: granian stops reading an unconsumed body without closing the connection, which wedged both the sync httpx client (blocked writing) and the worker (`test_granian_rejected_receive_does_not_wedge` runs granian as a subprocess for this – uvicorn, the in-process test server, doesn't show it). `run_receive` / `arun_receive` raise the feeding error (Ctrl-C, network) rather than the receive's complaint about the cut stream. Routes (`/{dataset}/_api/zfs`, `…/snapshot`, `…/{part}/send`, `…/{part}/receive` PUT and DELETE = abort) answer a failing `zfs` or refused check with 409 + the reason, an agent `OSError` with 503; `send` waits for `first()` so an early failure still gets a status, a later one truncates the stream (the receiver's `zfs receive -s` rejects it and keeps a token). A successful receive calls `factories.clear_caches()` – only in that worker. The client (`client.py`, `_client`) is its own httpx client: no retries, the server's `detail` in errors, and only `LAKEHOUSE_ZFS_PEER_KEY` / `_SECRET` as credentials – the lakehouse api client would send `LAKEHOUSE_API_KEY` to any peer url. Tests: `tests/test_integration_zfs_api.py` runs push/pull end to end against a live server with an in-memory `FakeZfs` patched over the `zfs_agent` names where they are called – `core.zfs.main` (status, snapshot, abort) and `core.zfs.stream` (send, receive), not the package, whose re-exports nothing calls through (one fake serves both "hosts", told apart by pool).
+- **`cli/zfs.py`**: dataset commands run in `ZfsContext` – yields `(dataset, pool)` from `-d` / `--pool`, prints errors like `DatasetContext`, but builds no catalog and never calls `ensure_dataset` (that would create the ZFS datasets a `pull` has to find absent). `-d <ds> zfs init` (manual dataset creation), `zfs serve` (granian on `ftm_lakehouse.api:zfs_app`, no auth, binds `127.0.0.1` by default), `-d <ds> zfs status [URL]` / `push URL` / `pull URL`. The agent daemon is the package's own `zfs-agent` command; mode 1 needs it started with `--actions create,status,snapshot,send,receive`.
+- **Settings**: `LAKEHOUSE_ON_ZFS`, `LAKEHOUSE_ZFS_POOL`, `LAKEHOUSE_ZFS_API` (mount the replication routes into the api), `LAKEHOUSE_ZFS_BUFFER` (stream buffer per transfer) – socket/owner/peer-auth/actions are the package's `ZFS_*` env.
 
 ### Configuration
 
@@ -248,6 +254,9 @@ Settings via environment variables with `LAKEHOUSE_` prefix:
 - `LAKEHOUSE_DUCKDB_EXTENSION_DIRECTORY`: Where DuckDB loads/auto-installs extensions; unset = `$HOME/.duckdb/extensions` (breaks without a writable `HOME` – the Docker image pre-installs `delta` into `/opt/duckdb/extensions` and sets this)
 - `LAKEHOUSE_ON_ZFS`: Enable ZFS dataset creation (default: `false`)
 - `LAKEHOUSE_ZFS_POOL`: ZFS pool path for dataset creation
+- `LAKEHOUSE_ZFS_API`: Mount the ZFS replication routes (`/{dataset}/_api/zfs/...`) into the api (default: `false`)
+- `LAKEHOUSE_ZFS_BUFFER`: Memory a ZFS replication stream may buffer per transfer, on either end, at least `1MiB` (default: `512MiB`)
+- `LAKEHOUSE_ZFS_PEER_KEY` / `LAKEHOUSE_ZFS_PEER_SECRET`: Api key headers the replication client sends to the other host; `LAKEHOUSE_API_KEY` never reaches a peer
 
 API settings use `LAKEHOUSE_API_` prefix:
 
@@ -260,13 +269,13 @@ Full operator-facing list with explanations: `docs/deployment/configuration.md`.
 
 Main CLI entry point: `ftm-lakehouse` (typer-based)
 - Uses `-d` flag for dataset name in most commands
-- Sub-typer groups: `maintenance` (`flush` / `optimize` / `shard` / `migrate` / `unlock`, + top-level `configure` / `make` / `export` / `crawl` shortcuts), `entities`, `statements`, `archive`, `zfs`
+- Sub-typer groups: `maintenance` (`flush` / `optimize` / `shard` / `migrate` / `unlock`, + top-level `configure` / `make` / `export` / `crawl` shortcuts), `entities`, `statements`, `archive`, `zfs` (`init` / `serve` / `status` / `push` / `pull`)
 - `configure -c <yml>` writes config only; `make -c` runs the same `write_config` helper first. Both merge (`exclude_unset=True`), so a partial yaml doesn't reset `shards` to the default
 - `make` runs flush → optimize → exports, all on by default (`--no-flush` / `--no-exports` / `--no-optimize`, plus `--force-optimize` / `--force-exports`)
-- `DatasetContext` yields `(name, uri)` and ensures the dataset on entry; commands resolve repos via the factories
+- `DatasetContext` yields `(name, uri)` and ensures the dataset on entry; commands resolve repos via the factories (the `zfs` group uses its own `ZfsContext` instead – no catalog, no ensure)
 - Shared command options are `OPT_*` `Annotated` constants in `cli/__init__.py`; new sub-typer groups go through `sub_typer(name, help)`
 - `statements sql` and `maintenance unlock` are local-only – they raise `RuntimeError` in api mode (raw SQL / lock-file manipulation deliberately have no api wire)
-- `SKIP_CATALOG_COMMANDS = {"zfs"}` in `cli/__init__.py` bypasses catalog loading for commands that don't need it
+- `SKIP_CATALOG_COMMANDS = {"zfs"}` in `cli/__init__.py` bypasses catalog loading for commands that don't need it; `-d` still lands in `STATE["dataset"]` (unvalidated – the command validates it)
 
 ## Testing
 

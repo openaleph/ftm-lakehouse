@@ -19,6 +19,9 @@
 | `LAKEHOUSE_DUCKDB_EXTENSION_DIRECTORY` | Directory DuckDB loads its extensions from (and auto-installs into when one is missing). Unset = `$HOME/.duckdb/extensions`, which fails in containers running without a writable `HOME` (`Failed to create directory "/.duckdb"`). The shipped Docker image pre-installs the `delta` extension at build time and sets this to `/opt/duckdb/extensions`, so runtime needs neither a writable `HOME` nor network access. | (unset) |
 | `LAKEHOUSE_ON_ZFS` | Enable ZFS dataset creation for local storage | `false` |
 | `LAKEHOUSE_ZFS_POOL` | ZFS dataset path for the lakehouse root (e.g. `zpools/tank/lakehouse`). Transport / agent settings (`ZFS_SOCKET`, `ZFS_OWNER`, ...) belong to the [zfs-agent](https://github.com/dataresearchcenter/zfs-agent) package -- see [ZFS Integration](zfs.md) | (required when `ON_ZFS` is enabled) |
+| `LAKEHOUSE_ZFS_API` | Mount the ZFS replication routes (`/{dataset}/_api/zfs/...`) into the API – see [Replication](zfs.md#replication). Needs `LAKEHOUSE_ZFS_POOL` | `false` |
+| `LAKEHOUSE_ZFS_BUFFER` | Memory a ZFS replication stream may buffer per transfer, on either end – what `mbuffer -m` does for a `zfs send \| mbuffer` pipe (e.g. `2GiB`, at least `1MiB`) | `512MiB` |
+| `LAKEHOUSE_ZFS_PEER_KEY` / `LAKEHOUSE_ZFS_PEER_SECRET` | Api key headers `zfs push` / `pull` / `status` send to the other host – for a peer behind the nginx api-key gate. `LAKEHOUSE_API_KEY` is never sent to a replication peer | (unset) |
 | `LAKEHOUSE_API_KEY` / `LAKEHOUSE_API_SECRET` | Client-side auth headers attached to outgoing lakehouse-API requests (authenticate through the reverse proxy in front of the API server) | (unset) |
 | `LAKEHOUSE_PUBLIC_URL_PREFIX` | Public URL prefix for blob URLs (supports a `${dataset}` placeholder) | (unset) |
 | `LOG_LEVEL` | Logging level (DEBUG, INFO, WARNING, ERROR) | `INFO` |
