@@ -728,7 +728,7 @@ def test_storage_journal_psql_append_only():
     )
 
     def dead_tuples() -> int:
-        # summed in python: a LIKE pattern would need psycopg2's `%%` escape
+        # summed in python: a LIKE pattern would need psycopg's `%%` escape
         with store.engine.connect() as conn:
             rows = conn.exec_driver_sql(
                 "SELECT relname, n_dead_tup FROM pg_stat_user_tables"
