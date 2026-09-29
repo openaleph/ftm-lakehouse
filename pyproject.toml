@@ -91,9 +91,6 @@ filterwarnings = [
     'ignore:datetime_iso expects UTC timezone, but got UTC\.:UserWarning',
 ]
 
-[tool.poetry.requires-plugins]
-poetry-plugin-export = ">=1.8"
-
 [tool.pytest_env]
 DEBUG = 1
 AWS_SECRET_ACCESS_KEY = "ftm-lakehouse"
