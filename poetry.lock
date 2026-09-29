@@ -2480,6 +2480,7 @@ files = [
     {file = "granian-2.8.3-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:542bd8b4c7307e2a5f39898b76fbca3f96b87a096aa15c594ca6d21ac6fc74ee"},
     {file = "granian-2.8.3.tar.gz", hash = "sha256:482315abc9dca49051e4246a0bf2f09a1349a9a8d554111657559e038c91a6c4"},
 ]
+markers = {main = "extra == \"api\""}
 
 [package.dependencies]
 click = ">=8.1.0"
@@ -5391,24 +5392,25 @@ tests = ["pytest"]
 
 [[package]]
 name = "putfs"
-version = "0.4.4"
+version = "0.5.0"
 description = "Efficient HTTP blob storage over local filesystem"
-optional = false
+optional = true
 python-versions = "<3.15,>=3.11"
 groups = ["main"]
+markers = "extra == \"api\""
 files = [
-    {file = "putfs-0.4.4-py3-none-any.whl", hash = "sha256:db925130449651c667c96aa29c3a75a8b7e5b0ca53b08681c61ef68f7b9db37a"},
-    {file = "putfs-0.4.4.tar.gz", hash = "sha256:9b4c91c5857736df292f05f180e171e65b630e6f0d2f422fe4aeb2b0221fbcc0"},
+    {file = "putfs-0.5.0-py3-none-any.whl", hash = "sha256:c91ade28d424bde4006df95e8e85492dc4a6d69ca4384dd5347d27b616e78cbb"},
+    {file = "putfs-0.5.0.tar.gz", hash = "sha256:97469cb5e788dec34a313887f3beeaf85feaf878c2624775b20e1f582180fe0d"},
 ]
 
 [package.dependencies]
 anyio = ">=4.15.1,<5.0.0"
-granian = ">=2.8.2,<3.0.0"
-starlette = ">=1.6.0,<2.0.0"
+granian = ">=2.8.3,<3.0.0"
+starlette = ">=1.7.0,<2.0.0"
 uvloop = ">=0.22.1,<0.23.0"
 
 [package.extras]
-client = ["anystore[http] (>=1.4.0,<2.0.0)", "tqdm (>=4.70.0,<5.0.0)"]
+client = ["anystore[http] (>=1.5.0,<2.0.0)", "tqdm (>=4.70.0,<5.0.0)"]
 
 [[package]]
 name = "py-partiql-parser"
@@ -7015,9 +7017,10 @@ tests = ["cython", "littleutils", "pygments", "pytest", "typeguard"]
 name = "starlette"
 version = "1.7.0"
 description = "The little ASGI library that shines."
-optional = false
+optional = true
 python-versions = ">=3.10"
 groups = ["main"]
+markers = "extra == \"api\""
 files = [
     {file = "starlette-1.7.0-py3-none-any.whl", hash = "sha256:67f8e99895493dd2911a03f11314af6ceebeae4e704bb9f43dfc6a9db151c93e"},
     {file = "starlette-1.7.0.tar.gz", hash = "sha256:c79f74ea63cff761804fbbfb182f1e0b440c2d07b164d24700c5a1bab5d6ff5d"},
@@ -7331,9 +7334,10 @@ standard = ["httptools (>=0.8.0)", "python-dotenv (>=0.13)", "pyyaml (>=5.1)", "
 name = "uvloop"
 version = "0.22.1"
 description = "Fast implementation of asyncio event loop on top of libuv"
-optional = false
+optional = true
 python-versions = ">=3.8.1"
 groups = ["main"]
+markers = "extra == \"api\""
 files = [
     {file = "uvloop-0.22.1-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:ef6f0d4cc8a9fa1f6a910230cd53545d9a14479311e87e3cb225495952eb672c"},
     {file = "uvloop-0.22.1-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:7cd375a12b71d33d46af85a3343b35d98e8116134ba404bd657b3b1d15988792"},
@@ -7894,4 +7898,4 @@ s3 = ["s3fs"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.15"
-content-hash = "b101bc977067a1dac1d58c20018d7bf12d6f8f9a1c501b0b8674f29252b0fc56"
+content-hash = "09b400090aeadba254d2f08e0e140e2b323b2f3bb60d6e421ea4e3d5b537e2d4"
