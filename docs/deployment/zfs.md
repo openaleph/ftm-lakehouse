@@ -19,7 +19,7 @@ When a new dataset is created, `ftm-lakehouse` calls `zfs create` (via `zfs-agen
 | ZFS Dataset | recordsize | compression | sync | Purpose |
 |-------------|-----------|-------------|------|---------|
 | `{dataset}/` | (parent defaults) | (parent defaults) | standard | Parent dataset with `atime=off`, `xattr=sa`, `dnodesize=auto` |
-| `{dataset}/archive` | 128K | `zstd-9` | standard | Content-addressed file storage (mixed-entropy blobs) |
+| `{dataset}/archive` | 1M | `zstd-9` | standard | Content-addressed file storage (mixed-entropy blobs) |
 | `{dataset}/statements` | 1M | `off` | standard | Delta Lake parquet – parquet handles compression internally (SNAPPY), ZFS-level compression on top burns CPU per block with no benefit |
 
 ## Mountpoint Ownership

@@ -237,9 +237,9 @@ def _iso_column(name: str) -> Any:
     through untouched, so whatever lands here *is* what the diff window
     compares against and what ``entities.ftm.json`` carries.
 
-    ``AT TIME ZONE 'UTC'`` is not redundant with the pinned session zone
-    (`ftm_lakehouse.logic.parquet.duckdb_config`): it makes the offset the
-    format string claims true of the value whatever connection this runs on.
+    ``AT TIME ZONE 'UTC'`` is not redundant with the session zone
+    ``LakeStore`` pins: it makes the offset the format string claims true of
+    the value whatever connection this runs on.
     """
     utc = f"\"{name}\" AT TIME ZONE 'UTC'"
     return literal_column(

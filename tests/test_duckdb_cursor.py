@@ -12,11 +12,13 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from tempfile import gettempdir
 
+import duckdb
 import pyarrow as pa
 from followthemoney import Statement
 from ftmq.store.lake import pack_statement
 
 from ftm_lakehouse.core.settings import Settings
+from ftm_lakehouse.logic.parquet import duckdb_config
 from ftm_lakehouse.model.statement import JOURNAL_SCHEMA
 from ftm_lakehouse.storage.parquet import ParquetStore
 from tests.duck import make_duckdb
@@ -71,6 +73,32 @@ def test_cursor_can_query_registered_view(tmp_path) -> None:
     with store._lake.cursor() as cur:
         (n,) = cur.execute("SELECT COUNT(*) FROM statement").fetchone()
     assert n == 1
+
+
+def test_cursor_session_is_utc(tmp_path) -> None:
+    """The LakeStore session renders TIMESTAMPTZ in UTC, whatever the host
+    zone – cursors inherit it from the parent connection."""
+    store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
+    _seed(store)
+
+    with store._lake.cursor() as cur:
+        (tz,) = cur.execute("SELECT current_setting('TimeZone')").fetchone()
+    assert tz == "UTC"
+
+
+def test_duckdb_config_connects_without_installable_extensions(
+    monkeypatch, tmp_path
+) -> None:
+    """The config must not need an extension DuckDB would have to install.
+
+    The Docker image points ``extension_directory`` at a read-only dir that
+    only holds ``delta``. A connect-time ``TimeZone`` option is applied before
+    the statically linked ``icu`` registers, so DuckDB tries to install
+    ``icu`` there and the connect fails.
+    """
+    monkeypatch.setenv("LAKEHOUSE_DUCKDB_EXTENSION_DIRECTORY", str(tmp_path))
+    config = {**duckdb_config(), "autoinstall_known_extensions": "false"}
+    duckdb.connect(":memory:", config=config).close()
 
 
 def test_make_duckdb_applies_memory_limit(monkeypatch) -> None:
