@@ -15,6 +15,14 @@ Spread this into a projection to keep captions intact while still projecting:
     Query(*Q_DOCUMENTS).select(P("contentHash"), *CAPTION_PROPS)
 """
 
+FOLDER_SCHEMATA: frozenset[str] = frozenset(
+    s.name for s in model.schemata.values() if s.is_a("Folder")
+)
+"""Every schema a document's ``parent`` can point at – ``Folder`` and the
+schemata extending it (``Package``, ``Workbook``, ``Email``, ``Message``) – as
+plain names, so a stream of entities can be classified with one set lookup.
+"""
+
 
 def merge_schema(s1: str | Schema, s2: str | Schema) -> Schema:
     """Lenient merge: Find common ancestors if schemata can't merge"""

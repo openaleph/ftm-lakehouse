@@ -26,6 +26,7 @@ from collections import Counter
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from enum import StrEnum
+from tempfile import TemporaryDirectory
 from typing import (
     IO,
     Any,
@@ -39,6 +40,7 @@ from typing import (
 )
 
 from anystore.io import Writer
+from anystore.io.read import smart_stream_json
 from anystore.io.write import Formats
 from anystore.logging import get_logger
 from anystore.logic.compress import CompressKind
@@ -52,6 +54,8 @@ from rigour.mime.types import CSV, FTM, JSON
 
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.core.settings import CHECKSUM_ALGORITHM
+from ftm_lakehouse.helpers.file import FolderTree, get_filename
+from ftm_lakehouse.helpers.schema import FOLDER_SCHEMATA
 from ftm_lakehouse.logic.entities.aggregate import EntityPayload
 from ftm_lakehouse.logic.path import DateTimeKey, StoreKey
 from ftm_lakehouse.model.file import Document, Documents
@@ -344,8 +348,8 @@ class DocumentsArtifact(DiffableArtifact):
     """Document metadata, and its delta series – origin-scopable.
 
     Owns the *write* side of the documents export: which entities belong in
-    it, and what rows each contributes. The query side – the folder map, the
-    ad-hoc lookups, the tombstoned ids – stays on
+    it, and what each contributes – its row, the name a path segment of it is
+    made of, or both. Reading the result back and the tombstoned ids stay on
     [`DocumentRepository`][ftm_lakehouse.repository.documents.DocumentRepository].
     """
 
@@ -374,6 +378,18 @@ class DocumentsArtifact(DiffableArtifact):
         )
 
     @staticmethod
+    def is_parent_schema(schema: str | None) -> bool:
+        """Whether an entity of ``schema`` can be another document's parent.
+
+        Today the ``Folder`` schemata, ``parent`` ranging over ``Folder`` –
+        and the sweep stages one row per such entity whether or not it is a
+        csv row itself, because that row is what the folder paths are built
+        out of (`DocumentsRun.resolve`). A bare ``Folder`` is scaffolding
+        only: no content hash, so nothing to point a reader at.
+        """
+        return schema in FOLDER_SCHEMATA
+
+    @staticmethod
     def is_document(data: SDict) -> bool:
         """Whether an entity dict belongs in the documents export.
 
@@ -384,40 +400,29 @@ class DocumentsArtifact(DiffableArtifact):
             return False
         return bool(data.get("properties", {}).get("contentHash"))
 
-    def make_documents(
-        self,
-        data: SDict,
-        paths: dict[str, str],
-        public_prefix: str | None = None,
-    ) -> Documents:
-        """The csv rows one entity dict contributes.
+    def make_document(self, data: SDict, public_prefix: str | None = None) -> Document:
+        """The unpathed row an entity dict contributes.
 
-        One row per resolvable parent folder, so a file living in two places is
-        listed under both; a file with no resolvable parent still gets its one
-        unpathed row. Each row is its own object, so a caller may materialise
-        them – the diff writes the same rows the csv did.
+        Everything about a document row that does not depend on the folder
+        tree, which is everything the sweep can know while it is still
+        staging the rows the tree is built from (`DocumentsRun`). The paths
+        are stamped in afterwards – one row per resolvable parent, so a file
+        living in two folders is listed under both, and a file whose parents
+        resolve to nothing keeps this one row.
 
         Args:
             data: Entity dict, as `EntityPayload.to_dict` returns.
-            paths: Folder id to path map from `DocumentRepository.make_paths`.
             public_prefix: Public url prefix to build blob links against.
 
-        Yields:
-            One `Document` per resolvable parent, else a single unpathed one.
+        Returns:
+            The `Document`, its ``path`` unset.
         """
         document = Document.from_entity_dict(data)
         if public_prefix:
             document.public_url = join_uri(
                 public_prefix, path.ArchiveKey(document.checksum).blob
             )
-        paths_ = [p for p in data.get("properties", {}).get("parent", []) if p in paths]
-        if not paths_:
-            yield document
-            return
-        # a copy per parent: the same file in two folders is two rows, and a
-        # caller that materialises them must not get two views of one object
-        for parent in paths_:
-            yield document.model_copy(update={"path": paths[parent]})
+        return document
 
     def stream(self) -> Documents:
         """Stream this variant's csv back as `Document` models."""
@@ -680,18 +685,37 @@ class EntitiesRun(DiffableRun):
 
 
 class DocumentsRun(DiffableRun):
-    """Writes one origin scope of ``documents.csv`` and its delta series."""
+    """Writes one origin scope of ``documents.csv`` and its delta series.
+
+    Two-phase, because a document's path is not knowable while the sweep
+    runs: it is the chain of its ancestors' names, and those ancestors come
+    past as entities like any other, in no particular order. `consume` stages
+    each row carrying the ``parent`` ids it was asserted with instead of a
+    path, plus one scaffolding row per entity that can *be* a parent; `finish`
+    resolves the tree out of those same rows (`resolve`) and sweeps the staged
+    file into the csv.
+
+    So the second pass goes over the documents of the store – a local
+    json-lines file, under ``TMPDIR`` – where asking the store for the folder
+    tree up front was a pass over every statement in the document bucket
+    before the first row could be written. The tree comes from the staged
+    rows rather than from a structure filled beside them because any document
+    may yet become another's parent, and then the staged rows already are
+    every potential parent there is.
+    """
 
     artifact: DocumentsArtifact
 
     def __init__(self, artifact: DocumentsArtifact, now: datetime) -> None:
         super().__init__(artifact, now)
-        # local import: `factories` imports this module for `ArtifactsRepository`
-        from ftm_lakehouse.repository.factories import get_documents
-
-        self.documents = get_documents(artifact.dataset.dataset, artifact.dataset.uri)
-        self.paths = self.documents.make_paths()
         self.public_prefix = artifact.dataset._model.get_public_prefix()
+        self._tmp = TemporaryDirectory(prefix="ftm-lakehouse-export-")
+        self.staged = f"{self._tmp.name}/documents.json"
+        self.staging = Writer(self.staged)
+
+    def prepare(self, version: int | None) -> None:
+        super().prepare(version)
+        self.staging.open()
 
     def claims(self, candidate: DeleteCandidate) -> bool:
         """Only tombstoned documents of this origin scope.
@@ -709,28 +733,98 @@ class DocumentsRun(DiffableRun):
         )
 
     def consume(self, payload: EntityPayload) -> None:
-        if self.artifact.origin and self.artifact.origin not in payload.origins:
-            return
-        data = payload.to_dict()
-        if not self.artifact.is_document(data):
-            return
-        rows = list(self.artifact.make_documents(data, self.paths, self.public_prefix))
-        for row in rows:
-            self.writer.write(row.model_dump(by_alias=True, mode="json"))
-        self.counts["total"] += 1
+        """Stage this entity, as a csv row and / or as path scaffolding.
 
-        if self.diff is not None:
-            op = self.op_for(payload)
-            if op is None:
-                return
+        A csv row ``doc`` only for a document of this origin scope; a
+        ``folder`` name for anything that can be a parent
+        (`DocumentsArtifact.is_parent_schema`), whatever the scope – an
+        origin-scoped csv still resolves its paths through parents asserted
+        by another origin, as it did when the map was one unscoped query.
+        Several schemata are both.
+
+        The counts are final here rather than in the second phase: they count
+        the documents the sweep met, which is one per entity whatever its
+        parents turn out to resolve to.
+        """
+        data = payload.to_dict()
+        staged: SDict = {}
+        if self.artifact.is_parent_schema(data.get("schema")):
+            staged["folder"] = get_filename(data)
+        in_scope = not self.artifact.origin or self.artifact.origin in payload.origins
+        if in_scope and self.artifact.is_document(data):
+            document = self.artifact.make_document(data, self.public_prefix)
+            staged["doc"] = document.model_dump(by_alias=True, mode="json")
+            self.counts["total"] += 1
+            if self.diff is not None:
+                # `op_for` claims the id off `pending`, so it runs once per
+                # entity and here rather than in the second phase
+                op = self.op_for(payload)
+                if op is not None:
+                    staged["op"] = str(op)
+                    self.counts[op.lower()] += 1
+        if not staged:
+            return
+        staged["id"] = data["id"]
+        staged["parents"] = data.get("properties", {}).get("parent", [])
+        self.staging.write(staged)
+
+    def resolve(self) -> dict[str, str]:
+        """The paths this run's staged rows resolve their parents against.
+
+        Built out of the staged rows themselves: every entity that can be a
+        parent staged its name and its own parents, so the whole chain is in
+        the file. One pass, and only the scaffolding rows are kept – a leaf
+        document is nobody's ancestor.
+        """
+        tree = FolderTree()
+        with Took() as t:
+            for staged in smart_stream_json(self.staged):
+                if folder := staged.get("folder"):
+                    tree.put(staged["id"], folder, staged["parents"])
+            paths = tree.paths()
+        log.info(
+            "Resolved folder paths.",
+            artifact=self.name,
+            folders=len(paths),
+            took=t.took,
+        )
+        return paths
+
+    def finish(self) -> None:
+        """Sweep the staged rows into the csv, paths stamped in, then the DELs.
+
+        One row per resolvable parent and one unpathed row for a document
+        whose parents resolve to nothing (`DocumentsArtifact.make_document`).
+        Each row is its own dict, so the diff can write what the csv wrote.
+        A scaffolding row that is no document of this scope carries no
+        ``doc`` and leaves nothing behind.
+        """
+        self.staging.close()
+        paths = self.resolve()
+        for staged in smart_stream_json(self.staged):
+            document = staged.get("doc")
+            if document is None:
+                continue
+            rows = [
+                {**document, "path": paths[parent]}
+                for parent in staged["parents"]
+                if parent in paths
+            ] or [cast(SDict, document)]
             for row in rows:
-                self.diff.write(
-                    {"op": str(op), **row.model_dump(by_alias=True, mode="json")}
-                )
-            self.counts[op.lower()] += 1
+                self.writer.write(row)
+            op = staged.get("op")
+            if op is not None and self.diff is not None:
+                for row in rows:
+                    self.diff.write({"op": op, **row})
+        super().finish()
 
     def write_delete(self, entity_id: str) -> None:
         cast(Writer, self.diff).write({"op": str(DiffOp.DEL), "id": entity_id})
+
+    def close(self) -> None:
+        super().close()
+        self.staging.close()
+        self._tmp.cleanup()
 
 
 class ExportSession:

@@ -1,6 +1,7 @@
 from anystore.io import smart_stream_csv_models
 from anystore.io.read import smart_stream_csv
 from followthemoney import Statement
+from ftmq.util import make_entity
 
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.model.file import Document
@@ -10,7 +11,6 @@ from ftm_lakehouse.repository import (
     DocumentRepository,
     EntityRepository,
 )
-from ftm_lakehouse.repository.factories import get_artifacts
 
 
 def _export(tmp_path, make_diff: bool = True) -> None:
@@ -28,8 +28,8 @@ def _archive_with_entities(archive: ArchiveRepository, entities: EntityRepositor
     return file
 
 
-def test_repository_document_iterate(tmp_path, fixtures_path):
-    """Test iterate documents from archived files."""
+def test_repository_document_rows(tmp_path, fixtures_path):
+    """The row one archived file contributes to the documents csv."""
     archive = ArchiveRepository("test", tmp_path)
     entities = EntityRepository("test", tmp_path)
 
@@ -40,9 +40,9 @@ def test_repository_document_iterate(tmp_path, fixtures_path):
     # Flush journal to parquet
     entities.flush()
 
-    # Now iterate documents from the repository
+    _export(tmp_path)
     repo = DocumentRepository("test", tmp_path)
-    documents = list(repo.iterate())
+    documents = list(repo.stream())
 
     assert len(documents) == 2
 
@@ -97,6 +97,88 @@ def test_repository_document_export_csv(tmp_path, fixtures_path):
     assert "companies.csv" in names
 
 
+def test_repository_document_export_csv_paths(tmp_path, fixtures_path):
+    """The sweep resolves folder paths from the entities it streams.
+
+    Nothing queries the folder tree before the sweep opens – the folders come
+    past as entities like any other, so the rows are staged and stamped once
+    the tree is complete (`DocumentsRun.finish`). A file in two folders is
+    still two rows.
+    """
+    archive = ArchiveRepository("test", tmp_path)
+    entities = EntityRepository("test", tmp_path)
+    src = fixtures_path / "src" / "utf.txt"
+
+    with entities.writer() as writer:
+        for key in ("a/b/utf.txt", "other/utf.txt"):
+            for entity in archive.store(src, key=key).make_entities():
+                writer.add_entity(entity)
+    entities.flush()
+
+    _export(tmp_path)
+
+    repo = DocumentRepository("test", tmp_path)
+    streamed = list(repo.stream())
+    assert {d.path for d in streamed} == {"a/b", "other"}
+    assert {d.relative_path for d in streamed} == {"a/b/utf.txt", "other/utf.txt"}
+
+
+def test_repository_document_export_csv_document_parent(tmp_path):
+    """An entity can be a csv row and path scaffolding at once.
+
+    ``parent`` ranges over ``Folder``, which ``Email`` / ``Package`` /
+    ``Workbook`` extend – so the entity a path segment comes from is often a
+    document of its own, and the sweep stages it as both
+    (`DocumentsArtifact.is_parent_schema`). A bare folder stays scaffolding:
+    no content hash, no row.
+    """
+    entities = EntityRepository("test", tmp_path)
+    with entities.writer() as writer:
+        writer.add_entity(
+            make_entity(
+                {
+                    "id": "mail",
+                    "schema": "Email",
+                    "properties": {
+                        "fileName": ["inbox.eml"],
+                        "contentHash": ["a" * 64],
+                    },
+                }
+            )
+        )
+        writer.add_entity(
+            make_entity(
+                {
+                    "id": "attachment",
+                    "schema": "Pages",
+                    "properties": {
+                        "fileName": ["doc.pdf"],
+                        "contentHash": ["b" * 64],
+                        "parent": ["mail"],
+                    },
+                }
+            )
+        )
+        writer.add_entity(
+            make_entity(
+                {
+                    "id": "folder",
+                    "schema": "Folder",
+                    "properties": {"fileName": ["empty"]},
+                }
+            )
+        )
+    entities.flush()
+
+    _export(tmp_path)
+
+    repo = DocumentRepository("test", tmp_path)
+    assert {d.name: d.path for d in repo.stream()} == {
+        "inbox.eml": None,
+        "doc.pdf": "inbox.eml",
+    }
+
+
 def test_repository_document_csv_uri(tmp_path):
     """Test csv_uri property returns correct path."""
     repo = DocumentRepository("test", tmp_path)
@@ -104,10 +186,9 @@ def test_repository_document_csv_uri(tmp_path):
 
 
 def test_repository_document_empty(tmp_path):
-    """Test iterate from empty repository."""
+    """Test streaming from an empty repository."""
     repo = DocumentRepository("test", tmp_path)
-    documents = list(repo.iterate())
-    assert documents == []
+    assert list(repo.stream()) == []
 
 
 def test_repository_document_multi_metadata(tmp_path):
@@ -131,8 +212,9 @@ def test_repository_document_multi_metadata(tmp_path):
     entities.flush()
 
     # Both should produce documents
+    _export(tmp_path)
     repo = DocumentRepository("test", tmp_path)
-    documents = list(repo.iterate())
+    documents = list(repo.stream())
 
     assert len(documents) == 2
     assert result1.checksum == result2.checksum
@@ -338,61 +420,42 @@ def test_repository_document_export_diff_origin(tmp_path, fixtures_path, settle)
     assert len(list((tmp_path / path.DIFFS_DOCUMENTS[tag.CRAWL_ORIGIN]).glob("*"))) == 1
 
 
-def test_make_documents_yields_distinct_rows_per_parent(tmp_path):
-    """A file in two folders is two rows, and both survive materialising.
+def test_repository_document_export_csv_multi_parent(tmp_path):
+    """A file in two folders is two rows, an unresolvable parent is dropped.
 
-    The diff writes the rows the csv wrote, so it has to hold them – yielding
-    one mutated object would collapse both to the last folder.
+    The expansion the second phase applies (`DocumentsRun.finish`): one row
+    per parent that resolves, and nothing at all for one that does not – as
+    long as another does, else the file keeps its one unpathed row.
     """
-    artifact = get_artifacts("test", tmp_path).documents
-    data = {
-        "id": "doc",
-        "schema": "Pages",
-        "caption": "doc.pdf",
-        "properties": {
-            "contentHash": ["a" * 64],
-            "fileName": ["doc.pdf"],
-            "parent": ["folder-a", "folder-b", "unknown"],
-        },
-    }
-    paths = {"folder-a": "one", "folder-b": "two"}
-
-    rows = list(artifact.make_documents(data, paths))
-    assert [r.path for r in rows] == ["one", "two"]
-    assert rows[0] is not rows[1]
-
-    # nothing resolvable -> one unpathed row
-    assert [r.path for r in artifact.make_documents(data, {})] == [None]
-
-
-def test_repository_document_make_paths_memoised(tmp_path, fixtures_path, monkeypatch):
-    """The folder map is built once per delta version, not once per caller.
-
-    The export sweep asks for it once per documents origin scope, and both
-    scopes share one repository through the factories cache – so a second ask
-    against an unchanged store must not re-scan the Folder entities.
-    """
-    archive = ArchiveRepository("test", tmp_path)
     entities = EntityRepository("test", tmp_path)
-    _archive_with_entities(archive, entities, fixtures_path / "src" / "utf.txt")
+    with entities.writer() as writer:
+        for folder, name in (("folder-a", "one"), ("folder-b", "two")):
+            writer.add_entity(
+                make_entity(
+                    {
+                        "id": folder,
+                        "schema": "Folder",
+                        "properties": {"fileName": [name]},
+                    }
+                )
+            )
+        writer.add_entity(
+            make_entity(
+                {
+                    "id": "doc",
+                    "schema": "Pages",
+                    "properties": {
+                        "fileName": ["doc.pdf"],
+                        "contentHash": ["a" * 64],
+                        "parent": ["folder-a", "folder-b", "unknown"],
+                    },
+                }
+            )
+        )
     entities.flush()
 
-    repo = DocumentRepository("test", tmp_path)
-    builds = 0
-    build = repo._build_paths
+    _export(tmp_path)
 
-    def counted() -> dict[str, str]:
-        nonlocal builds
-        builds += 1
-        return build()
-
-    monkeypatch.setattr(repo, "_build_paths", counted)
-
-    assert repo.make_paths() == repo.make_paths()
-    assert builds == 1
-
-    # a new commit invalidates it
-    _archive_with_entities(archive, entities, fixtures_path / "src" / "companies.csv")
-    entities.flush()
-    repo.make_paths()
-    assert builds == 2
+    rows = list(DocumentRepository("test", tmp_path).stream())
+    assert {r.id for r in rows} == {"doc"}
+    assert {r.path for r in rows} == {"one", "two"}
