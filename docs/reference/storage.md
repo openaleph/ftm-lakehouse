@@ -20,10 +20,6 @@ Delta Lake parquet storage for statements, partitioned by ``(shard, bucket, orig
         heading_level: 3
         show_root_heading: true
 
-::: ftm_lakehouse.storage.parquet.merge_partition
-    options:
-        heading_level: 3
-        show_root_heading: true
 
 ## TagStore
 

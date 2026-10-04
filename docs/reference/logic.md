@@ -78,12 +78,7 @@ An executable DuckDB SQL string holding all dedupe / fragment-supersession logic
         heading_level: 3
         show_root_heading: true
 
-::: ftm_lakehouse.logic.parquet.merge_duckdb_config
-    options:
-        heading_level: 3
-        show_root_heading: true
-
-What a merge reads and writes instead of going through Delta: one partition's files as a `SHARDED_SCHEMA`-shaped relation (partition columns as constants, columns the files predate as `NULL`), the DuckDB `COPY` options per bucket, and the DuckDB config of one of `LAKEHOUSE_MERGE_WORKERS` merge processes.
+What a merge reads and writes instead of going through Delta: one partition's files as a `SHARDED_SCHEMA`-shaped relation (partition columns as constants, columns the files predate as `NULL`) and the DuckDB `COPY` options per bucket.
 
 ::: ftm_lakehouse.logic.parquet.build_shard_sql
     options:

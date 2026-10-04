@@ -15,8 +15,6 @@ paths that need them (``merge``, ``get_entity_ids`` over the raw source).
 See `_dedupe_sql` for the two-branch fragment semantics.
 """
 
-import math
-import os
 from datetime import datetime
 from typing import Iterable
 
@@ -31,7 +29,7 @@ from ftmq.store.lake import BUCKET_DOCUMENT, BUCKET_PAGE, TARGET_SIZE
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.helpers.shards import entity_shard, shard_hex_width
 from ftm_lakehouse.model.statement import PA_TS, SHARDED_SCHEMA, TABLE_RAW
-from ftm_lakehouse.util import parse_byte_size, validate_origin
+from ftm_lakehouse.util import validate_origin
 
 SWEEP_BATCH_SIZE = 50_000
 """Rows per Arrow batch when `ParquetStore.sweep` materialises them as
@@ -39,19 +37,6 @@ Python dicts. DuckDB's own default (1M) is sized for a columnar consumer;
 turning a batch that size into dicts would hold a million of them at once, so
 the fused export asks for a smaller one. Bounds rows in flight, not bytes
 scanned – the scan stays streaming either way."""
-
-MERGE_SPILL_FACTOR = 32
-"""Estimated peak DuckDB footprint of the merge pipeline per compressed
-parquet byte – zstd/dictionary decompression blow-up (5–20x on statement
-data) times the concurrent sort materialisations of `_dedupe_sql`
-(window groups + final ``ORDER BY``), padded for headroom. Used by
-`merge_slice_count` to bound each merge slice to the configured
-DuckDB memory limit."""
-
-MERGE_SAMPLE_SIZE = 10_000
-"""Reservoir sample size for `build_bounds_sample_sql`. Bounds the
-slice-boundary resolution – boundary quality only affects load balance
-across slices, never correctness, so a fixed sample is fine."""
 
 SHARD_MIN_FILE_SIZE = 32 * 1_048_576  # 32 MB
 """Floor for `shard_target_file_size` – below this a re-shard would
@@ -65,11 +50,6 @@ applied, timestamps folded – so a read over it needs no reconciling; any
 other file (delta-rs appends and the re-shard write ``part-*``) makes the
 partition dirty. The signal lives in the Delta snapshot's file list, so it
 costs no tag I/O and cannot drift from the data."""
-
-FALLBACK_MEMORY_LIMIT = "8GB"
-"""Slice budget when ``LAKEHOUSE_DUCKDB_MEMORY_LIMIT`` is not a parseable
-byte size (e.g. a DuckDB percentage limit) – mirrors the conservative
-[`Settings`][ftm_lakehouse.core.settings.Settings] default."""
 
 MERGE_COMMIT_BATCH = 64
 """Merged partitions per Delta commit. Every commit is a log entry, and every
@@ -355,14 +335,13 @@ def build_merge_sql(
     bucket: str,
     origin: str,
     grace_cutoff: datetime,
-    entity_id_range: tuple[str | None, str | None] = (None, None),
     source: str = TABLE_RAW.name,
     select: str = "*",
 ) -> str:
     """DuckDB SQL that collapses one partition for physical merge.
 
-    `_dedupe_sql` over the **raw** ``statement_raw`` view (not the
-    deduped ``statement``) because ``merge`` needs every row visible –
+    `_dedupe_sql` over the partition's **raw** rows (not the deduped
+    ``statement`` view) because ``merge`` needs every row visible –
     including tombstones within the grace window, which must persist
     physically to keep shadowing their live rows – scoped to one
     ``(shard, bucket, origin)`` partition. Output is ordered by
@@ -378,13 +357,6 @@ def build_merge_sql(
             interpolate: `validate_origin` rejects quote characters.
         grace_cutoff: Tombstones with ``deleted_at <= grace_cutoff`` are
             dropped. Typically ``now - LAKEHOUSE_GRACE_PERIOD_DAYS``.
-        entity_id_range: Optional half-open ``[lo, hi)`` bound on
-            ``entity_id`` (``None`` = unbounded on that side) scoping the
-            merge to one range slice (`slice_ranges`). Every dedupe
-            group is a function of a single entity – the non-fragment key
-            ends in the statement ``id`` (owned by exactly one entity),
-            the fragment key contains ``entity_id`` itself – so an
-            ``entity_id`` predicate can never split a group.
         source: Relation holding the partition's rows – the ``statement_raw``
             view by default, or one partition's files
             ([`partition_source_sql`][partition_source_sql]).
@@ -395,15 +367,9 @@ def build_merge_sql(
         Executable DuckDB SQL.
     """
     origin = validate_origin(origin)
-    lo, hi = entity_id_range
-    where = f"WHERE shard = '{shard}' AND bucket = '{bucket}' AND origin = '{origin}'"
-    if lo is not None:
-        where += f" AND entity_id >= '{_string_literal(lo)}'"
-    if hi is not None:
-        where += f" AND entity_id < '{_string_literal(hi)}'"
     return _dedupe_sql(
         source=source,
-        where=where,
+        where=f"WHERE shard = '{shard}' AND bucket = '{bucket}' AND origin = '{origin}'",
         tombstone=(
             "(deleted_at IS NULL OR deleted_at > "
             f"TIMESTAMPTZ '{grace_cutoff.isoformat()}')"
@@ -489,25 +455,6 @@ def merge_copy_options(bucket: str) -> str:
     )
 
 
-def merge_duckdb_config(workers: int) -> dict[str, str]:
-    """[`duckdb_config`][duckdb_config] for one of ``workers`` merge processes.
-
-    Each worker is its own DuckDB instance, so the memory limit and the
-    threads are split between them – ``LAKEHOUSE_DUCKDB_MEMORY_LIMIT`` stays
-    the ceiling for the whole merge, not per worker. A limit that is not a
-    byte size (a percentage) falls back to `FALLBACK_MEMORY_LIMIT`, as
-    ``merge_slice_count`` does.
-    """
-    config = duckdb_config()
-    try:
-        budget = parse_byte_size(config["memory_limit"])
-    except ValueError:
-        budget = parse_byte_size(FALLBACK_MEMORY_LIMIT)
-    config["memory_limit"] = f"{budget // max(workers, 1)}B"
-    config["threads"] = str(max((os.cpu_count() or 1) // max(workers, 1), 1))
-    return config
-
-
 def shard_expr_sql(shards: int, column: str = "entity_id") -> str:
     """DuckDB expression computing the shard key of ``column``.
 
@@ -574,109 +521,6 @@ def build_shard_sql(
         f"FROM {source} "
         f"WHERE shard = '{shard}' AND bucket = '{bucket}' AND origin = '{origin}'"
     )
-
-
-def build_bounds_sample_sql(
-    shard: str,
-    bucket: str,
-    origin: str,
-    size: int = MERGE_SAMPLE_SIZE,
-    source: str = TABLE_RAW.name,
-) -> str:
-    """DuckDB SQL reservoir-sampling ``entity_id`` values from one partition.
-
-    Feeds `slice_ranges` with boundary candidates for a range-sliced
-    merge. The partition filter sits in a subquery because DuckDB applies
-    a query-level ``USING SAMPLE`` *before* the ``WHERE`` clause – sampled
-    directly, most of the sample would come from other partitions.
-
-    The reservoir draw is random, so slice boundaries vary between runs –
-    that only shifts load balance across slices, never the merged output.
-
-    Args:
-        shard: Target shard value (hex-padded).
-        bucket: Target bucket.
-        origin: Target origin tag.
-        size: Number of rows to sample.
-        source: Relation holding the partition's rows, as for
-            [`build_merge_sql`][build_merge_sql].
-
-    Returns:
-        Executable DuckDB SQL yielding one ``entity_id`` column.
-    """
-    origin = validate_origin(origin)
-    return (
-        f"SELECT entity_id FROM ("
-        f"SELECT entity_id FROM {source} "
-        f"WHERE shard = '{shard}' AND bucket = '{bucket}' AND origin = '{origin}'"
-        f") USING SAMPLE reservoir({int(size)} ROWS)"
-    )
-
-
-def slice_ranges(sample: list[str], slices: int) -> list[tuple[str | None, str | None]]:
-    """Derive contiguous half-open ``entity_id`` ranges from a sample.
-
-    Sorts ``sample`` and picks boundaries at even ranks, so ranges carry
-    roughly equal row counts (entities with many statements are
-    proportionally represented in the sample – weighting by row count is
-    exactly what balances the sort windows). Ranges tile the full key
-    space: the first is unbounded below, the last unbounded above, and
-    consecutive ranges share their boundary (``hi`` of one is ``lo`` of
-    the next), so every entity falls in exactly one range regardless of
-    boundary quality. Duplicate boundaries (skewed sample) collapse, so
-    fewer than ``slices`` ranges may come back.
-
-    Python string sort order matches DuckDB's binary ``VARCHAR``
-    comparison (UTF-8 byte order preserves code-point order), so the
-    ranges partition exactly as the SQL predicates will.
-
-    Args:
-        sample: ``entity_id`` values drawn from the partition
-            (`build_bounds_sample_sql`).
-        slices: Desired number of ranges; clamped to the sample size.
-
-    Returns:
-        List of ``(lo, hi)`` bounds in ascending order, ``None`` for
-        unbounded. ``[(None, None)]`` when no slicing is possible.
-    """
-    if slices <= 1 or not sample:
-        return [(None, None)]
-    ordered = sorted(sample)
-    slices = min(slices, len(ordered))
-    bounds: list[str] = []
-    for i in range(1, slices):
-        bound = ordered[i * len(ordered) // slices]
-        if not bounds or bound > bounds[-1]:
-            bounds.append(bound)
-    return list(zip([None, *bounds], [*bounds, None]))
-
-
-def merge_slice_count(partition_bytes: int, memory_limit: str) -> int:
-    """Number of range slices to merge a partition of ``partition_bytes``.
-
-    Estimates the peak DuckDB footprint of the merge pipeline as
-    `MERGE_SPILL_FACTOR` times the partition's compressed parquet
-    size and slices so each slice's estimate fits within ``memory_limit``
-    – keeping the per-slice sort mostly in RAM instead of exhausting the
-    spill directory. ``1`` means the single-pass merge suffices.
-
-    Args:
-        partition_bytes: Compressed parquet bytes of the partition (from
-            the Delta log's add actions – no data scan).
-        memory_limit: DuckDB memory limit string, typically
-            ``Settings.duckdb_memory_limit``. Unparsable values (e.g. a
-            percentage) fall back to `FALLBACK_MEMORY_LIMIT`.
-
-    Returns:
-        Slice count, at least ``1``.
-    """
-    try:
-        budget = parse_byte_size(memory_limit)
-    except ValueError:
-        budget = parse_byte_size(FALLBACK_MEMORY_LIMIT)
-    if partition_bytes <= 0:
-        return 1
-    return max(1, math.ceil(partition_bytes * MERGE_SPILL_FACTOR / budget))
 
 
 def shard_target_file_size(shards: int) -> int:

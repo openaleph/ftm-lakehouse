@@ -18,8 +18,13 @@ def count_parquet_files(repo: EntityRepository) -> int:
 
 
 def count_parquet_on_disk(tmp_path) -> int:
+    """Data files on disk – Delta checkpoints are parquet too, so skip the log."""
     return sum(
-        1 for _, _, fs in os.walk(tmp_path) for f in fs if f.endswith(".parquet")
+        1
+        for root, _, fs in os.walk(tmp_path)
+        if "_delta_log" not in root
+        for f in fs
+        if f.endswith(".parquet")
     )
 
 

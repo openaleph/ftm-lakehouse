@@ -12,7 +12,6 @@ from ftmq.store.lake import pack_statement
 from ftmq.types import Statements
 
 from ftm_lakehouse.helpers.shards import entity_shard
-from ftm_lakehouse.logic import parquet as logic_parquet
 from ftm_lakehouse.logic.parquet import MERGED_PREFIX, TABLE_CONFIGURATION
 from ftm_lakehouse.model.statement import JOURNAL_SCHEMA, TABLE_RAW
 from ftm_lakehouse.storage import parquet as storage_parquet
@@ -151,34 +150,6 @@ def test_storage_parquet_merge_collapses_duplicates(tmp_path):
     assert len(statements) == 1
     stmt = statements[0]
     assert stmt.last_seen == datetime(2021, 6, 1, tzinfo=timezone.utc)
-
-
-def test_storage_parquet_merge_range_sliced(tmp_path, monkeypatch):
-    """A partition estimated over the memory budget merges in sequential
-    ``entity_id`` range slices – same canonical result as single-pass.
-
-    Forces slicing by inflating the spill-factor estimate so even the tiny
-    test partitions exceed the memory budget; the slice count then clamps
-    to the boundary sample, exercising sampling, range construction and
-    the chained reader end to end.
-    """
-    monkeypatch.setattr(logic_parquet, "MERGE_SPILL_FACTOR", 10**12)
-    store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
-
-    rows = []
-    for i in range(40):
-        stmt = make_statement(f"e{i:02d}", "name", f"Name {i}")
-        rows.append(_pack(stmt))
-        rows.append(_pack(stmt))  # identical duplicate – collapses on merge
-    _flush(store, rows)
-    assert _row_count(store) == 80
-
-    store.merge()
-    assert _row_count(store) == 40
-
-    entities = list(store.query())
-    assert len(entities) == 40
-    assert {e.id for e in entities} == {f"e{i:02d}" for i in range(40)}
 
 
 def test_storage_parquet_soft_delete_hidden(tmp_path):
@@ -343,20 +314,6 @@ def test_storage_parquet_merge_escaped_origin(tmp_path):
     assert not store.needs_merge
 
 
-def test_storage_parquet_merge_workers(tmp_path, monkeypatch):
-    """Merging in worker processes gives what merging in-process gives."""
-    merged = []
-    for workers in (1, 2):
-        monkeypatch.setenv("LAKEHOUSE_MERGE_WORKERS", str(workers))
-        store = ParquetStore(tmp_path / str(workers), DATASET, shards=SHARDS)
-        _flush(store, _origin_rows("a"))
-        _flush(store, _origin_rows("b"))
-        store.merge()
-        merged.append(sorted((s.id, s.origin) for s in store.query_statements()))
-    assert merged[0] == merged[1]
-    assert len(merged[0]) == 40
-
-
 def test_storage_parquet_merge_commit_batches(tmp_path, monkeypatch):
     """Merged partitions commit in batches – a Delta version per batch, not
     per partition."""
@@ -470,3 +427,19 @@ def test_storage_parquet_merge_commits_across_a_racing_append(tmp_path, monkeypa
     store.merge()
     assert not store.needs_merge
     assert _row_count(store) == 2
+
+
+def test_storage_parquet_merge_writes_a_checkpoint(tmp_path):
+    """A merge that committed ends with a Delta checkpoint, so the next load
+    does not replay a checkpoint still listing every file the merge removed."""
+    store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
+    _flush(store, _origin_rows("a"))
+    log = tmp_path / "statements" / "_delta_log"
+    assert not list(log.glob("*.checkpoint.parquet"))
+
+    store.merge()
+    checkpoints = list(log.glob("*.checkpoint.parquet"))
+    assert [int(c.name.split(".")[0]) for c in checkpoints] == [store.version]
+
+    store.merge()  # nothing dirty, nothing committed, no new checkpoint
+    assert list(log.glob("*.checkpoint.parquet")) == checkpoints

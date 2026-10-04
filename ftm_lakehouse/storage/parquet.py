@@ -30,11 +30,8 @@ Layout:
 """
 
 import json
-import multiprocessing
 import posixpath
-from concurrent.futures import ProcessPoolExecutor
 from contextlib import ExitStack, closing, contextmanager
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import cache, cached_property
 from itertools import batched
@@ -79,7 +76,6 @@ from ftm_lakehouse.logic.parquet import (
     MERGED_PREFIX,
     SWEEP_BATCH_SIZE,
     TABLE_CONFIGURATION,
-    build_bounds_sample_sql,
     build_merge_sql,
     build_shard_sql,
     dedupe_rows_sql,
@@ -89,12 +85,9 @@ from ftm_lakehouse.logic.parquet import (
     live_view_sql,
     make_prune_by_shard,
     merge_copy_options,
-    merge_duckdb_config,
-    merge_slice_count,
     partition_source_sql,
     raw_view_sql,
     shard_target_file_size,
-    slice_ranges,
 )
 from ftm_lakehouse.model.dataset import DEFAULT_SHARDS
 from ftm_lakehouse.model.statement import (
@@ -150,78 +143,6 @@ class _LakeStore(LakeStore):
     @property
     def exists(self) -> bool:
         return self._exists()
-
-
-@dataclass
-class MergeTask:
-    """One partition's merge as handed to a worker – plain data, so it pickles."""
-
-    partition: Partition
-    files: Files
-    root: str
-    grace_cutoff: datetime
-    duckdb_config: dict[str, str]
-
-
-@dataclass
-class MergeResult:
-    """What a worker wrote for one partition: ``(path, size, rows)`` per file."""
-
-    files: list[tuple[str, int, int]]
-    slices: int
-    took: timedelta
-
-
-def merge_partition(task: MergeTask) -> MergeResult:
-    """Merge one partition into new data files next to its old ones.
-
-    Writes but does not commit: the files are invisible until
-    [`ParquetStore.merge`][ParquetStore.merge] commits them, so this runs in a
-    worker process as well as in-process, and an uncommitted file is an orphan
-    the next ``vacuum`` removes. Reads the partition's files directly
-    ([`partition_source_sql`][ftm_lakehouse.logic.parquet.partition_source_sql]),
-    so no Delta log is replayed here at all.
-
-    A partition whose size suggests the merge would outgrow the worker's
-    DuckDB memory limit is merged in ``entity_id`` range slices
-    (``merge_slice_count``),
-    one file per slice – ascending ranges, each sorted, so the partition's
-    files together keep the file sort order. A slice left empty by the merge
-    (everything in it reaped) gets no ``add`` action.
-    """
-    shard, bucket, origin = task.partition
-    directory = posixpath.dirname(task.files[0][0])
-    size = sum(s for _, s in task.files)
-    config: dict[str, Any] = {**task.duckdb_config}
-    with Took() as t, closing(duckdb.connect(config=config)) as con:
-        files = [f"{task.root}/{file}" for file, _ in task.files]
-        source = partition_source_sql(files, *task.partition)
-        ranges: list[tuple[str | None, str | None]] = [(None, None)]
-        slices = merge_slice_count(size, task.duckdb_config["memory_limit"])
-        if slices > 1:
-            sample_sql = build_bounds_sample_sql(shard, bucket, origin, source=source)
-            sample = [r[0] for r in con.execute(sample_sql).fetchall()]
-            ranges = slice_ranges(sample, slices)
-        written: list[tuple[str, int, int]] = []
-        for entity_range in ranges:
-            sql = build_merge_sql(
-                shard,
-                bucket,
-                origin,
-                task.grace_cutoff,
-                entity_id_range=entity_range,
-                source=source,
-                select=f"* EXCLUDE ({', '.join(PARTITIONS)})",
-            )
-            file = f"{directory}/{MERGED_PREFIX}{ensure_uuid()}.zstd.parquet"
-            target = f"{task.root}/{file}".replace("'", "''")
-            # RETURN_STATS: (filename, count, file_size_bytes, ...)
-            stats = con.execute(
-                f"COPY ({sql}) TO '{target}' ({merge_copy_options(bucket)})"
-            ).fetchone()
-            if stats and stats[1]:
-                written.append((file, int(stats[2]), int(stats[1])))
-    return MergeResult(files=written, slices=len(ranges), took=t.took)
 
 
 class ParquetStore:
@@ -807,19 +728,22 @@ class ParquetStore:
         on: every ``delta_scan`` and every ``write_deltalake`` replays the
         latest checkpoint, which holds every live file of the table. So the
         run loads one snapshot, hands each partition's files from it to
-        [`merge_partition`][merge_partition] – which reads them directly and
-        writes the merged files with DuckDB – and commits the results in
-        batches of `MERGE_COMMIT_BATCH` partitions, each batch one Delta
-        transaction of ``add`` and ``remove`` actions against that snapshot.
-        A batch is atomic: its partitions switch to their merged files
-        together, or not at all.
+        `_merge_partition` – which reads them directly and writes the merged
+        file with DuckDB – and commits the results in batches of
+        `MERGE_COMMIT_BATCH` partitions, each batch one Delta transaction of
+        ``add`` and ``remove`` actions against that snapshot. A batch is
+        atomic: its partitions switch to their merged files together, or not
+        at all. A run that committed anything ends with a checkpoint: Delta
+        writes one only every hundredth commit, and until then every load
+        replays the previous checkpoint – which still lists every file the
+        merge just removed, on a store with hundreds of thousands of them –
+        plus the merge's commits. The file list is small by now, so the
+        checkpoint is cheap, and every load after it is too.
 
-        Partitions merge in ``LAKEHOUSE_MERGE_WORKERS`` processes (one, the
-        default, merges in this process). They are independent – a
-        worker writes files and commits nothing – so they parallelise
-        without coordination; the DuckDB memory limit and the threads are
-        split between the workers
-        ([`merge_duckdb_config`][ftm_lakehouse.logic.parquet.merge_duckdb_config]).
+        Memory is bounded by DuckDB itself: the dedupe windows and the final
+        sort spill to ``LAKEHOUSE_DUCKDB_TEMP_DIRECTORY`` past
+        ``LAKEHOUSE_DUCKDB_MEMORY_LIMIT``. A partition too large to merge in
+        acceptable time wants more shards (`shard`), not a smaller merge.
 
         Args:
             force: Rewrite every partition, clean ones included – with
@@ -828,54 +752,94 @@ class ParquetStore:
         if not self.exists:
             return
         grace_cutoff = utc_now() - timedelta(days=self.settings.grace_period_days)
-        workers = max(self.settings.merge_workers, 1)
-        config = merge_duckdb_config(workers)
         merged = skipped = 0
-        with self.merge_lock():
+        config: dict[str, Any] = {**duckdb_config()}
+        with self.merge_lock(), closing(duckdb.connect(config=config)) as con:
             root, partitions = self._snapshot_partitions()
-            tasks: list[MergeTask] = []
-            for partition, (files, clean) in partitions.items():
-                if clean and not force:
-                    skipped += 1
-                    continue
-                tasks.append(MergeTask(partition, files, root, grace_cutoff, config))
-            with self._merge_runner(workers) as run:
-                results = zip(tasks, run(merge_partition, tasks))
-                for batch in batched(results, MERGE_COMMIT_BATCH):
-                    self._commit_merged(batch)
-                    merged += len(batch)
+            dirty = [
+                (partition, files)
+                for partition, (files, clean) in partitions.items()
+                if force or not clean
+            ]
+            skipped = len(partitions) - len(dirty)
+            results = (
+                (
+                    partition,
+                    files,
+                    *self._merge_partition(con, root, partition, files, grace_cutoff),
+                )
+                for partition, files in dirty
+            )
+            for batch in batched(results, MERGE_COMMIT_BATCH):
+                self._commit_merged(batch)
+                merged += len(batch)
+            if merged:
+                with self._snapshot_lock, Took() as t:
+                    snapshot = self._current_snapshot()
+                    if snapshot is not None:
+                        snapshot.create_checkpoint()
+                self.log.info("Wrote checkpoint.", took=t.took)
         self.log.info(
             "Merge complete.",
             merged=merged,
             skipped=skipped,
-            workers=workers,
             grace_period_days=self.settings.grace_period_days,
         )
 
-    @staticmethod
-    @contextmanager
-    def _merge_runner(workers: int) -> Iterator[Callable[..., Iterator[Any]]]:
-        """An ordered ``map`` over ``workers`` processes – the builtin for one.
+    def _merge_partition(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        root: str,
+        partition: Partition,
+        files: Files,
+        grace_cutoff: datetime,
+    ) -> tuple[tuple[str, int, int] | None, timedelta]:
+        """Merge one partition into a new data file next to its old ones.
 
-        Processes are spawned rather than forked: this process holds a DuckDB
-        instance with its own threads, which a fork would copy mid-flight.
-        Pending tasks are cancelled when the run fails, instead of merging
-        partitions whose results nobody will commit.
+        Writes but does not commit: the file is invisible until
+        [`merge`][ParquetStore.merge] commits it, so an uncommitted one is an
+        orphan the next ``vacuum`` removes. Reads the partition's files
+        directly ([`partition_source_sql`][ftm_lakehouse.logic.parquet.partition_source_sql]),
+        so no Delta log is replayed here at all.
+
+        Returns:
+            ``((path, size, rows), took)`` – the path table-relative, as a
+            Delta ``add`` action takes it; ``None`` for a partition the merge
+            reaped entirely (nothing left to add), and how long it took.
         """
-        if workers == 1:
-            yield map
-            return
-        context = multiprocessing.get_context("spawn")
-        pool = ProcessPoolExecutor(workers, mp_context=context)
-        try:
-            yield pool.map
-        finally:
-            pool.shutdown(cancel_futures=True)
+        shard, bucket, origin = partition
+        with Took() as t:
+            source = partition_source_sql(
+                [f"{root}/{file}" for file, _ in files], shard, bucket, origin
+            )
+            sql = build_merge_sql(
+                shard,
+                bucket,
+                origin,
+                grace_cutoff,
+                source=source,
+                select=f"* EXCLUDE ({', '.join(PARTITIONS)})",
+            )
+            directory = posixpath.dirname(files[0][0])
+            file = f"{directory}/{MERGED_PREFIX}{ensure_uuid()}.zstd.parquet"
+            target = f"{root}/{file}".replace("'", "''")
+            # RETURN_STATS: (filename, count, file_size_bytes, ...)
+            stats = con.execute(
+                f"COPY ({sql}) TO '{target}' ({merge_copy_options(bucket)})"
+            ).fetchone()
+        if stats and stats[1]:
+            return (file, int(stats[2]), int(stats[1])), t.took
+        return None, t.took
 
-    def _commit_merged(self, batch: Iterable[tuple[MergeTask, MergeResult]]) -> None:
+    def _commit_merged(
+        self,
+        batch: Iterable[
+            tuple[Partition, Files, tuple[str, int, int] | None, timedelta]
+        ],
+    ) -> None:
         """Commit a batch of merged partitions as one Delta transaction.
 
-        Each partition's merged files are added and every file it was merged
+        Each partition's merged file is added and every file it was merged
         from removed (`Files` paths – ``create_write_transaction`` encodes them
         for the log), all with ``dataChange = false``: the merge changes no
         logical content. Committed through the process's snapshot, advanced
@@ -885,12 +849,13 @@ class ParquetStore:
         batch = list(batch)
         now = int(utc_now().timestamp() * 1000)
         actions: list[AddAction | RemoveAction] = []
-        for task, result in batch:
-            values: dict[str, str | None] = dict(zip(PARTITIONS, task.partition))
-            for file, size, rows in result.files:
+        for partition, files, written, _ in batch:
+            values: dict[str, str | None] = dict(zip(PARTITIONS, partition))
+            if written is not None:
+                file, size, rows = written
                 stats = json.dumps({"numRecords": rows})
                 actions.append(AddAction(file, size, values, now, False, stats))
-            for file, size in task.files:
+            for file, size in files:
                 actions.append(RemoveAction(file, False, now, size, values))
         with self._snapshot_lock:
             snapshot = self._current_snapshot()
@@ -903,16 +868,14 @@ class ParquetStore:
                 partition_by=PARTITIONS,
             )
             snapshot.update_incremental()
-        for task, result in batch:
-            shard, bucket, origin = task.partition
+        for (shard, bucket, origin), _, _, took in batch:
             self.log.info(
                 f"Merged partition `{shard}/{bucket}/{origin}`.",
-                took=result.took,
+                took=took,
                 shard=shard,
                 bucket=bucket,
                 origin=origin,
                 grace_period_days=self.settings.grace_period_days,
-                slices=result.slices,
             )
 
     def _chained_reader(
