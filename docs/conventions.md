@@ -46,10 +46,8 @@ Operations use tags to track freshness and skip unnecessary work – `is_latest(
 
 | Tag | Set by | Meaning |
 |-----|--------|---------|
-| `journal/last_updated` | Statement writes | Journal has uncommitted data |
-| `journal/last_flushed` | Flush operation | Journal was flushed |
-| `statements/last_updated` | Flush / append | Rows landed in the parquet store – not canonical yet |
-| `statements/last_optimized` | `merge`, on completion | Canonical content changed. The clock every export, statistic and diff goes stale against |
+| `statements/last_updated` | Flush / append, `delete_origin` | The store's content moved – the clock every export, statistic and diff depends on. A merge rewrites files, not content, so it leaves it alone |
+| `operations/optimize/last_run` | `optimize`, on completion | Stamped for the record; `optimize` decides freshness from the store's dirty partitions, not from this tag |
 | `archive/last_updated` | File archive | New file was archived |
 | `exports/statements.csv`, `entities.ftm.json`, `exports/documents.csv`, `exports/documents.{origin}.csv`, `exports/statistics.json`, `index.json` | Export operations | Export target keys double as their freshness tags. The `all` sweep stamps every artifact it writes, so a later single-kind export sees itself up to date |
 | `operations/export/last_run` | `export all` | The fused sweep ran |

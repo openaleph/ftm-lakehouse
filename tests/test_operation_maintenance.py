@@ -54,13 +54,13 @@ def test_operation_optimize(tmp_path):
 
     job = OptimizeJob.make(dataset=DATASET, retention_hours=0)
     op = OptimizeOperation(job=job, uri=tmp_path)
-    assert op.get_target() == tag.STATEMENTS_OPTIMIZED
-    assert op.get_dependencies() == [tag.STATEMENTS_UPDATED]
+    assert op.get_target() == tag.OP_OPTIMIZE
+    assert op.get_dependencies() == []
 
     result = op.run()
     assert result.done == 3  # merge + compact + vacuum
 
-    target_path = f"tags/lakehouse/{tag.STATEMENTS_OPTIMIZED}"
+    target_path = f"tags/lakehouse/{tag.OP_OPTIMIZE}"
     assert (tmp_path / target_path).exists()
     assert count_parquet_files(repo) <= initial
     # Vacuum removed files tombstoned by merge/compact

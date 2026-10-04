@@ -7,16 +7,9 @@ by `DatasetJobOperation._run_local` after a successful run.
 """
 
 STATEMENTS_UPDATED = "statements/last_updated"
-"""Statement store was updated"""
-
-JOURNAL_UPDATED = "journal/last_updated"
-"""Statement journal was updated"""
-
-JOURNAL_FLUSHED = "journal/last_flushed"
-"""Journal store last flushed into statement store"""
-
-STATEMENTS_OPTIMIZED = "statements/last_optimized"
-"""Statement store was optimized (merge + compact + vacuum)"""
+"""The statement store's content moved – rows appended (a flush) or an origin
+dropped. The one clock every export, statistic and diff depends on: a merge
+rewrites files but changes no content, so it does not touch it."""
 
 ARCHIVE_UPDATED = "archive/last_updated"
 """Archive last updated (file added or removed)"""
@@ -26,6 +19,11 @@ OP_CRAWL = "operations/crawl/last_run"
 
 OP_DOWNLOAD_ARCHIVE = "operations/download_archive/last_run"
 """Last download archive execution"""
+
+OP_OPTIMIZE = "operations/optimize/last_run"
+"""Last optimize (merge + vacuum) execution – stamped by the run, never read
+for freshness: [`OptimizeOperation`][ftm_lakehouse.operation.maintenance.OptimizeOperation]
+asks the statement store for dirty partitions instead."""
 
 OP_MAKE = "operations/make/last_run"
 """Last make (full workflow) execution"""

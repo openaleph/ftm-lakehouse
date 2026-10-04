@@ -45,9 +45,8 @@ def cli_entities_iterate(
 ):
     """Iterate entities from the parquet store as FtM JSON lines.
 
-    Live read – reflects current state of the parquet table post-flush, but
-    correctness is only guaranteed after ``maintenance optimize``. For the
-    frozen pre-exported view use ``stream``.
+    Live read – the parquet table as it is post-flush, duplicates and
+    tombstones reconciled. For the frozen pre-exported view use ``stream``.
 
     Filter with either ``-q`` (Aleph filter params) or ``--rql`` (nested RQL),
     as in ``ftmq q``.

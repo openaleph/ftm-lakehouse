@@ -5,7 +5,6 @@ from typing import Generic
 
 from anystore.types import Uri
 
-from ftm_lakehouse.core.conventions import tag
 from ftm_lakehouse.model.job import DJ
 from ftm_lakehouse.repository.archive import ArchiveRepository
 from ftm_lakehouse.repository.artifacts import ArtifactsRepository
@@ -87,33 +86,8 @@ class DatasetJobOperation(DatasetHandle, Generic[DJ]):
 
         No-op by default;
         [`ExportOperation`][ftm_lakehouse.operation.export.ExportOperation] drains the
-        journal and merges the statement store here, since exports read
-        canonical rows.
+        journal here, so an export covers the rows that were still buffered.
         """
-
-    def prepare_canonical(self) -> None:
-        """Drain the journal and collapse the statement store – one pass each.
-
-        What a `prepare` owes any `handle` that reads canonical rows: the live
-        ``statement`` view does no read-time dedupe, so a partition is
-        canonical only once
-        [`ParquetStore.merge`][ftm_lakehouse.storage.parquet.ParquetStore.merge] has
-        run since its last write.
-
-        [`EntityRepository.merge`][ftm_lakehouse.repository.entities.main.EntityRepository.merge]
-        drains the journal itself, so this is one flush and one merge – not a
-        flush followed by a merge that flushes again. The guard is what keeps
-        an already-canonical dataset cheap: ``merge`` takes the exclusive write
-        fence unconditionally, which fences off producers, so a store with
-        nothing outstanding must not pay for it.
-        """
-        if (
-            self.entities.exists
-            and self._tags.is_latest(tag.JOURNAL_FLUSHED, [tag.JOURNAL_UPDATED])
-            and not self.entities.needs_merge
-        ):
-            return
-        self.entities.merge()
 
     def is_fresh(self) -> bool:
         """Whether the target is newer than every dependency – nothing to do.

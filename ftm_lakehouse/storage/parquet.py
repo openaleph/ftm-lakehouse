@@ -878,15 +878,6 @@ class ParquetStore:
                 for batch in batched(results, MERGE_COMMIT_BATCH):
                     self._commit_merged(batch)
                     merged += len(batch)
-            if merged:
-                # A rewrite changes the store's logical *canonical* content
-                # (duplicates collapse, deletes apply), which is what every
-                # downstream consumer reads - exports, statistics, diffs. They
-                # key on STATEMENTS_OPTIMIZED, stamped here on completion, so
-                # they go stale exactly when the canonical content moved.
-                # STATEMENTS_UPDATED stays the append-side clock: it says rows
-                # landed, not that they are canonical yet.
-                self._tags.set(tag.STATEMENTS_OPTIMIZED)
         self.log.info(
             "Merge complete.",
             merged=merged,

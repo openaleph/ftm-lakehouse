@@ -24,7 +24,6 @@ from datetime import datetime
 from functools import cached_property
 from typing import Any, Iterator
 
-from anystore.types import Uri
 from anystore.util import mask_uri
 from ftmq.model.stats import DatasetStats
 from rigour.time import utc_now
@@ -61,22 +60,14 @@ class ExportJob(DatasetJobModel):
 class ExportOperation(DatasetJobOperation[ExportJob]):
     """Export the dataset, in one sweep over the entity stream.
 
-    Flushes and merges first ([`prepare`][ExportOperation.prepare]) – exports
-    read canonical rows. Skips if the target is newer than the last optimize.
+    Flushes the journal first ([`prepare`][ExportOperation.prepare]) and reads
+    the store as it is – reads reconcile un-merged rows, so no merge is
+    needed. Skips if the target is newer than the last write.
 
     A run stamps a freshness tag per artifact it wrote, so a later single-kind
     export sees itself up to date and ``index.json`` still finds the
     dependencies it registers.
     """
-
-    def __init__(
-        self, job: ExportJob, uri: Uri | None = None, prepared: bool = False
-    ) -> None:
-        super().__init__(job, uri)
-        self.prepared = prepared
-        """Whether the caller has already drained and merged for this run –
-        [`MakeOperation`][ftm_lakehouse.operation.make.MakeOperation] does it once
-        for the three kinds it runs."""
 
     @cached_property
     def kinds(self) -> tuple[ExportKind, ...]:
@@ -94,22 +85,18 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
 
     def get_dependencies(self) -> list[str]:
         if self.job.kind == ExportKind.all:
-            return [tag.STATEMENTS_OPTIMIZED]
+            return [tag.STATEMENTS_UPDATED]
         return [str(d) for d in self.artifacts[self.job.kind].dependencies]
 
     def prepare(self) -> None:
-        """Drain the journal and merge, so the export reads canonical rows.
+        """Drain the journal, so the export covers the rows still buffered.
 
-        Skipped when the caller already did it:
-        [`MakeOperation`][ftm_lakehouse.operation.make.MakeOperation] prepares once
-        for the three kinds it runs, where preparing per kind meant a full
-        drain and a store-wide merge three times over – and ``statistics`` and
-        ``index`` are computed from a store the sweep ahead of them has
-        already canonicalized.
+        On an empty journal this is a ``LIMIT 1`` probe. Ahead of the
+        freshness window, as the base class requires: a drain that lands rows
+        moves [`STATEMENTS_UPDATED`][ftm_lakehouse.core.conventions.tag.STATEMENTS_UPDATED],
+        which this operation depends on.
         """
-        if self.prepared:
-            return
-        self.prepare_canonical()
+        self.entities.flush()
 
     def iterate(self) -> Iterator[EntityPayload]:
         """Every entity in the store, folded from one scan.
@@ -135,12 +122,6 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
             Counts per artifact and per diff op.
         """
         version = self.entities.version
-        if self.job.make_diff and version is not None and self.entities.needs_merge:
-            raise RuntimeError(
-                "Cannot export diffs: the statement store has un-merged writes "
-                "and a diff publishes canonical entities. Run "
-                "`ftm-lakehouse maintenance optimize` first."
-            )
         session = self.artifacts.session(now, self.kinds, version, self.job.make_diff)
         count = self.entities._statements.num_rows
         with session, self.progress(count) as bar:

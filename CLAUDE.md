@@ -263,7 +263,7 @@ Main CLI entry point: `ftm-lakehouse` (typer-based)
 - Uses `-d` flag for dataset name in most commands
 - Sub-typer groups: `maintenance` (`flush` / `optimize` / `shard` / `migrate` / `unlock`, + top-level `configure` / `make` / `export` / `crawl` shortcuts), `entities`, `statements`, `archive`, `zfs`
 - `configure -c <yml>` writes config only; `make -c` runs the same `write_config` helper first. Both merge (`exclude_unset=True`), so a partial yaml doesn't reset `shards` to the default
-- `make` runs flush → optimize → exports, all on by default (`--no-flush` / `--no-exports` / `--no-optimize`, plus `--force-optimize` / `--force-exports`)
+- `make` runs flush → optimize (merge + vacuum) → exports, all on by default (`--no-flush` / `--no-exports` / `--no-optimize`, plus `--force-optimize` / `--force-exports`). `MakeOperation` itself only flushes and exports – reads reconcile un-merged rows – so the optimize is an optimisation the CLI runs first
 - `DatasetContext` yields `(name, uri)` and ensures the dataset on entry; commands resolve repos via the factories
 - Shared command options are `OPT_*` `Annotated` constants in `cli/__init__.py`; new sub-typer groups go through `sub_typer(name, help)`
 - `statements sql` and `maintenance unlock` are local-only – they raise `RuntimeError` in api mode (raw SQL / lock-file manipulation deliberately have no api wire)

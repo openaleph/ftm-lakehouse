@@ -12,32 +12,28 @@ class MakeJob(DatasetJobModel):
 
 
 class MakeOperation(DatasetJobOperation[MakeJob]):
+    """Flush the journal and run every export kind.
+
+    Never merges: reads reconcile un-merged rows, so the exports are correct
+    on any store. Merging is
+    [`OptimizeOperation`][ftm_lakehouse.operation.maintenance.OptimizeOperation]'s
+    business – the ``make`` CLI runs it first by default, as an optimisation.
+    """
+
     target = tag.OP_MAKE
-    dependencies = [tag.STATEMENTS_OPTIMIZED]
-    """Only the canonical-content clock. Exports are a function of what the
-    store canonically holds, and
-    [`prepare`][MakeOperation.prepare] runs ahead of the freshness check, so
-    outstanding journal rows cannot hide from a run – they are drained and
-    merged first, and that moves
-    [`STATEMENTS_OPTIMIZED`][ftm_lakehouse.core.conventions.tag.STATEMENTS_OPTIMIZED].
-    Depending on ``journal/last_updated`` instead meant a continuously-fed
-    dataset was never fresh, so a scheduled ``make`` never converged."""
+    dependencies = [tag.STATEMENTS_UPDATED]
+    """The content clock. [`prepare`][MakeOperation.prepare] runs ahead of the
+    freshness check, so rows still in the journal cannot hide from a run –
+    they are drained first, and a drain that lands rows moves this tag."""
 
     def prepare(self) -> None:
-        """Drain the journal and merge – the run's only flush and merge pass.
-
-        Ahead of the freshness window, as the base class requires: ``merge``
-        stamps this operation's own dependency, so doing it from inside
-        `handle` would backdate the target against it and leave ``make``
-        permanently stale. The three exports `handle` runs are constructed
-        ``prepared``, so none of them repeats this.
-        """
-        self.prepare_canonical()
+        """Drain the journal – a ``LIMIT 1`` probe when it is empty."""
+        self.entities.flush()
 
     def handle(self, run: JobRun, *args, **kwargs) -> None:
         """Run the export sweep, then the two artifacts computed from it."""
         force = kwargs.get("force", False)
         for kind in MAKE_KINDS:
             job = ExportJob.make(dataset=self.dataset, kind=kind)
-            ExportOperation(job, self.uri, prepared=True).run(force=force)
+            ExportOperation(job, self.uri).run(force=force)
         run.job.done = 1

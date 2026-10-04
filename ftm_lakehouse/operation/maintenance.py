@@ -48,21 +48,16 @@ class OptimizeOperation(DatasetJobOperation[OptimizeJob]):
     obsolete ones. Each step is held under the dataset write fence.
     """
 
-    target = tag.STATEMENTS_OPTIMIZED
-    dependencies = [tag.STATEMENTS_UPDATED]
+    target = tag.OP_OPTIMIZE
+    dependencies: list[str] = []
 
     def is_fresh(self) -> bool:
-        """Ask the statement store whether any partition is unmerged.
+        """Ask the statement store whether any partition is dirty.
 
-        The tag pair cannot answer this one. ``merge`` stamps
-        [`STATEMENTS_OPTIMIZED`][ftm_lakehouse.core.conventions.tag.STATEMENTS_OPTIMIZED] on
-        completion while the target tag records when this operation *started*,
-        so a successful optimize always finishes behind its own dependency and
-        reads as stale – costing a redundant full pass every time. The
-        per-partition tags
-        [`ParquetStore.merge`][ftm_lakehouse.storage.parquet.ParquetStore.merge]
-        compares internally are the sound predicate, and ``needs_merge`` is
-        that comparison.
+        Not a tag pair: the store knows from its own file list which
+        partitions hold rows a merge has not rewritten
+        ([`ParquetStore.needs_merge`][ftm_lakehouse.storage.parquet.ParquetStore.needs_merge]),
+        and that is the only thing an optimize has to do.
         """
         return not self.entities.needs_merge
 

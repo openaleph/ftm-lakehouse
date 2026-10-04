@@ -18,7 +18,6 @@ from ftmq.types import StatementEntities, Statements, ValueEntities
 from rigour.time import utc_now
 
 from ftm_lakehouse.core.api import no_api
-from ftm_lakehouse.core.conventions import tag
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.model.statement import LakehouseStatement
 from ftm_lakehouse.repository.artifacts import (
@@ -93,10 +92,9 @@ class EntityRepository(DatasetHandle):
     ) -> Generator[BaseJournalWriter, None, None]:
         """Get a bulk writer for adding entities/statements.
 
-        The writer owns its own lifecycle (insert the tail on success, drop
+        The writer owns its own lifecycle: insert the tail on success, drop
         the un-inserted buffer on error, close either way – see
-        `BaseJournalWriter.__exit__`); this adds the freshness tag,
-        stamped only when the block leaves cleanly.
+        `BaseJournalWriter.__exit__`.
 
         Example:
             ```python
@@ -112,10 +110,7 @@ class EntityRepository(DatasetHandle):
         Yields:
             The journal writer, open for the duration of the block.
         """
-        with (
-            self._tags.touch(tag.JOURNAL_UPDATED),
-            self._journal.writer(origin, role) as writer,
-        ):
+        with self._journal.writer(origin, role) as writer:
             yield writer
 
     def add(
@@ -146,39 +141,22 @@ class EntityRepository(DatasetHandle):
         The journal holds the parquet statement columns, so this streams Arrow
         batches from one store into the other via
         [`write_batches`][EntityRepository.write_batches]. Duplicates and
-        tombstones land as new rows; call [`merge`][EntityRepository.merge]
-        afterwards to collapse them.
+        tombstones land as new rows; reads reconcile them, and
+        [`merge`][EntityRepository.merge] collapses them physically.
 
-        [`JOURNAL_FLUSHED`][ftm_lakehouse.core.conventions.tag.JOURNAL_FLUSHED] is
-        stamped with the timestamp this *entered*, so rows journalled while the
-        drain ran – carrying a later
-        [`JOURNAL_UPDATED`][ftm_lakehouse.core.conventions.tag.JOURNAL_UPDATED] –
-        still read as outstanding, and only when the journal was actually
-        drained. A concurrent flush holds the drain lock and makes this one a
-        no-op, which `JournalStore.flush_batches` reports the same way an empty
-        journal does: by yielding nothing. `JournalStore.has_rows` tells the two
-        apart, and the
-        distinction is load-bearing – stamping for a drain that never happened
-        claims rows reached parquet while they sit in the journal, and every
-        consumer keyed on the tag pair exports a store missing them.
+        A concurrent flush holds the drain lock and makes this one a no-op –
+        `JournalStore.flush_batches` yields nothing, as for an empty journal –
+        so ``0`` does not mean the journal is empty. Nothing is stamped here:
+        the rows that land stamp
+        [`STATEMENTS_UPDATED`][ftm_lakehouse.core.conventions.tag.STATEMENTS_UPDATED]
+        through [`ParquetStore.append`][ftm_lakehouse.storage.parquet.ParquetStore.append].
 
         Returns:
-            Number of statements appended; ``0`` both for an empty journal and
-            for a drain another flush was holding.
+            Number of statements appended.
         """
-        now = utc_now()
         with Took() as t:
             self.log.info("Flushing journal ...", journal=mask_uri(self._journal.uri))
             total = self.write_batches(self._journal.flush_batches())
-
-        if not total and self._journal.has_rows:
-            self.log.warning(
-                "Journal not drained – another flush is holding it",
-                journal=mask_uri(self._journal.uri),
-            )
-            return 0
-
-        self._tags.set(tag.JOURNAL_FLUSHED, now)
         if total:
             self.log.info(
                 "Flushed statements from journal to lake",
@@ -186,12 +164,6 @@ class EntityRepository(DatasetHandle):
                 took=t.took,
                 journal=mask_uri(self._journal.uri),
             )
-        elif not self._tags.exists(tag.STATEMENTS_OPTIMIZED):
-            # initial run: give freshness comparisons a baseline. An empty
-            # store is trivially canonical, and without the tag every
-            # consumer keyed on it would re-run forever (`is_latest` is
-            # False when no dependency exists at all).
-            self._tags.set(tag.STATEMENTS_OPTIMIZED)
         return total
 
     @no_api
@@ -228,8 +200,8 @@ class EntityRepository(DatasetHandle):
     def merge(self, force: bool = False) -> None:
         """Collapse duplicates and reap expired tombstones from parquet store.
 
-        Flushes the journal first. ``force`` rewrites every partition
-        regardless of freshness tags.
+        Flushes the journal first, so the rows it holds are merged too.
+        ``force`` rewrites every partition, clean ones included.
         """
         self.flush()
         self._statements.merge(force)
@@ -298,9 +270,8 @@ class EntityRepository(DatasetHandle):
         """Whether the statement store has writes that
         [`merge`][EntityRepository.merge] has not collapsed yet – local only.
 
-        Reads are canonical only on a merged store, so anything publishing
-        canonical rows (the exports, and their diffs strictly) checks
-        this first. See [`ParquetStore.needs_merge`][ParquetStore.needs_merge].
+        Reads reconcile such writes, so this decides whether an optimize has
+        work, nothing more. See [`ParquetStore.needs_merge`][ParquetStore.needs_merge].
         """
         return self._statements.needs_merge
 

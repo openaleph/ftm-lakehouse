@@ -85,13 +85,13 @@ Layout-affecting settings (`shards`) belong in the config *before* a dataset is 
 | `-c <config.yml>` | – | Same merge-write as `configure`, before anything else |
 | `--flush` / `--no-flush` | on | Flush outstanding journal statements into the parquet store |
 | `--exports` / `--no-exports` | on | Build statements/entities/documents/statistics exports and diffs. With `--no-exports` only `index.json` is refreshed |
-| `--optimize` / `--no-optimize` | on | Run the [optimize](entities.md#maintenance) pass before exporting (only applies with `--exports`) |
-| `--force-optimize` | off | Optimize even when the store is already up-to-date |
+| `--optimize` / `--no-optimize` | on | Run the [optimize](entities.md#maintenance) pass (merge + vacuum) before exporting (only applies with `--exports`). Reads reconcile un-merged rows, so exports are correct either way – an optimized store exports faster and reclaims disk |
+| `--force-optimize` | off | Optimize even when no partition is dirty |
 | `--force-exports` | off | Re-compute the exports pipeline even when the tags say it is fresh |
 
 ### `maintenance flush`
 
-`ftm-lakehouse -d <dataset> maintenance flush` drains outstanding journal statements into the parquet store and prints how many landed. It is the same drain `make` runs as its first stage, on its own – no optimize, no exports, so duplicates and tombstones stay as new rows until the next [optimize](entities.md#maintenance).
+`ftm-lakehouse -d <dataset> maintenance flush` drains outstanding journal statements into the parquet store and prints how many landed. It is the same drain `make` runs as its first stage, on its own – no optimize, no exports; duplicates and tombstones stay as physical rows, which reads reconcile, until the next [optimize](entities.md#maintenance).
 
 `--all` sweeps every dataset in the catalog instead, printing a count per dataset plus the total. It addresses the whole catalog, so combining it with `-d` is an error rather than a silent override. Datasets with an empty journal are a cheap no-op – the drain probes for rows before it rotates anything – which makes `ftm-lakehouse maintenance flush --all` a reasonable cron entry for a lakehouse whose writers leave data in the journal. It fails fast: the first dataset that errors aborts the sweep.
 

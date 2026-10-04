@@ -363,11 +363,6 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
                 for row in conn.execute(q):
                     yield _row_to_statement(row)
 
-    @property
-    def has_rows(self) -> bool:
-        """Whether the live table or any un-drained segment holds a row."""
-        return any(self._has_rows(name) for name in self._table_names())
-
     def count(self) -> int:
         """Count rows for this dataset, across all segments."""
         total = 0

@@ -116,7 +116,7 @@ class Artifact:
     base: ClassVar[StoreKey]
     kind: ClassVar[ExportKind]
     mime_type: ClassVar[str] = CSV
-    dependencies: ClassVar[tuple[str | StoreKey, ...]] = (tag.STATEMENTS_OPTIMIZED,)
+    dependencies: ClassVar[tuple[str | StoreKey, ...]] = (tag.STATEMENTS_UPDATED,)
     compressed: ClassVar[bool] = True
     fieldnames: ClassVar[list[str] | None] = None
 
