@@ -123,13 +123,17 @@ The async `optimize` operation produces this canonical state by running the thre
 | `compact()` | cheap | Delta `OPTIMIZE compact` per partition – bin-packs small files |
 | `vacuum()` | cheap | Delta `VACUUM` – delete files no longer referenced in the Delta log |
 
+`merge` reads the Delta log once per run: it loads one snapshot, hands each dirty partition's files from it to DuckDB (`read_parquet` over exactly those files, no `delta_scan`), writes the merged files with DuckDB's `COPY`, and commits the results in batches of 64 partitions – one transaction of `add` and `remove` actions each. Replaying the log per partition is what made merges slow on large stores: every `delta_scan` and every `write_deltalake` replays the latest checkpoint, which lists every live file of the table. The dedupe windows only run over key groups that actually hold more than one row; every other row streams through untouched, so merging an already-clean partition is little more than a sorted copy. Partitions can merge in parallel processes (`LAKEHOUSE_MERGE_WORKERS`) – they are independent, a worker writes files and commits nothing – but DuckDB already uses every core within one partition, so extra workers mainly help where many small partitions are dominated by per-partition overhead.
+
+The store's Delta table is created with `delta.deletedFileRetentionDuration = 1 hour` and `delta.logRetentionDuration = 1 day` (the `migrate_parquet_table_properties` migration applies them to older stores). The Delta defaults – a week of `remove` actions in every checkpoint, 30 days of superseded checkpoints on disk – let the log of a frequently merged store outgrow the data it describes.
+
 #### Sharding – why, and how many shards
 
 The `shard` partition key is the unit that keeps per-partition working sets bounded, independent of total dataset size. Everything expensive in the lakehouse operates one `(shard, bucket)` partition at a time:
 
 - **Writes:** producers hand over whole batches without a partition key and `append` derives each row's shard, writing one file per `(shard, bucket, origin)` partition the batch spans. Bigger batches therefore cost fewer files, not more.
 - **Reads:** statement queries iterate `(shard, bucket)` partitions in Python and push `WHERE shard = ?` into DuckDB; the live view is a plain scan, so filters push to file statistics and a full-store `ORDER BY entity_id` stays bounded to one partition. Single-entity lookups hash the entity id and scan just its own shard.
-- **Optimize:** the merge rewrite materializes one partition at a time – its memory and rewrite cost scale with the largest partition, not the whole table.
+- **Optimize:** the merge rewrite materializes one partition at a time (per worker) – its memory and rewrite cost scale with the largest partition, not the whole table.
 
 Sharding is a trade-off, not a free win: every shard multiplies the partition count (`shard × bucket × origin`), which means more small parquet files, more Delta log metadata, and more per-partition query iterations. For small and medium datasets that overhead costs more than the bounded working sets gain.
 
@@ -139,7 +143,7 @@ That's why the **default is `0`** – a single shard (`shard <= 1` collapses to 
 
 `ShardOperation` (`ftm-lakehouse -d <dataset> maintenance shard --shards <n>`, or `operation.shard(dataset, shards)`) changes the count after the fact. It drains the journal, then rewrites the statement store onto the new layout and records the new count in `config.yml` – in that order, since the config is what every other process resolves the layout from.
 
-`bucket` and `origin` are invariant under a re-shard – only `shard` moves – so the rewrite runs one `write_deltalake` per `(bucket, origin)` group: every source partition of the group streams through a single chained Arrow reader (`SELECT *` with the `shard` column recomputed from `entity_id` in DuckDB), and the group's partitions are replaced wholesale in one atomic commit. Nothing is materialized in Python.
+`bucket` and `origin` are invariant under a re-shard – only `shard` moves – so the rewrite runs one `write_deltalake` per `(bucket, origin)` group: every source partition of the group streams through a single chained Arrow reader (`SELECT *` with the `shard` column recomputed from `entity_id` in DuckDB), and the group's partitions are replaced wholesale in one atomic commit. Nothing is materialized in Python. Like `merge`, the re-shard reads the Delta log once: source partitions are read from one snapshot's file lists (`read_parquet`, no `delta_scan` per partition) and every group write goes through that same table handle.
 
 Deliberately **not** a merge: rows are neither deduped nor sorted on the way through, because the trigger is a store whose partitions have grown too big to query well, not one whose content is wrong. Every rewritten partition therefore comes out marked dirty – run `optimize` afterwards to restore canonical content and file sort order. Re-running a re-shard is safe: each row's target shard is a function of its `entity_id` and the target count alone, so a run interrupted between group commits is repaired by running it again.
 

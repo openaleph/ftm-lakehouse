@@ -213,6 +213,20 @@ class BaseJournalStore(Generic[W]):
         """
         raise NotImplementedError
 
+    @property
+    @no_api
+    def has_rows(self) -> bool:
+        """Whether anything is still buffered – live table or un-drained segment.
+
+        The cheap counterpart to `count`: a ``LIMIT 1`` probe instead of
+        counting rows that routinely run into the millions. It exists to tell a
+        flush that drained nothing whether the journal was empty or whether
+        another flush held it (`flush_batches` yields nothing in both cases),
+        and local-only for the same reason that one is – the store that owns
+        the rows is the one that can answer.
+        """
+        raise NotImplementedError
+
     def count(self) -> int:
         """Count rows for this dataset."""
         raise NotImplementedError

@@ -24,6 +24,7 @@ from datetime import datetime
 from functools import cached_property
 from typing import Any, Iterator
 
+from anystore.types import Uri
 from anystore.util import mask_uri
 from ftmq.model.stats import DatasetStats
 from rigour.time import utc_now
@@ -68,6 +69,15 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
     dependencies it registers.
     """
 
+    def __init__(
+        self, job: ExportJob, uri: Uri | None = None, prepared: bool = False
+    ) -> None:
+        super().__init__(job, uri)
+        self.prepared = prepared
+        """Whether the caller has already drained and merged for this run –
+        [`MakeOperation`][ftm_lakehouse.operation.make.MakeOperation] does it once
+        for the three kinds it runs."""
+
     @cached_property
     def kinds(self) -> tuple[ExportKind, ...]:
         """The sweep artifacts this run writes."""
@@ -88,11 +98,18 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
         return [str(d) for d in self.artifacts[self.job.kind].dependencies]
 
     def prepare(self) -> None:
-        """Drain the journal and merge, so the export reads canonical rows."""
-        if not self._tags.is_latest(tag.JOURNAL_FLUSHED, [tag.JOURNAL_UPDATED]):
-            self.entities.flush()
-        if self.entities.exists and self.entities.needs_merge:
-            self.entities.merge()
+        """Drain the journal and merge, so the export reads canonical rows.
+
+        Skipped when the caller already did it:
+        [`MakeOperation`][ftm_lakehouse.operation.make.MakeOperation] prepares once
+        for the three kinds it runs, where preparing per kind meant a full
+        drain and a store-wide merge three times over – and ``statistics`` and
+        ``index`` are computed from a store the sweep ahead of them has
+        already canonicalized.
+        """
+        if self.prepared:
+            return
+        self.prepare_canonical()
 
     def iterate(self) -> Iterator[EntityPayload]:
         """Every entity in the store, folded from one scan.

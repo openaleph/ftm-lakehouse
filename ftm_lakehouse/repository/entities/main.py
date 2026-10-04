@@ -149,13 +149,36 @@ class EntityRepository(DatasetHandle):
         tombstones land as new rows; call [`merge`][EntityRepository.merge]
         afterwards to collapse them.
 
+        [`JOURNAL_FLUSHED`][ftm_lakehouse.core.conventions.tag.JOURNAL_FLUSHED] is
+        stamped with the timestamp this *entered*, so rows journalled while the
+        drain ran – carrying a later
+        [`JOURNAL_UPDATED`][ftm_lakehouse.core.conventions.tag.JOURNAL_UPDATED] –
+        still read as outstanding, and only when the journal was actually
+        drained. A concurrent flush holds the drain lock and makes this one a
+        no-op, which `JournalStore.flush_batches` reports the same way an empty
+        journal does: by yielding nothing. `JournalStore.has_rows` tells the two
+        apart, and the
+        distinction is load-bearing – stamping for a drain that never happened
+        claims rows reached parquet while they sit in the journal, and every
+        consumer keyed on the tag pair exports a store missing them.
+
         Returns:
-            Number of statements appended.
+            Number of statements appended; ``0`` both for an empty journal and
+            for a drain another flush was holding.
         """
-        with self._tags.touch(tag.JOURNAL_FLUSHED), Took() as t:
+        now = utc_now()
+        with Took() as t:
             self.log.info("Flushing journal ...", journal=mask_uri(self._journal.uri))
             total = self.write_batches(self._journal.flush_batches())
 
+        if not total and self._journal.has_rows:
+            self.log.warning(
+                "Journal not drained – another flush is holding it",
+                journal=mask_uri(self._journal.uri),
+            )
+            return 0
+
+        self._tags.set(tag.JOURNAL_FLUSHED, now)
         if total:
             self.log.info(
                 "Flushed statements from journal to lake",
@@ -303,6 +326,18 @@ class EntityRepository(DatasetHandle):
             Names of the columns added – empty if the store is already current.
         """
         return self._statements.evolve_schema()
+
+    @no_api
+    def configure_table(self) -> dict[str, str]:
+        """Apply the statement store's Delta table properties.
+
+        Delegates to [`ParquetStore.configure_table`][ParquetStore.configure_table],
+        the primitive behind the table-properties migration.
+
+        Returns:
+            The properties that changed – empty if the store is already current.
+        """
+        return self._statements.configure_table()
 
     @no_api
     def unlock(self) -> bool:

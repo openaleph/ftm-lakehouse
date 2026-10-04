@@ -1,5 +1,6 @@
 """Tests for ParquetStore — append-only sorted writes + async merge."""
 
+import math
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -13,7 +14,9 @@ from ftmq.types import Statements
 from ftm_lakehouse.core.conventions import tag
 from ftm_lakehouse.helpers.shards import entity_shard
 from ftm_lakehouse.logic import parquet as logic_parquet
+from ftm_lakehouse.logic.parquet import TABLE_CONFIGURATION
 from ftm_lakehouse.model.statement import JOURNAL_SCHEMA, TABLE_RAW
+from ftm_lakehouse.storage import parquet as storage_parquet
 from ftm_lakehouse.storage.parquet import ParquetStore
 
 DATASET = "test"
@@ -293,3 +296,132 @@ def test_storage_parquet_get_statements_uses_shard(tmp_path):
     assert len(jane) == 1 and jane[0].entity_id == "e-jane"
     assert len(john) == 1 and john[0].entity_id == "e-john"
     assert nobody == []
+
+
+def _origin_rows(origin: str, entities: int = 20) -> list[dict]:
+    """Every statement twice – a merge has duplicates to collapse."""
+    rows = []
+    for i in range(entities):
+        for _ in range(2):
+            row = _pack(make_statement(f"e{i}", "name", f"Name {i}"))
+            row["origin"] = origin
+            rows.append(row)
+    return rows
+
+
+def _files_per_partition(store: ParquetStore) -> dict[tuple[str, str, str], int]:
+    actions = pa.table(store.deltatable.get_add_actions(flatten=True))
+    counts: dict[tuple[str, str, str], int] = defaultdict(int)
+    for key in zip(
+        actions["partition.shard"].to_pylist(),
+        actions["partition.bucket"].to_pylist(),
+        actions["partition.origin"].to_pylist(),
+    ):
+        counts[key] += 1
+    return dict(counts)
+
+
+def test_storage_parquet_merge_escaped_origin(tmp_path):
+    """An origin delta-rs percent-escapes in the partition path merges in
+    place: the merged file lands in the partition's own directory, and every
+    file it was merged from is removed by the same commit."""
+    store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
+    origin = "mapping:abc 1"
+    _flush(store, _origin_rows(origin))
+    _flush(store, _origin_rows(origin))
+    assert _row_count(store) == 80
+    assert set(_files_per_partition(store).values()) == {2}
+
+    store.merge()
+
+    assert _row_count(store) == 20
+    assert set(_files_per_partition(store).values()) == {1}
+    assert {s.origin for s in store.query_statements()} == {origin}
+    assert not store.needs_merge
+
+
+def test_storage_parquet_merge_workers(tmp_path, monkeypatch):
+    """Merging in worker processes gives what merging in-process gives."""
+    merged = []
+    for workers in (1, 2):
+        monkeypatch.setenv("LAKEHOUSE_MERGE_WORKERS", str(workers))
+        store = ParquetStore(tmp_path / str(workers), DATASET, shards=SHARDS)
+        _flush(store, _origin_rows("a"))
+        _flush(store, _origin_rows("b"))
+        store.merge()
+        merged.append(sorted((s.id, s.origin) for s in store.query_statements()))
+    assert merged[0] == merged[1]
+    assert len(merged[0]) == 40
+
+
+def test_storage_parquet_merge_commit_batches(tmp_path, monkeypatch):
+    """Merged partitions commit in batches – a Delta version per batch, not
+    per partition."""
+    monkeypatch.setattr(storage_parquet, "MERGE_COMMIT_BATCH", 3)
+    store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
+    _flush(store, _origin_rows("a"))
+    partitions = len(store._list_partitions())
+    assert partitions > 3
+    version = store.version
+
+    store.merge()
+
+    assert store.version - version == math.ceil(partitions / 3)
+    assert _row_count(store) == 20
+
+
+def test_storage_parquet_table_configuration(tmp_path):
+    """A new store carries the log-bounding table properties, so configuring
+    it again changes nothing."""
+    store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
+    _flush(store, _origin_rows("a"))
+    config = store.deltatable.metadata().configuration
+    assert {k: config.get(k) for k in TABLE_CONFIGURATION} == TABLE_CONFIGURATION
+    assert store.configure_table() == {}
+
+
+def test_storage_parquet_lookup_queries_its_partitions(tmp_path, monkeypatch):
+    """An id lookup queries only the ``(shard, bucket)`` pairs its prune
+    allows; a query that cannot prune (an OR) still queries them all."""
+    store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
+    _flush(store, _origin_rows("a"))
+    pairs = list(store._iter_shard_buckets())
+    assert len(pairs) > 2
+
+    executed = []
+    execute = store._lake._execute
+
+    def spy(q, *args, **kwargs):
+        executed.append(q)
+        return execute(q, *args, **kwargs)
+
+    monkeypatch.setattr(store._lake, "_execute", spy)
+
+    assert {s.entity_id for s in _get_statements(store, "e1")} == {"e1"}
+    assert len(executed) == 1
+
+    executed.clear()
+    q = Query(M(entity_id__in=["e1", "e2"]))
+    assert {s.entity_id for s in store.query_statements(q)} == {"e1", "e2"}
+    assert len(executed) == len({entity_shard(e, SHARDS) for e in ("e1", "e2")})
+
+    executed.clear()
+    q = Query(M(entity_id="e1") | M(entity_id="e2"))
+    assert {s.entity_id for s in store.query_statements(q)} == {"e1", "e2"}
+    assert len(executed) == len(pairs)
+
+
+def test_storage_parquet_shard_escaped_origin(tmp_path):
+    """A re-shard reads an origin delta-rs percent-escapes in the partition
+    path from the snapshot's files and moves every row to its new shard."""
+    store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
+    origin = "mapping:abc 1"
+    _flush(store, _origin_rows(origin))
+    store.shard(3)
+    assert _row_count(store) == 40
+    entity_ids = {s.entity_id for s in store.query_statements()}
+    shards = {shard for shard, _, _ in store._list_partitions()}
+    assert shards == {entity_shard(e, 3) for e in entity_ids}
+    store.merge()
+    assert {s.origin for s in store.query_statements()} == {origin}
+    assert _row_count(store) == 20

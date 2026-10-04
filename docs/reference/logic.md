@@ -39,14 +39,36 @@ The DuckDB config, the `statement` / `statement_raw` view-SQL builders, and the 
         heading_level: 3
         show_root_heading: true
 
-Both builders emit `delta_scan('<uri>')`, so a view defined from this SQL resolves the current Delta log on every query – defining it once per connection is enough; subsequent `write_deltalake` commits are picked up automatically. The live `statement` view is a plain `WHERE deleted_at IS NULL` scan (no window function, so predicate pushdown survives) and is only correct on an **optimized** store; `statement_raw` exposes every physical row – tombstones and pre-merge duplicates included – for `merge` and raw-source `get_entity_ids` queries (diff exports).
+Both builders emit `delta_scan('<uri>')`, so a view defined from this SQL resolves the current Delta log on every query – defining it once per connection is enough; subsequent `write_deltalake` commits are picked up automatically. The live `statement` view is a plain `WHERE deleted_at IS NULL` scan (no window function, so predicate pushdown survives) and is only correct on an **optimized** store; `statement_raw` exposes every physical row – tombstones and pre-merge duplicates included – for raw-source `get_entity_ids` queries (diff exports).
 
 ::: ftm_lakehouse.logic.parquet.build_merge_sql
     options:
         heading_level: 3
         show_root_heading: true
 
-An executable DuckDB SQL string over `statement_raw` holding all dedupe / fragment-supersession logic; it collapses one `(shard, bucket, origin)` partition for physical rewrite. Change-detection for diff exports no longer has its own SQL builder – it is an ftmq `Query` over the raw source (`ParquetStore.get_entity_ids(q, source=store.source_raw)`).
+An executable DuckDB SQL string holding all dedupe / fragment-supersession logic; it collapses one `(shard, bucket, origin)` partition for physical rewrite. `ParquetStore.merge` runs it over the partition's files (`partition_source_sql`) rather than `statement_raw`, so a merge never replays the Delta log per partition; only key groups with more than one row go through its windows. Change-detection for diff exports no longer has its own SQL builder – it is an ftmq `Query` over the raw source (`ParquetStore.get_entity_ids(q, source=store.source_raw)`).
+
+::: ftm_lakehouse.logic.parquet.partition_source_sql
+    options:
+        heading_level: 3
+        show_root_heading: true
+
+::: ftm_lakehouse.logic.parquet.read_parquet_sql
+    options:
+        heading_level: 3
+        show_root_heading: true
+
+::: ftm_lakehouse.logic.parquet.merge_copy_options
+    options:
+        heading_level: 3
+        show_root_heading: true
+
+::: ftm_lakehouse.logic.parquet.merge_duckdb_config
+    options:
+        heading_level: 3
+        show_root_heading: true
+
+What a merge reads and writes instead of going through Delta: one partition's files as a `SHARDED_SCHEMA`-shaped relation (partition columns as constants, columns the files predate as `NULL`), the DuckDB `COPY` options per bucket, and the DuckDB config of one of `LAKEHOUSE_MERGE_WORKERS` merge processes.
 
 ::: ftm_lakehouse.logic.parquet.build_shard_sql
     options:

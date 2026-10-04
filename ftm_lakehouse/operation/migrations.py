@@ -32,5 +32,21 @@ def migrate_parquet_add_role(ref: DatasetRef) -> None:
     get_entities(*ref).evolve_schema()
 
 
-MIGRATIONS: tuple[Migration, ...] = (migrate_parquet_add_role,)
+def migrate_parquet_table_properties(ref: DatasetRef) -> None:
+    """Bound the Delta log of a statement store created without retention
+    properties.
+
+    Sets [`TABLE_CONFIGURATION`][ftm_lakehouse.logic.parquet.TABLE_CONFIGURATION]
+    ([`configure_table`][ftm_lakehouse.repository.EntityRepository.configure_table]),
+    writes a checkpoint without the expired ``remove`` actions and deletes the
+    log past the new retention – on a store merged many times over, most of
+    ``_delta_log``.
+    """
+    get_entities(*ref).configure_table()
+
+
+MIGRATIONS: tuple[Migration, ...] = (
+    migrate_parquet_add_role,
+    migrate_parquet_table_properties,
+)
 """Every migration, oldest first – the order they are applied in."""

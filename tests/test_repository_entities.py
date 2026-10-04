@@ -517,3 +517,40 @@ def test_export_no_diff_keeps_the_diff_watermark(tmp_path):
     assert len(diffs) == 1
     with repo._store.open(diffs[0]) as fh:
         assert [json.loads(line)["entity"]["id"] for line in fh] == ["john"]
+
+
+def test_repository_entities_skipped_flush_keeps_the_journal_tag(tmp_path):
+    """A flush another flush is holding must not claim the journal is drained.
+
+    `flush_batches` reports "someone else has it" the same way it reports an
+    empty journal – by yielding nothing – so the tag would otherwise be
+    stamped for a drain that never happened, and
+    `ExportOperation.prepare` reads exactly
+    that tag to decide whether the store it exports is complete.
+    """
+    repo = EntityRepository("test", tmp_path)
+    with repo.writer() as writer:
+        writer.add_entity(make_entity(JANE))
+
+    assert repo.flush() > 0
+    flushed = repo._tags.get(tag.JOURNAL_FLUSHED)
+    assert flushed is not None
+    assert not repo._journal.has_rows
+
+    with repo.writer() as writer:
+        writer.add_entity(make_entity(JOHN))
+
+    with repo._journal.flush_lock() as acquired:
+        assert acquired  # this test is the other flush
+        assert repo.flush() == 0
+
+    assert repo._tags.get(tag.JOURNAL_FLUSHED) == flushed
+    assert repo._journal.has_rows  # john is still in there
+
+    # an empty journal, by contrast, is genuinely drained
+    assert repo.flush() > 0
+    assert not repo._journal.has_rows
+    drained = repo._tags.get(tag.JOURNAL_FLUSHED)
+    assert drained is not None and drained > flushed
+    assert repo.flush() == 0
+    assert repo._tags.get(tag.JOURNAL_FLUSHED) > drained

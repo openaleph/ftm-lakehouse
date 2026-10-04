@@ -54,6 +54,12 @@ class Settings(BaseSettings):
 
     duckdb_memory_limit: str = "8GB"
 
+    merge_workers: int = 1
+    """Processes a ``merge`` runs partitions in (``LAKEHOUSE_MERGE_WORKERS``).
+    ``1`` merges in-process. `duckdb_memory_limit` and the CPU threads are
+    split between the workers, so the limit stays the ceiling for the whole
+    merge – each worker also carries its own Python heap on top of it."""
+
     duckdb_temp_directory: str | None = Field(
         default_factory=lambda: str(Path(gettempdir()) / "duckdb")
     )
