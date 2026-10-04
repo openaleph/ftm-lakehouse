@@ -31,7 +31,7 @@ from rigour.time import utc_now
 
 from ftm_lakehouse.core.conventions import tag
 from ftm_lakehouse.core.settings import Settings
-from ftm_lakehouse.logic.entities.aggregate import EntityPayload, aggregate_batches
+from ftm_lakehouse.logic.entities.aggregate import EntityPayload, aggregate_unsafe
 from ftm_lakehouse.model.job import DatasetJobModel
 from ftm_lakehouse.operation.base import DatasetJobOperation
 from ftm_lakehouse.repository.artifacts import SWEEP_KINDS, ExportKind
@@ -101,10 +101,9 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
         """Every entity in the store, folded from one scan.
 
         Writes ``statements.csv`` from the same Arrow batches when this run
-        covers it, so the csv costs a tee rather than a second pass. The
-        batches only reach python when something downstream needs the entities
-        (`aggregate_batches`) – a statements-only export stays columnar end to
-        end.
+        covers it, so the csv costs a tee rather than a second pass. Rows are
+        only materialised when something downstream needs them – a
+        statements-only export stays columnar end to end.
 
         Args:
             throughput: Counter fed the Arrow bytes the scan pulls – the
@@ -112,8 +111,8 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
         """
         with_csv_export = ExportKind.statements in self.kinds
         tee = bool({ExportKind.entities, ExportKind.documents} & set(self.kinds))
-        batches = self.entities.sweep(with_csv_export, tee, throughput)
-        yield from aggregate_batches(batches, self.dataset)
+        rows = self.entities.sweep(with_csv_export, tee, throughput)
+        yield from aggregate_unsafe(rows, self.dataset)
 
     def export(self, now: datetime) -> dict[str, int]:
         """Write every requested artifact from one pass over the entities.
@@ -140,7 +139,7 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
             with session, SyncProgressBar("Exporting statements", count) as bar:
                 for payload in self.iterate(bar.throughput):
                     session.consume(payload)
-                    bar.advance(payload.count)
+                    bar.advance(len(payload.statements))
             return session.result()
 
     def export_statistics(self) -> None:

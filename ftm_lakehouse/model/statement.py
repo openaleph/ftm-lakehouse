@@ -226,18 +226,17 @@ timestamps compare *lexically* against a diff window
 def _iso_column(name: str) -> Any:
     """Render a stored timestamp as the ISO string the entity fold wants.
 
-    The sweep's fold
-    (`ftm_lakehouse.logic.entities.aggregate.aggregate_batches`) materialises
-    these columns as python lists, and a timestamp column costs one
-    ``datetime`` per row – 5x a string column, for a value the fold would only
-    spell back as ISO. Formatting in SQL keeps the whole path in string-land,
-    so the fold compares strings and the csv gets proper ISO-8601 instead of
-    DuckDB's ``2026-09-08 16:53:31.000000Z`` rendering.
+    The sweep hands its Arrow batches to ``to_pylist()``, which turns a
+    timestamp column into one ``datetime`` per row – 5x the cost of a string
+    column, for values `ftm_lakehouse.logic.entities.aggregate.aggregate_unsafe`
+    immediately spells back as ISO through ``datetime_iso``. Formatting in SQL
+    keeps the whole path in string-land, and the csv gets proper ISO-8601
+    instead of DuckDB's ``2026-09-08 16:53:31.000000Z`` rendering.
 
     The output is ``datetime.isoformat()`` character for character – that is
-    the contract, not a spelling choice: whatever lands here *is* what the
-    diff window compares against and what ``entities.ftm.json`` carries, and
-    the fold refuses a batch whose seen columns are anything else.
+    the contract, not a spelling choice: ``datetime_iso`` passes a string
+    through untouched, so whatever lands here *is* what the diff window
+    compares against and what ``entities.ftm.json`` carries.
 
     ``AT TIME ZONE 'UTC'`` is not redundant with the session zone
     ``LakeStore`` pins: it makes the offset the format string claims true of

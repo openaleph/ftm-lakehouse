@@ -1112,21 +1112,20 @@ class ParquetStore:
         csv_key: str | None = None,
         tee: bool = True,
         throughput: Throughput | None = None,
-    ) -> Iterator[pa.RecordBatch]:
+    ) -> Iterator[StatementDict]:
         """One scan of the live view, teeing Arrow batches two ways.
 
         Each ``(shard, bucket)`` partition streams straight from DuckDB as
         Arrow batches (`_execute_partitioned`). Every batch can go to a
-        ``pyarrow`` CSV writer *and* be handed on, so a caller that wants both
-        ``statements.csv`` and the entities behind it pays for one scan rather
-        than writing the csv and reading it back.
+        ``pyarrow`` CSV writer *and* be handed on as row dicts, so a caller
+        that wants both ``statements.csv`` and the rows behind it pays for one
+        scan rather than writing the csv and reading it back.
 
-        Batches carry `STATEMENT_CSV_COLUMNS`, which covers everything an
-        entity aggregation needs, and arrive entity-contiguous (the select
-        orders by ``entity_id`` and an entity lives in one partition) – so
-        `ftm_lakehouse.logic.entities.aggregate.aggregate_batches` folds them
-        column-wise, without a python object per row and without touching the
-        columns only the csv wants.
+        Rows come from ``RecordBatch.to_pylist`` – a bulk conversion in C – and
+        carry `STATEMENT_CSV_COLUMNS`, which covers everything an entity
+        aggregation needs. They arrive entity-contiguous (the select orders by
+        ``entity_id`` and an entity lives in one partition), so
+        ``aggregate_unsafe`` can fold them directly.
 
         The csv handle lives for the generator's lifetime; abandoning the
         generator closes it through the usual ``GeneratorExit`` unwind, so the
@@ -1136,18 +1135,18 @@ class ParquetStore:
             csv_key: Store key to write the sorted statements csv to.
                 ``None`` scans without writing one. Compression comes from
                 `compression` (the dataset's config), not from the caller.
-            tee: Hand the batches on. ``False`` keeps the scan purely
-                columnar – nothing reaches python at all – which is what a
-                csv-only export wants.
+            tee: Yield row dicts. ``False`` keeps the scan purely
+                columnar – nothing is materialised in Python – which is what
+                a csv-only export wants.
             throughput: Counter fed the Arrow bytes of every batch scanned –
                 a progress bar's, so it can show how fast the scan moves.
 
         Yields:
-            `pyarrow.RecordBatch` per batch scanned, unless ``tee`` is off.
+            ``StatementDict`` rows, unless ``tee`` is off.
         """
         sql = statement_csv_select()
-        # a batch's columns are materialised as python lists only when it is
-        # handed on, so the cap is on rows-in-flight, not on bytes scanned
+        # a batch is materialised as Python objects only when rows are asked
+        # for, so the cap is on rows-in-flight, not on bytes scanned
         batch_size = SWEEP_BATCH_SIZE if tee else None
         with ExitStack() as stack:
             out = None
@@ -1168,7 +1167,7 @@ class ParquetStore:
                             stack.callback(writer.close)
                         writer.write(batch)
                     if tee:
-                        yield batch
+                        yield from cast(list[StatementDict], batch.to_pylist())
 
     def get_entity_ids(
         self, q: Query | None = None, *, source: SqlSource | None = None

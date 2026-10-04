@@ -916,7 +916,7 @@ class ExportSession:
 
     def consume(self, payload: EntityPayload) -> None:
         """Hand one entity to every artifact this run is writing."""
-        self.counts["statements"] += payload.count
+        self.counts["statements"] += len(payload.statements)
         self.counts["entities"] += 1
         if not payload.to_dict():  # no resolvable schema
             return
