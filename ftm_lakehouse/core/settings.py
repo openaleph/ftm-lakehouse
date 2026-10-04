@@ -40,10 +40,9 @@ class Settings(BaseSettings):
 
     journal_pool_size: int = 5
     """Postgres journal connections kept warm between writers
-    (``LAKEHOUSE_JOURNAL_POOL_SIZE``). ``0`` pools nothing. It is per dataset: a
-    worker writing many datasets holds up to this many idle connections for each
-    of them, which is the figure to size against postgres
-    ``max_connections``."""
+    (``LAKEHOUSE_JOURNAL_POOL_SIZE``). ``0`` pools nothing. One pool per journal
+    uri per process, whatever the dataset count, so this times the worker count
+    is the idle figure to size against postgres ``max_connections``."""
 
     lock_max_retries: int = 22
     """Retry bound for every wait on a dataset lock: acquiring ``.LOCK`` or

@@ -7,7 +7,7 @@ import threading
 import time
 from binascii import crc32
 from contextlib import contextmanager
-from functools import cached_property
+from functools import cached_property, partial
 from typing import Any, Generator
 from uuid import uuid4
 
@@ -481,15 +481,24 @@ def _ping_on_checkout(conn: Any, record: Any, proxy: Any) -> None:
         raise DisconnectionError(f"Journal connection is dead: {exc}") from exc
 
 
+def _adbc_connect(uri: str) -> Any:
+    """Dial one ADBC connection – the pools' creator, bound to a uri."""
+    if adbc_pg is None:
+        raise ERR_NO_ADBC
+    return adbc_pg.connect(uri)
+
+
+_POOLS: dict[str, Pool] = {}
+"""ADBC pools by journal uri – see [`PostgresJournalStore.pool`][PostgresJournalStore.pool]."""
+
+_POOLS_LOCK = threading.Lock()
+"""Guards `_POOLS`: one store is shared across a worker's threads."""
+
+
 class PostgresJournalStore(SqlJournalStore):
     """Journal on postgres – Arrow row IO through ADBC, binary ``COPY``."""
 
     lock_timeout = ROTATE_LOCK_TIMEOUT
-
-    def __init__(self, dataset: str, uri: str | None = None) -> None:
-        super().__init__(dataset, uri)
-        self._pool_lock = threading.Lock()
-        self._pool: Pool | None = None
 
     def make_engine(self) -> Engine:
         # NullPool: connections opened on demand, closed after use. The
@@ -531,41 +540,53 @@ class PostgresJournalStore(SqlJournalStore):
 
     def connect(self) -> Connection:
         """Open an ADBC connection for Arrow row IO."""
-        if adbc_pg is None:
-            raise ERR_NO_ADBC
-        return adbc_pg.connect(self.adbc_uri)
+        return _adbc_connect(self.adbc_uri)
 
     def pool(self) -> Pool:
-        """The writers' connection pool, built on first use.
+        """The writers' connection pool, built on first use and shared by
+        every journal on the same uri.
 
         ADBC ships no pool of its own, so this is SQLAlchemy's over
         `connect` (the upstream recipe – see
         https://arrow.apache.org/adbc/current/python/recipe/postgresql.html).
         A cold ADBC connection costs way more than the liveness ping.
 
-        ``settings.journal_pool_size`` bounds what is kept *idle* between
-        writers – ``0`` pools nothing at all. ``max_overflow=-1`` keeps the
-        burst behaviour a per-writer ``connect()`` had: writers beyond the
-        pool open their own connection rather than queueing, so peak
-        connections follow write concurrency either way.
+        Keyed on the uri, not on the store: nothing about an ADBC connection
+        is dataset-scoped – `insert_batch` and `read_segment` name their
+        table per statement – while ``get_journal`` caches a store per
+        dataset for the life of the process. A pool per store therefore sized
+        idle connections by *how many datasets a worker had written to*: four
+        workers over seventy datasets exhaust a default postgres
+        ``max_connections`` and every journal write starts failing. One pool
+        per uri bounds them by ``settings.journal_pool_size`` per process,
+        which is what the setting says.
+
+        That size bounds what is kept *idle* between writers – ``0`` pools
+        nothing at all. ``max_overflow=-1`` keeps the burst behaviour a
+        per-writer ``connect()`` had: writers beyond the pool open their own
+        connection rather than queueing, so peak connections follow write
+        concurrency either way.
 
         Built behind a lock rather than as a ``cached_property``: those have
         had no lock since python 3.12, and one store is shared across a
         worker's threads – two threads opening their first writer would each
         build a pool, and only one of them would be reachable to dispose.
         """
-        with self._pool_lock:
-            if self._pool is None:
+        uri = self.adbc_uri
+        with _POOLS_LOCK:
+            pool = _POOLS.get(uri)
+            if pool is None:
                 if settings.journal_pool_size < 1:
-                    self._pool = NullPool(self.connect)
+                    pool = NullPool(partial(_adbc_connect, uri))
                 else:
-                    self._pool = QueuePool(
-                        self.connect,
+                    pool = QueuePool(
+                        partial(_adbc_connect, uri),
                         pool_size=settings.journal_pool_size,
                         max_overflow=-1,
                         events=[(_ping_on_checkout, "checkout")],
                     )
-            return self._pool
+                _POOLS[uri] = pool
+            return pool
 
     def acquire(self) -> Any:
         return self.pool().connect()
@@ -575,12 +596,14 @@ class PostgresJournalStore(SqlJournalStore):
 
         The pool is dropped, not just emptied: ``get_journal`` caches this
         store for the life of the process, so it has to come back up on the
-        next writer.
+        next writer. It is the uri's pool, so this also drops what the other
+        datasets on that journal were sharing – they rebuild on their next
+        writer, and nothing but a shutdown or a test disposes a journal.
         """
-        with self._pool_lock:
-            if self._pool is not None:
-                self._pool.dispose()
-                self._pool = None
+        with _POOLS_LOCK:
+            pool = _POOLS.pop(self.adbc_uri, None)
+        if pool is not None:
+            pool.dispose()
         super().dispose()
 
     def insert_batch(self, conn: Any, batch: pa.Table) -> None:

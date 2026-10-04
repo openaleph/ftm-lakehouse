@@ -911,7 +911,7 @@ def test_storage_journal_postgres_dispose_rebuilds_pool():
         assert store.pool().checkedin() == 1
 
         store.dispose()
-        assert store._pool is None
+        assert store.adbc_uri not in journal_sql._POOLS
 
         with store.writer() as w:
             w.add_statement(make_statement("reborn", "name", "Reborn"))
@@ -922,12 +922,31 @@ def test_storage_journal_postgres_dispose_rebuilds_pool():
 
 
 @pytest.mark.skipif(not PSQL_URI, reason="needs PYTEST_POSTGRESQL_URI")
+def test_storage_journal_postgres_pool_shared_per_uri():
+    """One pool per journal uri, not per dataset: `get_journal` caches a store
+    per dataset forever, so a pool each sized idle connections by how many
+    datasets a worker had written to instead of by `journal_pool_size`."""
+    one = sql_journal(DATASET, PSQL_URI)
+    two = sql_journal(f"{DATASET}_other", PSQL_URI)
+    try:
+        assert one.pool() is two.pool()
+    finally:
+        one.clear()
+        two.clear()
+        one.dispose()
+        two.dispose()
+
+
+@pytest.mark.skipif(not PSQL_URI, reason="needs PYTEST_POSTGRESQL_URI")
 def test_storage_journal_postgres_pool_size_zero(monkeypatch):
     """`0` pools nothing - `QueuePool(pool_size=0)` means *unbounded*, so the
     obvious way to turn pooling off has to be a different pool."""
     monkeypatch.setattr(journal_sql.settings, "journal_pool_size", 0)
     store = sql_journal(DATASET, PSQL_URI)
     store.clear()
+    # the uri's pool outlives any one store, so drop what an earlier test
+    # built before asserting on what this size yields
+    store.dispose()
     try:
         seen = []
         for i in range(2):
