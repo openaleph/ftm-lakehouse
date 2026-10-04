@@ -36,8 +36,6 @@ from ftm_lakehouse.helpers.shards import entity_shard, shard_hex_width
 from ftm_lakehouse.model.statement import PA_TS, SHARDED_SCHEMA, TABLE_RAW
 from ftm_lakehouse.util import parse_byte_size, validate_origin
 
-QUERY_IN_BATCH_SIZE = 5_000
-
 SWEEP_BATCH_SIZE = 50_000
 """Rows per Arrow batch when `ParquetStore.sweep` materialises them as
 Python dicts. DuckDB's own default (1M) is sized for a columnar consumer;

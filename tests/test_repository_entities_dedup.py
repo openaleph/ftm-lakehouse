@@ -9,7 +9,6 @@ whose delete has not been applied. Entity-level reads still fold by
 only its statement-level dedupe / tombstoning waits for merge.
 """
 
-import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -56,7 +55,7 @@ def repo(
 @pytest.fixture
 def local_repo(tmp_path) -> Generator[EntityRepository, None, None]:
     """Local-only fixture for tests that hit ``@no_api`` internals
-    (``view()`` and ``get_changed_entity_ids`` aren't exposed via the API).
+    (``get_changed_entity_ids`` isn't exposed via the API).
     """
     yield _make_local_repo(tmp_path)
 
@@ -189,26 +188,6 @@ def test_query_no_cross_origin_dedupe(repo):
     # Both origins survive; each statement id appears once per origin.
     assert {s.origin for s in stmts} == {"source-a", "source-b"}
     assert set(Counter(s.id for s in stmts).values()) == {2}
-
-
-def test_view_query_assembles_entities_without_merge(local_repo):
-    """LakeStore view().query() yields one entity per id even on an
-    un-merged store: the live view has no statement dedupe, but duplicate
-    rows fold at entity assembly."""
-    repo = local_repo
-    jane = EntityProxy.from_dict(JANE)
-
-    repo.add(jane)
-    repo.flush()
-
-    repo.add(jane)
-    repo.flush()
-
-    # Reach through the parquet store to ftmq's global view – this path
-    # doesn't iterate (shard, bucket); the physical duplicate rows collapse
-    # into one assembled entity per id.
-    entities = list(repo._statements.view().query())
-    assert {e.id for e in entities} == {"jane"}
 
 
 def test_merge_collapses_appended_duplicates(repo):

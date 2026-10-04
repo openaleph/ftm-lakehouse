@@ -142,7 +142,7 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
                 "`ftm-lakehouse maintenance optimize` first."
             )
         session = self.artifacts.session(now, self.kinds, version, self.job.make_diff)
-        count = self.entities._statements.deltatable.count()
+        count = self.entities._statements.num_rows
         with session, self.progress(count) as bar:
             for payload in self.iterate():
                 session.consume(payload)

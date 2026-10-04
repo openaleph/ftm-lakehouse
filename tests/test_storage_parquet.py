@@ -386,7 +386,7 @@ def test_storage_parquet_lookup_queries_its_partitions(tmp_path, monkeypatch):
     every pair, one query each."""
     store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
     _flush(store, _origin_rows("a"))
-    pairs = list(store._iter_shard_buckets())
+    pairs = sorted({(s, b) for s, b, _ in store._list_partitions()})
     assert len(pairs) > 2
 
     executed = []
