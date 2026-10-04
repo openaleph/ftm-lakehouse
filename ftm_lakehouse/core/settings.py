@@ -46,11 +46,12 @@ class Settings(BaseSettings):
     ``max_connections``."""
 
     lock_max_retries: int = 22
-    """Retry bound when acquiring the dataset write fence (``.LOCK``). Retry
+    """Retry bound for every wait on a dataset lock: acquiring ``.LOCK`` or
+    ``.LOCK-MERGE``, and an append backing off while ``.LOCK`` is held. Retry
     ``n`` sleeps ``n + rand(0, 1)`` seconds, so the total wait is roughly
     ``N²/2`` seconds – the default of 22 gives up after ~4.5 minutes; a lock
     left behind by a crashed writer must be released via ``ftm-lakehouse
-    operations unlock``."""
+    maintenance unlock``."""
 
     duckdb_memory_limit: str = "8GB"
 

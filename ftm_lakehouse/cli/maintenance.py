@@ -253,9 +253,9 @@ def cli_migrate(
 def cli_unlock():
     """Forcibly release the dataset write fence.
 
-    Use when a previous writer (flush / merge / vacuum / append)
-    died with the lock held and subsequent writes hang trying to acquire
-    it. The lock is just a file at ``<dataset>/.LOCK``.
+    Use when a previous writer (merge, vacuum, re-shard, an export sweep)
+    died with a lock held and later runs fail to acquire it. The locks are
+    files at ``<dataset>/.LOCK`` and ``<dataset>/.LOCK-MERGE``.
 
     **Confirm no process is actively writing** before running – breaking
     a held lock can corrupt an in-flight write. No-op if no lock is held.

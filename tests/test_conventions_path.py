@@ -339,7 +339,7 @@ def test_conventions_path_datetime_key_defaults():
         (path.STATISTICS, "statistics.json"),
         (path.VERSIONS, "versions"),
         (path.LOCK, ".LOCK"),
-        (path.LOCK_APPENDS, ".LOCK-APPENDS"),
+        (path.LOCK_MERGE, ".LOCK-MERGE"),
         (path.TAGS, "tags/lakehouse"),
         (path.LOCKS, ".locks/lakehouse"),
         (path.ARCHIVE, "archive"),

@@ -27,7 +27,7 @@ Dataset Layout
                 YYYY/MM/...
 
             .LOCK                           # dataset-wide maintenance lock
-            .LOCK-APPENDS/                  # in-flight append markers
+            .LOCK-MERGE                     # merge / export-sweep lock
             .locks/{tenant}/                 # operation-specific locks
             tags/{tenant}/                  # workflow state / cache
 
@@ -124,8 +124,9 @@ VERSIONS = VersionsKey()
 LOCK = StoreKey(".LOCK")
 """dataset-wide maintenance lock key name"""
 
-LOCK_APPENDS = StoreKey(".LOCK-APPENDS")
-"""Prefix for per-writer append marker keys (shared side of the write fence)"""
+LOCK_MERGE = StoreKey(".LOCK-MERGE")
+"""Merge lock – held by ``merge`` and by an export sweep, and taken alongside
+``.LOCK`` by the exclusive maintenance. Appends do not wait for it."""
 
 LOCKS = ScopedKey(".locks", TENANT)
 """Locks, under the default tenant: ``.locks/lakehouse/``.

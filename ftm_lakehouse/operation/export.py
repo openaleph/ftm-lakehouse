@@ -118,17 +118,24 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
             now: Timestamp the run started – the diff files are named after it
                 and the diff states are recorded at it.
 
+        Held under the statement store's merge lock: the sweep pins one
+        snapshot's files, and an ``optimize`` – a merge, then a retention-0
+        vacuum – would delete them under it. Appends are not affected.
+
         Returns:
             Counts per artifact and per diff op.
         """
-        version = self.entities.version
-        session = self.artifacts.session(now, self.kinds, version, self.job.make_diff)
-        count = self.entities._statements.num_rows
-        with session, self.progress(count) as bar:
-            for payload in self.iterate():
-                session.consume(payload)
-                bar.update(len(payload.statements))
-        return session.result()
+        with self.entities.merge_lock():
+            version = self.entities.version
+            session = self.artifacts.session(
+                now, self.kinds, version, self.job.make_diff
+            )
+            count = self.entities._statements.num_rows
+            with session, self.progress(count) as bar:
+                for payload in self.iterate():
+                    session.consume(payload)
+                    bar.update(len(payload.statements))
+            return session.result()
 
     @staticmethod
     def progress(total: int) -> tqdm:

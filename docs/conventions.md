@@ -12,7 +12,7 @@ lakehouse/
     ├── config.yml                # Dataset configuration (shards, compression, ...)
     ├── index.json                # Published dataset index with statistics
     ├── .LOCK                     # Exclusive maintenance fence
-    ├── .LOCK-APPENDS/            # In-flight append markers (shared fence)
+    ├── .LOCK-MERGE               # Merge / export-sweep lock
     │
     ├── archive/                  # Content-addressed file storage
     │   └── {ch[0:2]}/{ch[2:4]}/{ch[4:6]}/{checksum}/

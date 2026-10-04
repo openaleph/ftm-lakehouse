@@ -6,6 +6,7 @@ from functools import cached_property
 from typing import Generator, Iterable, Iterator, cast
 
 import pyarrow as pa
+from anystore.interface.lock import Lock
 from anystore.types import Uri
 from anystore.util import Took, mask_uri
 from followthemoney import EntityProxy, Statement, StatementEntity
@@ -232,6 +233,14 @@ class EntityRepository(DatasetHandle):
     def vacuum(self, retention_hours: int = 0) -> None:
         """Delete obsolete parquet files tombstoned in the Delta log."""
         self._statements.vacuum(retention_hours=retention_hours)
+
+    @no_api
+    def merge_lock(self) -> Lock:
+        """The statement store's merge lock – what an export sweep holds so an
+        ``optimize`` cannot vacuum the files it is reading. See
+        [`ParquetStore.merge_lock`][ParquetStore.merge_lock].
+        """
+        return self._statements.merge_lock()
 
     @no_api
     def sweep(

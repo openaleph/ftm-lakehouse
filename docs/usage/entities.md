@@ -337,7 +337,7 @@ Dedup is `merge`'s job alone – there is no write-time collapse to lean on, so 
 
 ## Maintenance
 
-Independent async operations on the parquet statement store, held under the exclusive [maintenance fence](../architecture.md#sharded-append-only-pattern) so they never race each other or in-flight appends.
+Independent async operations on the parquet statement store, serialised by the dataset's [locks](../architecture.md#sharded-append-only-pattern): `merge` holds the merge lock, which appends do not wait for, so ingest flows through it; the in-place rewrites hold the exclusive fence as well.
 
 ### Flush (journal → parquet)
 

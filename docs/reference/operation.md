@@ -53,7 +53,7 @@ Diff entries carry one of three ops, per the [OpenSanctions delta format](https:
 
 ## OptimizeOperation
 
-Optimize the parquet statement store in one pass: merge (rewrite every dirty partition into one canonical file – collapse duplicates, fold `first_seen` to the min, `last_seen` to the max, drop tombstones older than the grace cutoff per `LAKEHOUSE_GRACE_PERIOD_DAYS`) and vacuum (delete the files that replaced). Reads reconcile un-merged rows, so this is an optimisation, not a precondition. Each step acquires the exclusive maintenance fence (`.LOCK`) and waits for in-flight append markers to drain.
+Optimize the parquet statement store in one pass: merge (rewrite every dirty partition into one canonical file – collapse duplicates, fold `first_seen` to the min, `last_seen` to the max, drop tombstones older than the grace cutoff per `LAKEHOUSE_GRACE_PERIOD_DAYS`) and vacuum (delete the files that replaced). Reads reconcile un-merged rows, so this is an optimisation, not a precondition. `merge` holds the merge lock (`.LOCK-MERGE`), which appends do not wait for, so ingest flows through it; `vacuum` takes the exclusive fence (`.LOCK`) as well.
 
 ::: ftm_lakehouse.operation.maintenance.OptimizeJob
     options:

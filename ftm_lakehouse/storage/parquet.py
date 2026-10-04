@@ -41,7 +41,6 @@ from itertools import batched
 from threading import RLock
 from typing import Any, Callable, Iterable, Iterator, cast
 from urllib.parse import unquote
-from uuid import uuid4
 
 import duckdb
 import pyarrow as pa
@@ -470,18 +469,16 @@ class ParquetStore:
         return self._lake.default_view().stats()
 
     def _write_lock(self) -> Lock:
-        """Exclusive side of the dataset write fence.
+        """The exclusive dataset write fence – ``{dataset_root}/.LOCK``.
 
-        Held by maintenance ([`merge`][ParquetStore.merge],
-        [`vacuum`][ParquetStore.vacuum] via
-        `_maintenance_fence`) and by the first-ever
-        [`append`][ParquetStore.append] of a dataset (table creation must not
-        race). The lock lives at
-        ``{dataset_root}/.LOCK`` per ``path.LOCK``.
-
-        Regular appends do **not** take this lock – they register a shared
-        marker instead (`_append_fence`); Delta's optimistic
-        concurrency serializes concurrent append commits safely on its own.
+        Held by the maintenance that rewrites or drops files in place –
+        re-shard, [`delete_origin`][ParquetStore.delete_origin], schema changes,
+        [`vacuum`][ParquetStore.vacuum], via `_maintenance_fence` – and by the
+        first-ever [`append`][ParquetStore.append] of a dataset (table creation
+        must not race). Appends back off while it is held
+        (`_await_unlocked`) and take no lock of their own: Delta's optimistic
+        concurrency serializes concurrent append commits. [`merge`][ParquetStore.merge]
+        does not take it either – see [`merge_lock`][ParquetStore.merge_lock].
 
         Acquisition is bounded by ``settings.lock_max_retries`` (total wait
         roughly ``N²/2`` seconds); entering the returned lock raises
@@ -511,69 +508,50 @@ class ParquetStore:
             do_raise=True,
         )(attempt)()
 
-    def _await(self, ready: Callable[[], bool], what: str) -> None:
-        """Block until ``ready()`` is true, with the fence's retry bound."""
+    def merge_lock(self) -> Lock:
+        """The merge lock – ``{dataset_root}/.LOCK-MERGE``.
+
+        Held by [`merge`][ParquetStore.merge] and by an export sweep, and taken
+        alongside `_write_lock` by the exclusive maintenance. Appends do not
+        wait for it: a merge removes exactly the files it read and an append
+        only adds, so Delta commits both whichever lands first, and a read
+        reconciles the result – ingest keeps flowing through an hours-long
+        merge. A sweep holds it so an ``optimize`` (merge, then a retention-0
+        [`vacuum`][ParquetStore.vacuum]) cannot delete the files the sweep's
+        snapshot still names.
+        """
+        return Lock(
+            self._store,
+            key=path.LOCK_MERGE,
+            max_retries=self.settings.lock_max_retries,
+        )
+
+    def _await_unlocked(self) -> None:
+        """Back off while the exclusive ``.LOCK`` is held, with the fence's
+        retry bound. Without a marker of its own, an append that passed this
+        check can still be in flight when maintenance takes the lock; for a
+        merge that is fine, and the in-place rewrites retry their commit
+        ([`delete_origin`][ParquetStore.delete_origin]) or run with writers
+        stopped ([`shard`][ParquetStore.shard])."""
 
         def check() -> None:
-            if not ready():
-                raise RuntimeError(
-                    f"Write fence busy: {what}. If a writer crashed, release "
-                    "the fence via `ftm-lakehouse maintenance unlock`."
-                )
-
-        self._fence_retry(check)
-
-    def _append_markers(self) -> list[str]:
-        """Keys of all currently registered append markers."""
-        return list(self._store.iterate_keys(prefix=str(path.LOCK_APPENDS)))
-
-    @contextmanager
-    def _append_fence(self) -> Iterator[None]:
-        """Shared (append) side of the dataset write fence.
-
-        Registers a marker key under ``.LOCK-APPENDS/`` and only *then*
-        checks the maintenance ``.LOCK`` – the store-then-load order makes
-        the handshake sound on a linearizable store: when the ``.LOCK``
-        check sees no lock, the marker write is already visible to any
-        later drain poll by a maintenance holder, so
-        `_maintenance_fence` can never pass its drain while an
-        unnoticed append is in flight. When ``.LOCK`` is held, the marker
-        is removed *before* backing off (a parked appender must not
-        deadlock the drain), then register-and-check retries under the
-        fence's usual bound.
-
-        Concurrent appends never block each other – Delta append commits
-        are blind appends that delta-rs serializes via optimistic commit
-        retries. A marker left behind by a crashed appender blocks
-        maintenance until released via [`unlock`][ParquetStore.unlock]
-        (``ftm-lakehouse maintenance unlock``).
-        """
-        marker = f"{path.LOCK_APPENDS}/{uuid4().hex}"
-
-        def register() -> None:
-            self._store.touch(marker)
             if self._store.exists(path.LOCK):
-                self._store.delete(marker, ignore_errors=True)
                 raise RuntimeError(
                     f"Write fence busy: maintenance lock `{path.LOCK}` is "
                     "held. If a writer crashed, release the fence via "
                     "`ftm-lakehouse maintenance unlock`."
                 )
 
-        self._fence_retry(register)
-        try:
-            yield
-        finally:
-            self._store.delete(marker, ignore_errors=True)
+        self._fence_retry(check)
 
     def _ensure_table(self) -> None:
         """Create the Delta table (as an empty commit) if it does not exist.
 
         Runs under the exclusive write lock so two racing first imports
         cannot both commit version ``0``. Establishing existence here –
-        once, at the first write – lets [`append`][ParquetStore.append] always take the
-        shared append fence with ``mode="append"`` instead of
-        special-casing creation inside the hot write path.
+        once, at the first write – lets [`append`][ParquetStore.append] always
+        write with ``mode="append"`` instead of special-casing creation inside
+        the hot write path.
         """
         if self.exists:
             return
@@ -591,42 +569,34 @@ class ParquetStore:
 
     @contextmanager
     def _maintenance_fence(self) -> Iterator[None]:
-        """Exclusive fence for partition-rewriting maintenance.
-
-        Acquires the ``.LOCK`` write lock (fencing off other maintenance and
-        new appends), then waits for in-flight append markers to drain so a
-        rewrite never overlaps an append it could tombstone.
+        """Exclusive fence for maintenance that rewrites or drops files in
+        place: the ``.LOCK`` write lock (fencing off other maintenance and new
+        appends) plus the merge lock, so a merge or an export sweep is never
+        under way at the same time.
         """
-        with self._write_lock():
-            self._await(
-                lambda: not self._append_markers(),
-                f"append markers under `{path.LOCK_APPENDS}/` are present",
-            )
+        with self._write_lock(), self.merge_lock():
             yield
 
     def unlock(self) -> bool:
         """Forcibly release the dataset write fence.
 
         Operator escape hatch for the case where a writer process died
-        with the fence held (or an attacker held it on purpose). Releases
-        both sides: the exclusive ``.LOCK`` file and any append markers
-        under ``.LOCK-APPENDS/``.
+        with a lock held (or an attacker held it on purpose). Releases both
+        lock files: the exclusive ``.LOCK`` and the ``.LOCK-MERGE`` of
+        [`merge_lock`][ParquetStore.merge_lock].
 
         **Use sparingly** – breaking a fence that's still held by a live
         writer can corrupt a write in flight. Confirm no process is
         actively writing before running.
 
         Returns:
-            ``True`` if a lock or marker was released, ``False`` if the
-            fence was clear.
+            ``True`` if a lock was released, ``False`` if both were clear.
         """
         released = False
-        if self._store.exists(path.LOCK):
-            self._store.delete(path.LOCK)
-            released = True
-        for marker in self._append_markers():
-            self._store.delete(marker, ignore_errors=True)
-            released = True
+        for key in (path.LOCK, path.LOCK_MERGE):
+            if self._store.exists(key):
+                self._store.delete(key)
+                released = True
         return released
 
     def evolve_schema(self) -> list[str]:
@@ -736,15 +706,15 @@ class ParquetStore:
         order, and [`merge`][ParquetStore.merge] rewrites every partition an append touched
         into the file sort order anyway.
 
-        Held under the *shared* side of the write fence
-        (`_append_fence`): concurrent appends run in parallel – Delta
-        serializes their commits via optimistic concurrency – while
-        [`merge`][ParquetStore.merge] / [`vacuum`][ParquetStore.vacuum] wait
-        for the append markers to drain
-        before rewriting partitions. Table creation happens
-        once in `_ensure_table` (under the exclusive lock, so two
-        racing imports can't both commit version ``0``); the write loop
-        itself always appends. The files delta-rs writes are named
+        Takes no lock: concurrent appends run in parallel – Delta serializes
+        their commits via optimistic concurrency – and a concurrent
+        [`merge`][ParquetStore.merge] is harmless, since it removes only the
+        files it read and a read reconciles the rest. Appends only back off
+        while the exclusive ``.LOCK`` of the in-place rewrites is held
+        (`_await_unlocked`). Table creation happens once in `_ensure_table`
+        (under that lock, so two racing imports can't both commit version
+        ``0``); the write loop itself always appends. The files delta-rs
+        writes are named
         ``part-*``, which is what marks their partitions dirty for the next
         [`merge`][ParquetStore.merge] (`MERGED_PREFIX`) – no tag to stamp.
 
@@ -771,20 +741,20 @@ class ParquetStore:
         )
         with self._tags.touch(tag.STATEMENTS_UPDATED):
             self._ensure_table()
-            with self._append_fence():
-                with self._snapshot_lock:
-                    snapshot = self._current_snapshot()
-                    if snapshot is None:
-                        raise RuntimeError(f"Statement store vanished: `{self.uri}`")
-                    for bucket in buckets:
-                        sub = batch.filter(pc.equal(batch["bucket"], bucket))
-                        write_deltalake(
-                            snapshot,
-                            sub,
-                            partition_by=PARTITIONS,
-                            mode="append",
-                            writer_properties=writer_for_bucket(bucket),
-                        )
+            self._await_unlocked()
+            with self._snapshot_lock:
+                snapshot = self._current_snapshot()
+                if snapshot is None:
+                    raise RuntimeError(f"Statement store vanished: `{self.uri}`")
+                for bucket in buckets:
+                    sub = batch.filter(pc.equal(batch["bucket"], bucket))
+                    write_deltalake(
+                        snapshot,
+                        sub,
+                        partition_by=PARTITIONS,
+                        mode="append",
+                        writer_properties=writer_for_bucket(bucket),
+                    )
 
     @property
     def needs_merge(self) -> bool:
@@ -805,8 +775,8 @@ class ParquetStore:
         fragment rows: keep the latest emission per ``(entity_id, prop,
         fragment)`` group; fold ``first_seen`` to the min; drop tombstones older
         than the grace cutoff) and replaces the partition's files with the
-        result. Held under the exclusive maintenance fence (``path.LOCK`` +
-        append-marker drain, `_maintenance_fence`).
+        result. Held under [`merge_lock`][ParquetStore.merge_lock], not the
+        exclusive fence: appends keep flowing while this runs.
 
         Only dirty partitions are rewritten – those holding a file this
         method did not write (`MERGED_PREFIX`), i.e. appended since their
@@ -861,9 +831,7 @@ class ParquetStore:
         workers = max(self.settings.merge_workers, 1)
         config = merge_duckdb_config(workers)
         merged = skipped = 0
-        with self._maintenance_fence():
-            # appends are fenced off from here on, so no partition can be
-            # written after this and still read as merged
+        with self.merge_lock():
             root, partitions = self._snapshot_partitions()
             tasks: list[MergeTask] = []
             for partition, (files, clean) in partitions.items():
@@ -1099,9 +1067,10 @@ class ParquetStore:
         partitions and Delta drops their files instead of rewriting rows –
         unlike [`merge`][ParquetStore.merge]'s tombstone reap this is
         immediate, with no grace period and nothing left to collapse. Held
-        under the exclusive maintenance fence
-        (`_maintenance_fence`), like the other partition-level
-        rewrites.
+        under the exclusive maintenance fence (`_maintenance_fence`), like the
+        other in-place rewrites; an append to the same origin that was already
+        in flight when the fence closed conflicts with the delete's commit,
+        which is retried under the fence's bound.
 
         Stamps
         [`STATEMENTS_UPDATED`][ftm_lakehouse.core.conventions.tag.STATEMENTS_UPDATED]
@@ -1123,11 +1092,18 @@ class ParquetStore:
         if not self.exists:
             return 0
         with self._maintenance_fence(), Took() as t, self._snapshot_lock:
-            snapshot = self._current_snapshot()
-            if snapshot is None:
+            if self._current_snapshot() is None:
                 return 0
-            # safe to interpolate: `validate_origin` rejects quotes
-            metrics = snapshot.delete(f"origin = '{origin}'")
+            metrics: dict[str, Any] = {}
+
+            def drop() -> None:
+                nonlocal metrics
+                snapshot = self._current_snapshot()
+                assert snapshot is not None
+                # safe to interpolate: `validate_origin` rejects quotes
+                metrics = snapshot.delete(f"origin = '{origin}'")
+
+            self._fence_retry(drop)
             deleted = int(metrics.get("num_deleted_rows") or 0)
             if deleted:
                 self._tags.set(tag.STATEMENTS_UPDATED)

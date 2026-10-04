@@ -433,3 +433,40 @@ def test_storage_parquet_shard_escaped_origin(tmp_path):
     store.merge()
     assert {s.origin for s in store.query_statements()} == {origin}
     assert _row_count(store) == 20
+
+
+def test_storage_parquet_merge_commits_across_a_racing_append(tmp_path, monkeypatch):
+    """An append that lands while a merge runs is kept: the merge removes
+    only the files it read, the append only adds, Delta commits both, and the
+    read reconciles the result. The appended file leaves the partition dirty
+    for the next merge."""
+    store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
+    other = ParquetStore(tmp_path, DATASET, shards=SHARDS)  # another process
+    _flush(store, _origin_rows("a", entities=1))  # e0 twice
+    partition = (entity_shard("e0", SHARDS), "thing", "a")
+
+    commit = store._commit_merged
+
+    def racing_commit(batch):
+        rows = [_pack(make_statement("e0", "name", "Name 0"))]  # a third copy
+        rows.append(_pack(make_statement("e1", "name", "Name 1")))  # a new entity
+        for row in rows:
+            row["origin"] = "a"
+        _flush(other, rows)
+        commit(batch)
+
+    monkeypatch.setattr(store, "_commit_merged", racing_commit)
+    store.merge()
+
+    files = _partition_files(store)[partition]
+    assert sum(f.startswith(MERGED_PREFIX) for f in files) == 1
+    assert sum(f.startswith("part-") for f in files) == 1  # the racing e0 copy
+    assert store.needs_merge
+    statements = sorted((s.entity_id, s.value) for s in store.query_statements())
+    assert statements == [("e0", "Name 0"), ("e1", "Name 1")]
+    assert _row_count(store) == 3  # merged e0, appended e0, appended e1
+
+    monkeypatch.setattr(store, "_commit_merged", commit)  # no more racing
+    store.merge()
+    assert not store.needs_merge
+    assert _row_count(store) == 2
