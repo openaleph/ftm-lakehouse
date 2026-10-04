@@ -7,6 +7,7 @@ from typing import Generator, Iterable, Iterator, cast
 
 import pyarrow as pa
 from anystore.interface.lock import Lock
+from anystore.io.progress import Throughput
 from anystore.types import Uri
 from anystore.util import Took, mask_uri
 from followthemoney import EntityProxy, Statement, StatementEntity
@@ -244,7 +245,10 @@ class EntityRepository(DatasetHandle):
 
     @no_api
     def sweep(
-        self, with_csv_export: bool = True, tee: bool = True
+        self,
+        with_csv_export: bool = True,
+        tee: bool = True,
+        throughput: Throughput | None = None,
     ) -> Iterator[StatementDict]:
         """One scan of the store, optionally writing ``statements.csv`` from it.
 
@@ -255,12 +259,13 @@ class EntityRepository(DatasetHandle):
             with_csv_export: Write the ``statements.csv`` artifact from the same
                 Arrow batches the rows come from.
             tee: Yield row dicts. ``False`` keeps the scan columnar.
+            throughput: Counter fed the Arrow bytes of every batch scanned.
 
         Yields:
             ``StatementDict`` rows, unless ``tee`` is off.
         """
         key = self.EXPORTS_STATEMENTS if with_csv_export else None
-        yield from self._statements.sweep(key, tee)
+        yield from self._statements.sweep(key, tee, throughput)
 
     @property
     @no_api

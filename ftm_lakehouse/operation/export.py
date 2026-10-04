@@ -19,16 +19,15 @@ entity stream – ``statistics.json`` (a global SQL aggregate) and ``index.json`
 (store metadata) – are written directly, outside the sweep.
 """
 
-import warnings
 from datetime import datetime
 from functools import cached_property
 from typing import Any, Iterator
 
+from anystore.io import SyncProgressBar
+from anystore.io.progress import Throughput
 from anystore.util import mask_uri
 from ftmq.model.stats import DatasetStats
 from rigour.time import utc_now
-from tqdm import TqdmExperimentalWarning
-from tqdm.rich import tqdm
 
 from ftm_lakehouse.core.conventions import tag
 from ftm_lakehouse.core.settings import Settings
@@ -98,17 +97,21 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
         """
         self.entities.flush()
 
-    def iterate(self) -> Iterator[EntityPayload]:
+    def iterate(self, throughput: Throughput | None = None) -> Iterator[EntityPayload]:
         """Every entity in the store, folded from one scan.
 
         Writes ``statements.csv`` from the same Arrow batches when this run
         covers it, so the csv costs a tee rather than a second pass. Rows are
         only materialised when something downstream needs them – a
         statements-only export stays columnar end to end.
+
+        Args:
+            throughput: Counter fed the Arrow bytes the scan pulls – the
+                progress bar's, so it shows how fast the sweep reads.
         """
         with_csv_export = ExportKind.statements in self.kinds
         tee = bool({ExportKind.entities, ExportKind.documents} & set(self.kinds))
-        rows = self.entities.sweep(with_csv_export=with_csv_export, tee=tee)
+        rows = self.entities.sweep(with_csv_export, tee, throughput)
         yield from aggregate_unsafe(rows, self.dataset)
 
     def export(self, now: datetime) -> dict[str, int]:
@@ -131,20 +134,13 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
                 now, self.kinds, version, self.job.make_diff
             )
             count = self.entities._statements.num_rows
-            with session, self.progress(count) as bar:
-                for payload in self.iterate():
+            # advanced per statement folded; its throughput is the Arrow
+            # bytes the scan pulls from the store
+            with session, SyncProgressBar("Exporting statements", count) as bar:
+                for payload in self.iterate(bar.throughput):
                     session.consume(payload)
-                    bar.update(len(payload.statements))
+                    bar.advance(len(payload.statements))
             return session.result()
-
-    @staticmethod
-    def progress(total: int) -> tqdm:
-        """Progress bar over the sweep, counted in statements."""
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", TqdmExperimentalWarning)
-            return tqdm(
-                total=total, unit="Statement", dynamic_ncols=True, smoothing=0.1
-            )
 
     def export_statistics(self) -> None:
         """Write ``statistics.json`` from the store's global SQL aggregate."""

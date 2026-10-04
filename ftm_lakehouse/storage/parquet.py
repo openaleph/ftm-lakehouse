@@ -44,6 +44,8 @@ import pyarrow as pa
 import pyarrow.compute as pc
 from anystore.decorators import error_handler
 from anystore.interface.lock import Lock
+from anystore.io import SyncProgressBar
+from anystore.io.progress import Throughput
 from anystore.logging import get_logger
 from anystore.logic.compress import CompressKind
 from anystore.store import get_store
@@ -110,6 +112,11 @@ Files = list[tuple[str, int]]
 percent-decoded – the form DuckDB (prefixed with the table root) and a Delta
 ``add`` / ``remove`` action take; the log stores it encoded once more, and
 ``get_add_actions`` hands it back that way."""
+
+MergedPartition = tuple[Partition, Files, tuple[str, int, int] | None, timedelta]
+"""What `ParquetStore._merge_partition` produced for one partition: its key,
+the files it read, the ``(path, size, rows)`` it wrote – ``None`` when the
+merge reaped everything – and how long it took."""
 
 Pairs = dict[tuple[str, str], list[tuple[Partition, Files, bool]]]
 """``(partition, files, clean)`` per ``(shard, bucket)`` pair, one entry per
@@ -762,17 +769,20 @@ class ParquetStore:
                 if force or not clean
             ]
             skipped = len(partitions) - len(dirty)
-            results = (
-                (
-                    partition,
-                    files,
-                    *self._merge_partition(con, root, partition, files, grace_cutoff),
-                )
-                for partition, files in dirty
-            )
-            for batch in batched(results, MERGE_COMMIT_BATCH):
-                self._commit_merged(batch)
-                merged += len(batch)
+            # one bar, advanced per partition, its throughput the bytes read
+            with SyncProgressBar("Merging partitions", len(dirty)) as bar:
+
+                def results() -> Iterator[MergedPartition]:
+                    for partition, files in dirty:
+                        written, took = self._merge_partition(
+                            con, root, partition, files, grace_cutoff
+                        )
+                        bar.advance(size=sum(size for _, size in files))
+                        yield partition, files, written, took
+
+                for batch in batched(results(), MERGE_COMMIT_BATCH):
+                    self._commit_merged(batch)
+                    merged += len(batch)
             if merged:
                 with self._snapshot_lock, Took() as t:
                     snapshot = self._current_snapshot()
@@ -831,12 +841,7 @@ class ParquetStore:
             return (file, int(stats[2]), int(stats[1])), t.took
         return None, t.took
 
-    def _commit_merged(
-        self,
-        batch: Iterable[
-            tuple[Partition, Files, tuple[str, int, int] | None, timedelta]
-        ],
-    ) -> None:
+    def _commit_merged(self, batch: Iterable[MergedPartition]) -> None:
         """Commit a batch of merged partitions as one Delta transaction.
 
         Each partition's merged file is added and every file it was merged
@@ -1104,7 +1109,10 @@ class ParquetStore:
         self.log.info("Vacuumed.", took=t.took)
 
     def sweep(
-        self, csv_key: str | None = None, tee: bool = True
+        self,
+        csv_key: str | None = None,
+        tee: bool = True,
+        throughput: Throughput | None = None,
     ) -> Iterator[StatementDict]:
         """One scan of the live view, teeing Arrow batches two ways.
 
@@ -1131,6 +1139,8 @@ class ParquetStore:
             tee: Yield row dicts. ``False`` keeps the scan purely
                 columnar – nothing is materialised in Python – which is what
                 a csv-only export wants.
+            throughput: Counter fed the Arrow bytes of every batch scanned –
+                a progress bar's, so it can show how fast the scan moves.
 
         Yields:
             ``StatementDict`` rows, unless ``tee`` is off.
@@ -1148,6 +1158,8 @@ class ParquetStore:
             writer: CSVWriter | None = None
             for reader in self._execute_partitioned(sql, batch_size):
                 for batch in reader:
+                    if throughput is not None:
+                        throughput.add(batch.nbytes)
                     if out is not None:
                         if writer is None:
                             writer = CSVWriter(out, batch.schema)
