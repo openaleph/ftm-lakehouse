@@ -22,7 +22,7 @@ for entity in aggregate_unsafe(statement_dicts, "my_dataset"):
 
 ## Parquet helpers
 
-The DuckDB config, the `statement` / `statement_raw` view-SQL builders, and the merge-query builder used by `ParquetStore` via ftmq's `LakeStore`.
+The DuckDB config, the per-source `statement` builders a read picks between, the `LakeStore` view builders, and the merge-query builder used by `ParquetStore`.
 
 ::: ftm_lakehouse.logic.parquet.duckdb_config
     options:
@@ -61,7 +61,7 @@ The two view builders feed ftmq's `LakeStore`, whose connection-level views over
         heading_level: 3
         show_root_heading: true
 
-An executable DuckDB SQL string holding all dedupe / fragment-supersession logic; it collapses one `(shard, bucket, origin)` partition for physical rewrite. `ParquetStore.merge` runs it over the partition's files (`partition_source_sql`) rather than `statement_raw`, so a merge never replays the Delta log per partition; only key groups with more than one row go through its windows. Change-detection for diff exports no longer has its own SQL builder – it is an ftmq `Query` over the raw source (`ParquetStore.get_entity_ids(q, source=store.source_raw)`).
+An executable DuckDB SQL string holding all dedupe / fragment-supersession logic; it collapses one `(shard, bucket, origin)` partition for physical rewrite. `ParquetStore.merge` runs it over the partition's files (`partition_source_sql`) rather than `statement_raw`, so a merge never replays the Delta log per partition; `dedupe_rows_sql` is the same query without the grace predicate and the sort – what a read over a dirty partition runs. Change-detection for diff exports no longer has its own SQL builder – it is an ftmq `Query` over the raw source (`ParquetStore.get_entity_ids(q, source=store.source_raw)`).
 
 ::: ftm_lakehouse.logic.parquet.partition_source_sql
     options:

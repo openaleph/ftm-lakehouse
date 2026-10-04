@@ -101,13 +101,13 @@ The parquet statement store is partitioned by `(shard, bucket, origin)`:
 - `bucket` – coarse FtM schema group (thing / interval / document / page / pages / mention)
 - `origin` – caller-supplied source tag
 
-Each row carries `first_seen`, `last_seen`, `fragment`, `role`, and `deleted_at` directly in the parquet schema (no separate translog). The live `statement` query view is a plain `WHERE deleted_at IS NULL` scan – **no read-time dedupe** – so a filter (`schema` / `prop` / `entity_id`) pushes straight through to DuckDB's per-file statistics.
+Each row carries `first_seen`, `last_seen`, `fragment`, `role`, and `deleted_at` directly in the parquet schema (no separate translog). Reads reconcile: a read over a partition holding files `merge` did not write runs the dedupe query, while a partition made of merge output alone – canonical by construction – is a plain `WHERE deleted_at IS NULL` scan whose filters (`schema` / `prop` / `entity_id`) push straight through to DuckDB's per-file statistics; `entity_id` sits in the dedupe windows' keys, so an id lookup pushes below them too.
 
 Writes are **append-only**: `append` derives each row's `shard` from its `entity_id`, then writes one parquet file per `(shard, bucket, origin)` partition the batch spans. It deliberately does not sort – nothing reads in physical order, and `merge` rewrites every partition an append touched anyway. Duplicates and tombstones land as additional rows.
 
 Deriving the partition key at the last moment is what keeps the layout honest. Rows reach `append` in `JOURNAL_SCHEMA`, which has no `shard` column at all: a journalled row routinely outlives the process that wrote it, so a shard key packed at write time could encode a count that is no longer configured. Because the key is a function of `entity_id` and the *writing store's* count, a producer that resolved a stale config can no longer mis-route a partition – at worst it hands over a batch spanning several shards, which costs extra files that the next `merge` rewrites into one per partition.
 
-**Correctness assumes an optimized store.** Dedupe, fragment supersession, `first_seen`/`last_seen` folding, and tombstone reaping all happen in `merge`; between a write and the next merge, reads can surface duplicate ids and rows whose delete has not been applied. Run `optimize` before you query or export. `merge` routes every row into one of two isolated branches on the `fragment` column (empty-string sentinel, never NULL):
+**Reads are correct on any store; `merge` is compaction.** Dedupe, fragment supersession, `first_seen`/`last_seen` folding and tombstone hiding happen in one DuckDB query, `_dedupe_sql`, which a read runs over a dirty partition and `merge` runs to rewrite it – so the rows a read returns are the same before and after a merge, and what a merge changes is the cost (a clean partition is a plain scan) and the disk (tombstones past grace and the rows they shadow are gone). The query routes every row into one of two isolated branches on the `fragment` column (empty-string sentinel, never NULL):
 
 - **non-fragment** (`fragment = ''`, the default): content-addressed dedup – latest `last_seen` per statement `id` wins; distinct ids never interact. Scoped per `(shard, bucket, origin)` partition, so the *same* statement observed under two origins is kept once per origin (merge cannot cross origin partitions).
 - **fragment-bearing** (`fragment != ''`): supersession per `(origin, entity_id, prop, fragment, role)` group – every row tied at the group's max `last_seen` survives (the latest emission, multi-valued props included), older emissions go. See [Fragment Supersession](usage/entities.md#fragment-supersession) for semantics and the producer contract.
@@ -143,7 +143,7 @@ That's why the **default is `0`** – a single shard (`shard <= 1` collapses to 
 
 `bucket` and `origin` are invariant under a re-shard – only `shard` moves – so the rewrite runs one `write_deltalake` per `(bucket, origin)` group: every source partition of the group streams through a single chained Arrow reader (`SELECT *` with the `shard` column recomputed from `entity_id` in DuckDB), and the group's partitions are replaced wholesale in one atomic commit. Nothing is materialized in Python. Like `merge`, the re-shard reads the Delta log once: source partitions are read from one snapshot's file lists (`read_parquet`, no `delta_scan` per partition) and every group write goes through that same table handle.
 
-Deliberately **not** a merge: rows are neither deduped nor sorted on the way through, because the trigger is a store whose partitions have grown too big to query well, not one whose content is wrong. Every rewritten partition therefore comes out marked dirty – run `optimize` afterwards to restore canonical content and file sort order. Re-running a re-shard is safe: each row's target shard is a function of its `entity_id` and the target count alone, so a run interrupted between group commits is repaired by running it again.
+Deliberately **not** a merge: rows are neither deduped nor sorted on the way through, because the trigger is a store whose partitions have grown too big to query well, not one whose content is wrong. Every rewritten partition therefore comes out dirty (delta-rs names its files `part-*`), so reads reconcile it; run `optimize` afterwards to get plain-scan reads and the file sort order back. Re-running a re-shard is safe: each row's target shard is a function of its `entity_id` and the target count alone, so a run interrupted between group commits is repaired by running it again.
 
 Two caveats. The write fence holds off parquet appends but not journal writes, so statements journalled under the old count and flushed after the rewrite land in the wrong partition – **run it with writers stopped**. And the operation skips when `config.yml` already names the target count, so a config edited by hand to a count the store was never rewritten for needs `--force`.
 
@@ -241,7 +241,7 @@ core/
   config.py             # Config loading utilities (load_config)
   conventions/
     path.py             # Path patterns (archive/, exports/, etc.)
-    tag.py              # Tag keys (journal/last_updated, exports/statements, etc.)
+    tag.py              # Tag keys (statements/last_updated, exports/statements, etc.)
 ```
 
 **Principles:**
@@ -360,17 +360,14 @@ flowchart TD
     C --> |"export(statistics)"| F[statistics.json]
     F --> |"export(index)"| G[index.json]
 
-    B -.-> T1[journal/last_updated]
-    B -.-> T1b[journal/last_flushed]
     C -.-> T2[statements/last_updated]
-    C -.-> T2a[statements/last_optimized]
     D -.-> T3[exports/statements]
     E -.-> T4[exports/entities_json]
     F -.-> T5[exports/statistics]
 
     classDef tag fill:#f9f,stroke:#333,stroke-width:1px
     classDef storage fill:#69b,stroke:#333,stroke-width:2px,color:#fff
-    class T0,T1,T1b,T2,T2a,T3,T4,T5 tag
+    class T0,T2,T3,T4,T5 tag
     class B,C,AR storage
 ```
 

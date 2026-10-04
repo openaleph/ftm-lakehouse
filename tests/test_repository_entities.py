@@ -169,7 +169,7 @@ def test_repository_entities_export_diff(tmp_path, settle):
     repo.flush()
     assert repo.version == 2
 
-    # a diff reads canonical rows, so the store has to be merged first
+    # un-merged or merged – a diff reads reconciled rows either way
     settle(repo)
     _export(tmp_path)
     diff_files = list(
@@ -199,7 +199,7 @@ def test_repository_entities_export_diff(tmp_path, settle):
     assert delta["op"] == "ADD"
     assert delta["entity"]["id"] == "bob"
 
-    # Re-adding jane without changes doesn't create new diff after merge
+    # Re-adding jane without changes doesn't create a new diff
     with repo.writer() as writer:
         writer.add_entity(make_entity(JANE))
     repo.flush()
@@ -384,7 +384,7 @@ def test_repository_entities_export_diff_no_changes(tmp_path, settle):
     repo.flush()
     assert repo.version == 2
 
-    # a diff reads canonical rows, so the store has to be merged first
+    # un-merged or merged – a diff reads reconciled rows either way
     settle(repo)
     _export(tmp_path)
 

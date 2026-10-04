@@ -143,7 +143,7 @@ def test_repository_document_multi_metadata(tmp_path):
     assert "same.txt" in names
 
 
-def test_repository_document_export_diff(tmp_path, fixtures_path):
+def test_repository_document_export_diff(tmp_path, fixtures_path, settle):
     """Test incremental diff export using translog-based change detection.
 
     The first export writes no file - it only records the state the next diff
@@ -169,10 +169,7 @@ def test_repository_document_export_diff(tmp_path, fixtures_path):
     entities.flush()
     assert entities._statements.version == 2
 
-    # a diff reads canonical rows, so the store has to be merged first
-    entities.merge()
-
-    # First export - only records the diff state, writes no file
+    settle(entities)
     _export(tmp_path)
 
     diff_files = list((tmp_path / path.DIFFS_DOCUMENTS).glob("*.diff.csv"))
@@ -183,7 +180,7 @@ def test_repository_document_export_diff(tmp_path, fixtures_path):
     file3.write_text("new content")
     _archive_with_entities(archive, entities, file3)
     entities.flush()
-    entities.merge()  # a diff reads canonical rows
+    settle(entities)
 
     # Incremental diff - captures changes via translog
     _export(tmp_path)
@@ -200,7 +197,7 @@ def test_repository_document_export_diff(tmp_path, fixtures_path):
     assert incremental_docs[0].name == "new_file.txt"
 
 
-def test_repository_document_export_diff_no_changes(tmp_path, fixtures_path):
+def test_repository_document_export_diff_no_changes(tmp_path, fixtures_path, settle):
     """Test diff export when there are no new changes after initial setup."""
     archive = ArchiveRepository("test", tmp_path)
     entities = EntityRepository("test", tmp_path)
@@ -208,11 +205,11 @@ def test_repository_document_export_diff_no_changes(tmp_path, fixtures_path):
     # Create data and flush
     _archive_with_entities(archive, entities, fixtures_path / "src" / "utf.txt")
     entities.flush()  # v0
-    entities.merge()  # a diff reads canonical rows
+    settle(entities)
 
     _archive_with_entities(archive, entities, fixtures_path / "src" / "companies.csv")
     entities.flush()  # v1
-    entities.merge()  # a diff reads canonical rows
+    settle(entities)
 
     # First export - only records the diff state
     _export(tmp_path)
@@ -260,7 +257,7 @@ def test_repository_document_export_csv_origin(tmp_path, fixtures_path):
     assert {d.name for d in repo.stream(tag.CRAWL_ORIGIN)} == {"utf.txt"}
 
 
-def test_repository_document_export_diff_origin(tmp_path, fixtures_path):
+def test_repository_document_export_diff_origin(tmp_path, fixtures_path, settle):
     """Origin-scoped diffs keep their own state and only see their origin."""
     archive = ArchiveRepository("test", tmp_path)
     entities = EntityRepository("test", tmp_path)
@@ -269,9 +266,7 @@ def test_repository_document_export_diff_origin(tmp_path, fixtures_path):
         archive, entities, fixtures_path / "src" / "utf.txt", tag.CRAWL_ORIGIN
     )
     entities.flush()
-    entities.merge()
-
-    # first export only records the state both scopes diff against
+    settle(entities)
     _export(tmp_path)
     assert not (tmp_path / path.DIFFS_DOCUMENTS[tag.CRAWL_ORIGIN]).exists()
 
@@ -280,7 +275,7 @@ def test_repository_document_export_diff_origin(tmp_path, fixtures_path):
     file3.write_text("new content")
     _archive_with_origin(archive, entities, file3, tag.CRAWL_ORIGIN)
     entities.flush()
-    entities.merge()
+    settle(entities)
 
     _export(tmp_path)
 
@@ -294,7 +289,7 @@ def test_repository_document_export_diff_origin(tmp_path, fixtures_path):
     file4.write_text("other content")
     _archive_with_origin(archive, entities, file4, "other")
     entities.flush()
-    entities.merge()
+    settle(entities)
 
     _export(tmp_path)
 

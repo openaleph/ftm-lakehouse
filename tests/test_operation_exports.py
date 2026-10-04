@@ -42,9 +42,9 @@ def test_operation_export_statements(tmp_path):
 
     assert op.get_target() == path.EXPORTS_STATEMENTS
     assert op.get_target() == "exports/statements.csv"
-    # exports reflect canonical content, so they go stale against the merge
-    # clock - not against raw appends or the journal, which `prepare()` has
-    # already resolved by the time the freshness check runs
+    # exports go stale against the content clock – rows landing, an origin
+    # dropped – which `prepare()`'s flush has already moved by the time the
+    # freshness check runs; a merge changes no content and leaves it alone
     assert op.get_dependencies() == [tag.STATEMENTS_UPDATED]
     assert op.get_dependencies() == ["statements/last_updated"]
 

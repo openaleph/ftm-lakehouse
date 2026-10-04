@@ -40,7 +40,7 @@ ftm-lakehouse -d my_dataset make
 # Stream entities back out
 ftm-lakehouse -d my_dataset entities stream
 
-# Maintenance – reads assume an optimized store, run after write batches
+# Maintenance – compact the store; reads are correct without it, faster with it
 ftm-lakehouse -d my_dataset maintenance optimize
 ```
 

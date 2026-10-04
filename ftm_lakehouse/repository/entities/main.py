@@ -420,7 +420,7 @@ class EntityRepository(DatasetHandle):
         Args:
             stmt: The Statement to delete. A
                 `ftm_lakehouse.model.statement.LakehouseStatement` (e.g. read
-                back via `ParquetStore.get_statements`) carries its own
+                back via `query_statements`) carries its own
                 fragment and role.
             fragment: Fragment override – required to shadow a
                 fragment-bearing row when passing a plain ``Statement``;

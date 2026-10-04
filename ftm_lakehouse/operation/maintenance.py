@@ -104,8 +104,8 @@ class ShardOperation(DatasetJobOperation[ShardJob]):
     ``entity_id`` alone, so it is idempotent.
 
     The rewrite is neither sorted nor deduped, which leaves every
-    partition marked dirty – run ``optimize`` afterwards to restore
-    canonical content and file sort order.
+    partition dirty – reads reconcile it; run ``optimize`` afterwards to get
+    plain-scan reads and the file sort order back.
     """
 
     target = tag.OP_SHARD
