@@ -26,7 +26,7 @@ working unchanged.
 """
 
 from datetime import datetime
-from typing import Any, Generator, Iterable, TypeAlias, cast
+from typing import Any, Generator, Iterable, NamedTuple, TypeAlias, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -45,6 +45,7 @@ from sqlalchemy import (
     TableClause,
     Text,
     column,
+    func,
     literal_column,
     select,
     table,
@@ -253,6 +254,58 @@ _STATEMENT_CSV_SELECT = [
     _iso_column(c) if c in SEEN_COLUMNS else _STATEMENT_CSV_TABLE.c[c]
     for c in STATEMENT_CSV_COLUMNS
 ]
+
+
+class DeleteCandidate(NamedTuple):
+    """One entity carrying a tombstone, as `deleted_candidates_select` rows it.
+
+    What a diff series needs to decide whether an id is one of its ``DEL``
+    candidates, without asking storage again: the latest tombstone to compare
+    against the series' window, and the origins and schemata the tombstoned
+    rows carry, for the series that are scoped by those.
+    """
+
+    id: str
+    deleted_at: datetime
+    origins: frozenset[str]
+    schemata: frozenset[str]
+    content_hash: bool
+
+
+def deleted_candidates_select(since: datetime) -> Select[Any]:
+    """One row per entity whose latest tombstone is at or after ``since``.
+
+    The ``DEL`` half of every diff series in one pass over ``statement_raw``:
+    deletes never come past a live-view sweep, so each series has to know its
+    tombstoned ids up front, and asking per series meant a scan of every
+    partition per series (``deleted_at`` is no partition column, so nothing
+    prunes).
+
+    Rows are filtered on ``deleted_at IS NOT NULL`` rather than on ``since``,
+    which is what lets the aggregates describe the entity instead of just its
+    newest tombstones: a document deleted in two steps would otherwise be
+    missing the ``contentHash`` row that identifies it. Candidacy is then the
+    ``HAVING`` – the same question the per-series queries asked. The predicate
+    still prunes every row group that holds no tombstone, which is nearly all
+    of them.
+
+    An entity's rows live in one ``(shard, bucket)`` partition, so grouping
+    per partition (`_execute_partitioned`) groups per entity.
+    """
+    t = TABLE_RAW
+    return (
+        select(
+            t.c.entity_id,
+            func.max(t.c.deleted_at).label("deleted_at"),
+            func.array_agg(t.c.origin.distinct()).label("origins"),
+            func.array_agg(t.c.schema.distinct()).label("schemata"),
+            func.bool_or(t.c.prop == "contentHash").label("content_hash"),
+        )
+        .select_from(t)
+        .where(t.c.deleted_at.is_not(None))
+        .group_by(t.c.entity_id)
+        .having(func.max(t.c.deleted_at) >= since)
+    )
 
 
 def statement_csv_select() -> Select[Any]:

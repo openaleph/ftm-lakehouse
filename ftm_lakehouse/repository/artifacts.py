@@ -26,7 +26,17 @@ from collections import Counter
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import IO, Any, ClassVar, Generator, Iterable, Iterator, Self, cast
+from typing import (
+    IO,
+    Any,
+    Callable,
+    ClassVar,
+    Generator,
+    Iterable,
+    Iterator,
+    Self,
+    cast,
+)
 
 from anystore.io import Writer
 from anystore.io.write import Formats
@@ -45,6 +55,7 @@ from ftm_lakehouse.core.settings import CHECKSUM_ALGORITHM
 from ftm_lakehouse.logic.entities.aggregate import EntityPayload
 from ftm_lakehouse.logic.path import DateTimeKey, StoreKey
 from ftm_lakehouse.model.file import Document, Documents
+from ftm_lakehouse.model.statement import DeleteCandidate
 from ftm_lakehouse.repository.base import DatasetHandle
 from ftm_lakehouse.util import validate_origin
 
@@ -57,6 +68,10 @@ first it would cap the header at two columns.
 """
 
 log = get_logger(__name__)
+
+Candidates = Callable[[datetime], Iterator[DeleteCandidate]]
+"""The one delete-candidate scan a session distributes – see
+[`ExportSession.load_pending`][ExportSession.load_pending]."""
 
 DOCUMENT_ORIGINS: tuple[str | None, ...] = (None, tag.CRAWL_ORIGIN)
 """Scopes the documents export is written for – every origin, plus a csv /
@@ -340,20 +355,32 @@ class DocumentsArtifact(DiffableArtifact):
     fieldnames = DOCUMENT_FIELDNAMES
 
     @staticmethod
-    def is_document(data: SDict) -> bool:
-        """Whether an entity dict belongs in the documents export.
+    def is_document_schema(schema: str | None) -> bool:
+        """Whether ``schema`` is one the documents export carries.
 
-        The in-Python spelling of ``Q_DOCUMENTS``: a ``Document`` descendant
-        that is not a bare ``Folder`` (those are the path scaffolding, not
-        files) and actually has a content hash to point at.
+        The schema half of ``Q_DOCUMENTS``: a ``Document`` descendant that is
+        not a bare ``Folder`` (those are the path scaffolding, not files).
+        Split out so the live path (`is_document`, off an entity dict) and the
+        delete path (`DocumentsRun.claims`, off the schemata its tombstoned
+        rows carry) share one spelling of it.
         """
-        schema = data.get("schema")
         if not schema:
             return False
         schema_ = model.get(str(schema))
-        if schema_ is None or not schema_.is_a("Document"):
-            return False
-        if schema_.name == "Folder":
+        return (
+            schema_ is not None
+            and schema_.is_a("Document")
+            and schema_.name != "Folder"
+        )
+
+    @staticmethod
+    def is_document(data: SDict) -> bool:
+        """Whether an entity dict belongs in the documents export.
+
+        The in-Python spelling of ``Q_DOCUMENTS``: a schema the export carries
+        (`is_document_schema`) that actually has a content hash to point at.
+        """
+        if not DocumentsArtifact.is_document_schema(data.get("schema")):
             return False
         return bool(data.get("properties", {}).get("contentHash"))
 
@@ -553,27 +580,21 @@ class DiffableRun(WritingRun):
         self.since_iso = datetime_iso(last_timestamp)
         self.active = True
         self.diff = self.artifact.diff_writer(self.now)
-        # a raw-view scan of every partition: `deleted_at` is no partition
-        # column, so nothing prunes and this runs before the sweep opens
-        log.info(
-            "Loading delete candidates ...",
-            dataset=self.artifact.dataset.dataset,
-            artifact=str(self.artifact.tag),
-            since=self.since_iso,
-        )
-        with Took() as t:
-            self.pending = set(self.deleted_ids(last_timestamp))
-        log.info(
-            "Loaded delete candidates.",
-            dataset=self.artifact.dataset.dataset,
-            artifact=str(self.artifact.tag),
-            candidates=len(self.pending),
-            took=t.took,
-        )
+        # `pending` is filled from the session's one scan, not from here - see
+        # `ExportSession.load_pending`
 
-    def deleted_ids(self, since: datetime) -> Iterator[str]:
-        """Ids tombstoned since the given timestamp – the DEL candidates."""
-        return iter(())
+    def claims(self, candidate: DeleteCandidate) -> bool:
+        """Whether this series owns ``candidate`` as one of its DEL candidates.
+
+        The window is this series' own, so the shared scan can run at the
+        earliest bound any of them needs. A scope-restricted series narrows
+        further.
+        """
+        return (
+            self.active
+            and self.since is not None
+            and candidate.deleted_at >= self.since
+        )
 
     def op_for(self, payload: EntityPayload) -> DiffOp | None:
         """This entity's diff op, or ``None`` when it did not change.
@@ -643,9 +664,6 @@ class EntitiesRun(DiffableRun):
 
         self.entities = get_entities(artifact.dataset.dataset, artifact.dataset.uri)
 
-    def deleted_ids(self, since: datetime) -> Iterator[str]:
-        return self.entities.deleted_ids(since)
-
     def consume(self, payload: EntityPayload) -> None:
         data = payload.to_dict()
         self.writer.write(data)
@@ -675,8 +693,20 @@ class DocumentsRun(DiffableRun):
         self.paths = self.documents.make_paths()
         self.public_prefix = artifact.dataset._model.get_public_prefix()
 
-    def deleted_ids(self, since: datetime) -> Iterator[str]:
-        return self.documents.deleted_ids(since, self.artifact.origin)
+    def claims(self, candidate: DeleteCandidate) -> bool:
+        """Only tombstoned documents of this origin scope.
+
+        The scoping `consume` applies to a live entity, applied to one that is
+        gone: the aggregates describe the entity's tombstoned rows, which for
+        an entity the sweep never meets alive is all of them.
+        """
+        if not super().claims(candidate):
+            return False
+        if self.artifact.origin and self.artifact.origin not in candidate.origins:
+            return False
+        return candidate.content_hash and any(
+            DocumentsArtifact.is_document_schema(s) for s in candidate.schemata
+        )
 
     def consume(self, payload: EntityPayload) -> None:
         if self.artifact.origin and self.artifact.origin not in payload.origins:
@@ -716,10 +746,12 @@ class ExportSession:
         runs: tuple[ArtifactRun, ...],
         version: int | None,
         make_diff: bool = True,
+        candidates: Candidates | None = None,
     ) -> None:
         self.runs = runs
         self.version = version
         self.make_diff = make_diff
+        self.candidates = candidates
         self.counts: Counter[str] = Counter()
 
     def __enter__(self) -> Self:
@@ -728,7 +760,44 @@ class ExportSession:
         version = self.version if self.make_diff else None
         for run in self.runs:
             run.prepare(version)
+        self.load_pending()
         return self
+
+    def load_pending(self) -> None:
+        """Fill every active series' DEL candidates from one raw scan.
+
+        Deletes never come past a live-view sweep, so each series has to know
+        its tombstoned ids before the sweep opens. The sets are per series –
+        their windows and scopes differ – but the scan behind them is the same
+        pass over every partition (``deleted_at`` is no partition column, so
+        nothing prunes), and it used to run once per series: on a full export
+        that is three passes over the whole store before the first row is
+        written. It runs once now, at the earliest window any series needs,
+        and each one claims what it owns (`DiffableRun.claims`) – a candidate
+        outside a series' window or scope is simply not its own.
+        """
+        active = [r for r in self.diffable if r.active and r.since is not None]
+        if not active or self.candidates is None:
+            return
+        since = min(cast(datetime, r.since) for r in active)
+        log.info(
+            "Loading delete candidates ...",
+            series=[str(r.artifact.tag) for r in active],
+            since=datetime_iso(since),
+        )
+        with Took() as t:
+            total = 0
+            for candidate in self.candidates(since):
+                total += 1
+                for run in active:
+                    if run.claims(candidate):
+                        run.pending.add(candidate.id)
+        log.info(
+            "Loaded delete candidates.",
+            candidates=total,
+            claimed={str(r.artifact.tag): len(r.pending) for r in active},
+            took=t.took,
+        )
 
     def __exit__(self, exc_type: type | None, *args: Any) -> None:
         try:
@@ -840,8 +909,12 @@ class ArtifactsRepository(DatasetHandle):
                 resolve their window against.
             make_diff: Whether diff series run at all.
         """
+        # local import: `factories` imports this module for `ArtifactsRepository`
+        from ftm_lakehouse.repository.factories import get_entities
+
         runs = tuple(a.run(now) for a in self.written_by(kinds))
-        return ExportSession(runs, version, make_diff)
+        entities = get_entities(self.dataset, self.uri)
+        return ExportSession(runs, version, make_diff, entities.deleted_candidates)
 
     def resources(self) -> Iterator[DataResource]:
         """Describe every written artifact for ``index.json``.

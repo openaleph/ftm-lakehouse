@@ -1,4 +1,6 @@
 from anystore.io import smart_stream_csv_models
+from anystore.io.read import smart_stream_csv
+from followthemoney import Statement
 
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.model.file import Document
@@ -195,6 +197,45 @@ def test_repository_document_export_diff(tmp_path, fixtures_path, settle):
     )
     assert len(incremental_docs) == 1
     assert incremental_docs[0].name == "new_file.txt"
+
+
+def test_repository_document_export_diff_delete(tmp_path, fixtures_path, settle):
+    """A deleted document diffs as a DEL – a deleted non-document does not.
+
+    Every diff series picks its DEL candidates out of one shared raw scan
+    (`ExportSession.load_pending`), so the documents series has to do its own
+    narrowing in python: schema and content hash, the half of ``Q_DOCUMENTS``
+    a tombstoned entity can still be judged by. A tombstoned ``Company`` must
+    not land in the documents diff – it was never a row in it.
+    """
+    archive = ArchiveRepository("test", tmp_path)
+    entities = EntityRepository("test", tmp_path)
+
+    file = _archive_with_entities(archive, entities, fixtures_path / "src" / "utf.txt")
+    with entities.writer() as writer:
+        writer.add_statement(
+            Statement(
+                entity_id="acme",
+                prop="name",
+                schema="Company",
+                value="Acme Inc",
+                dataset="test",
+            )
+        )
+    entities.flush()
+    settle(entities)
+    _export(tmp_path)
+    assert not list((tmp_path / path.DIFFS_DOCUMENTS).glob("*.diff.csv"))
+
+    entities.delete_entity(file.id)
+    entities.delete_entity("acme")
+    entities.flush()
+    settle(entities)
+    _export(tmp_path)
+
+    (diff_file,) = list((tmp_path / path.DIFFS_DOCUMENTS).glob("*.diff.csv"))
+    rows = list(smart_stream_csv(diff_file))
+    assert [(r["op"], r["id"]) for r in rows] == [("DEL", file.id)]
 
 
 def test_repository_document_export_diff_no_changes(tmp_path, fixtures_path, settle):

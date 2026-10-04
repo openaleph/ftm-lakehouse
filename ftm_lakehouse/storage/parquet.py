@@ -91,7 +91,9 @@ from ftm_lakehouse.model.statement import (
     SHARDED_SCHEMA,
     TABLE,
     TABLE_RAW,
+    DeleteCandidate,
     LakehouseStatement,
+    deleted_candidates_select,
     statement_csv_select,
 )
 from ftm_lakehouse.storage.tags import TagStore
@@ -1178,6 +1180,34 @@ class ParquetStore:
         for reader in self._execute_partitioned(sql, prune=prune):
             for batch in reader:
                 yield from batch["entity_id"].to_pylist()
+
+    def deleted_candidates(self, since: datetime) -> Iterator[DeleteCandidate]:
+        """Every entity carrying a tombstone at or after ``since``.
+
+        One `deleted_candidates_select` pass over the raw view of every
+        partition – ``deleted_at`` is no partition column, so there is nothing
+        to prune by and the pass is the whole table either way. That is why it
+        is one pass: a diff series needs its tombstoned ids before the sweep
+        opens, and asking per series paid for this scan per series.
+
+        Args:
+            since: Earliest tombstone any caller cares about – the earliest
+                window of the series being served.
+
+        Yields:
+            `DeleteCandidate`, one per entity.
+        """
+        sql = deleted_candidates_select(since)
+        for reader in self._execute_partitioned(sql, batch_size=SWEEP_BATCH_SIZE):
+            for batch in reader:
+                for row in batch.to_pylist():
+                    yield DeleteCandidate(
+                        id=row["entity_id"],
+                        deleted_at=row["deleted_at"],
+                        origins=frozenset(row["origins"] or ()),
+                        schemata=frozenset(row["schemata"] or ()),
+                        content_hash=bool(row["content_hash"]),
+                    )
 
     def _list_partitions(self) -> list[tuple[str, str, str]]:
         """List all ``(shard, bucket, origin)`` triples currently in the table.

@@ -21,7 +21,7 @@ from rigour.time import utc_now
 
 from ftm_lakehouse.core.api import no_api
 from ftm_lakehouse.core.settings import Settings
-from ftm_lakehouse.model.statement import LakehouseStatement
+from ftm_lakehouse.model.statement import DeleteCandidate, LakehouseStatement
 from ftm_lakehouse.repository.artifacts import (
     EntitiesArtifact,
     StatementsArtifact,
@@ -510,3 +510,11 @@ class EntityRepository(DatasetHandle):
         """
         q = Query(C(deleted_at__gte=since))
         return self._statements.get_entity_ids(q, source=self._statements.source_raw)
+
+    @no_api
+    def deleted_candidates(self, since: datetime) -> Iterator[DeleteCandidate]:
+        """Every tombstoned entity since ``since``, described well enough for
+        any diff series to pick its own ``DEL`` candidates out of the one scan
+        ([`ParquetStore.deleted_candidates`][ftm_lakehouse.storage.parquet.ParquetStore.deleted_candidates]).
+        """
+        return self._statements.deleted_candidates(since)
