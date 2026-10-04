@@ -99,8 +99,18 @@ replays from its latest checkpoint:
   around."""
 
 _DUCKDB_TYPES = {pa.string(): "VARCHAR", pa.bool_(): "BOOLEAN", PA_TS: "TIMESTAMPTZ"}
-"""DuckDB type per `SHARDED_SCHEMA` arrow type, for columns a partition's
-files predate (`partition_source_sql`)."""
+"""DuckDB type per `SHARDED_SCHEMA` arrow type."""
+
+_FILE_COLUMNS = "SELECT {} WHERE false".format(
+    ", ".join(
+        f"NULL::{_DUCKDB_TYPES[f.type]} AS {f.name}"
+        for f in SHARDED_SCHEMA
+        if f.name not in ("shard", "bucket", "origin")
+    )
+)
+"""An empty row set carrying every column a data file can hold, typed –
+unioned by name with a partition's files (`partition_source_sql`) so a column
+they predate reads as ``NULL``."""
 
 
 def duckdb_config() -> dict[str, str]:
@@ -342,10 +352,15 @@ def live_view_sql(dt: DeltaTable) -> str:
     querying – the dedupe / supersession / grace logic lives solely in
     [`build_merge_sql`][build_merge_sql].
     """
-    return (
-        f"SELECT *, entity_id AS canonical_id "
-        f"FROM {_delta_scan_clause(dt)} WHERE deleted_at IS NULL"
-    )
+    return live_rows_sql(_delta_scan_clause(dt))
+
+
+def live_rows_sql(source: str) -> str:
+    """The live ``statement`` rows of ``source``: tombstones hidden,
+    ``canonical_id`` synthesised – the body of
+    [`live_view_sql`][live_view_sql] over any relation, e.g. a set of files
+    ([`partition_source_sql`][partition_source_sql])."""
+    return f"SELECT *, entity_id AS canonical_id FROM {source} WHERE deleted_at IS NULL"
 
 
 def build_merge_sql(
@@ -423,49 +438,46 @@ def read_parquet_sql(files: Iterable[str]) -> str:
 
 
 def partition_source_sql(
-    files: Iterable[str],
-    shard: str,
-    bucket: str,
-    origin: str,
-    columns: Iterable[str],
+    files: Iterable[str], shard: str, bucket: str, origin: str
 ) -> str:
     """One partition's parquet files as a relation shaped like `SHARDED_SCHEMA`.
 
-    What a merge reads instead of ``statement_raw``: going through
-    ``delta_scan`` means replaying the Delta log on every query, which on a
-    store with a large log costs more than merging the partition does.
-    The caller already holds the snapshot and hands over the partition's
-    files from it.
+    What reads and merges use instead of ``delta_scan``, which replays the
+    Delta log on every query – on a store with a large log that costs more
+    than the query does. The caller holds the snapshot and hands over the
+    partition's files from it.
 
     Delta data files carry no partition columns, so ``shard`` / ``bucket`` /
     ``origin`` come in as constants. A column the files predate (one added by
     [`evolve_schema`][ftm_lakehouse.storage.parquet.ParquetStore.evolve_schema])
-    reads as ``NULL``, as ``delta_scan`` would read it.
+    reads as ``NULL``, as ``delta_scan`` would read it: the files are unioned
+    *by name* with an empty, fully typed row set (`_FILE_COLUMNS`), so every
+    column exists whatever the files carry – without opening them first to
+    find out.
 
     Args:
         files: The partition's data files, readable by DuckDB.
         shard: The partition's shard.
         bucket: The partition's bucket.
         origin: The partition's origin – re-validated before interpolation.
-        columns: Columns present in ``files`` (a ``DESCRIBE`` of
-            [`read_parquet_sql`][read_parquet_sql]).
 
     Returns:
         A parenthesised DuckDB subquery.
     """
     origin = validate_origin(origin)
-    present = set(columns)
     constants = {"shard": shard, "bucket": bucket, "origin": origin}
-    projection = []
-    for field in SHARDED_SCHEMA:
-        if field.name in constants:
-            value = _string_literal(constants[field.name])
-            projection.append(f"'{value}' AS {field.name}")
-        elif field.name in present:
-            projection.append(field.name)
-        else:
-            projection.append(f"NULL::{_DUCKDB_TYPES[field.type]} AS {field.name}")
-    return f"(SELECT {', '.join(projection)} FROM {read_parquet_sql(files)})"
+    projection = ", ".join(
+        (
+            f"'{_string_literal(constants[f.name])}' AS {f.name}"
+            if f.name in constants
+            else f.name
+        )
+        for f in SHARDED_SCHEMA
+    )
+    return (
+        f"(SELECT {projection} FROM ("
+        f"SELECT * FROM {read_parquet_sql(files)} UNION ALL BY NAME {_FILE_COLUMNS}))"
+    )
 
 
 def merge_copy_options(bucket: str) -> str:

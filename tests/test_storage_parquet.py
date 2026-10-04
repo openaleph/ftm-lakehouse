@@ -381,21 +381,22 @@ def test_storage_parquet_table_configuration(tmp_path):
 
 
 def test_storage_parquet_lookup_queries_its_partitions(tmp_path, monkeypatch):
-    """An id lookup queries only the ``(shard, bucket)`` pairs its prune
-    allows; a query that cannot prune (an OR) still queries them all."""
+    """An id lookup reads only the ``(shard, bucket)`` pairs its prune
+    allows, all in one query; a query that cannot prune (an OR) still reads
+    every pair, one query each."""
     store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
     _flush(store, _origin_rows("a"))
     pairs = list(store._iter_shard_buckets())
     assert len(pairs) > 2
 
     executed = []
-    execute = store._lake._execute
+    cursor_over = store._cursor_over
 
-    def spy(q, *args, **kwargs):
-        executed.append(q)
-        return execute(q, *args, **kwargs)
+    def spy(source):
+        executed.append(source)
+        return cursor_over(source)
 
-    monkeypatch.setattr(store._lake, "_execute", spy)
+    monkeypatch.setattr(store, "_cursor_over", spy)
 
     assert {s.entity_id for s in _get_statements(store, "e1")} == {"e1"}
     assert len(executed) == 1
@@ -403,7 +404,10 @@ def test_storage_parquet_lookup_queries_its_partitions(tmp_path, monkeypatch):
     executed.clear()
     q = Query(M(entity_id__in=["e1", "e2"]))
     assert {s.entity_id for s in store.query_statements(q)} == {"e1", "e2"}
-    assert len(executed) == len({entity_shard(e, SHARDS) for e in ("e1", "e2")})
+    assert len(executed) == 1
+    assert {entity_shard(e, SHARDS) for e in ("e1", "e2")} == {
+        shard for shard, _ in pairs if f"shard={shard}/" in executed[0]
+    }
 
     executed.clear()
     q = Query(M(entity_id="e1") | M(entity_id="e2"))
