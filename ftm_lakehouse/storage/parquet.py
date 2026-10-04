@@ -61,7 +61,6 @@ from ftmq.model.stats import DatasetStats
 from ftmq.query import Query, Sql, SqlSource
 from ftmq.store.lake import (
     PRUNE,
-    TARGET_SIZE,
     LakeStore,
     storage_options,
     writer_for_bucket,
@@ -234,9 +233,8 @@ class ParquetStore:
     new parquet files. Reads reconcile whatever the files hold – duplicates,
     superseded fragments, tombstones – unless a partition is made of
     [`merge`][ParquetStore.merge] output alone, which is canonical and read as
-    a plain scan. [`merge`][ParquetStore.merge], [`compact`][ParquetStore.compact]
-    and [`vacuum`][ParquetStore.vacuum] are therefore maintenance, not a
-    precondition for correct reads.
+    a plain scan. [`merge`][ParquetStore.merge] and [`vacuum`][ParquetStore.vacuum]
+    are therefore maintenance, not a precondition for correct reads.
     """
 
     def __init__(
@@ -475,7 +473,7 @@ class ParquetStore:
         """Exclusive side of the dataset write fence.
 
         Held by maintenance ([`merge`][ParquetStore.merge],
-        [`compact`][ParquetStore.compact], [`vacuum`][ParquetStore.vacuum] via
+        [`vacuum`][ParquetStore.vacuum] via
         `_maintenance_fence`) and by the first-ever
         [`append`][ParquetStore.append] of a dataset (table creation must not
         race). The lock lives at
@@ -741,8 +739,8 @@ class ParquetStore:
         Held under the *shared* side of the write fence
         (`_append_fence`): concurrent appends run in parallel – Delta
         serializes their commits via optimistic concurrency – while
-        [`merge`][ParquetStore.merge] / [`compact`][ParquetStore.compact] /
-        [`vacuum`][ParquetStore.vacuum] wait for the append markers to drain
+        [`merge`][ParquetStore.merge] / [`vacuum`][ParquetStore.vacuum] wait
+        for the append markers to drain
         before rewriting partitions. Table creation happens
         once in `_ensure_table` (under the exclusive lock, so two
         racing imports can't both commit version ``0``); the write loop
@@ -997,8 +995,8 @@ class ParquetStore:
         One writer per *target* partition stays open across a group's
         write, so the target file size is scaled down by the shard count
         (`shard_target_file_size`) to
-        keep their combined buffers bounded; the resulting small files are
-        what the follow-up ``compact`` bin-packs.
+        keep their combined buffers bounded; the follow-up ``merge`` rewrites
+        each partition into one file anyway.
 
         Deliberately no dedupe and no sort: the use case is a store whose
         queries have outgrown their shard count, and a re-shard moves
@@ -1142,37 +1140,11 @@ class ParquetStore:
             )
         return deleted
 
-    def compact(self) -> None:
-        """Bin-pack small parquet files within each partition.
-
-        Cheap maintenance – Delta's ``OPTIMIZE compact`` only rewrites small
-        files into larger ones; it does not collapse duplicate rows or drop
-        tombstones (use [`merge`][ParquetStore.merge] for that). Held under the exclusive
-        maintenance fence (`_maintenance_fence`).
-        """
-        if not self.exists:
-            return
-        with self._maintenance_fence(), Took() as t, self._snapshot_lock:
-            snapshot = self._current_snapshot()
-            if snapshot is not None:
-                for shard, bucket, origin in self._list_partitions():
-                    snapshot.optimize.compact(
-                        partition_filters=[
-                            ("shard", "=", shard),
-                            ("bucket", "=", bucket),
-                            ("origin", "=", origin),
-                        ],
-                        writer_properties=writer_for_bucket(bucket),
-                        target_size=TARGET_SIZE,
-                    )
-        self.log.info("Compaction done.", took=t.took)
-
     def vacuum(self, retention_hours: int = 0) -> None:
         """Delete obsolete parquet files no longer referenced by the Delta log.
 
-        Tombstoned files (replaced by [`merge`][ParquetStore.merge] /
-        [`compact`][ParquetStore.compact]) become orphans on disk; vacuum
-        prunes them once they're past
+        Files [`merge`][ParquetStore.merge] replaced become orphans on disk;
+        vacuum prunes them once they're past
         ``retention_hours``. Held under the exclusive maintenance fence
         (`_maintenance_fence`).
 

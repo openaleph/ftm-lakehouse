@@ -1,15 +1,15 @@
 """Statement-store maintenance: optimize, re-shard and migrate.
 
-[`OptimizeOperation`][OptimizeOperation] runs the three Delta Lake maintenance steps in
-order – the use case is always all of them together:
+[`OptimizeOperation`][OptimizeOperation] runs the two Delta Lake maintenance steps in
+order – the use case is always both together:
 
-1. merge – collapse duplicates / fold ``first_seen`` / reap tombstones
-   past the grace period
-2. compact – bin-pack small parquet files
-3. vacuum – delete obsolete parquet files from disk
+1. merge – rewrite every dirty partition into one canonical file: collapse
+   duplicates, fold ``first_seen``, reap tombstones past the grace period
+2. vacuum – delete the files a merge replaced from disk
 
-Exports and statistics assume an optimized store, so run this after large
-write batches.
+Reads reconcile un-merged rows, so this is an optimisation – a merged
+partition is a plain scan – and the disk reclaim; run it after large write
+batches.
 
 [`ShardOperation`][ShardOperation] is the rarer one: it changes the dataset's shard
 count, which means rewriting every partition and then recording the new
@@ -40,12 +40,13 @@ class OptimizeJob(DatasetJobModel):
 
 
 class OptimizeOperation(DatasetJobOperation[OptimizeJob]):
-    """Optimize the parquet statement store: merge, compact, vacuum.
+    """Optimize the parquet statement store: merge, then vacuum.
 
-    For each ``(shard, bucket, origin)`` partition: keep the most-recent row
-    per statement id, fold ``first_seen`` down to the minimum, drop tombstones
-    older than the grace period – then bin-pack small files and delete
-    obsolete ones. Each step is held under the dataset write fence.
+    For each dirty ``(shard, bucket, origin)`` partition: keep the most-recent
+    row per statement id, fold ``first_seen`` down to the minimum, drop
+    tombstones older than the grace period – one file per partition – then
+    delete the files that replaced. Each step is held under the dataset write
+    fence.
     """
 
     target = tag.OP_OPTIMIZE
@@ -63,9 +64,6 @@ class OptimizeOperation(DatasetJobOperation[OptimizeJob]):
 
     def handle(self, run: JobRun[OptimizeJob], force: bool = False, **kwargs) -> None:
         self.entities.merge(force)
-        run.job.done += 1
-        run.save()
-        self.entities.compact()
         run.job.done += 1
         run.save()
         self.entities.vacuum(retention_hours=run.job.retention_hours)

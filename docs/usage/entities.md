@@ -337,7 +337,7 @@ Dedup is `merge`'s job alone – there is no write-time collapse to lean on, so 
 
 ## Maintenance
 
-Three independent async operations on the parquet statement store, held under the exclusive [maintenance fence](../architecture.md#sharded-append-only-pattern) so they never race each other or in-flight appends.
+Independent async operations on the parquet statement store, held under the exclusive [maintenance fence](../architecture.md#sharded-append-only-pattern) so they never race each other or in-flight appends.
 
 ### Flush (journal → parquet)
 
@@ -354,14 +354,6 @@ ftm-lakehouse -d my_dataset maintenance flush
 ftm-lakehouse maintenance flush --all
 ```
 
-### Compact (cheap)
-
-Bin-packs small parquet files within each `(shard, bucket, origin)` partition via Delta's `OPTIMIZE compact`. Does not change row contents.
-
-```python
-entities._statements.compact()
-```
-
 ### Merge (expensive)
 
 Per-partition rewrite that collapses duplicates, folds `first_seen` to the min across each group, and drops tombstones whose `deleted_at` is older than the grace cutoff. Non-fragment rows dedupe per statement `id` (`ROW_NUMBER OVER (PARTITION BY id ORDER BY last_seen DESC) = 1`); fragment rows keep the latest emission per `(entity_id, prop, fragment)` group.
@@ -374,7 +366,7 @@ Grace comes from `LAKEHOUSE_GRACE_PERIOD_DAYS` (default 30 days); set it to `0` 
 
 ### Vacuum
 
-Deletes obsolete parquet files that `merge` / `compact` have tombstoned in the Delta log.
+Deletes the obsolete parquet files that `merge` replaced in the Delta log.
 
 ```python
 entities._statements.vacuum()
@@ -413,7 +405,6 @@ def main():
     print(f"Flushed {count} statements")
 
     # Maintenance – run on a schedule in production
-    entities._statements.compact()
     entities.merge()
 
     # Read back

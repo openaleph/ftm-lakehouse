@@ -79,7 +79,6 @@ storage/
   parquet.py         # ParquetStore - Delta Lake statement store
                      #   .append (sorted per-shard write)
                      #   .merge (per-partition dedup + tombstone reap)
-                     #   .compact (file bin-pack)
                      #   .vacuum (delete obsolete files)
   journal/
     base.py          # BaseJournalStore
@@ -106,7 +105,7 @@ Each row carries `first_seen`, `last_seen`, `fragment`, `role`, and `deleted_at`
 
 Writes are **append-only**: `append` derives each row's `shard` from its `entity_id`, then writes one parquet file per `(shard, bucket, origin)` partition the batch spans. It deliberately does not sort – nothing reads in physical order, and `merge` rewrites every partition an append touched anyway. Duplicates and tombstones land as additional rows.
 
-Deriving the partition key at the last moment is what keeps the layout honest. Rows reach `append` in `JOURNAL_SCHEMA`, which has no `shard` column at all: a journalled row routinely outlives the process that wrote it, so a shard key packed at write time could encode a count that is no longer configured. Because the key is a function of `entity_id` and the *writing store's* count, a producer that resolved a stale config can no longer mis-route a partition – at worst it hands over a batch spanning several shards, which costs extra files that `compact` bin-packs.
+Deriving the partition key at the last moment is what keeps the layout honest. Rows reach `append` in `JOURNAL_SCHEMA`, which has no `shard` column at all: a journalled row routinely outlives the process that wrote it, so a shard key packed at write time could encode a count that is no longer configured. Because the key is a function of `entity_id` and the *writing store's* count, a producer that resolved a stale config can no longer mis-route a partition – at worst it hands over a batch spanning several shards, which costs extra files that the next `merge` rewrites into one per partition.
 
 **Correctness assumes an optimized store.** Dedupe, fragment supersession, `first_seen`/`last_seen` folding, and tombstone reaping all happen in `merge`; between a write and the next merge, reads can surface duplicate ids and rows whose delete has not been applied. Run `optimize` before you query or export. `merge` routes every row into one of two isolated branches on the `fragment` column (empty-string sentinel, never NULL):
 
@@ -120,7 +119,6 @@ The async `optimize` operation produces this canonical state by running the thre
 | Step | Cost | What it does |
 |------|------|--------------|
 | `merge()` | expensive | Per-partition rewrite: keep latest row per `(id, role)` (`ROW_NUMBER`) / latest emission per fragment group, fold `first_seen` to min, drop tombstones past grace |
-| `compact()` | cheap | Delta `OPTIMIZE compact` per partition – bin-packs small files |
 | `vacuum()` | cheap | Delta `VACUUM` – delete files no longer referenced in the Delta log |
 
 `merge` reads the Delta log once per run: it loads one snapshot, hands each dirty partition's files from it to DuckDB (`read_parquet` over exactly those files, no `delta_scan`), writes the merged files with DuckDB's `COPY`, and commits the results in batches of 64 partitions – one transaction of `add` and `remove` actions each. Replaying the log per partition is what made merges slow on large stores: every `delta_scan` and every `write_deltalake` replays the latest checkpoint, which lists every live file of the table. The dedupe query is the one reads use over a dirty partition, so a merge and a read can never disagree about what the rows mean. Partitions can merge in parallel processes (`LAKEHOUSE_MERGE_WORKERS`) – they are independent, a worker writes files and commits nothing – but DuckDB already uses every core within one partition, so extra workers mainly help where many small partitions are dominated by per-partition overhead.
@@ -191,7 +189,7 @@ operation/
   base.py          # DatasetJobOperation - base class with freshness checks
   export.py        # ExportOperation - every export from one entity sweep
   crawl.py         # CrawlOperation - source → files → entities
-  maintenance.py   # OptimizeOperation - merge + compact + vacuum in one pass
+  maintenance.py   # OptimizeOperation - merge + vacuum in one pass
   make.py          # MakeOperation - flush + all exports + index
   download.py      # DownloadArchiveOperation
 ```
@@ -355,7 +353,7 @@ flowchart TD
     B --> |"flush()"| C[(Parquet Store)]
     A3[Tenant bulk imports] --> |"EntityBuffer + write_batches"| C
 
-    C --> |"optimize() – merge + compact + vacuum"| C
+    C --> |"optimize() – merge + vacuum"| C
 
     C --> |"export(statements)"| D[statements.csv]
     C --> |"export(entities)"| E[entities.ftm.json]

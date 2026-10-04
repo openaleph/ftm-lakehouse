@@ -170,8 +170,10 @@ def cli_optimize(
     ] = 0,
     force: OPT_FORCE = False,
 ):
-    """Optimize the statement store: collapse duplicates and reap expired
-    tombstones, bin-pack small parquet files, delete obsolete files.
+    """Optimize the statement store: rewrite every dirty partition into one
+    canonical file (collapse duplicates, reap expired tombstones), then
+    delete the files that replaced. Reads reconcile un-merged rows, so this is
+    an optimisation and a disk reclaim, not a precondition.
 
     Tombstones older than ``LAKEHOUSE_GRACE_PERIOD_DAYS`` are dropped. Each
     step is held under the dataset write fence.
@@ -251,7 +253,7 @@ def cli_migrate(
 def cli_unlock():
     """Forcibly release the dataset write fence.
 
-    Use when a previous writer (flush / merge / compact / vacuum / append)
+    Use when a previous writer (flush / merge / vacuum / append)
     died with the lock held and subsequent writes hang trying to acquire
     it. The lock is just a file at ``<dataset>/.LOCK``.
 

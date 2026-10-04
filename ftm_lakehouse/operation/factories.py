@@ -10,7 +10,7 @@ Example:
     # Run a single export operation
     export("my_dataset", "statements")
 
-    # Optimize the statement store (merge + compact + vacuum)
+    # Optimize the statement store (merge + vacuum)
     optimize("my_dataset")
 
     # Run the full make workflow (flush + all exports)
@@ -78,8 +78,9 @@ def optimize(
     force: bool = False,
 ) -> OptimizeJob:
     """
-    Optimize the statement store: merge duplicates / reap tombstones,
-    bin-pack small files, delete obsolete files.
+    Optimize the statement store: merge every dirty partition into one
+    canonical file (collapse duplicates, reap tombstones), then delete the
+    files that replaced.
 
     Args:
         dataset: Name of the dataset to optimize

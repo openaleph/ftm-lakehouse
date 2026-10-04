@@ -229,11 +229,6 @@ class EntityRepository(DatasetHandle):
         self.shards = shards
 
     @no_api
-    def compact(self) -> None:
-        """Bin-pack small parquet files within each partition."""
-        self._statements.compact()
-
-    @no_api
     def vacuum(self, retention_hours: int = 0) -> None:
         """Delete obsolete parquet files tombstoned in the Delta log."""
         self._statements.vacuum(retention_hours=retention_hours)

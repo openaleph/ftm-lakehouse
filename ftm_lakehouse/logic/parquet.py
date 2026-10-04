@@ -55,8 +55,8 @@ across slices, never correctness, so a fixed sample is fine."""
 
 SHARD_MIN_FILE_SIZE = 32 * 1_048_576  # 32 MB
 """Floor for `shard_target_file_size` – below this a re-shard would
-trade its memory bound for a file-count explosion the follow-up ``compact``
-has to clean up."""
+trade its memory bound for a file-count explosion the follow-up ``merge``
+has to rewrite."""
 
 MERGED_PREFIX = "merged-"
 """Basename prefix of the data files `ParquetStore.merge` writes. A partition
@@ -693,8 +693,8 @@ def shard_target_file_size(shards: int) -> int:
 
     Merge has no such problem – it writes one partition per call – and
     keeps the full ``TARGET_SIZE``. The smaller files a re-shard leaves
-    behind are what ``compact`` bin-packs on the next optimize, which the
-    re-shard asks for anyway.
+    behind are rewritten into one per partition by the next ``merge``, which
+    the re-shard asks for anyway.
 
     Args:
         shards: Target shard count.

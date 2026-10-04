@@ -303,7 +303,7 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
         segment that had to finish before the first row could be handed over.
         A drained table therefore spans shards and
         [`append`][ftm_lakehouse.storage.parquet.ParquetStore.append] writes one
-        file per partition it touches, which ``compact`` bin-packs.
+        file per partition it touches, which the next ``merge`` rewrites.
         """
         with self.flush_lock() as acquired:
             if not acquired:
