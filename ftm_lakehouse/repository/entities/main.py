@@ -249,20 +249,20 @@ class EntityRepository(DatasetHandle):
         with_csv_export: bool = True,
         tee: bool = True,
         throughput: Throughput | None = None,
-    ) -> Iterator[StatementDict]:
+    ) -> Iterator[pa.RecordBatch]:
         """One scan of the store, optionally writing ``statements.csv`` from it.
 
         Delegates to [`ParquetStore.sweep`][ParquetStore.sweep] with this
         dataset's csv key, so the artifact carries the configured codec.
 
         Args:
-            with_csv_export: Write the ``statements.csv`` artifact from the same
-                Arrow batches the rows come from.
-            tee: Yield row dicts. ``False`` keeps the scan columnar.
+            with_csv_export: Write the ``statements.csv`` artifact from the
+                same Arrow batches the entities are folded from.
+            tee: Hand the batches on. ``False`` keeps the scan columnar.
             throughput: Counter fed the Arrow bytes of every batch scanned.
 
         Yields:
-            ``StatementDict`` rows, unless ``tee`` is off.
+            `pyarrow.RecordBatch` per batch scanned, unless ``tee`` is off.
         """
         key = self.EXPORTS_STATEMENTS if with_csv_export else None
         yield from self._statements.sweep(key, tee, throughput)
