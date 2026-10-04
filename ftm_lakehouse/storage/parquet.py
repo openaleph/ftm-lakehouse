@@ -57,12 +57,7 @@ from deltalake.transaction import AddAction, RemoveAction
 from followthemoney.statement import StatementDict
 from ftmq.model.stats import DatasetStats
 from ftmq.query import Query, Sql, SqlSource
-from ftmq.store.lake import (
-    PRUNE,
-    LakeStore,
-    storage_options,
-    writer_for_bucket,
-)
+from ftmq.store.lake import PRUNE, LakeStore, storage_options, writer_for_bucket
 from ftmq.types import StatementEntities, Statements
 from pyarrow.csv import CSVWriter  # type: ignore[attr-defined]  # missing from stubs
 from rigour.time import utc_now
@@ -1098,15 +1093,17 @@ class ParquetStore:
         """
         if not self.exists:
             return
+        deleted: list[str] = []
         with self._maintenance_fence(), Took() as t, self._snapshot_lock:
             snapshot = self._current_snapshot()
             if snapshot is not None:
-                snapshot.vacuum(
+                deleted = snapshot.vacuum(
                     retention_hours=retention_hours,
                     dry_run=False,
                     enforce_retention_duration=False,
+                    full=True,
                 )
-        self.log.info("Vacuumed.", took=t.took)
+        self.log.info("Vacuumed.", files=len(deleted), took=t.took)
 
     def sweep(
         self,

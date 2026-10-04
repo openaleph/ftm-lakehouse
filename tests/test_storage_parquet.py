@@ -340,6 +340,46 @@ def test_storage_parquet_table_configuration(tmp_path):
     assert store.configure_table() == {}
 
 
+def _orphans(store: ParquetStore, root) -> set[str]:
+    """Data files on disk the current snapshot does not reference."""
+    snapshot = store._current_snapshot()
+    assert snapshot is not None
+    live = {uri.rsplit("/", 1)[-1] for uri in snapshot.file_uris()}
+    on_disk = {p.name for p in root.rglob("*.parquet") if "_delta_log" not in p.parts}
+    return on_disk - live
+
+
+def test_storage_parquet_vacuum_reaps_orphans_a_checkpoint_forgot(tmp_path):
+    """A file whose ``remove`` aged out of the checkpoint is still reaped.
+
+    ``delta.deletedFileRetentionDuration`` keeps a ``remove`` in checkpoints
+    for an hour (`TABLE_CONFIGURATION`), and
+    [`merge`][ftm_lakehouse.storage.parquet.ParquetStore.merge] ends on a
+    checkpoint – so a vacuum that walked the log for removes instead of
+    listing the table would find nothing after it, and the orphan would sit
+    on disk for good.
+    """
+    store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
+    rows = [_pack(make_statement("jane", "name", "Jane Doe"))]
+    _flush(store, rows)
+    _flush(store, rows)  # a second file per partition for merge to replace
+    store.merge()
+    forgotten = _orphans(store, tmp_path)
+    assert forgotten
+
+    # what the one-hour retention does to every remove older than it once the
+    # next checkpoint is written
+    store.deltatable.alter.set_table_properties(
+        {"delta.deletedFileRetentionDuration": "interval 0 hours"}
+    )
+    _flush(store, rows)
+    store.merge()
+    assert forgotten <= _orphans(store, tmp_path)
+
+    store.vacuum()
+    assert not _orphans(store, tmp_path)
+
+
 def test_storage_parquet_lookup_queries_its_partitions(tmp_path, monkeypatch):
     """An id lookup reads only the ``(shard, bucket)`` pairs its prune
     allows, all in one query; a query that cannot prune (an OR) still reads
