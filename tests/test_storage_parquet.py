@@ -11,10 +11,9 @@ from ftmq.store.base import DEFAULT_ORIGIN
 from ftmq.store.lake import pack_statement
 from ftmq.types import Statements
 
-from ftm_lakehouse.core.conventions import tag
 from ftm_lakehouse.helpers.shards import entity_shard
 from ftm_lakehouse.logic import parquet as logic_parquet
-from ftm_lakehouse.logic.parquet import TABLE_CONFIGURATION
+from ftm_lakehouse.logic.parquet import MERGED_PREFIX, TABLE_CONFIGURATION
 from ftm_lakehouse.model.statement import JOURNAL_SCHEMA, TABLE_RAW
 from ftm_lakehouse.storage import parquet as storage_parquet
 from ftm_lakehouse.storage.parquet import ParquetStore
@@ -182,96 +181,100 @@ def test_storage_parquet_merge_range_sliced(tmp_path, monkeypatch):
     assert {e.id for e in entities} == {f"e{i:02d}" for i in range(40)}
 
 
-def test_storage_parquet_soft_delete_hidden_after_merge(tmp_path):
-    """A tombstone hides its statement once ``merge`` makes the store canonical.
+def test_storage_parquet_soft_delete_hidden(tmp_path):
+    """A tombstone hides its statement as soon as it lands.
 
-    The live view is a plain ``deleted_at IS NULL`` scan with no read-time
-    dedupe, so before merge the live row and the tombstone coexist and the
-    live row stays visible. ``merge`` collapses the id to its tombstone (the
-    latest ``last_seen``), which the live view then filters out.
+    The live row and the tombstone coexist physically until a merge; the read
+    collapses the id to its tombstone (the latest ``last_seen``) and filters
+    it out. ``merge`` with grace ``0`` then reaps both rows.
     """
     store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
 
     stmt = make_statement("jane", "name", "Jane Doe")
     _flush(store, [_pack(stmt)])
-    store.merge()
     assert len(list(store.query_statements())) == 1
 
-    # Tombstone has a strictly LATER last_seen so merge picks it as the
-    # surviving row per id; deleted_at IS NOT NULL then filters it out.
     tomb = _pack(stmt, deleted_at=datetime(2025, 1, 1, tzinfo=timezone.utc))
     tomb["last_seen"] = datetime(2025, 1, 1, tzinfo=timezone.utc)
     _flush(store, [tomb])
-
-    # Before merge the live row is still visible – no read-time dedupe.
-    assert len(list(store.query_statements())) == 1
+    assert list(store.query_statements()) == []
     assert _row_count(store) == 2
 
-    # Merge with grace=0 collapses the id to its tombstone and reaps both rows.
     store.settings.grace_period_days = 0
     store.merge()
     assert list(store.query_statements()) == []
     assert _row_count(store) == 0
 
 
-def test_storage_parquet_merge_skips_unchanged_partitions(tmp_path):
-    """merge() rewrites only partitions dirtied since their last merge.
+def _partition_files(store: ParquetStore) -> dict[tuple[str, str, str], list[str]]:
+    """Active data file basenames per partition, from the snapshot."""
+    actions = pa.table(store.deltatable.get_add_actions(flatten=True))
+    files: dict[tuple[str, str, str], list[str]] = defaultdict(list)
+    for file, shard, bucket, origin in zip(
+        actions["path"].to_pylist(),
+        actions["partition.shard"].to_pylist(),
+        actions["partition.bucket"].to_pylist(),
+        actions["partition.origin"].to_pylist(),
+    ):
+        files[(shard, bucket, origin)].append(file.rsplit("/", 1)[-1])
+    return dict(files)
 
-    Asserts the freshness-tag mechanism directly: ``append`` stamps a
-    ``last_updated`` tag per touched ``(shard, bucket, origin)``; ``merge``
-    rewrites (and stamps ``last_optimized`` on) only partitions whose
-    ``last_updated`` is newer than ``last_optimized``. So a skipped partition's
-    ``last_optimized`` tag is left untouched, while a rewritten one's advances.
+
+def test_storage_parquet_create_adds_no_file(tmp_path):
+    """Table creation is an empty commit – no data file, nothing dirty."""
+    store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
+    store._ensure_table()
+    assert store.exists
+    assert store._list_partitions() == []
+    assert not store.needs_merge
+
+
+def test_storage_parquet_merge_skips_clean_partitions(tmp_path):
+    """merge() rewrites only dirty partitions – those holding a file it did
+    not write. The signal is the snapshot's file list: merge output is named
+    ``merged-*``, everything else (delta-rs appends) ``part-*``; no tags.
     """
     store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
-
-    # two entities in distinct shards => two `thing` partitions, each with a dup
     jane_shard = entity_shard("e-jane", SHARDS)
     john_shard = entity_shard("e-john", SHARDS)
     assert jane_shard != john_shard
     for eid in ("e-jane", "e-john"):
         _flush(store, [_pack(make_statement(eid, "name", f"{eid} v1"))])
         _flush(store, [_pack(make_statement(eid, "name", f"{eid} v1"))])
-    assert _row_count(store) == 4  # two partitions x two duplicate rows
-
-    # per-partition freshness-tag keys (bucket "thing", default origin)
-    jane_opt = tag.statements_partition_optimized(jane_shard, "thing", DEFAULT_ORIGIN)
-    john_opt = tag.statements_partition_optimized(john_shard, "thing", DEFAULT_ORIGIN)
-    jane_upd = tag.statements_partition_updated(jane_shard, "thing", DEFAULT_ORIGIN)
-    john_upd = tag.statements_partition_updated(john_shard, "thing", DEFAULT_ORIGIN)
-
-    # before the first merge both partitions are dirty (no last_optimized yet)
-    assert not store._tags.is_latest(jane_opt, [jane_upd])
-    assert not store._tags.is_latest(john_opt, [john_upd])
+    jane = (jane_shard, "thing", DEFAULT_ORIGIN)
+    john = (john_shard, "thing", DEFAULT_ORIGIN)
+    assert _row_count(store) == 4
+    assert set(store._dirty_partitions()) == {jane, john}
+    assert store.needs_merge
 
     store.merge()
-    assert _row_count(store) == 2  # both partitions collapsed
-    # both partitions now optimized (last_optimized newer than last_updated)
-    assert store._tags.is_latest(jane_opt, [jane_upd])
-    assert store._tags.is_latest(john_opt, [john_upd])
-    jane_opt_ts = store._tags.get(jane_opt)
-    john_opt_ts = store._tags.get(john_opt)
-
-    # no-op merge: nothing dirtied since last merge -> no partition re-stamped
-    store.merge()
-    assert store._tags.get(jane_opt) == jane_opt_ts
-    assert store._tags.get(john_opt) == john_opt_ts
+    files = _partition_files(store)
     assert _row_count(store) == 2
+    assert all(f.startswith(MERGED_PREFIX) for names in files.values() for f in names)
+    assert not store.needs_merge
+    version = store.version
 
-    # touch only e-jane's partition with another duplicate
+    # nothing dirty: no partition rewritten, no commit
+    store.merge()
+    assert store.version == version
+    assert _partition_files(store) == files
+
+    # a duplicate into e-jane's partition dirties that one alone
     _flush(store, [_pack(make_statement("e-jane", "name", "e-jane v1"))])
+    assert set(store._dirty_partitions()) == {jane}
     assert _row_count(store) == 3
-    # e-jane is now dirty (last_updated newer than last_optimized); e-john clean
-    assert not store._tags.is_latest(jane_opt, [jane_upd])
-    assert store._tags.is_latest(john_opt, [john_upd])
 
     store.merge()
+    after = _partition_files(store)
     assert _row_count(store) == 2
-    # e-jane was rewritten -> its last_optimized advanced and it is clean again
-    assert store._tags.get(jane_opt) > jane_opt_ts
-    assert store._tags.is_latest(jane_opt, [jane_upd])
-    # e-john was skipped -> its last_optimized tag is untouched
-    assert store._tags.get(john_opt) == john_opt_ts
+    assert after[john] == files[john]  # skipped – untouched
+    assert after[jane] != files[jane]
+    assert all(f.startswith(MERGED_PREFIX) for f in after[jane])
+
+    # force rewrites clean partitions too
+    store.merge(force=True)
+    assert _partition_files(store)[john] != after[john]
+    assert _row_count(store) == 2
 
 
 def test_storage_parquet_get_statements_uses_shard(tmp_path):
@@ -392,9 +395,9 @@ def test_storage_parquet_lookup_queries_its_partitions(tmp_path, monkeypatch):
     executed = []
     cursor_over = store._cursor_over
 
-    def spy(source):
+    def spy(source, clean):
         executed.append(source)
-        return cursor_over(source)
+        return cursor_over(source, clean)
 
     monkeypatch.setattr(store, "_cursor_over", spy)
 
@@ -423,6 +426,7 @@ def test_storage_parquet_shard_escaped_origin(tmp_path):
     _flush(store, _origin_rows(origin))
     store.shard(3)
     assert _row_count(store) == 40
+    assert store.needs_merge  # the re-shard writes part-* files
     entity_ids = {s.entity_id for s in store.query_statements()}
     shards = {shard for shard, _, _ in store._list_partitions()}
     assert shards == {entity_shard(e, 3) for e in entity_ids}

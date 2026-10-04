@@ -1,21 +1,18 @@
 """Pure functions for Delta Lake parquet operations.
 
-DuckDB view-SQL builders for ``LakeStore`` and the per-partition merge SQL.
-The live ``statement`` view ([`live_view_sql`][live_view_sql]) is a plain
-``WHERE deleted_at IS NULL`` scan – correctness assumes a store made
-canonical by [`build_merge_sql`][build_merge_sql] (one row per id, supersession applied,
-timestamps folded). ``statement_raw`` exposes every underlying Delta row for
-code paths that need tombstones / pre-merge duplicates visible (``merge``,
-``get_entity_ids`` over the raw source).
-
-All dedupe / fragment-supersession / grace logic lives in one place –
-`_dedupe_sql`, used only by [`build_merge_sql`][build_merge_sql]. See its docstring
-for the two-branch fragment semantics.
-
-A merge reads one partition straight from its parquet files
-([`partition_source_sql`][partition_source_sql]) rather than through
-``delta_scan``, and writes its output with DuckDB's ``COPY``
-([`merge_copy_options`][merge_copy_options]).
+DuckDB SQL builders for the statement store's reads and for the per-partition
+merge. All dedupe / fragment-supersession / grace logic lives in one place –
+`_dedupe_sql` – and serves both: a read over a partition that holds files a
+merge did not write reconciles them ([`dedupe_rows_sql`][dedupe_rows_sql]),
+while a partition made of merge output alone is canonical by construction
+and gets a plain scan ([`live_rows_sql`][live_rows_sql]). A merge is the same
+query over one partition's files
+([`build_merge_sql`][build_merge_sql], [`partition_source_sql`][partition_source_sql]),
+written back with DuckDB's ``COPY`` ([`merge_copy_options`][merge_copy_options])
+– physical compaction, never a precondition for reading. ``statement_raw``
+exposes every underlying row, tombstones and duplicates included, for the
+paths that need them (``merge``, ``get_entity_ids`` over the raw source).
+See `_dedupe_sql` for the two-branch fragment semantics.
 """
 
 import math
@@ -60,6 +57,14 @@ SHARD_MIN_FILE_SIZE = 32 * 1_048_576  # 32 MB
 """Floor for `shard_target_file_size` – below this a re-shard would
 trade its memory bound for a file-count explosion the follow-up ``compact``
 has to clean up."""
+
+MERGED_PREFIX = "merged-"
+"""Basename prefix of the data files `ParquetStore.merge` writes. A partition
+whose active files all carry it is canonical – one row per key, supersession
+applied, timestamps folded – so a read over it needs no reconciling; any
+other file (delta-rs appends and the re-shard write ``part-*``) makes the
+partition dirty. The signal lives in the Delta snapshot's file list, so it
+costs no tag I/O and cannot drift from the data."""
 
 FALLBACK_MEMORY_LIMIT = "8GB"
 """Slice budget when ``LAKEHOUSE_DUCKDB_MEMORY_LIMIT`` is not a parseable
@@ -145,7 +150,7 @@ def _string_literal(value: str) -> str:
     return value.replace("'", "''")
 
 
-def _delta_scan_clause(dt: DeltaTable) -> str:
+def delta_scan_sql(table_uri: str) -> str:
     """``delta_scan('<uri>')`` with the URI single-quote–escaped.
 
     DuckDB's ``delta_scan`` does not accept prepared parameters for its
@@ -154,7 +159,7 @@ def _delta_scan_clause(dt: DeltaTable) -> str:
     path lets a dataset name (and thus the URI) carry a quote – primary
     validation is in `validate_dataset_name`.
     """
-    return f"delta_scan('{dt.table_uri.replace(chr(39), chr(39) * 2)}')"
+    return f"delta_scan('{_string_literal(table_uri)}')"
 
 
 def raw_view_sql(dt: DeltaTable) -> str:
@@ -165,23 +170,19 @@ def raw_view_sql(dt: DeltaTable) -> str:
     and raw-source queries (diff exports) – any path that needs the
     physical layout visible.
     """
-    return f"SELECT * FROM {_delta_scan_clause(dt)}"
+    return f"SELECT * FROM {delta_scan_sql(dt.table_uri)}"
 
 
-NONFRAGMENT_KEY = ("shard", "bucket", "origin", "id", "role")
-"""Row identity of a non-fragment statement – one survivor per key."""
+NONFRAGMENT_KEY = ("shard", "bucket", "origin", "entity_id", "id", "role")
+"""Row identity of a non-fragment statement – one survivor per key.
+
+``entity_id`` is redundant – a statement id is content-hashed over its entity,
+so it belongs to exactly one – but naming it lets DuckDB push an
+``entity_id = ?`` filter below the window instead of resolving every
+duplicate group of the partition for one lookup."""
 
 FRAGMENT_GROUP = ("shard", "bucket", "origin", "entity_id", "prop", "fragment", "role")
 """Supersession group of a fragment statement – the latest emission survives."""
-
-
-def _join_on(keys: tuple[str, ...]) -> str:
-    """``b`` / ``d`` join condition on ``keys`` – NULL-safe for the nullable
-    ``role``, so role-less rows match each other as they group in a window."""
-    return " AND ".join(
-        f"b.{k} IS NOT DISTINCT FROM d.{k}" if k == "role" else f"b.{k} = d.{k}"
-        for k in keys
-    )
 
 
 def _dedupe_sql(
@@ -191,7 +192,8 @@ def _dedupe_sql(
     order_by: str = "",
     select: str = "*",
 ) -> str:
-    """Two-branch dedupe skeleton for physical [`build_merge_sql`][build_merge_sql].
+    """Two-branch dedupe skeleton – reads over a dirty partition and
+    [`build_merge_sql`][build_merge_sql] alike.
 
     Rows route into two isolated branches on ``fragment`` (empty-string
     sentinel, applied *before* any window runs so the branches can never
@@ -204,8 +206,8 @@ def _dedupe_sql(
       ids) are uniquely placed in one ``(shard, bucket)`` by the model
       layer; ``origin`` in the key keeps the same id under two origins as
       two independent rows (matching the per-``(shard, bucket, origin)``
-      scope of physical merge – load-bearing when the slice spans
-      origins, e.g. `build_changed_sql`). Tombstones bump ``last_seen``
+      scope of physical merge – load-bearing when the source spans
+      origins, as a read over a ``(shard, bucket)`` pair does). Tombstones bump ``last_seen``
       to ``MAX(deleted_at, the shadowed row's last_seen)`` at write time,
       so the tombstone can never rank below the row it deletes – the
       ``deleted_at`` tiebreak resolves the tie that leaves, and the one a
@@ -249,18 +251,11 @@ def _dedupe_sql(
     diff detects change with, a silently undiffable update. Only the ``QUALIFY``
     windows below work at group scope, which is what supersession means.
 
-    **Only groups with something to resolve go through a window.** A window
-    materialises and sorts every row it sees, ``value`` included – full text
-    in the document buckets – yet a key with a single row (non-fragment) or a
-    group of one emission with distinct ids (fragment) comes out of the
-    windows exactly as it went in. So two narrow aggregates find the keys
-    that *do* need resolving (``nonfragment_dups``: more than one row;
-    ``fragment_dups``: more than one ``last_seen``, or a repeated ``id``), a
-    ``SEMI JOIN`` routes those groups' rows through the windows, and an
-    ``ANTI JOIN`` streams every other row through untouched. The result is
-    row for row what windowing everything gives, and costs least on a store
-    that is already canonical. ``base`` is deliberately not a CTE: referenced
-    by several branches, DuckDB materialises it – the whole partition.
+    Every filter column a read pushes down sits in the window keys:
+    ``shard`` / ``bucket`` / ``origin`` as partition keys and ``entity_id``
+    in both branches, so an ``entity_id = ?`` lookup is evaluated below the
+    windows – on the files' statistics – instead of resolving every group of
+    the partition first. Any other predicate waits above them, as it must.
 
     Args:
         source: Relation to read from – a ``delta_scan('...')`` clause,
@@ -275,51 +270,38 @@ def _dedupe_sql(
         Executable DuckDB SQL.
     """
 
-    def rows(branch: str) -> str:
-        scope = f"{where} AND {branch}" if where else f"WHERE {branch}"
-        return f"(SELECT * FROM {source} {scope})"
-
-    nonfragment, fragment = rows("fragment = ''"), rows("fragment != ''")
     key, group = ", ".join(NONFRAGMENT_KEY), ", ".join(FRAGMENT_GROUP)
     return f"""
-WITH nonfragment_dups AS (
-    SELECT {key} FROM {nonfragment} GROUP BY ALL HAVING count(*) > 1
+WITH base AS (
+    SELECT * FROM {source} {where}
 ),
-fragment_dups AS (
-    SELECT {group} FROM {fragment} GROUP BY ALL
-    HAVING min(last_seen) <> max(last_seen) OR count(*) <> count(DISTINCT id)
-)
-SELECT {select} FROM (
-    SELECT b.* FROM {nonfragment} b
-    ANTI JOIN nonfragment_dups d ON {_join_on(NONFRAGMENT_KEY)}
-    UNION ALL
+nonfragment_rows AS (
     SELECT * REPLACE (
         MIN(first_seen) OVER (PARTITION BY {key}) AS first_seen
     )
-    FROM (
-        SELECT b.* FROM {nonfragment} b
-        SEMI JOIN nonfragment_dups d ON {_join_on(NONFRAGMENT_KEY)}
-    )
+    FROM base
+    WHERE fragment = ''
     QUALIFY ROW_NUMBER() OVER (
         PARTITION BY {key}
         ORDER BY last_seen DESC, deleted_at DESC NULLS LAST
     ) = 1
-    UNION ALL
-    SELECT b.* FROM {fragment} b
-    ANTI JOIN fragment_dups d ON {_join_on(FRAGMENT_GROUP)}
-    UNION ALL
+),
+fragment_rows AS (
     SELECT * REPLACE (
         MIN(first_seen) OVER (PARTITION BY {group}, id) AS first_seen
     )
-    FROM (
-        SELECT b.* FROM {fragment} b
-        SEMI JOIN fragment_dups d ON {_join_on(FRAGMENT_GROUP)}
-    )
+    FROM base
+    WHERE fragment != ''
     QUALIFY last_seen = MAX(last_seen) OVER (PARTITION BY {group})
     AND ROW_NUMBER() OVER (
         PARTITION BY {group}, id
         ORDER BY last_seen DESC, deleted_at DESC NULLS LAST
     ) = 1
+)
+SELECT {select} FROM (
+    SELECT * FROM nonfragment_rows
+    UNION ALL
+    SELECT * FROM fragment_rows
 )
 WHERE {tombstone}
 {order_by}
@@ -327,38 +309,45 @@ WHERE {tombstone}
 
 
 def live_view_sql(dt: DeltaTable) -> str:
-    """SELECT body for the live ``statement`` view.
+    """SELECT body for the connection-level ``statement`` view.
 
-    On a store kept canonical by [`build_merge_sql`][build_merge_sql] (one row per
-    statement id, fragment supersession applied, ``first_seen`` /
-    ``last_seen`` folded) the live rows are simply the non-tombstoned
-    physical rows – so the view is a plain filtered scan, no window
-    function. Predicate pushdown works natively: ``schema`` / ``prop`` /
-    ``entity_id`` filters reach ``delta_scan``'s per-file statistics (a
-    window would be a pushdown barrier for any non-partition column).
-
-    ``canonical_id`` is not stored – this is a single-dataset store with no
-    entity resolution, so it always equals ``entity_id`` – and is synthesised
-    here as ``entity_id AS canonical_id`` so ftmq's query layer (which keys
-    entity identity on ``canonical_id``) resolves against the view unchanged.
-    [`raw_view_sql`][raw_view_sql] deliberately omits it so ``merge`` never materialises
-    the duplicate column.
-
-    Correctness holds only on an **optimized** store: between a write and
-    the next `merge` this view can surface duplicate ids and rows
-    whose delete has not been applied yet. Run ``optimize`` before
-    querying – the dedupe / supersession / grace logic lives solely in
-    [`build_merge_sql`][build_merge_sql].
+    The view ftmq's ``LakeStore`` registers over ``delta_scan`` – what
+    ``stats()``, the raw-SQL CLI and nothing else read. Partition-scoped reads
+    build their own view per cursor over the partition's files and choose
+    between [`live_rows_sql`][live_rows_sql] and [`dedupe_rows_sql`][dedupe_rows_sql]
+    by whether the partition is clean; this one has no partition to ask, so it
+    always reconciles.
     """
-    return live_rows_sql(_delta_scan_clause(dt))
+    return dedupe_rows_sql(delta_scan_sql(dt.table_uri))
 
 
 def live_rows_sql(source: str) -> str:
-    """The live ``statement`` rows of ``source``: tombstones hidden,
-    ``canonical_id`` synthesised – the body of
-    [`live_view_sql`][live_view_sql] over any relation, e.g. a set of files
-    ([`partition_source_sql`][partition_source_sql])."""
+    """The live ``statement`` rows of a **clean** ``source``.
+
+    A partition made of merge output alone is canonical – one row per key,
+    supersession applied, ``first_seen`` / ``last_seen`` folded – so its live
+    rows are the non-tombstoned physical rows: a plain filtered scan, no
+    window function, and every ``schema`` / ``prop`` / ``entity_id`` filter
+    reaches the files' statistics.
+
+    ``canonical_id`` is not stored – this is a single-dataset store with no
+    entity resolution, so it always equals ``entity_id`` – and is synthesised
+    as ``entity_id AS canonical_id`` so ftmq's query layer (which keys entity
+    identity on ``canonical_id``) resolves against the view unchanged.
+    [`raw_view_sql`][raw_view_sql] deliberately omits it so ``merge`` never
+    materialises the duplicate column.
+    """
     return f"SELECT *, entity_id AS canonical_id FROM {source} WHERE deleted_at IS NULL"
+
+
+def dedupe_rows_sql(source: str) -> str:
+    """The live ``statement`` rows of a ``source`` that may hold un-merged
+    files: `_dedupe_sql` – duplicates collapsed, supersession
+    applied, timestamps folded, tombstones hidden – with ``canonical_id``
+    synthesised as in [`live_rows_sql`][live_rows_sql]. Row for row what a
+    read over the partition's merge output returns, which is what makes
+    ``merge`` an optimisation rather than a precondition."""
+    return _dedupe_sql(source, select="*, entity_id AS canonical_id")
 
 
 def build_merge_sql(
@@ -451,7 +440,9 @@ def partition_source_sql(
     reads as ``NULL``, as ``delta_scan`` would read it: the files are unioned
     *by name* with an empty, fully typed row set (`_FILE_COLUMNS`), so every
     column exists whatever the files carry – without opening them first to
-    find out.
+    find out. ``fragment`` is the exception: its "no fragment" sentinel is
+    the empty string, and `_dedupe_sql` routes on ``fragment = ''`` /
+    ``!= ''`` – a NULL would fall out of both branches – so it is coalesced.
 
     Args:
         files: The partition's data files, readable by DuckDB.
@@ -468,7 +459,9 @@ def partition_source_sql(
         (
             f"'{_string_literal(constants[f.name])}' AS {f.name}"
             if f.name in constants
-            else f.name
+            else (
+                "COALESCE(fragment, '') AS fragment" if f.name == "fragment" else f.name
+            )
         )
         for f in SHARDED_SCHEMA
     )

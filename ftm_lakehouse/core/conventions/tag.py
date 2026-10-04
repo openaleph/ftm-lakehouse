@@ -6,8 +6,6 @@ Export operations don't have constants here – their freshness tag is the
 by `DatasetJobOperation._run_local` after a successful run.
 """
 
-from ftm_lakehouse.util import validate_origin
-
 STATEMENTS_UPDATED = "statements/last_updated"
 """Statement store was updated"""
 
@@ -59,46 +57,6 @@ def migration(name: str) -> str:
             ``ftm_lakehouse.operation.migrations``.
     """
     return f"migrations/{name}"
-
-
-def statements_partition_updated(shard: str, bucket: str, origin: str) -> str:
-    """Per-partition freshness tag: a ``(shard, bucket, origin)`` was written.
-
-    Partition-scoped analog of [`STATEMENTS_UPDATED`][STATEMENTS_UPDATED],
-    stamped by
-    [`ParquetStore.append`][ftm_lakehouse.storage.parquet.ParquetStore.append].
-    [`ParquetStore.merge`][ftm_lakehouse.storage.parquet.ParquetStore.merge]
-    compares it against
-    [`statements_partition_optimized`][statements_partition_optimized] via
-    [`TagStore.is_latest`][ftm_lakehouse.storage.tags.TagStore.is_latest] to
-    skip partitions that haven't changed since their last merge.
-
-    Args:
-        shard: Hex-padded shard value.
-        bucket: FtM schema bucket (``thing`` / ``interval`` / ...).
-        origin: Source tag – validated so it stays a single path segment.
-    """
-    validate_origin(origin)
-    return f"statements/{shard}/{bucket}/{origin}/last_updated"
-
-
-def statements_partition_optimized(shard: str, bucket: str, origin: str) -> str:
-    """Per-partition freshness tag: a ``(shard, bucket, origin)`` was merged.
-
-    Partition-scoped analog of [`STATEMENTS_OPTIMIZED`][STATEMENTS_OPTIMIZED],
-    stamped by
-    [`ParquetStore.merge`][ftm_lakehouse.storage.parquet.ParquetStore.merge]
-    after it rewrites the partition. See
-    [`statements_partition_updated`][statements_partition_updated] for the
-    freshness comparison.
-
-    Args:
-        shard: Hex-padded shard value.
-        bucket: FtM schema bucket (``thing`` / ``interval`` / ...).
-        origin: Source tag – validated so it stays a single path segment.
-    """
-    validate_origin(origin)
-    return f"statements/{shard}/{bucket}/{origin}/last_optimized"
 
 
 CRAWL_ORIGIN = "crawl"

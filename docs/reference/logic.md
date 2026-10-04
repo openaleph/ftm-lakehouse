@@ -39,7 +39,22 @@ The DuckDB config, the `statement` / `statement_raw` view-SQL builders, and the 
         heading_level: 3
         show_root_heading: true
 
-Both builders emit `delta_scan('<uri>')`, so a view defined from this SQL resolves the current Delta log on every query – defining it once per connection is enough; subsequent `write_deltalake` commits are picked up automatically. The live `statement` view is a plain `WHERE deleted_at IS NULL` scan (no window function, so predicate pushdown survives) and is only correct on an **optimized** store; `statement_raw` exposes every physical row – tombstones and pre-merge duplicates included – for raw-source `get_entity_ids` queries (diff exports).
+::: ftm_lakehouse.logic.parquet.live_rows_sql
+    options:
+        heading_level: 3
+        show_root_heading: true
+
+::: ftm_lakehouse.logic.parquet.dedupe_rows_sql
+    options:
+        heading_level: 3
+        show_root_heading: true
+
+::: ftm_lakehouse.logic.parquet.delta_scan_sql
+    options:
+        heading_level: 3
+        show_root_heading: true
+
+The two view builders feed ftmq's `LakeStore`, whose connection-level views over `delta_scan` serve `stats()` and the raw-SQL CLI – `statement` always reconciles there. Partition-scoped reads build their own `statement` view per cursor over the partition's files: `live_rows_sql` – a plain `WHERE deleted_at IS NULL` scan – when every active file was written by `merge`, `dedupe_rows_sql` otherwise, so reads are correct at any time and cheapest on a merged store. `statement_raw` exposes every physical row – tombstones and pre-merge duplicates included – for raw-source `get_entity_ids` queries (diff exports).
 
 ::: ftm_lakehouse.logic.parquet.build_merge_sql
     options:

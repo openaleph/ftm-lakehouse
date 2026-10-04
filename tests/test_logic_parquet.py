@@ -4,6 +4,7 @@ import math
 from datetime import datetime, timedelta, timezone
 
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from ftmq.query import M, P, Query
 from ftmq.store.lake import TARGET_SIZE
@@ -16,6 +17,7 @@ from ftm_lakehouse.logic.parquet import (
     build_shard_sql,
     make_prune_by_shard,
     merge_slice_count,
+    partition_source_sql,
     shard_expr_sql,
     shard_target_file_size,
     slice_ranges,
@@ -879,3 +881,36 @@ def test_shard_target_file_size():
     # the product stays around one TARGET_SIZE until the floor kicks in
     assert 4 * shard_target_file_size(4) == TARGET_SIZE
     assert shard_target_file_size(4096) == SHARD_MIN_FILE_SIZE
+
+
+def test_partition_source_sql_fills_missing_columns(tmp_path, now):
+    """A file predating a column reads it as NULL – except ``fragment``, whose
+    sentinel is the empty string: the dedupe routes on ``fragment = ''`` /
+    ``!= ''``, so a NULL would silently drop the row. Partition columns come
+    from the caller, not the file."""
+    file = str(tmp_path / "old.parquet")
+    pq.write_table(
+        pa.table(
+            {
+                "id": ["s1"],
+                "entity_id": ["e1"],
+                "dataset": ["test"],
+                "schema": ["Person"],
+                "prop": ["name"],
+                "value": ["Jane"],
+                "external": [False],
+                "first_seen": pa.array([now], SHARDED_SCHEMA.field("first_seen").type),
+                "last_seen": pa.array([now], SHARDED_SCHEMA.field("last_seen").type),
+            }
+        ),
+        file,
+    )
+    con = make_duckdb()
+    source = partition_source_sql([file], "0a", "thing", "mapping:x")
+    row = con.execute(
+        f"SELECT shard, origin, fragment, role, deleted_at FROM {source}"
+    ).fetchone()
+    assert row == ("0a", "mapping:x", "", None, None)
+    assert [d[0] for d in con.execute(f"SELECT * FROM {source}").description] == (
+        SHARDED_SCHEMA.names
+    )

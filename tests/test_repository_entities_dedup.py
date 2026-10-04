@@ -1,12 +1,12 @@
-"""Flush appends physical rows; ``merge`` makes the store canonical.
+"""Flush appends physical rows; reads reconcile them; ``merge`` compacts.
 
-Correctness is guaranteed only after ``merge``: it collapses duplicates per
-``(shard, bucket, id)``, applies fragment supersession, and reaps tombstones.
-The live ``statement`` view is a plain ``deleted_at IS NULL`` scan, so between
-a write and the next merge, statement reads can surface duplicate ids and rows
-whose delete has not been applied. Entity-level reads still fold by
-``entity_id`` on assembly, so an entity's *id* is stable even before merge –
-only its statement-level dedupe / tombstoning waits for merge.
+Every flush lands as new rows – duplicates, re-emissions and tombstones
+included. A read over such a partition collapses duplicates per ``(id, origin,
+fragment, role)``, applies fragment supersession, folds ``first_seen`` /
+``last_seen`` and hides tombstoned ids, so the same statements come back
+before and after ``merge``; ``merge`` only rewrites the partition into one
+canonical file, after which reads are a plain scan. The ``settle`` fixture
+runs each test both ways.
 """
 
 from collections import Counter
@@ -76,47 +76,46 @@ def test_flush_appends_duplicates(repo):
     assert rows2 == rows1 * 2  # second flush appended a fresh copy
 
 
-def test_query_dedup_after_re_add(repo):
-    """Re-flushing the same entity then merging surfaces one row per statement id."""
+def test_query_dedup_after_re_add(repo, settle):
+    """Re-flushing the same entity still surfaces one row per statement id."""
     repo, _ = repo
     jane = EntityProxy.from_dict(JANE)
 
     repo.add(jane)
     repo.flush()
-    repo.merge()
+    settle(repo)
     stmts1 = list(repo.query_statements())
 
     repo.add(jane)
     repo.flush()
-    repo.merge()  # dedupe is applied by merge; reads assume an optimized store
+    settle(repo)
     stmts2 = list(repo.query_statements())
 
     entities = list(repo.query(flush_first=False))
     assert {e.id for e in entities} == {"jane"}
-    # Statement stream dedupes after merge – the second flush's fresh copies
-    # are collapsed back to one row per id.
+    # the second flush's fresh copies collapse to one row per id
     assert len(stmts2) == len(stmts1)
     assert {s.id for s in stmts2} == {s.id for s in stmts1}
 
 
-def test_query_statements_dedup_after_merge(repo):
-    """After merge, one row per id with folded first_seen / latest last_seen."""
+def test_query_statements_dedup(repo, settle):
+    """One row per id with folded first_seen / latest last_seen."""
     repo, _ = repo
     jane = EntityProxy.from_dict(JANE)
 
     repo.add(jane)
     repo.flush()
-    repo.merge()
+    settle(repo)
     first = {s.id: (s.first_seen, s.last_seen) for s in repo.query_statements()}
 
     # Re-add so last_seen differs across the two physical rows
     repo.add(jane)
     repo.flush()
-    repo.merge()  # merge folds first_seen to min and last_seen to max per id
+    settle(repo)
 
     stmts = list(repo.query_statements())
     by_id = {s.id: s for s in stmts}
-    # No duplicate statement ids once merge made the store canonical.
+    # no duplicate statement ids, merged or not
     assert len(stmts) == len(by_id)
     # Dedupe keeps the earliest first_seen and the latest last_seen.
     for stmt_id, (orig_first, orig_last) in first.items():
@@ -124,29 +123,28 @@ def test_query_statements_dedup_after_merge(repo):
         assert by_id[stmt_id].last_seen > orig_last
 
 
-def test_query_skips_tombstone_after_merge(repo):
-    """Deleting an entity hides it from queries once merge runs."""
+def test_query_skips_tombstone(repo, settle):
+    """Deleting an entity hides it from queries."""
     repo, _ = repo
     jane = EntityProxy.from_dict(JANE)
 
     repo.add(jane)
     repo.flush()
-    repo.merge()
+    settle(repo)
     assert {e.id for e in repo.query(flush_first=False)} == {"jane"}
 
     repo.delete_entity("jane")
     repo.flush()
-    # Merge collapses the id to its tombstone (latest last_seen); the live
-    # view then filters deleted_at IS NOT NULL, so the entity vanishes. Before
-    # merge the live row and tombstone coexist and the entity is still visible.
-    repo.merge()
+    # the id collapses to its tombstone (latest last_seen), which the live
+    # rows filter out – whether the pair still coexists physically or not
+    settle(repo)
 
     assert list(repo.query(flush_first=False)) == []
     assert list(repo.query_statements()) == []
 
 
-def test_query_re_add_after_delete(repo):
-    """Re-adding a deleted entity makes it visible again after merge."""
+def test_query_re_add_after_delete(repo, settle):
+    """Re-adding a deleted entity makes it visible again."""
     repo, _ = repo
     jane = EntityProxy.from_dict(JANE)
 
@@ -154,19 +152,19 @@ def test_query_re_add_after_delete(repo):
     repo.flush()
     repo.delete_entity("jane")
     repo.flush()
-    repo.merge()
+    settle(repo)
     assert list(repo.query(flush_first=False)) == []
 
-    # Re-add: new live row has last_seen > the tombstone's last_seen, so
-    # merge picks the re-add and deleted_at IS NULL keeps it.
+    # re-add: the new live row has last_seen > the tombstone's, so it wins
+    # the id and deleted_at IS NULL keeps it
     repo.add(jane)
     repo.flush()
-    repo.merge()
+    settle(repo)
     assert {e.id for e in repo.query(flush_first=False)} == {"jane"}
 
 
-def test_query_no_cross_origin_dedupe(repo):
-    """The same statement under two origins is kept per origin after merge.
+def test_query_no_cross_origin_dedupe(repo, settle):
+    """The same statement under two origins is kept per origin.
 
     ``origin`` is a partition key, so ``merge`` – which rewrites each
     ``(shard, bucket, origin)`` partition independently – cannot collapse a
@@ -182,7 +180,7 @@ def test_query_no_cross_origin_dedupe(repo):
     repo.flush()
     repo.add(jane, origin="source-b")
     repo.flush()
-    repo.merge()
+    settle(repo)
 
     stmts = list(repo.query_statements())
     # Both origins survive; each statement id appears once per origin.
@@ -230,7 +228,11 @@ def test_get_changed_entity_ids_sees_tombstones(local_repo):
     # Even though the deduped view hides the tombstoned entity from
     # normal reads, the diff path queries statement_raw so it still
     # picks up the deletion timestamp.
-    changed = list(repo._statements.get_entity_ids(Query(C(first_seen__gte=before))))
+    changed = list(
+        repo._statements.get_entity_ids(
+            Query(C(first_seen__gte=before)), source=repo._statements.source_raw
+        )
+    )
     assert "jane" in changed
 
 

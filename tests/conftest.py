@@ -213,3 +213,18 @@ def make_test_api(tmp_path: Path) -> Generator[str, None, None]:
         yield base_url
 
     get_api.cache_clear()
+
+
+@pytest.fixture(params=["unmerged", "merged"])
+def settle(request):
+    """Run a test's assertions against the un-merged store and against the
+    merged one. Reads reconcile duplicates, supersession and tombstones at
+    read time, so both must agree – ``merge`` only changes the physical
+    layout. Call it where the test would have merged.
+    """
+
+    def _settle(repo) -> None:
+        if request.param == "merged":
+            repo.merge()
+
+    return _settle
