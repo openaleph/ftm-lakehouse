@@ -30,10 +30,11 @@ from typing import IO, Any, ClassVar, Generator, Iterable, Iterator, Self, cast
 
 from anystore.io import Writer
 from anystore.io.write import Formats
+from anystore.logging import get_logger
 from anystore.logic.compress import CompressKind
 from anystore.model.base import BaseModel
 from anystore.types import SDict
-from anystore.util import join_uri
+from anystore.util import Took, join_uri
 from followthemoney import model
 from followthemoney.dataset import DataResource
 from ftmq.util import datetime_iso
@@ -54,6 +55,8 @@ A writer would otherwise take it from whichever row comes first, which is
 wrong for a diff – a ``DEL`` row carries only ``op`` and ``id``, and landing
 first it would cap the header at two columns.
 """
+
+log = get_logger(__name__)
 
 DOCUMENT_ORIGINS: tuple[str | None, ...] = (None, tag.CRAWL_ORIGIN)
 """Scopes the documents export is written for – every origin, plus a csv /
@@ -550,7 +553,23 @@ class DiffableRun(WritingRun):
         self.since_iso = datetime_iso(last_timestamp)
         self.active = True
         self.diff = self.artifact.diff_writer(self.now)
-        self.pending = set(self.deleted_ids(last_timestamp))
+        # a raw-view scan of every partition: `deleted_at` is no partition
+        # column, so nothing prunes and this runs before the sweep opens
+        log.info(
+            "Loading delete candidates ...",
+            dataset=self.artifact.dataset.dataset,
+            artifact=str(self.artifact.tag),
+            since=self.since_iso,
+        )
+        with Took() as t:
+            self.pending = set(self.deleted_ids(last_timestamp))
+        log.info(
+            "Loaded delete candidates.",
+            dataset=self.artifact.dataset.dataset,
+            artifact=str(self.artifact.tag),
+            candidates=len(self.pending),
+            took=t.took,
+        )
 
     def deleted_ids(self, since: datetime) -> Iterator[str]:
         """Ids tombstoned since the given timestamp – the DEL candidates."""

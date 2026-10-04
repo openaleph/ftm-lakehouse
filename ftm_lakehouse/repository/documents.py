@@ -7,6 +7,7 @@ from typing import Iterator
 
 from anystore.logic.compress import CompressKind
 from anystore.types import Uri
+from anystore.util import Took
 from ftmq.query import C, M, P, Query
 
 from ftm_lakehouse.helpers.file import get_filename
@@ -96,7 +97,14 @@ class DocumentRepository(DatasetHandle):
         return self._paths
 
     def _build_paths(self) -> dict[str, str]:
-        """Walk the Folder entities into a folder id to path map."""
+        """Walk the Folder entities into a folder id to path map.
+
+        One pass over the ``Folder`` entities of the store. An export builds
+        this before its sweep opens, so on a large store it is part of the
+        gap before the first row is written – hence the log lines.
+        """
+        self.log.info("Building folder paths ...", version=self._paths_version)
+        took = Took()
         # First pass: collect caption and parent for each folder
         folders: dict[str, tuple[str, str | None]] = {}
         for d in self._statements._query_data(
@@ -124,6 +132,7 @@ class DocumentRepository(DatasetHandle):
                 current_id = parent_id
             paths[folder_id] = "/".join(reversed(parts))
 
+        self.log.info("Built folder paths.", folders=len(paths), took=took.took)
         return paths
 
     def iterate(self, q: Query | None = None) -> Documents:
