@@ -33,7 +33,6 @@ from typing import (
     Callable,
     ClassVar,
     Generator,
-    Iterable,
     Iterator,
     Self,
     cast,
@@ -85,14 +84,16 @@ it without the archive's other sources bleeding in."""
 
 
 class ExportKind(StrEnum):
-    """The available dataset exports.
+    """What each export artifact is called.
 
-    Lives here rather than with the export operation because each `Artifact`
-    declares the kind it answers to, and ``repository/`` cannot import
-    ``operation/``. `ftm_lakehouse.operation.export` re-exports it.
+    An artifact's identity: the name it declares (`Artifact.kind`), the name
+    it is addressed by (`ArtifactsRepository.__getitem__`) and the name an
+    export run reports it under. Lives here rather than with the export
+    operation because each `Artifact` declares its own, and ``repository/``
+    cannot import ``operation/``. `ftm_lakehouse.operation.export`
+    re-exports it.
     """
 
-    all = "all"
     statements = "statements"
     entities = "entities"
     documents = "documents"
@@ -139,7 +140,6 @@ class Artifact:
     base: ClassVar[StoreKey]
     kind: ClassVar[ExportKind]
     mime_type: ClassVar[str] = CSV
-    dependencies: ClassVar[tuple[str | StoreKey, ...]] = (tag.STATEMENTS_UPDATED,)
     compressed: ClassVar[bool] = True
     fieldnames: ClassVar[list[str] | None] = None
 
@@ -193,17 +193,8 @@ class Artifact:
         """Whether the artifact has been written."""
         return self.dataset._store.exists(self.key)
 
-    def is_fresh(self) -> bool:
-        """Whether the artifact exists *and* is newer than its dependencies.
-
-        A missing artifact is never fresh – there is nothing to be current.
-        """
-        if not self.exists():
-            return False
-        return self.dataset._tags.is_latest(self.tag, self.dependencies)
-
     def touch(self, ts: datetime | None = None) -> None:
-        """Stamp the freshness tag"""
+        """Stamp the freshness tag – when this artifact was last written"""
         self.dataset._tags.set(self.tag, ts)
 
     def writer(self, lazy: bool = False) -> Writer:
@@ -462,12 +453,6 @@ class IndexArtifact(VersionedArtifact):
 
     base = path.INDEX
     kind = ExportKind.index
-    dependencies = (
-        path.CONFIG,
-        path.EXPORTS_STATISTICS,
-        path.ENTITIES_JSON,
-        path.EXPORTS_DOCUMENTS,
-    )
 
 
 ARTIFACTS: tuple[type[Artifact], ...] = (
@@ -479,17 +464,6 @@ ARTIFACTS: tuple[type[Artifact], ...] = (
 )
 
 ARTIFACTS_BY_KIND: dict[ExportKind, type[Artifact]] = {a.kind: a for a in ARTIFACTS}
-
-SWEEP_KINDS = (
-    ExportKind.statements,
-    ExportKind.entities,
-    ExportKind.documents,
-    ExportKind.statistics,
-)
-"""The kinds the entity sweep produces.
-
-Only ``index.json`` is left out: it registers what the others wrote, so it
-runs after them rather than with them."""
 
 
 class ArtifactRun:
@@ -976,19 +950,19 @@ class ArtifactsRepository(DatasetHandle):
     """The export artifacts one dataset produces.
 
     Binds the declarations above to this dataset, so a caller addresses an
-    artifact by kind and gets something that knows where it lives, whether it
-    is current, how to write it and how to describe itself in ``index.json``.
+    artifact by name and gets something that knows where it lives, how to
+    write it and how to describe itself in ``index.json``.
 
     Example:
         ```python
         artifacts = ArtifactsRepository("my_dataset", uri)
-        artifacts.entities.is_fresh()
+        artifacts.entities.exists()
         artifacts.documents["crawl"].key
         ```
     """
 
     def __getitem__(self, kind: ExportKind | str) -> Artifact:
-        """The artifact answering to one export kind, bound to this dataset."""
+        """The artifact of that name, bound to this dataset."""
         return ARTIFACTS_BY_KIND[ExportKind(kind)](self)
 
     def __iter__(self) -> Iterator[Artifact]:
@@ -1018,27 +992,31 @@ class ArtifactsRepository(DatasetHandle):
         """The documents variants a full export writes, one per origin."""
         yield from (self.documents[origin] for origin in DOCUMENT_ORIGINS)
 
-    def written_by(self, kinds: Iterable[ExportKind]) -> Iterator[Artifact]:
-        """Every artifact those kinds cover, origin scopes expanded."""
-        for kind in kinds:
-            if kind == ExportKind.documents:
+    def streamed(self) -> Iterator[Artifact]:
+        """Every artifact the sweep writes, origin scopes expanded.
+
+        All of them bar ``index.json``, which registers what these wrote and
+        so runs after them rather than with them.
+        """
+        for artifact in self:
+            if isinstance(artifact, IndexArtifact):
+                continue
+            if isinstance(artifact, DocumentsArtifact):
                 yield from self.document_scopes()
             else:
-                yield self[kind]
+                yield artifact
 
     def session(
         self,
         now: datetime,
-        kinds: Iterable[ExportKind],
         version: int | None,
         make_diff: bool = True,
     ) -> ExportSession:
-        """The artifacts an export run covers, ready to be driven as one loop.
+        """The artifacts an export run writes, ready to be driven as one loop.
 
         Args:
             now: Timestamp the run started – diff files are named after it and
                 diff states are recorded at it.
-            kinds: Which exports this run covers.
             version: Current delta table version, which the diff series
                 resolve their window against.
             make_diff: Whether diff series run at all.
@@ -1046,7 +1024,7 @@ class ArtifactsRepository(DatasetHandle):
         # local import: `factories` imports this module for `ArtifactsRepository`
         from ftm_lakehouse.repository.factories import get_entities
 
-        runs = tuple(a.run(now) for a in self.written_by(kinds))
+        runs = tuple(a.run(now) for a in self.streamed())
         entities = get_entities(self.dataset, self.uri)
         return ExportSession(runs, version, make_diff, entities.deleted_candidates)
 
@@ -1058,12 +1036,7 @@ class ArtifactsRepository(DatasetHandle):
         public_prefix = self._model.get_public_prefix()
         if not public_prefix:
             return
-        for artifact in (
-            self.statements,
-            self.entities,
-            *self.document_scopes(),
-            self.statistics,
-        ):
+        for artifact in self.streamed():
             resource = artifact.make_resource(public_prefix)
             if resource is not None:
                 yield resource

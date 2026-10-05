@@ -77,7 +77,7 @@ Available operations:
 |----------|-------------|
 | [`CrawlJob`](../reference/operation.md#ftm_lakehouse.operation.crawl.CrawlJob) | Batch file ingestion from a source URI |
 | [`OptimizeJob`](../reference/operation.md#ftm_lakehouse.operation.maintenance.OptimizeJob) | Merge duplicates / reap tombstones, bin-pack small files, delete obsolete files |
-| [`ExportJob`](../reference/operation.md#ftm_lakehouse.operation.export.ExportJob) | Export by `kind`: `statements`, `entities`, `documents`, `statistics`, `index` |
+| [`ExportJob`](../reference/operation.md#ftm_lakehouse.operation.export.ExportJob) | Export every artifact from one sweep, then `index.json`. `make_diff` (default `true`) also writes the delta diff files |
 | [`DownloadArchiveJob`](../reference/operation.md#ftm_lakehouse.operation.download.DownloadArchiveJob) | Export archive files to original paths |
 | [`MakeJob`](../reference/operation.md#ftm_lakehouse.operation.make.MakeJob) | Full workflow: flush + all exports |
 

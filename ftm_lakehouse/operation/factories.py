@@ -7,13 +7,13 @@ Example:
     ```python
     from ftm_lakehouse.operation import export, make, optimize
 
-    # Run a single export operation
-    export("my_dataset", "statements")
+    # Write every export artifact from one sweep
+    export("my_dataset")
 
     # Optimize the statement store (merge + vacuum)
     optimize("my_dataset")
 
-    # Run the full make workflow (flush + all exports)
+    # Run the full make workflow (flush + export)
     make("my_dataset")
     ```
 """
@@ -24,7 +24,7 @@ from ftm_lakehouse.operation.download import (
     DownloadArchiveJob,
     DownloadArchiveOperation,
 )
-from ftm_lakehouse.operation.export import ExportJob, ExportKind, ExportOperation
+from ftm_lakehouse.operation.export import ExportJob, ExportOperation
 from ftm_lakehouse.operation.maintenance import (
     MigrateJob,
     MigrateOperation,
@@ -38,13 +38,12 @@ from ftm_lakehouse.operation.make import MakeJob, MakeOperation
 
 def export(
     dataset: str,
-    kind: ExportKind | str = ExportKind.all,
     uri: Uri | None = None,
     force: bool = False,
     make_diff: bool = True,
 ) -> ExportJob:
     """
-    Run an export operation.
+    Run the export: every artifact from one sweep, then ``index.json``.
 
     Compression of the exported artifacts is the dataset's own
     ``compression`` config value – there is deliberately no runtime
@@ -52,22 +51,14 @@ def export(
 
     Args:
         dataset: Name of the dataset to export from
-        kind: What to export – ``all`` (the default: statements, entities and
-            documents from one sweep, with their diffs), or one of
-            ``statements``, ``entities``, ``documents``, ``statistics``,
-            ``index``
         uri: Dataset storage root override
         force: Force export even if up-to-date
-        make_diff: Also export delta diff files (``entities`` / ``documents``)
+        make_diff: Also export the delta diff files
 
     Returns:
         The completed job result
     """
-    job = ExportJob.make(
-        dataset=dataset,
-        kind=ExportKind(kind),
-        make_diff=make_diff,
-    )
+    job = ExportJob.make(dataset=dataset, make_diff=make_diff)
     return ExportOperation(job, uri).run(force=force)
 
 

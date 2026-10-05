@@ -1,4 +1,9 @@
-"""Tests for the ExportOperation kinds - statements, entities, statistics, documents, index."""
+"""Tests for the ExportOperation: one sweep writes every artifact.
+
+A run writes ``statements.csv``, ``entities.ftm.json``, every
+``documents.csv`` scope and ``statistics.json`` from one pass over the
+entities, then ``index.json`` registering them.
+"""
 
 import json
 
@@ -8,7 +13,7 @@ from rigour.mime.types import CSV, FTM, JSON
 
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.model.file import Document
-from ftm_lakehouse.operation.export import ExportJob, ExportKind, ExportOperation
+from ftm_lakehouse.operation.export import ExportJob, ExportOperation
 from ftm_lakehouse.repository import ArchiveRepository, EntityRepository
 from tests.shared import JANE, JOHN
 
@@ -23,153 +28,99 @@ def setup_entities(repo: EntityRepository) -> None:
     repo.flush()
 
 
-def make_op(kind: ExportKind, tmp_path, **kwargs) -> ExportOperation:
-    job = ExportJob.make(dataset=DATASET, kind=kind, **kwargs)
+def setup_documents(tmp_path, fixtures_path) -> EntityRepository:
+    """Archive two files – one as a crawl would, so the origin-scoped export
+    has something to pick up – and flush their entities."""
+    archive = ArchiveRepository(dataset=DATASET, uri=tmp_path)
+    repo = EntityRepository(dataset=DATASET, uri=tmp_path)
+    for key, origin in (("utf.txt", tag.CRAWL_ORIGIN), ("companies.csv", None)):
+        doc = archive.store(fixtures_path / "src" / key)
+        with repo.writer(origin=origin) as writer:
+            for entity in doc.make_entities():
+                writer.add_entity(entity)
+    repo.flush()
+    return repo
+
+
+def make_op(tmp_path, **kwargs) -> ExportOperation:
+    job = ExportJob.make(dataset=DATASET, **kwargs)
     return ExportOperation(job=job, uri=tmp_path)
 
 
-def test_operation_export_statements(tmp_path):
-    """Export kind=statements: parquet to statements.csv with tags."""
-    repo = EntityRepository(dataset=DATASET, uri=tmp_path)
-    setup_entities(repo)
+def test_export_writes_every_artifact(tmp_path, fixtures_path):
+    """One run, every artifact and every freshness tag."""
+    tmp_path = tmp_path / DATASET
+    repo = setup_documents(tmp_path, fixtures_path)
 
-    # No target tag before run
-    target_path = "tags/lakehouse/exports/statements.csv"
-    assert not (tmp_path / target_path).exists()
+    op = make_op(tmp_path)
 
-    # Create operation and verify target/dependencies
-    op = make_op(ExportKind.statements, tmp_path)
-
-    assert op.get_target() == path.EXPORTS_STATEMENTS
-    assert op.get_target() == "exports/statements.csv"
-    # exports go stale against the content clock – rows landing, an origin
-    # dropped – which `prepare()`'s flush has already moved by the time the
-    # freshness check runs; a merge changes no content and leaves it alone
+    # the operation keys on the content clock as a whole
+    assert op.get_target() == tag.OP_EXPORT
+    assert op.get_target() == "operations/export/last_run"
     assert op.get_dependencies() == [tag.STATEMENTS_UPDATED]
-    assert op.get_dependencies() == ["statements/last_updated"]
 
-    # Run the export operation
+    assert not (tmp_path / "tags/lakehouse" / path.EXPORTS_STATEMENTS).exists()
+
     result = op.run()
 
     assert result.done == 1
     assert result.running is False
     assert result.stopped is not None
 
-    # Verify tag exists at hardcoded path after run
-    assert (tmp_path / target_path).exists()
-
-    # Verify output file exists at hardcoded path
+    # every artifact, at its hardcoded path
     assert (tmp_path / "exports/statements.csv").exists()
-
-
-def test_operation_export_entities(tmp_path):
-    """Export kind=entities: parquet to entities.ftm.json with tags."""
-    tmp_path = tmp_path / DATASET
-    repo = EntityRepository(dataset=DATASET, uri=tmp_path)
-    setup_entities(repo)
-
-    # No target tag before run
-    target_path = "tags/lakehouse/entities.ftm.json"
-    assert not (tmp_path / target_path).exists()
-
-    # Create operation and verify target/dependencies
-    op = make_op(ExportKind.entities, tmp_path)
-
-    assert op.get_target() == path.ENTITIES_JSON
-    assert op.get_target() == "entities.ftm.json"
-    assert op.get_dependencies() == [tag.STATEMENTS_UPDATED]
-
-    # Run the export operation
-    result = op.run()
-
-    assert result.done == 1
-    assert result.running is False
-    assert result.stopped is not None
-
-    # Verify tag exists at hardcoded path after run
-    assert (tmp_path / target_path).exists()
-
-    # Verify output file exists at hardcoded path
     assert (tmp_path / "entities.ftm.json").exists()
+    assert (tmp_path / "exports/documents.csv").exists()
+    assert (tmp_path / "exports/documents.crawl.csv").exists()
+    assert (tmp_path / "index.json").exists()
+    # the two versioned ones live beside their current copy
+    for key in (path.EXPORTS_STATISTICS, path.INDEX):
+        assert list((tmp_path / "versions").rglob(str(key)))
 
-
-def test_operation_export_statistics(tmp_path):
-    """Export kind=statistics: parquet to statistics.json with tags."""
-    tmp_path = tmp_path / DATASET
-    repo = EntityRepository(dataset=DATASET, uri=tmp_path)
-    setup_entities(repo)
-
-    # No target tag before run
-    target_path = "tags/lakehouse/exports/statistics.json"
-    assert not (tmp_path / target_path).exists()
-
-    # Create operation and verify target/dependencies
-    op = make_op(ExportKind.statistics, tmp_path)
-
-    assert op.get_target() == path.EXPORTS_STATISTICS
-    assert op.get_target() == "exports/statistics.json"
-    assert op.get_dependencies() == [tag.STATEMENTS_UPDATED]
-
-    # Run the export operation
-    result = op.run()
-
-    assert result.done == 1
-    assert result.running is False
-    assert result.stopped is not None
-
-    # Verify tag exists at hardcoded path after run
-    assert (tmp_path / target_path).exists()
-
-    # Verify output file exists (versioned, so check versions dir)
-    versions = list((tmp_path / "versions").rglob("exports/statistics.json"))
-    assert len(versions) >= 1
-
-
-def test_operation_export_index(tmp_path):
-    """Export kind=index: generate index.json with tags."""
-    tmp_path = tmp_path / DATASET
-    repo = EntityRepository(dataset=DATASET, uri=tmp_path)
-    setup_entities(repo)
-
-    # Run prerequisites first (statistics and entities exports)
-    make_op(ExportKind.statistics, tmp_path).run()
-    make_op(ExportKind.entities, tmp_path).run()
-
-    # No target tag before run
-    target_path = "tags/lakehouse/index.json"
-    assert not (tmp_path / target_path).exists()
-
-    # Create operation and verify target/dependencies
-    op = make_op(ExportKind.index, tmp_path)
-
-    assert op.get_target() == path.INDEX
-    assert op.get_target() == "index.json"
-    assert op.get_dependencies() == [
-        path.CONFIG,
-        path.EXPORTS_STATISTICS,
+    # ... and each one carries its own freshness tag, the record of when it
+    # was last written
+    for key in (
+        path.EXPORTS_STATEMENTS,
         path.ENTITIES_JSON,
         path.EXPORTS_DOCUMENTS,
-    ]
-    assert op.get_dependencies() == [
-        "config.yml",
-        "exports/statistics.json",
-        "entities.ftm.json",
-        "exports/documents.csv",
-    ]
+        path.EXPORTS_DOCUMENTS[tag.CRAWL_ORIGIN],
+        path.EXPORTS_STATISTICS,
+        path.INDEX,
+    ):
+        assert (tmp_path / "tags/lakehouse" / str(key)).exists(), key
+        assert repo._tags.is_latest(key, [tag.STATEMENTS_UPDATED]), key
 
-    result = op.run()
+    assert make_op(tmp_path).is_fresh()
 
-    assert result.done == 1
-    assert result.running is False
-    assert result.stopped is not None
 
-    # Verify tag exists at hardcoded path after run
-    assert (tmp_path / target_path).exists()
+def test_export_documents_scopes(tmp_path, fixtures_path):
+    """The documents csv and its crawl-scoped sibling, from the one run."""
+    tmp_path = tmp_path / DATASET
+    setup_documents(tmp_path, fixtures_path)
 
-    # Resource mime types are pinned so they can't drift silently –
-    # statements.csv is a CSV artifact (FTM_STMT would claim JSON).
-    make_op(ExportKind.statements, tmp_path).run()
-    make_op(ExportKind.index, tmp_path).run(force=True)
+    make_op(tmp_path).run()
+
+    docs = list(smart_stream_csv_models(tmp_path / path.EXPORTS_DOCUMENTS, Document))
+    assert len(docs) == 2
+    for doc in docs:
+        assert doc.public_url.startswith(f"https://data.example.org/{DATASET}/archive/")
+
+    crawl_csv = tmp_path / path.EXPORTS_DOCUMENTS[tag.CRAWL_ORIGIN]
+    crawl_docs = list(smart_stream_csv_models(crawl_csv, Document))
+    assert {d.name for d in crawl_docs} == {"utf.txt"}
+
+
+def test_export_index_registers_the_artifacts(tmp_path, fixtures_path):
+    """``index.json`` describes what the sweep wrote, mime types pinned.
+
+    They can't drift silently: ``statements.csv`` is a CSV artifact (``FTM``
+    would claim JSON), and the documents scopes are each their own resource.
+    """
+    tmp_path = tmp_path / DATASET
+    setup_documents(tmp_path, fixtures_path)
+
+    make_op(tmp_path).run()
+
     index = json.loads((tmp_path / path.INDEX).read_text())
     mimes = {
         r["name"].rsplit("/", 1)[-1]: r.get("mime_type")
@@ -177,35 +128,39 @@ def test_operation_export_index(tmp_path):
     }
     assert mimes["statements.csv"] == CSV
     assert mimes["entities.ftm.json"] == FTM
+    assert mimes["documents.csv"] == CSV
+    assert mimes["documents.crawl.csv"] == CSV
     assert mimes["statistics.json"] == JSON
-    assert "documents.csv" not in mimes  # no documents export in this test
+    # the index is the file being written, so it does not describe itself
+    assert "index.json" not in mimes
+    # the statistics the same sweep folded
+    assert index["stats"]["entity_count"] == 2
 
-    # Verify output file exists (versioned, so check versions dir)
-    versions = list((tmp_path / "versions").rglob("index.json"))
-    assert len(versions) >= 1
+
+def test_export_skips_empty_store(tmp_path):
+    """Nothing to sweep still publishes the dataset's metadata."""
+    tmp_path = tmp_path / DATASET
+    EntityRepository(dataset=DATASET, uri=tmp_path)  # config only, no statements
+
+    result = make_op(tmp_path).run()
+
+    assert result.done == 1
+    assert not (tmp_path / path.EXPORTS_STATEMENTS).exists()
+    assert (tmp_path / path.INDEX).exists()
 
 
-def test_export_sweep_writes_every_artifact_once(tmp_path):
-    """`ExportKind.all` produces the streamed artifacts from a single pass."""
+def test_export_index_not_rewritten_when_fresh(tmp_path):
+    """A fresh run never reaches the sweep, so nothing is re-published."""
+    tmp_path = tmp_path / DATASET
     repo = EntityRepository(dataset=DATASET, uri=tmp_path)
     setup_entities(repo)
 
-    op = make_op(ExportKind.all, tmp_path)
-    assert op.get_target() == tag.OP_EXPORT
-    assert op.get_target() == "operations/export/last_run"
-    assert op.get_dependencies() == [tag.STATEMENTS_UPDATED]
+    assert make_op(tmp_path).run().done == 1
+    versions = list((tmp_path / "versions").rglob(str(path.INDEX)))
+    assert len(versions) == 1
 
-    result = op.run()
-    assert result.done == 1
-
-    assert (tmp_path / path.EXPORTS_STATEMENTS).exists()
-    assert (tmp_path / path.ENTITIES_JSON).exists()
-    # every artifact the sweep wrote carries its own freshness tag, so a
-    # single-kind export afterwards sees itself up to date
-    assert (tmp_path / "tags/lakehouse" / path.EXPORTS_STATEMENTS).exists()
-    assert (tmp_path / "tags/lakehouse" / path.ENTITIES_JSON).exists()
-    assert repo._tags.is_latest(path.ENTITIES_JSON, [tag.STATEMENTS_UPDATED])
-    assert make_op(ExportKind.entities, tmp_path).is_fresh()
+    assert make_op(tmp_path).run().done == 0
+    assert list((tmp_path / "versions").rglob(str(path.INDEX))) == versions
 
 
 def test_export_fresh_across_merge_stale_after_write(tmp_path):
@@ -219,7 +174,7 @@ def test_export_fresh_across_merge_stale_after_write(tmp_path):
     def is_fresh() -> bool:
         return repo._tags.is_latest(path.EXPORTS_STATEMENTS, [tag.STATEMENTS_UPDATED])
 
-    make_op(ExportKind.statements, tmp_path).run()
+    make_op(tmp_path).run()
     assert repo.needs_merge  # the export did not merge for itself
     assert is_fresh()
 
@@ -230,60 +185,8 @@ def test_export_fresh_across_merge_stale_after_write(tmp_path):
     setup_entities(repo)
     assert not is_fresh()
 
-    make_op(ExportKind.statements, tmp_path).run()
+    make_op(tmp_path).run()
     assert is_fresh()
-
-
-def test_operation_export_documents(tmp_path, fixtures_path):
-    """Export kind=documents: parquet to documents.csv with tags."""
-    tmp_path = tmp_path / DATASET
-    archive = ArchiveRepository(dataset=DATASET, uri=tmp_path)
-    repo = EntityRepository(dataset=DATASET, uri=tmp_path)
-
-    # Archive files and write their entities – one of them as a crawl would,
-    # so the origin-scoped export has something to pick up
-    for key, origin in (("utf.txt", tag.CRAWL_ORIGIN), ("companies.csv", None)):
-        doc = archive.store(fixtures_path / "src" / key)
-        with repo.writer(origin=origin) as writer:
-            for entity in doc.make_entities():
-                writer.add_entity(entity)
-    repo.flush()
-
-    # No target tag before run
-    target_path = "tags/lakehouse/exports/documents.csv"
-    assert not (tmp_path / target_path).exists()
-
-    # Create operation and verify target/dependencies
-    op = make_op(ExportKind.documents, tmp_path)
-
-    assert op.get_target() == path.EXPORTS_DOCUMENTS
-    assert op.get_target() == "exports/documents.csv"
-    assert op.get_dependencies() == [tag.STATEMENTS_UPDATED]
-
-    # Run the export operation
-    result = op.run()
-
-    assert result.done == 1
-    assert result.running is False
-    assert result.stopped is not None
-
-    # Verify tag exists at hardcoded path after run
-    assert (tmp_path / target_path).exists()
-
-    # Verify output file exists at hardcoded path
-    assert (tmp_path / "exports/documents.csv").exists()
-
-    # Check result
-    docs = list(smart_stream_csv_models(tmp_path / path.EXPORTS_DOCUMENTS, Document))
-    assert len(docs) == 2
-    for doc in docs:
-        assert doc.public_url.startswith(f"https://data.example.org/{DATASET}/archive/")
-
-    # ... and the same run wrote the crawl-scoped csv next to it
-    crawl_csv = tmp_path / path.EXPORTS_DOCUMENTS[tag.CRAWL_ORIGIN]
-    assert crawl_csv.exists()
-    crawl_docs = list(smart_stream_csv_models(crawl_csv, Document))
-    assert {d.name for d in crawl_docs} == {"utf.txt"}
 
 
 def test_export_empty_sweep_truncates_stale_artifact(tmp_path):
@@ -292,7 +195,7 @@ def test_export_empty_sweep_truncates_stale_artifact(tmp_path):
     freshly stamped as current."""
     repo = EntityRepository(dataset=DATASET, uri=tmp_path)
     setup_entities(repo)
-    make_op(ExportKind.all, tmp_path).run()
+    make_op(tmp_path).run()
 
     entities = tmp_path / path.ENTITIES_JSON
     assert "jane" in entities.read_text()
@@ -300,7 +203,7 @@ def test_export_empty_sweep_truncates_stale_artifact(tmp_path):
     repo.delete_entity("jane")
     repo.delete_entity("john")
     repo.merge()
-    make_op(ExportKind.all, tmp_path).run(force=True)
+    make_op(tmp_path).run(force=True)
 
     assert entities.exists()
     assert entities.read_text() == ""
@@ -312,6 +215,6 @@ def test_export_result_counts_each_entity_once(tmp_path):
     repo = EntityRepository(dataset=DATASET, uri=tmp_path)
     setup_entities(repo)
 
-    result = make_op(ExportKind.all, tmp_path).run().result
+    result = make_op(tmp_path).run().result
     assert result["entities"] == 2
     assert result["statements"] == sum(1 for _ in repo.query_statements())

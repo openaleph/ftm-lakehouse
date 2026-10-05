@@ -22,7 +22,7 @@ from ftm_lakehouse.catalog import get_dataset_model, update_dataset
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.lake import get_lakehouse
 from ftm_lakehouse.model.dataset import DatasetModel
-from ftm_lakehouse.operation import ExportKind, export, make
+from ftm_lakehouse.operation import export, make
 from ftm_lakehouse.operation.crawl import crawl
 from ftm_lakehouse.repository.base import DatasetRef
 from ftm_lakehouse.repository.factories import get_archive, get_entities, get_versions
@@ -274,7 +274,7 @@ def test_e2e_workflows_export_files_created(dataset):
         writer.add_entity(entity)
 
     get_entities(*dataset).flush()
-    export(dataset.name, ExportKind.statements, dataset.uri)
+    export(dataset.name, dataset.uri)
 
     # Verify the file is bigger (more statements)
     new_csv_content = store.get(path.EXPORTS_STATEMENTS)
@@ -339,11 +339,9 @@ def test_e2e_workflows_index_includes_statistics(dataset):
             writer.add_entity(entity)
 
     get_entities(*dataset).flush()
-    export(dataset.name, ExportKind.statements, dataset.uri)
-    export(dataset.name, ExportKind.statistics, dataset.uri)
-
-    # Make index
-    export(dataset.name, ExportKind.index, dataset.uri)
+    # one run: the statistics are folded in the sweep and `index.json` is
+    # written after it, so it registers them
+    export(dataset.name, dataset.uri)
 
     # Verify the index with statistics included
     index = get_versions(*dataset).get(path.INDEX, DatasetModel)
@@ -487,8 +485,8 @@ def test_e2e_workflows_is_latest_logic(dataset):
     get_entities(*dataset).add(entity, origin="test")
     get_entities(*dataset).flush()
 
-    # Export statistics - sets the STATISTICS tag
-    export(dataset.name, ExportKind.statistics, dataset.uri)
+    # Export - stamps every artifact's tag, the statistics' among them
+    export(dataset.name, dataset.uri)
 
     # Statistics should now be latest relative to STATEMENTS_UPDATED
     assert tags.is_latest(path.EXPORTS_STATISTICS, [tag.STATEMENTS_UPDATED])

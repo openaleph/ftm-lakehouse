@@ -9,7 +9,7 @@ from typer.testing import CliRunner
 
 from ftm_lakehouse.cli import cli as cli_app
 from ftm_lakehouse.core.conventions import path
-from ftm_lakehouse.operation.export import ExportJob, ExportKind, ExportOperation
+from ftm_lakehouse.operation.export import ExportJob, ExportOperation
 from ftm_lakehouse.repository.entities.main import EntityRepository
 from tests.shared import BOB, JANE
 
@@ -119,7 +119,7 @@ def test_merge_lock_serialises_merge_and_sweep(tmp_path, monkeypatch) -> None:
             repo._statements.merge()
 
     repo._statements._store.touch(path.LOCK_MERGE)  # a merge is under way
-    job = ExportJob.make(dataset="test", kind=ExportKind.entities)
+    job = ExportJob.make(dataset="test")
     with pytest.raises(RuntimeError, match="Already locked"):
         ExportOperation(job=job, uri=tmp_path).export(utc_now())
     assert repo.unlock() is True

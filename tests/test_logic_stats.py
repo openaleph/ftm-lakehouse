@@ -10,7 +10,7 @@ from ftmq.util import make_entity
 
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.logic.entities.stats import StatsCollector, _date_props
-from ftm_lakehouse.operation.export import ExportJob, ExportKind, ExportOperation
+from ftm_lakehouse.operation.export import ExportJob, ExportOperation
 from ftm_lakehouse.repository import EntityRepository
 
 DATASET = "stats_test"
@@ -140,7 +140,7 @@ def test_logic_stats_matches_the_store(tmp_path):
     """
     repo = _setup(tmp_path)
 
-    job = ExportJob.make(dataset=DATASET, kind=ExportKind.statistics)
+    job = ExportJob.make(dataset=DATASET)
     ExportOperation(job=job, uri=tmp_path).run(force=True)
 
     written = repo._store.get(path.EXPORTS_STATISTICS, model=DatasetStats)

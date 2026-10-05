@@ -190,7 +190,7 @@ operation/
   export.py        # ExportOperation - every export from one entity sweep
   crawl.py         # CrawlOperation - source → files → entities
   maintenance.py   # OptimizeOperation - merge + vacuum in one pass
-  make.py          # MakeOperation - flush + all exports + index
+  make.py          # MakeOperation - flush + export
   download.py      # DownloadArchiveOperation
 ```
 
@@ -299,7 +299,7 @@ ftm_lakehouse/
 ├── operation/               # Layer 4: Multi-step workflow operations
 │   ├── base.py              # DatasetJobOperation (freshness targets / deps)
 │   ├── factories.py         # export(), optimize(), make(), crawl(), ...
-│   ├── export.py            # ExportOperation (spec table per kind)
+│   ├── export.py            # ExportOperation (one sweep, every artifact)
 │   ├── maintenance.py       # OptimizeOperation
 │   ├── make.py              # MakeOperation (full workflow)
 │   ├── crawl.py             # CrawlOperation
@@ -355,19 +355,21 @@ flowchart TD
 
     C --> |"optimize() – merge + vacuum"| C
 
-    C --> |"export(statements)"| D[statements.csv]
-    C --> |"export(entities)"| E[entities.ftm.json]
-    C --> |"export(statistics)"| F[statistics.json]
-    F --> |"export(index)"| G[index.json]
+    C --> |"export() – one sweep"| D[statements.csv]
+    C --> |"export()"| E[entities.ftm.json]
+    C --> |"export()"| F[statistics.json]
+    C --> |"export()"| H[documents.csv]
+    D & E & F & H --> |"registered by the same run"| G[index.json]
 
     C -.-> T2[statements/last_updated]
     D -.-> T3[exports/statements]
     E -.-> T4[exports/entities_json]
     F -.-> T5[exports/statistics]
+    H -.-> T6[exports/documents]
 
     classDef tag fill:#f9f,stroke:#333,stroke-width:1px
     classDef storage fill:#69b,stroke:#333,stroke-width:2px,color:#fff
-    class T0,T2,T3,T4,T5 tag
+    class T0,T2,T3,T4,T5,T6 tag
     class B,C,AR storage
 ```
 
