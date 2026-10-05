@@ -10,7 +10,7 @@ Factory functions provide convenient ways to run operations from a Dataset:
 
     dataset = get_dataset("my_dataset")
     export(dataset, "statements")  # Run single export
-    optimize(dataset)              # Merge + compact + vacuum
+    optimize(dataset)              # Merge + vacuum
     make(dataset)                  # Run full workflow
 """
 

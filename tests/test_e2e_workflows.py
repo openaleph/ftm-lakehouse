@@ -106,11 +106,9 @@ def test_e2e_workflows_initial_crawl_and_make(dataset, fixtures_path):
 def test_e2e_workflows_make_skips_when_up_to_date(dataset, fixtures_path, request):
     """Test that make() skips processing when nothing has changed.
 
-    Note: The freshness checks use START timestamps intentionally.
-    This means the first make() after data changes will run twice:
-    1. First run: starts at T1, updates dependencies at T2 > T1
-    2. Second run: sees T1 < T2, runs again, no new dependency updates
-    3. Third run: properly skips because T2 (from run 2) > T2 (dependencies unchanged)
+    `prepare()` flushes ahead of the freshness check, so rows landing move the
+    content clock before the check runs; with nothing new, the next run is
+    fresh and does no work.
     """
     if "docker" in request.node.name:
         pytest.skip(

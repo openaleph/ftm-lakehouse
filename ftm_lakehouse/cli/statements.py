@@ -123,6 +123,9 @@ def cli_statements_sql(query: str):
             raise RuntimeError("`statements sql` is not available in API mode")
         store = entities._statements._lake
         with store.cursor() as cur:
+            # an unknown table name would otherwise resolve against this
+            # module's globals
+            cur.execute("SET python_enable_replacements = false")
             with Took() as t:
                 cur.execute(query)
             Console().print(f"Query took: {t.took}")

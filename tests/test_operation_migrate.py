@@ -6,6 +6,7 @@ from ftmq.util import make_entity
 from rigour.time import utc_now
 
 from ftm_lakehouse.core.conventions import path, tag
+from ftm_lakehouse.logic.parquet import TABLE_CONFIGURATION
 from ftm_lakehouse.model.statement import SHARDED_SCHEMA
 from ftm_lakehouse.operation.maintenance import MigrateJob, MigrateOperation
 from ftm_lakehouse.operation.migrations import MIGRATIONS
@@ -51,7 +52,8 @@ def _columns(repo: EntityRepository) -> set[str]:
 
 def test_operation_migrate(tmp_path):
     """The role migration evolves a pre-role store in place: no file is
-    rewritten, the old rows read back role-less, and writes work again."""
+    rewritten, the old rows read back role-less, and writes work again. The
+    table-properties migration bounds the log of a store created without them."""
     _write_pre_role_store(tmp_path)
     repo = EntityRepository(dataset=DATASET, uri=tmp_path)
     assert "role" not in _columns(repo)
@@ -61,12 +63,13 @@ def test_operation_migrate(tmp_path):
     assert op.get_target() == tag.OP_MIGRATE
     assert not op.is_fresh()
     result = op.run()
-    assert result.done == len(MIGRATIONS) == 1
+    assert result.done == len(MIGRATIONS) == 2
     assert result.pending == 0
     assert (tmp_path / f"tags/lakehouse/{tag.OP_MIGRATE}").exists()
-    assert (
-        tmp_path / f"tags/lakehouse/{tag.migration('migrate_parquet_add_role')}"
-    ).exists()
+    for migration in ("migrate_parquet_add_role", "migrate_parquet_table_properties"):
+        assert (tmp_path / f"tags/lakehouse/{tag.migration(migration)}").exists()
+    config = repo._statements.deltatable.metadata().configuration
+    assert {k: config.get(k) for k in TABLE_CONFIGURATION} == TABLE_CONFIGURATION
 
     # metadata-only: the column is there, the parquet files are untouched
     assert "role" in _columns(repo)
@@ -130,3 +133,14 @@ def test_operation_migrate_current_store(tmp_path):
         job=MigrateJob.make(dataset=DATASET), uri=tmp_path
     ).is_fresh()
     assert len(list(repo.query_statements())) == 2  # id + name
+
+
+def test_merge_partition_predating_a_column(tmp_path):
+    """A partition whose files all predate a column merges with that column
+    NULL, as the store reads it."""
+    _write_pre_role_store(tmp_path)
+    repo = EntityRepository(dataset=DATASET, uri=tmp_path)
+    repo.evolve_schema()
+    repo._statements.merge(force=True)
+    statements = list(repo.query_statements())
+    assert [(s.entity_id, s.role) for s in statements] == [("entity-1", None)]

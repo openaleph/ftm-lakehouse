@@ -7,73 +7,61 @@ derived in [`ParquetStore.append`][ParquetStore.append] and nowhere else – pro
 ``JOURNAL_SCHEMA`` rows with no shard key at all, so a partition can never be
 picked against a shard count other than the one this store is configured for.
 
-Writes are **append-only**: each flush sorts a per-partition batch by
-``(entity_id, id, last_seen DESC)`` in memory and appends it as a new parquet
-file. Two views are registered on the underlying ``LakeStore`` connection –
-[`live_view_sql`][ftm_lakehouse.logic.parquet.live_view_sql] produces the ``statement``
-view that every read targets (a plain ``WHERE deleted_at IS NULL`` scan), and
-[`raw_view_sql`][ftm_lakehouse.logic.parquet.raw_view_sql] produces ``statement_raw``
-for code paths that need tombstones and pre-merge duplicates visible
-(`merge`, `get_entity_ids` over `source_raw`).
+Writes are **append-only**: a flush lands each batch as new parquet files,
+duplicates, re-emissions and tombstones included. Reads reconcile them: every
+read runs over the files of one ``(shard, bucket)`` pair, taken from a Delta
+snapshot the process keeps, and a partition holding files that `merge` did not
+write is read through the dedupe query
+([`dedupe_rows_sql`][ftm_lakehouse.logic.parquet.dedupe_rows_sql]) while a
+partition made of merge output alone – canonical by construction – is a plain
+``deleted_at IS NULL`` scan ([`live_rows_sql`][ftm_lakehouse.logic.parquet.live_rows_sql]).
+So reads are correct at any time; `merge` is the compaction that makes them
+cheap again and reaps tombstones past grace, `vacuum` drops the files a merge
+replaced, and `shard` re-keys the whole store onto a different shard count –
+the one operation that moves rows between partitions.
 
-**Correctness assumes an optimized store.** The live view has no read-time
-dedupe – it just hides tombstones – so reads are correct only once
-`merge` has made the store canonical (one row per statement id,
-fragment supersession applied, ``first_seen`` / ``last_seen`` folded). All of
-that dedupe logic lives solely in
-[`build_merge_sql`][ftm_lakehouse.logic.parquet.build_merge_sql]. Between a write and the
-next merge, reads can surface duplicate ids and rows whose delete has not been
-applied yet.
-
-Statement-level reads iterate ``(shard, bucket)`` partitions and add
-``WHERE shard = ? AND bucket = ?`` per query, keeping a full-store ``ORDER BY
-entity_id`` bounded to one partition; any filter pushes through the plain
-scan to DuckDB's file statistics. ``stats()`` and ``view()`` go through the
-un-iterated global view.
-
-``merge`` collapses physical duplicates and reaps tombstones past grace –
-load-bearing for read correctness, not just cleanup; ``compact`` bin-packs
-small files; ``vacuum`` removes obsolete Delta file versions. ``shard``
-re-keys the whole store onto a different shard count, the one operation
-that moves rows between partitions.
+Statement-level reads iterate ``(shard, bucket)`` pairs and add ``WHERE shard =
+? AND bucket = ?`` per query, keeping a full-store ``ORDER BY entity_id``
+bounded to one partition; filters push through to the files' statistics.
+``stats()`` and sorted / sliced queries go through the whole table.
 
 Layout:
     statements/shard={s}/bucket={b}/origin={o}/part-*.parquet
 """
 
-from contextlib import ExitStack, contextmanager
-from datetime import timedelta
+import json
+import posixpath
+from contextlib import ExitStack, closing, contextmanager
+from datetime import datetime, timedelta
 from functools import cache, cached_property
-from typing import Callable, Iterator, cast
-from uuid import uuid4
+from itertools import batched
+from threading import RLock
+from typing import Any, Callable, Iterable, Iterator, cast
+from urllib.parse import unquote
 
 import duckdb
 import pyarrow as pa
 import pyarrow.compute as pc
 from anystore.decorators import error_handler
 from anystore.interface.lock import Lock
+from anystore.io import SyncProgressBar
+from anystore.io.progress import Throughput
 from anystore.logging import get_logger
 from anystore.logic.compress import CompressKind
 from anystore.store import get_store
 from anystore.types import Uri
-from anystore.util import Took, join_uri, mask_uri
+from anystore.util import Took, ensure_uuid, join_uri, mask_uri
 from deltalake import DeltaTable, Schema, write_deltalake
+from deltalake.exceptions import DeltaError, TableNotFoundError
+from deltalake.transaction import AddAction, RemoveAction
 from followthemoney.statement import StatementDict
 from ftmq.model.stats import DatasetStats
 from ftmq.query import Query, Sql, SqlSource
-from ftmq.store.base import View
-from ftmq.store.lake import (
-    PRUNE,
-    TARGET_SIZE,
-    LakeStore,
-    setup_duckdb_storage,
-    storage_options,
-    writer_for_bucket,
-)
+from ftmq.store.lake import PRUNE, LakeStore, storage_options, writer_for_bucket
 from ftmq.types import StatementEntities, Statements
 from pyarrow.csv import CSVWriter  # type: ignore[attr-defined]  # missing from stubs
 from rigour.time import utc_now
-from sqlalchemy import Select, column
+from sqlalchemy import Select
 
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.core.settings import Settings
@@ -81,30 +69,56 @@ from ftm_lakehouse.helpers.shards import entity_shard
 from ftm_lakehouse.logic.entities import aggregate_unsafe
 from ftm_lakehouse.logic.entities.aggregate import EntityPayload
 from ftm_lakehouse.logic.parquet import (
+    MERGE_COMMIT_BATCH,
+    MERGED_PREFIX,
     SWEEP_BATCH_SIZE,
-    build_bounds_sample_sql,
+    TABLE_CONFIGURATION,
     build_merge_sql,
     build_shard_sql,
+    dedupe_rows_sql,
+    delta_scan_sql,
     duckdb_config,
+    live_rows_sql,
     live_view_sql,
     make_prune_by_shard,
-    merge_slice_count,
+    merge_copy_options,
+    partition_source_sql,
     raw_view_sql,
     shard_target_file_size,
-    slice_ranges,
 )
 from ftm_lakehouse.model.dataset import DEFAULT_SHARDS
 from ftm_lakehouse.model.statement import (
     SHARDED_SCHEMA,
     TABLE,
     TABLE_RAW,
+    DeleteCandidate,
     LakehouseStatement,
+    deleted_candidates_select,
     statement_csv_select,
 )
 from ftm_lakehouse.storage.tags import TagStore
 from ftm_lakehouse.util import validate_origin
 
 PARTITIONS = ["shard", "bucket", "origin"]
+
+Partition = tuple[str, str, str]
+"""A ``(shard, bucket, origin)`` partition key."""
+
+Files = list[tuple[str, int]]
+"""A partition's data files as ``(path, size)``: the path table-relative and
+percent-decoded – the form DuckDB (prefixed with the table root) and a Delta
+``add`` / ``remove`` action take; the log stores it encoded once more, and
+``get_add_actions`` hands it back that way."""
+
+MergedPartition = tuple[Partition, Files, tuple[str, int, int] | None, timedelta]
+"""What `ParquetStore._merge_partition` produced for one partition: its key,
+the files it read, the ``(path, size, rows)`` it wrote – ``None`` when the
+merge reaped everything – and how long it took."""
+
+Pairs = dict[tuple[str, str], list[tuple[Partition, Files, bool]]]
+"""``(partition, files, clean)`` per ``(shard, bucket)`` pair, one entry per
+origin partition. ``clean`` is whether every file was written by `merge`
+(`MERGED_PREFIX`), i.e. whether a read over it can skip the dedupe."""
 
 
 @cache
@@ -117,17 +131,34 @@ def make_source(table: str, shards: int) -> SqlSource:
     return SqlSource(table, **config)
 
 
+class _LakeStore(LakeStore):
+    """ftmq's store, with ``exists`` answered by the owning `ParquetStore`.
+
+    ``LakeStore._execute`` – what ``stats()`` runs each of its aggregates
+    through – checks ``exists`` per call, and ftmq answers that by loading a
+    fresh ``DeltaTable``: one checkpoint replay per aggregate. The store's
+    cached snapshot answers it for free.
+    """
+
+    def __init__(self, *args: Any, exists: Callable[[], bool], **kwargs: Any) -> None:
+        self._exists = exists
+        super().__init__(*args, **kwargs)
+
+    @property
+    def exists(self) -> bool:
+        return self._exists()
+
+
 class ParquetStore:
     """Single Delta Lake table (per dataset) partitioned by ``(shard, bucket,
     origin)``.
 
-    Writes are append-only: [`append`][ParquetStore.append] sorts a per-partition batch in
-    memory and writes one parquet file. Reads target the live ``statement``
-    view (``deleted_at IS NULL``) registered on the `LakeStore`
-    connection and assume a store made canonical by
-    [`merge`][ParquetStore.merge] – [`merge`][ParquetStore.merge],
-    [`compact`][ParquetStore.compact], [`vacuum`][ParquetStore.vacuum] are
-    load-bearing for read correctness, not just cleanup.
+    Writes are append-only: [`append`][ParquetStore.append] writes each batch as
+    new parquet files. Reads reconcile whatever the files hold – duplicates,
+    superseded fragments, tombstones – unless a partition is made of
+    [`merge`][ParquetStore.merge] output alone, which is canonical and read as
+    a plain scan. [`merge`][ParquetStore.merge] and [`vacuum`][ParquetStore.vacuum]
+    are therefore maintenance, not a precondition for correct reads.
     """
 
     def __init__(
@@ -146,7 +177,10 @@ class ParquetStore:
         self.compression = compression
         self._store = get_store(uri)
         self._tags = TagStore(uri)
-        self._lake = LakeStore(
+        self._snapshot_lock = RLock()
+        self._snapshot: DeltaTable | None = None
+        self._pairs: tuple[int, Pairs] | None = None
+        self._lake = _LakeStore(
             uri=str(self.uri),
             dataset=self.dataset,
             partition_by=PARTITIONS,
@@ -155,32 +189,115 @@ class ParquetStore:
                 TABLE_RAW.name: raw_view_sql,
             },
             duckdb_config=duckdb_config(),
+            exists=lambda: self.exists,
         )
         self.log = get_logger(
             f"{self.dataset}.{self.__class__.__name__}",
             dataset=self.dataset,
             uri=mask_uri(self.uri),
         )
-        setup_duckdb_storage()
 
     @property
     def deltatable(self) -> DeltaTable:
+        """A freshly loaded handle on the table – for callers outside the
+        store. Everything in here shares `_current_snapshot`."""
         return self._lake.deltatable
+
+    @property
+    def num_rows(self) -> int:
+        """Physical row count from the snapshot's file statistics – no scan."""
+        with self._snapshot_lock:
+            snapshot = self._current_snapshot()
+            return snapshot.count() if snapshot is not None else 0
 
     @property
     def version(self) -> int | None:
         """Current version of the main Delta table."""
-        if self._lake.exists:
-            return self._lake.deltatable.version()
+        with self._snapshot_lock:
+            snapshot = self._current_snapshot()
+            return snapshot.version() if snapshot is not None else None
 
     @property
     def exists(self) -> bool:
         """Check existence of deltatable"""
-        return self._lake.exists
+        with self._snapshot_lock:
+            return self._current_snapshot() is not None
 
-    def view(self) -> View:
-        """Get a view for querying statements."""
-        return self._lake.default_view()
+    def _current_snapshot(self) -> DeltaTable | None:
+        """This process's Delta snapshot, brought up to date – ``None``
+        without a table.
+
+        Loaded once, then advanced with ``update_incremental``, which reads only
+        the commits since. Loading a ``DeltaTable`` replays the latest
+        checkpoint – the whole file list of the table – and every read and
+        append used to do that, some several times. A snapshot whose next
+        commits the log retention already deleted is loaded afresh.
+
+        Callers hold `_snapshot_lock`: the object is shared by this process's
+        threads, and an append writes through it.
+        """
+        if self._snapshot is not None:
+            try:
+                self._snapshot.update_incremental()
+                return self._snapshot
+            except DeltaError:
+                self._snapshot = None
+        try:
+            self._snapshot = DeltaTable(
+                str(self.uri), storage_options=storage_options()
+            )
+        except TableNotFoundError:
+            return None
+        return self._snapshot
+
+    def _snapshot_pairs(self) -> tuple[str, Pairs]:
+        """The table root and the current snapshot's data files per
+        ``(shard, bucket)`` pair, from its add actions – file-level metadata,
+        no data scan. Regrouped only when the version moved; empty without a
+        table."""
+        with self._snapshot_lock:
+            snapshot = self._current_snapshot()
+            if snapshot is None:
+                return "", {}
+            version = snapshot.version()
+            if self._pairs is None or self._pairs[0] != version:
+                actions = pa.table(snapshot.get_add_actions(flatten=True))
+                partitions: dict[Partition, Files] = {}
+                for file, size, shard, bucket, origin in zip(
+                    actions["path"].to_pylist(),
+                    actions["size_bytes"].to_pylist(),
+                    actions["partition.shard"].to_pylist(),
+                    actions["partition.bucket"].to_pylist(),
+                    actions["partition.origin"].to_pylist(),
+                ):
+                    key = (shard, bucket, origin)
+                    partitions.setdefault(key, []).append((unquote(file), size))
+                pairs: Pairs = {}
+                for partition, files in sorted(partitions.items()):
+                    clean = all(
+                        posixpath.basename(file).startswith(MERGED_PREFIX)
+                        for file, _ in files
+                    )
+                    pairs.setdefault(partition[:2], []).append(
+                        (partition, files, clean)
+                    )
+                self._pairs = (version, pairs)
+            return snapshot.table_uri.rstrip("/"), self._pairs[1]
+
+    def _snapshot_partitions(self) -> tuple[str, dict[Partition, tuple[Files, bool]]]:
+        """The table root and the snapshot's ``(files, clean)`` per partition."""
+        root, pairs = self._snapshot_pairs()
+        return root, {
+            partition: (files, clean)
+            for sources in pairs.values()
+            for partition, files, clean in sources
+        }
+
+    def _dirty_partitions(self) -> dict[Partition, Files]:
+        """The partitions holding a file `merge` did not write, with their
+        files – what a default merge rewrites."""
+        _, partitions = self._snapshot_partitions()
+        return {p: files for p, (files, clean) in partitions.items() if not clean}
 
     @cached_property
     def source(self) -> SqlSource:
@@ -190,9 +307,7 @@ class ParquetStore:
     def source_raw(self) -> SqlSource:
         return make_source(TABLE_RAW, self.shards)
 
-    def _compile_query(
-        self, q: Query | None = None, *, source: SqlSource | None = None
-    ) -> Select:
+    def _compile_query(self, q: Query | None = None) -> Select:
         """Compile ``q`` to a statements ``Select`` against the live view.
 
         Compiles through `self.source`, so a schema filter folds into
@@ -201,46 +316,38 @@ class ParquetStore:
         partitions instead of scanning all of them. The single entry point every
         lakehouse read funnels its `Query` through.
         """
-        if q is None:
-            q = Query()
-        return q.compile(source or self.source)
-
-    @staticmethod
-    def _needs_global(q: Query | None) -> bool:
-        """Whether ``q`` must execute as ONE query over the whole view.
-
-        The compiled ``LIMIT`` / ``OFFSET`` live in ftmq's un-scoped
-        ``canonical_ids`` subquery and ``ORDER BY`` only orders within a
-        partition, so under the per-``(shard, bucket)`` iteration a sliced
-        or sorted query would over-return (one limit *per partition*) and
-        mis-order. Those queries bypass the iteration and run globally via
-        ``LakeStore._execute`` – bounded by the limit (DuckDB top-N) resp.
-        an inherent global sort.
-        """
-        return q is not None and (q.sort is not None or q.slice is not None)
-
-    def _global_statement_data(self, q: Query | None = None) -> Iterator[StatementDict]:
-        """Execute a compiled select ONCE over the whole live view.
-
-        Entity rows stay contiguous for aggregation: ftmq's statement
-        selects order by ``entity_id`` (unsorted) or ``(sortable_value,
-        id)`` (sorted).
-        """
-        for row in self._lake._execute(self._compile_query(q)):
-            yield cast(StatementDict, vars(row))
+        return (q or Query()).compile(self.source)
 
     def _statement_data(self, q: Query | None = None) -> Iterator[StatementDict]:
-        """Statement dicts for ``q``, choosing the execution strategy.
+        """Statement dicts for ``q``.
 
-        One global query when sort / slice demand it (`_needs_global`),
-        else the per-partition iteration (`_query_statement_data`).
-        Rows stay entity-contiguous either way, so aggregation can run over
-        the stream directly. Empty for a store that has never been written.
+        A sorted or sliced query runs as ONE query over the whole table: the
+        compiled ``LIMIT`` / ``OFFSET`` live in ftmq's un-scoped
+        ``canonical_ids`` subquery and ``ORDER BY`` only orders within a
+        partition, so under the per-``(shard, bucket)`` iteration it would
+        over-return (one limit *per partition*) and mis-order. It reads
+        ``delta_scan`` on a cursor of its own (`_cursor_over`), reconciling
+        unless every pair it can touch is clean. Everything else iterates the
+        pairs (`_query_statement_data`). Rows stay entity-contiguous either
+        way – ftmq's statement selects order by ``entity_id`` (unsorted) or
+        ``(sortable_value, id)`` (sorted) – so aggregation can run over the
+        stream directly.
         """
-        if not self.exists:
-            return
-        if self._needs_global(q):
-            yield from self._global_statement_data(q)
+        if q is not None and (q.sort is not None or q.slice is not None):
+            root, pairs = self._snapshot_pairs()
+            if not root:
+                return
+            keys = self._pruned_keys(pairs, self._prune_values(q, self.source))
+            clean = all(c for key in keys for _, _, c in pairs[key])
+            compiled = str(
+                self._compile_query(q).compile(compile_kwargs={"literal_binds": True})
+            )
+            with self._cursor_over(delta_scan_sql(root), clean) as cur:
+                res = cur.execute(compiled)
+                columns = [d[0] for d in res.description]
+                while rows := res.fetchmany(100_000):
+                    for row in rows:
+                        yield cast(StatementDict, dict(zip(columns, row)))
         else:
             yield from self._query_statement_data(q)
 
@@ -250,7 +357,7 @@ class ParquetStore:
         Args:
             q: Optional ``Query`` of entity-level filters (schema, properties,
                 ids, ...) plus ordering / slicing – a sorted or sliced query
-                executes globally (`_needs_global`) so ``LIMIT`` and
+                executes globally (`_statement_data`) so ``LIMIT`` and
                 ``ORDER BY`` hold across partitions.
 
         Yields:
@@ -264,8 +371,7 @@ class ParquetStore:
 
         Args:
             q: Optional ``Query`` – executed via `_statement_data`;
-                sorted / sliced queries execute globally
-                (`_needs_global`).
+                sorted / sliced queries execute globally.
 
         Yields:
             `LakehouseStatement` objects matching the query – carrying their
@@ -280,47 +386,24 @@ class ParquetStore:
     def stats(self) -> DatasetStats:
         """Compute statistics from the statement store.
 
-        Runs ftmq's aggregation SQL over the live ``statement`` view. Assumes
-        an optimized store: the live view is a plain ``deleted_at IS NULL``
-        scan, so the aggregates are correct only once [`merge`][ParquetStore.merge] has made
-        the store canonical (one row per id, supersession applied). Run
-        ``optimize`` before heavy stats workloads.
+        Runs ftmq's aggregation SQL over the connection-level ``statement``
+        view ([`live_view_sql`][ftm_lakehouse.logic.parquet.live_view_sql]),
+        which always reconciles – correct on any store, cheapest on a merged
+        one.
         """
         return self._lake.default_view().stats()
 
-    def count(self, q: Query | None = None) -> int:
-        """Count distinct entities matching ``q``.
-
-        A single ``count(DISTINCT entity_id)`` aggregate (not the
-        per-partition read iteration), so it's cheap enough to short-circuit an
-        export that would otherwise iterate every partition for zero results.
-        Compiled through `self.source`, so a schema filter folds into
-        the same ``bucket IN (...)`` prune as `_compile_query` –
-        non-matching partitions are pruned, not just file-skipped. Like the
-        other aggregates it assumes an optimized store.
-        """
-        if not self.exists:
-            return 0
-        if q is None:
-            q = Query()
-        for row in self._lake._execute(Sql(q, self.source).count):
-            for value in row:
-                return int(value)
-        return 0
-
     def _write_lock(self) -> Lock:
-        """Exclusive side of the dataset write fence.
+        """The exclusive dataset write fence – ``{dataset_root}/.LOCK``.
 
-        Held by maintenance ([`merge`][ParquetStore.merge],
-        [`compact`][ParquetStore.compact], [`vacuum`][ParquetStore.vacuum] via
-        `_maintenance_fence`) and by the first-ever
-        [`append`][ParquetStore.append] of a dataset (table creation must not
-        race). The lock lives at
-        ``{dataset_root}/.LOCK`` per ``path.LOCK``.
-
-        Regular appends do **not** take this lock – they register a shared
-        marker instead (`_append_fence`); Delta's optimistic
-        concurrency serializes concurrent append commits safely on its own.
+        Held by the maintenance that rewrites or drops files in place –
+        re-shard, [`delete_origin`][ParquetStore.delete_origin], schema changes,
+        [`vacuum`][ParquetStore.vacuum], via `_maintenance_fence` – and by the
+        first-ever [`append`][ParquetStore.append] of a dataset (table creation
+        must not race). Appends back off while it is held
+        (`_await_unlocked`) and take no lock of their own: Delta's optimistic
+        concurrency serializes concurrent append commits. [`merge`][ParquetStore.merge]
+        does not take it either – see [`merge_lock`][ParquetStore.merge_lock].
 
         Acquisition is bounded by ``settings.lock_max_retries`` (total wait
         roughly ``N²/2`` seconds); entering the returned lock raises
@@ -350,69 +433,50 @@ class ParquetStore:
             do_raise=True,
         )(attempt)()
 
-    def _await(self, ready: Callable[[], bool], what: str) -> None:
-        """Block until ``ready()`` is true, with the fence's retry bound."""
+    def merge_lock(self) -> Lock:
+        """The merge lock – ``{dataset_root}/.LOCK-MERGE``.
+
+        Held by [`merge`][ParquetStore.merge] and by an export sweep, and taken
+        alongside `_write_lock` by the exclusive maintenance. Appends do not
+        wait for it: a merge removes exactly the files it read and an append
+        only adds, so Delta commits both whichever lands first, and a read
+        reconciles the result – ingest keeps flowing through an hours-long
+        merge. A sweep holds it so an ``optimize`` (merge, then a retention-0
+        [`vacuum`][ParquetStore.vacuum]) cannot delete the files the sweep's
+        snapshot still names.
+        """
+        return Lock(
+            self._store,
+            key=path.LOCK_MERGE,
+            max_retries=self.settings.lock_max_retries,
+        )
+
+    def _await_unlocked(self) -> None:
+        """Back off while the exclusive ``.LOCK`` is held, with the fence's
+        retry bound. Without a marker of its own, an append that passed this
+        check can still be in flight when maintenance takes the lock; for a
+        merge that is fine, and the in-place rewrites retry their commit
+        ([`delete_origin`][ParquetStore.delete_origin]) or run with writers
+        stopped ([`shard`][ParquetStore.shard])."""
 
         def check() -> None:
-            if not ready():
-                raise RuntimeError(
-                    f"Write fence busy: {what}. If a writer crashed, release "
-                    "the fence via `ftm-lakehouse maintenance unlock`."
-                )
-
-        self._fence_retry(check)
-
-    def _append_markers(self) -> list[str]:
-        """Keys of all currently registered append markers."""
-        return list(self._store.iterate_keys(prefix=str(path.LOCK_APPENDS)))
-
-    @contextmanager
-    def _append_fence(self) -> Iterator[None]:
-        """Shared (append) side of the dataset write fence.
-
-        Registers a marker key under ``.LOCK-APPENDS/`` and only *then*
-        checks the maintenance ``.LOCK`` – the store-then-load order makes
-        the handshake sound on a linearizable store: when the ``.LOCK``
-        check sees no lock, the marker write is already visible to any
-        later drain poll by a maintenance holder, so
-        `_maintenance_fence` can never pass its drain while an
-        unnoticed append is in flight. When ``.LOCK`` is held, the marker
-        is removed *before* backing off (a parked appender must not
-        deadlock the drain), then register-and-check retries under the
-        fence's usual bound.
-
-        Concurrent appends never block each other – Delta append commits
-        are blind appends that delta-rs serializes via optimistic commit
-        retries. A marker left behind by a crashed appender blocks
-        maintenance until released via [`unlock`][ParquetStore.unlock]
-        (``ftm-lakehouse maintenance unlock``).
-        """
-        marker = f"{path.LOCK_APPENDS}/{uuid4().hex}"
-
-        def register() -> None:
-            self._store.touch(marker)
             if self._store.exists(path.LOCK):
-                self._store.delete(marker, ignore_errors=True)
                 raise RuntimeError(
                     f"Write fence busy: maintenance lock `{path.LOCK}` is "
                     "held. If a writer crashed, release the fence via "
                     "`ftm-lakehouse maintenance unlock`."
                 )
 
-        self._fence_retry(register)
-        try:
-            yield
-        finally:
-            self._store.delete(marker, ignore_errors=True)
+        self._fence_retry(check)
 
     def _ensure_table(self) -> None:
         """Create the Delta table (as an empty commit) if it does not exist.
 
         Runs under the exclusive write lock so two racing first imports
         cannot both commit version ``0``. Establishing existence here –
-        once, at the first write – lets [`append`][ParquetStore.append] always take the
-        shared append fence with ``mode="append"`` instead of
-        special-casing creation inside the hot write path.
+        once, at the first write – lets [`append`][ParquetStore.append] always
+        write with ``mode="append"`` instead of special-casing creation inside
+        the hot write path.
         """
         if self.exists:
             return
@@ -424,47 +488,40 @@ class ParquetStore:
                 pa.Table.from_pylist([], schema=SHARDED_SCHEMA),
                 partition_by=PARTITIONS,
                 mode="overwrite",
+                configuration=TABLE_CONFIGURATION,
                 storage_options=storage_options(),
             )
 
     @contextmanager
     def _maintenance_fence(self) -> Iterator[None]:
-        """Exclusive fence for partition-rewriting maintenance.
-
-        Acquires the ``.LOCK`` write lock (fencing off other maintenance and
-        new appends), then waits for in-flight append markers to drain so a
-        rewrite never overlaps an append it could tombstone.
+        """Exclusive fence for maintenance that rewrites or drops files in
+        place: the ``.LOCK`` write lock (fencing off other maintenance and new
+        appends) plus the merge lock, so a merge or an export sweep is never
+        under way at the same time.
         """
-        with self._write_lock():
-            self._await(
-                lambda: not self._append_markers(),
-                f"append markers under `{path.LOCK_APPENDS}/` are present",
-            )
+        with self._write_lock(), self.merge_lock():
             yield
 
     def unlock(self) -> bool:
         """Forcibly release the dataset write fence.
 
         Operator escape hatch for the case where a writer process died
-        with the fence held (or an attacker held it on purpose). Releases
-        both sides: the exclusive ``.LOCK`` file and any append markers
-        under ``.LOCK-APPENDS/``.
+        with a lock held (or an attacker held it on purpose). Releases both
+        lock files: the exclusive ``.LOCK`` and the ``.LOCK-MERGE`` of
+        [`merge_lock`][ParquetStore.merge_lock].
 
         **Use sparingly** – breaking a fence that's still held by a live
         writer can corrupt a write in flight. Confirm no process is
         actively writing before running.
 
         Returns:
-            ``True`` if a lock or marker was released, ``False`` if the
-            fence was clear.
+            ``True`` if a lock was released, ``False`` if both were clear.
         """
         released = False
-        if self._store.exists(path.LOCK):
-            self._store.delete(path.LOCK)
-            released = True
-        for marker in self._append_markers():
-            self._store.delete(marker, ignore_errors=True)
-            released = True
+        for key in (path.LOCK, path.LOCK_MERGE):
+            if self._store.exists(key):
+                self._store.delete(key)
+                released = True
         return released
 
     def evolve_schema(self) -> list[str]:
@@ -483,20 +540,55 @@ class ParquetStore:
             Names of the columns added – empty if the table is already current
             or does not exist yet.
         """
-        if not self.exists:
-            return []
-        deltatable = self.deltatable
-        known = {f.name for f in deltatable.schema().fields}
-        missing = [
-            f for f in Schema.from_arrow(SHARDED_SCHEMA).fields if f.name not in known
-        ]
-        if not missing:
-            return []
-        names = [f.name for f in missing]
-        with self._maintenance_fence():
-            deltatable.alter.add_columns(missing)
+        with self._snapshot_lock:
+            snapshot = self._current_snapshot()
+            if snapshot is None:
+                return []
+            known = {f.name for f in snapshot.schema().fields}
+            missing = [
+                f
+                for f in Schema.from_arrow(SHARDED_SCHEMA).fields
+                if f.name not in known
+            ]
+            if not missing:
+                return []
+            names = [f.name for f in missing]
+            with self._maintenance_fence():
+                snapshot.alter.add_columns(missing)
         self.log.info("Evolved parquet schema.", columns=names)
         return names
+
+    def configure_table(self) -> dict[str, str]:
+        """Apply `TABLE_CONFIGURATION` to a table created without it.
+
+        Sets the properties, then writes a checkpoint under them – which drops
+        the ``remove`` actions past the new retention, so every reader from
+        here on replays a smaller one – and deletes the log entries and
+        checkpoints past the new log retention. Idempotent, and held under the
+        exclusive maintenance fence: a metadata commit racing an append would
+        fail it.
+
+        Returns:
+            The properties that changed – empty if the table is already
+            configured or does not exist yet.
+        """
+        with self._snapshot_lock:
+            snapshot = self._current_snapshot()
+            if snapshot is None:
+                return {}
+            current = snapshot.metadata().configuration
+            changed = {
+                k: v for k, v in TABLE_CONFIGURATION.items() if current.get(k) != v
+            }
+            if not changed:
+                return {}
+            with self._maintenance_fence(), Took() as t:
+                snapshot.alter.set_table_properties(changed)
+                snapshot.update_incremental()
+                snapshot.create_checkpoint()
+                snapshot.cleanup_metadata()
+        self.log.info("Configured delta table.", took=t.took, **changed)
+        return changed
 
     def _with_shard(self, batch: pa.Table) -> pa.Table:
         """Derive the ``shard`` partition key from ``entity_id``.
@@ -539,19 +631,23 @@ class ParquetStore:
         order, and [`merge`][ParquetStore.merge] rewrites every partition an append touched
         into the file sort order anyway.
 
-        Held under the *shared* side of the write fence
-        (`_append_fence`): concurrent appends run in parallel – Delta
-        serializes their commits via optimistic concurrency – while
-        [`merge`][ParquetStore.merge] / [`compact`][ParquetStore.compact] /
-        [`vacuum`][ParquetStore.vacuum] wait for the append markers to drain
-        before rewriting partitions. Table creation happens
-        once in `_ensure_table` (under the exclusive lock, so two
-        racing imports can't both commit version ``0``); the write loop
-        itself always appends. Each touched ``(shard, bucket, origin)``
-        partition is stamped with a ``last_updated`` freshness tag inside
-        the fence and *before* the Delta writes, so a later [`merge`][ParquetStore.merge]
-        can skip partitions that didn't change – see `_mark_updated`
-        for why both halves of that ordering are load-bearing.
+        Takes no lock: concurrent appends run in parallel – Delta serializes
+        their commits via optimistic concurrency – and a concurrent
+        [`merge`][ParquetStore.merge] is harmless, since it removes only the
+        files it read and a read reconciles the rest. Appends only back off
+        while the exclusive ``.LOCK`` of the in-place rewrites is held
+        (`_await_unlocked`). Table creation happens once in `_ensure_table`
+        (under that lock, so two racing imports can't both commit version
+        ``0``); the write loop itself always appends. The files delta-rs
+        writes are named
+        ``part-*``, which is what marks their partitions dirty for the next
+        [`merge`][ParquetStore.merge] (`MERGED_PREFIX`) – no tag to stamp.
+
+        Writes through this process's snapshot (`_current_snapshot`),
+        advanced to the latest commit first, instead of loading the table per
+        write – a load replays the whole file list, which made an append's cost
+        grow with the store. Appends of one process are serialised on the
+        snapshot; appends of different processes still commit concurrently.
 
         Args:
             batch: PyArrow table with the columns of
@@ -570,93 +666,48 @@ class ParquetStore:
         )
         with self._tags.touch(tag.STATEMENTS_UPDATED):
             self._ensure_table()
-            with self._append_fence():
-                self._mark_updated(batch)
+            self._await_unlocked()
+            with self._snapshot_lock:
+                snapshot = self._current_snapshot()
+                if snapshot is None:
+                    raise RuntimeError(f"Statement store vanished: `{self.uri}`")
                 for bucket in buckets:
                     sub = batch.filter(pc.equal(batch["bucket"], bucket))
                     write_deltalake(
-                        str(self.uri),
+                        snapshot,
                         sub,
                         partition_by=PARTITIONS,
                         mode="append",
                         writer_properties=writer_for_bucket(bucket),
-                        storage_options=storage_options(),
                     )
-
-    def _mark_updated(self, batch: pa.Table) -> None:
-        """Stamp a ``last_updated`` tag on every partition present in ``batch``.
-
-        Partition-level counterpart to the dataset-wide
-        [`STATEMENTS_UPDATED`][ftm_lakehouse.core.conventions.tag.STATEMENTS_UPDATED] tag:
-        one tag per distinct ``(shard, bucket, origin)`` triple in the
-        batch. [`merge`][ParquetStore.merge] compares each partition's ``last_updated``
-        against its ``last_optimized`` to decide whether the partition
-        needs rewriting.
-
-        Called *inside* the append fence and *before* the Delta commits.
-        Both halves matter, and the failure they prevent is the same one:
-        a partition that looks clean while holding un-merged rows, which a
-        default [`merge`][ParquetStore.merge] then skips forever (reads depend on merge
-        for correctness, so it would surface duplicates indefinitely).
-
-        - Before the commits, so a writer dying mid-append leaves at worst
-          a dirty tag with no data – one harmless extra merge.
-        - Inside the fence, so a [`merge`][ParquetStore.merge] cannot stamp
-          ``last_optimized`` between this tag and the commits it belongs
-          to. Outside the fence that interleaving is reachable: the
-          appender stamps ``last_updated``, gets locked out of the fence
-          by the in-flight merge, and commits its rows only after that
-          merge has stamped a *newer* ``last_optimized`` over them.
-        """
-        partitions = batch.select(PARTITIONS).group_by(PARTITIONS).aggregate([])
-        for shard, bucket, origin in zip(
-            partitions["shard"].to_pylist(),
-            partitions["bucket"].to_pylist(),
-            partitions["origin"].to_pylist(),
-        ):
-            self._tags.set(tag.statements_partition_updated(shard, bucket, origin))
 
     @property
     def needs_merge(self) -> bool:
-        """Whether any partition has been written to since its last merge.
+        """Whether any partition holds a file [`merge`][ParquetStore.merge] did
+        not write – and so reads through the dedupe query until it does.
 
-        Reads are canonical only on a merged store – the live ``statement``
-        view does no read-time dedupe – so paths that publish canonical rows
-        (`export_diff`)
-        check this first.
-
-        The dataset-level ``statements/last_optimized`` tag cannot answer it:
-        [`OptimizeOperation`][ftm_lakehouse.operation.maintenance.OptimizeOperation] stamps
-        that with its *start* time while [`merge`][ParquetStore.merge] bumps
-        ``statements/last_updated`` on completion, so the dataset pair reads
-        stale right after a successful optimize. The per-partition tags are
-        the ones [`merge`][ParquetStore.merge] itself compares, stamped in the order that
-        makes the comparison sound.
+        Answered from the snapshot's file list (`MERGED_PREFIX`), which is
+        what `merge` itself selects partitions by, so the two cannot disagree.
         """
-        for shard, bucket, origin in self._list_partitions():
-            updated = tag.statements_partition_updated(shard, bucket, origin)
-            optimized = tag.statements_partition_optimized(shard, bucket, origin)
-            if not self._tags.is_latest(optimized, [updated]):
-                return True
-        return False
+        return bool(self._dirty_partitions())
 
     def merge(self, force: bool = False) -> None:
         """Collapse duplicates and reap expired tombstones, partition by partition.
 
         For each ``(shard, bucket, origin)`` partition, runs the merge
-        query against ``statement_raw`` (non-fragment rows: keep latest
-        row per ``id`` by ``last_seen DESC``; fragment rows: keep the
-        latest emission per ``(entity_id, prop, fragment)`` group; fold
-        ``first_seen`` to the min; drop tombstones older than the grace
-        cutoff) and atomically overwrites that partition via
-        ``partition_filters``. Held under the exclusive maintenance fence
-        (``path.LOCK`` + append-marker drain, `_maintenance_fence`).
+        query ([`build_merge_sql`][ftm_lakehouse.logic.parquet.build_merge_sql] –
+        non-fragment rows: keep latest row per ``id`` by ``last_seen DESC``;
+        fragment rows: keep the latest emission per ``(entity_id, prop,
+        fragment)`` group; fold ``first_seen`` to the min; drop tombstones older
+        than the grace cutoff) and replaces the partition's files with the
+        result. Held under [`merge_lock`][ParquetStore.merge_lock], not the
+        exclusive fence: appends keep flowing while this runs.
 
-        Only partitions whose ``last_updated`` freshness tag is newer than
-        their ``last_optimized`` tag are rewritten – a partition untouched
-        since its last merge is skipped, so an optimize after a small
-        append rewrites only what changed instead of the whole store. Each
-        successful rewrite stamps ``last_optimized``.
+        Only dirty partitions are rewritten – those holding a file this
+        method did not write (`MERGED_PREFIX`), i.e. appended since their
+        last merge – so an optimize after a small append rewrites only what
+        changed instead of the whole store. The signal is the snapshot's
+        file list; nothing is stamped.
 
         Because a clean partition is never revisited by a *default* merge,
         a tombstone sitting in an otherwise-idle partition is not
@@ -668,95 +719,166 @@ class ParquetStore:
         ``LAKEHOUSE_GRACE_PERIOD_DAYS=0`` for an immediate purge)
         physically reaps cold tombstones too.
 
-        Load-bearing for reads: the live ``statement`` view does no
-        dedupe, so a partition's rows are only canonical – one row per id,
-        fragment supersession applied, ``first_seen`` / ``last_seen``
-        folded – after this runs. Reads assume every touched partition has
-        been merged since its last write.
+        An optimisation, not a precondition: reads reconcile a dirty
+        partition with the same dedupe query this writes, so the rows a read
+        returns are the same before and after. What changes is the cost – a
+        clean partition is a plain scan – and the disk, once tombstones past
+        grace and the rows they shadow are gone. The commit says so in Delta's
+        own terms: its ``add`` and ``remove`` actions carry ``dataChange =
+        false``, the mark of a rewrite that changes no logical content.
 
-        A partition whose parquet size suggests the merge pipeline would
-        outgrow ``LAKEHOUSE_DUCKDB_MEMORY_LIMIT``
-        (`merge_slice_count`) is merged
-        in contiguous ``entity_id`` range slices instead of one pass: a
-        reservoir sample picks boundaries
-        (`slice_ranges`), one merge
-        query runs per range – strictly sequentially, so only one sort
-        window is materialised at a time – and the slices chain into the
-        single atomic partition overwrite (`_chained_reader`). No
-        dedupe group spans an ``entity_id`` bound, ranges stream in
-        ascending order, so output content, file sort order and the Delta
-        commit are identical to a single-pass merge.
+        The Delta log is read once per run, not once per partition. On a store
+        whose log has grown large, replaying it is what a merge spent its time
+        on: every ``delta_scan`` and every ``write_deltalake`` replays the
+        latest checkpoint, which holds every live file of the table. So the
+        run loads one snapshot, hands each partition's files from it to
+        `_merge_partition` – which reads them directly and writes the merged
+        file with DuckDB – and commits the results in batches of
+        `MERGE_COMMIT_BATCH` partitions, each batch one Delta transaction of
+        ``add`` and ``remove`` actions against that snapshot. A batch is
+        atomic: its partitions switch to their merged files together, or not
+        at all. A run that committed anything ends with a checkpoint: Delta
+        writes one only every hundredth commit, and until then every load
+        replays the previous checkpoint – which still lists every file the
+        merge just removed, on a store with hundreds of thousands of them –
+        plus the merge's commits. The file list is small by now, so the
+        checkpoint is cheap, and every load after it is too.
+
+        Memory is bounded by DuckDB itself: the dedupe windows and the final
+        sort spill to ``LAKEHOUSE_DUCKDB_TEMP_DIRECTORY`` past
+        ``LAKEHOUSE_DUCKDB_MEMORY_LIMIT``. A partition too large to merge in
+        acceptable time wants more shards (`shard`), not a smaller merge.
 
         Args:
-            force: Rewrite every partition regardless of freshness tags.
+            force: Rewrite every partition, clean ones included – with
+                ``LAKEHOUSE_GRACE_PERIOD_DAYS=0`` that purges cold tombstones.
         """
         if not self.exists:
             return
         grace_cutoff = utc_now() - timedelta(days=self.settings.grace_period_days)
         merged = skipped = 0
-        with self._maintenance_fence():
-            sizes = self._partition_bytes()
-            for shard, bucket, origin in self._list_partitions():
-                updated = tag.statements_partition_updated(shard, bucket, origin)
-                optimized = tag.statements_partition_optimized(shard, bucket, origin)
-                if not (force or not self._tags.is_latest(optimized, [updated])):
-                    skipped += 1
-                    continue
-                with Took() as t, self._tags.touch(optimized):
-                    slices = merge_slice_count(
-                        sizes.get((shard, bucket, origin), 0),
-                        self.settings.duckdb_memory_limit,
-                    )
-                    with self._lake.cursor() as cur:
-                        ranges: list[tuple[str | None, str | None]] = [(None, None)]
-                        if slices > 1:
-                            sample_sql = build_bounds_sample_sql(shard, bucket, origin)
-                            sample = [r[0] for r in cur.execute(sample_sql).fetchall()]
-                            ranges = slice_ranges(sample, slices)
-                        sqls = [
-                            build_merge_sql(
-                                shard, bucket, origin, grace_cutoff, entity_id_range=r
-                            )
-                            for r in ranges
-                        ]
-                        write_deltalake(
-                            str(self.uri),
-                            self._chained_reader(cur, sqls),
-                            mode="overwrite",
-                            partition_by=PARTITIONS,
-                            predicate=(
-                                f"shard = '{shard}' AND bucket = '{bucket}' "
-                                f"AND origin = '{origin}'"
-                            ),
-                            writer_properties=writer_for_bucket(bucket),
-                            target_file_size=TARGET_SIZE,
-                            storage_options=storage_options(),
+        config: dict[str, Any] = {**duckdb_config()}
+        with self.merge_lock(), closing(duckdb.connect(config=config)) as con:
+            root, partitions = self._snapshot_partitions()
+            dirty = [
+                (partition, files)
+                for partition, (files, clean) in partitions.items()
+                if force or not clean
+            ]
+            skipped = len(partitions) - len(dirty)
+            # one bar, advanced per partition, its throughput the bytes read
+            with SyncProgressBar("Merging partitions", len(dirty)) as bar:
+
+                def results() -> Iterator[MergedPartition]:
+                    for partition, files in dirty:
+                        written, took = self._merge_partition(
+                            con, root, partition, files, grace_cutoff
                         )
-                    merged += 1
-                    self.log.info(
-                        f"Merged partition `{shard}/{bucket}/{origin}`.",
-                        took=t.took,
-                        shard=shard,
-                        bucket=bucket,
-                        origin=origin,
-                        grace_period_days=self.settings.grace_period_days,
-                        slices=len(ranges),
-                    )
+                        bar.advance(size=sum(size for _, size in files))
+                        yield partition, files, written, took
+
+                for batch in batched(results(), MERGE_COMMIT_BATCH):
+                    self._commit_merged(batch)
+                    merged += len(batch)
             if merged:
-                # A rewrite changes the store's logical *canonical* content
-                # (duplicates collapse, deletes apply), which is what every
-                # downstream consumer reads - exports, statistics, diffs. They
-                # key on STATEMENTS_OPTIMIZED, stamped here on completion, so
-                # they go stale exactly when the canonical content moved.
-                # STATEMENTS_UPDATED stays the append-side clock: it says rows
-                # landed, not that they are canonical yet.
-                self._tags.set(tag.STATEMENTS_OPTIMIZED)
+                with self._snapshot_lock, Took() as t:
+                    snapshot = self._current_snapshot()
+                    if snapshot is not None:
+                        snapshot.create_checkpoint()
+                self.log.info("Wrote checkpoint.", took=t.took)
         self.log.info(
             "Merge complete.",
             merged=merged,
             skipped=skipped,
             grace_period_days=self.settings.grace_period_days,
         )
+
+    def _merge_partition(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        root: str,
+        partition: Partition,
+        files: Files,
+        grace_cutoff: datetime,
+    ) -> tuple[tuple[str, int, int] | None, timedelta]:
+        """Merge one partition into a new data file next to its old ones.
+
+        Writes but does not commit: the file is invisible until
+        [`merge`][ParquetStore.merge] commits it, so an uncommitted one is an
+        orphan the next ``vacuum`` removes. Reads the partition's files
+        directly ([`partition_source_sql`][ftm_lakehouse.logic.parquet.partition_source_sql]),
+        so no Delta log is replayed here at all.
+
+        Returns:
+            ``((path, size, rows), took)`` – the path table-relative, as a
+            Delta ``add`` action takes it; ``None`` for a partition the merge
+            reaped entirely (nothing left to add), and how long it took.
+        """
+        shard, bucket, origin = partition
+        with Took() as t:
+            source = partition_source_sql(
+                [f"{root}/{file}" for file, _ in files], shard, bucket, origin
+            )
+            sql = build_merge_sql(
+                shard,
+                bucket,
+                origin,
+                grace_cutoff,
+                source=source,
+                select=f"* EXCLUDE ({', '.join(PARTITIONS)})",
+            )
+            directory = posixpath.dirname(files[0][0])
+            file = f"{directory}/{MERGED_PREFIX}{ensure_uuid()}.zstd.parquet"
+            target = f"{root}/{file}".replace("'", "''")
+            # RETURN_STATS: (filename, count, file_size_bytes, ...)
+            stats = con.execute(
+                f"COPY ({sql}) TO '{target}' ({merge_copy_options(bucket)})"
+            ).fetchone()
+        if stats and stats[1]:
+            return (file, int(stats[2]), int(stats[1])), t.took
+        return None, t.took
+
+    def _commit_merged(self, batch: Iterable[MergedPartition]) -> None:
+        """Commit a batch of merged partitions as one Delta transaction.
+
+        Each partition's merged file is added and every file it was merged
+        from removed (`Files` paths – ``create_write_transaction`` encodes them
+        for the log), all with ``dataChange = false``: the merge changes no
+        logical content. Committed through the process's snapshot, advanced
+        past the commit, so the next batch is not checked against a version
+        this one already superseded.
+        """
+        batch = list(batch)
+        now = int(utc_now().timestamp() * 1000)
+        actions: list[AddAction | RemoveAction] = []
+        for partition, files, written, _ in batch:
+            values: dict[str, str | None] = dict(zip(PARTITIONS, partition))
+            if written is not None:
+                file, size, rows = written
+                stats = json.dumps({"numRecords": rows})
+                actions.append(AddAction(file, size, values, now, False, stats))
+            for file, size in files:
+                actions.append(RemoveAction(file, False, now, size, values))
+        with self._snapshot_lock:
+            snapshot = self._current_snapshot()
+            if snapshot is None:
+                raise RuntimeError(f"Statement store vanished: `{self.uri}`")
+            snapshot.create_write_transaction(
+                actions,
+                mode="append",
+                schema=snapshot.schema(),
+                partition_by=PARTITIONS,
+            )
+            snapshot.update_incremental()
+        for (shard, bucket, origin), _, _, took in batch:
+            self.log.info(
+                f"Merged partition `{shard}/{bucket}/{origin}`.",
+                took=took,
+                shard=shard,
+                bucket=bucket,
+                origin=origin,
+                grace_period_days=self.settings.grace_period_days,
+            )
 
     def _chained_reader(
         self, cur: duckdb.DuckDBPyConnection, sqls: list[str]
@@ -770,17 +892,13 @@ class ParquetStore:
         starts once query ``i`` is exhausted – so at most one of them
         holds a sort window in DuckDB at a time.
 
-        Both rewriting paths feed it: [`merge`][ParquetStore.merge] passes its range
-        slices, which arrive in ascending ``entity_id`` order and are
-        each internally sorted, so the concatenated stream keeps the
-        global file sort order; [`shard`][ParquetStore.shard] passes one query per
-        source partition, deliberately unordered.
+        [`shard`][ParquetStore.shard] feeds it one query per source
+        partition, deliberately unordered.
 
         Args:
             cur: Open DuckDB cursor – must stay alive until the returned
                 reader is fully consumed.
-            sqls: Queries in output order; a single-pass merge passes
-                exactly one.
+            sqls: Queries in output order.
         """
         first = cur.execute(sqls[0]).to_arrow_reader()
 
@@ -790,25 +908,6 @@ class ParquetStore:
                 yield from cur.execute(sql).to_arrow_reader()
 
         return pa.RecordBatchReader.from_batches(first.schema, batches())
-
-    def _partition_bytes(self) -> dict[tuple[str, str, str], int]:
-        """Physical parquet bytes per ``(shard, bucket, origin)`` partition.
-
-        Summed from the Delta log's add actions – file-level metadata,
-        no data scan. Drives the slice count of a range-sliced
-        [`merge`][ParquetStore.merge].
-        """
-        actions = pa.table(self.deltatable.get_add_actions(flatten=True))
-        sizes: dict[tuple[str, str, str], int] = {}
-        for size, shard, bucket, origin in zip(
-            actions["size_bytes"].to_pylist(),
-            actions["partition.shard"].to_pylist(),
-            actions["partition.bucket"].to_pylist(),
-            actions["partition.origin"].to_pylist(),
-        ):
-            key = (shard, bucket, origin)
-            sizes[key] = sizes.get(key, 0) + size
-        return sizes
 
     def shard(self, shards: int) -> None:
         """Re-key the whole store onto ``shards`` entity-hash shards.
@@ -829,18 +928,18 @@ class ParquetStore:
         One writer per *target* partition stays open across a group's
         write, so the target file size is scaled down by the shard count
         (`shard_target_file_size`) to
-        keep their combined buffers bounded; the resulting small files are
-        what the follow-up ``compact`` bin-packs.
+        keep their combined buffers bounded; the follow-up ``merge`` rewrites
+        each partition into one file anyway.
 
         Deliberately no dedupe and no sort: the use case is a store whose
         queries have outgrown their shard count, and a re-shard moves
-        rows rather than deciding which survive. Every rewritten
-        partition is therefore re-stamped as dirty, so the next
-        [`merge`][ParquetStore.merge] restores canonical content and file sort order –
-        run ``optimize`` afterwards. The stamps are per-partition only;
-        the dataset-level clocks stay put, because a re-shard changes
-        physical layout, not canonical content, and the exports keyed on
-        them are byte-identical either side of it.
+        rows rather than deciding which survive. Every rewritten partition
+        comes out dirty – delta-rs names its files ``part-*``, not
+        `MERGED_PREFIX` – so reads reconcile it and the next
+        [`merge`][ParquetStore.merge] restores the file sort order; run
+        ``optimize`` afterwards. The dataset-level clocks stay put, because a
+        re-shard changes physical layout, not content, and the exports keyed
+        on them are byte-identical either side of it.
 
         Idempotent: the target shard is a function of ``entity_id`` and
         the target count alone, never of the value a row currently
@@ -867,17 +966,46 @@ class ParquetStore:
         self.log.info("Re-shard complete.", shards=shards)
 
     def _rewrite_shards(self, shards: int) -> None:
-        """Rewrite every ``(bucket, origin)`` group onto ``shards`` shards."""
+        """Rewrite every ``(bucket, origin)`` group onto ``shards`` shards.
+
+        Reads the Delta log once, as [`merge`][ParquetStore.merge] does: the
+        source partitions' files come from the process's snapshot
+        ([`partition_source_sql`][ftm_lakehouse.logic.parquet.partition_source_sql]),
+        and every group write goes through it, advanced past each commit. A
+        ``delta_scan`` per source partition and a reload per write replayed
+        the whole log once per partition of the store. The snapshot lock is
+        held for each group's write – a re-shard runs with writers stopped,
+        from a process that does nothing else.
+        """
         with self._maintenance_fence():
-            groups: dict[tuple[str, str], list[str]] = {}
-            for shard, bucket, origin in self._list_partitions():
-                groups.setdefault((bucket, origin), []).append(shard)
+            root, partitions = self._snapshot_partitions()
+            groups: dict[tuple[str, str], list[tuple[Partition, Files]]] = {}
+            for partition, (files, _) in partitions.items():
+                _, bucket, origin = partition
+                groups.setdefault((bucket, origin), []).append((partition, files))
+            config: dict[str, Any] = {**duckdb_config()}
             for (bucket, origin), sources in groups.items():
-                sqls = [build_shard_sql(s, bucket, origin, shards) for s in sources]
-                with Took() as t, self._lake.cursor() as cur:
+                with (
+                    Took() as t,
+                    closing(duckdb.connect(config=config)) as con,
+                    self._snapshot_lock,
+                ):
+                    snapshot = self._current_snapshot()
+                    if snapshot is None:
+                        raise RuntimeError(f"Statement store vanished: `{self.uri}`")
+                    sqls = [
+                        build_shard_sql(
+                            *partition,
+                            shards,
+                            source=partition_source_sql(
+                                [f"{root}/{file}" for file, _ in files], *partition
+                            ),
+                        )
+                        for partition, files in sources
+                    ]
                     write_deltalake(
-                        str(self.uri),
-                        self._chained_reader(cur, sqls),
+                        snapshot,
+                        self._chained_reader(con, sqls),
                         mode="overwrite",
                         partition_by=PARTITIONS,
                         predicate=(
@@ -886,8 +1014,8 @@ class ParquetStore:
                         ),
                         writer_properties=writer_for_bucket(bucket),
                         target_file_size=shard_target_file_size(shards),
-                        storage_options=storage_options(),
                     )
+                    snapshot.update_incremental()
                 self.log.info(
                     f"Re-sharded `{bucket}/{origin}`.",
                     took=t.took,
@@ -896,8 +1024,6 @@ class ParquetStore:
                     sources=len(sources),
                     shards=shards,
                 )
-            for shard, bucket, origin in self._list_partitions():
-                self._tags.set(tag.statements_partition_updated(shard, bucket, origin))
 
     def delete_origin(self, origin: str) -> int:
         """Physically drop every row of one origin.
@@ -906,20 +1032,15 @@ class ParquetStore:
         partitions and Delta drops their files instead of rewriting rows –
         unlike [`merge`][ParquetStore.merge]'s tombstone reap this is
         immediate, with no grace period and nothing left to collapse. Held
-        under the exclusive maintenance fence
-        (`_maintenance_fence`), like the other partition-level
-        rewrites.
+        under the exclusive maintenance fence (`_maintenance_fence`), like the
+        other in-place rewrites; an append to the same origin that was already
+        in flight when the fence closed conflicts with the delete's commit,
+        which is retried under the fence's bound.
 
         Stamps
-        [`STATEMENTS_OPTIMIZED`][ftm_lakehouse.core.conventions.tag.STATEMENTS_OPTIMIZED]
-        on completion when rows were removed – dropping a partition moves the
-        store's canonical content exactly as a merge does, so exports,
-        statistics and diffs have to go stale against it. The append-side
-        ``STATEMENTS_UPDATED`` clock is deliberately left alone: no rows
-        landed. The dropped partitions' own tags are left behind too – they
-        no longer enumerate, and a later write to the same origin stamps a
-        fresh ``last_updated`` over the stale ``last_optimized``, so the
-        partition comes back dirty.
+        [`STATEMENTS_UPDATED`][ftm_lakehouse.core.conventions.tag.STATEMENTS_UPDATED]
+        on completion when rows were removed: the store's content moved, so
+        exports, statistics and diffs have to go stale against it.
 
         Args:
             origin: The origin tag to drop.
@@ -935,12 +1056,22 @@ class ParquetStore:
         origin = validate_origin(origin)
         if not self.exists:
             return 0
-        with self._maintenance_fence(), Took() as t:
-            # safe to interpolate: `validate_origin` rejects quotes
-            metrics = self.deltatable.delete(f"origin = '{origin}'")
+        with self._maintenance_fence(), Took() as t, self._snapshot_lock:
+            if self._current_snapshot() is None:
+                return 0
+            metrics: dict[str, Any] = {}
+
+            def drop() -> None:
+                nonlocal metrics
+                snapshot = self._current_snapshot()
+                assert snapshot is not None
+                # safe to interpolate: `validate_origin` rejects quotes
+                metrics = snapshot.delete(f"origin = '{origin}'")
+
+            self._fence_retry(drop)
             deleted = int(metrics.get("num_deleted_rows") or 0)
             if deleted:
-                self._tags.set(tag.STATEMENTS_OPTIMIZED)
+                self._tags.set(tag.STATEMENTS_UPDATED)
             self.log.info(
                 "Dropped origin.",
                 took=t.took,
@@ -950,36 +1081,11 @@ class ParquetStore:
             )
         return deleted
 
-    def compact(self) -> None:
-        """Bin-pack small parquet files within each partition.
-
-        Cheap maintenance – Delta's ``OPTIMIZE compact`` only rewrites small
-        files into larger ones; it does not collapse duplicate rows or drop
-        tombstones (use [`merge`][ParquetStore.merge] for that). Held under the exclusive
-        maintenance fence (`_maintenance_fence`).
-        """
-        if not self.exists:
-            return
-        with self._maintenance_fence():
-            with Took() as t:
-                for shard, bucket, origin in self._list_partitions():
-                    self.deltatable.optimize.compact(
-                        partition_filters=[
-                            ("shard", "=", shard),
-                            ("bucket", "=", bucket),
-                            ("origin", "=", origin),
-                        ],
-                        writer_properties=writer_for_bucket(bucket),
-                        target_size=TARGET_SIZE,
-                    )
-            self.log.info("Compaction done.", took=t.took)
-
     def vacuum(self, retention_hours: int = 0) -> None:
         """Delete obsolete parquet files no longer referenced by the Delta log.
 
-        Tombstoned files (replaced by [`merge`][ParquetStore.merge] /
-        [`compact`][ParquetStore.compact]) become orphans on disk; vacuum
-        prunes them once they're past
+        Files [`merge`][ParquetStore.merge] replaced become orphans on disk;
+        vacuum prunes them once they're past
         ``retention_hours``. Held under the exclusive maintenance fence
         (`_maintenance_fence`).
 
@@ -989,16 +1095,23 @@ class ParquetStore:
         """
         if not self.exists:
             return
-        with self._maintenance_fence(), Took() as t:
-            self.deltatable.vacuum(
-                retention_hours=retention_hours,
-                dry_run=False,
-                enforce_retention_duration=False,
-            )
-            self.log.info("Vacuumed.", took=t.took)
+        deleted: list[str] = []
+        with self._maintenance_fence(), Took() as t, self._snapshot_lock:
+            snapshot = self._current_snapshot()
+            if snapshot is not None:
+                deleted = snapshot.vacuum(
+                    retention_hours=retention_hours,
+                    dry_run=False,
+                    enforce_retention_duration=False,
+                    full=True,
+                )
+        self.log.info("Vacuumed.", files=len(deleted), took=t.took)
 
     def sweep(
-        self, csv_key: str | None = None, tee: bool = True
+        self,
+        csv_key: str | None = None,
+        tee: bool = True,
+        throughput: Throughput | None = None,
     ) -> Iterator[StatementDict]:
         """One scan of the live view, teeing Arrow batches two ways.
 
@@ -1008,9 +1121,7 @@ class ParquetStore:
         that wants both ``statements.csv`` and the rows behind it pays for one
         scan rather than writing the csv and reading it back.
 
-        Rows come from ``RecordBatch.to_pylist`` – a bulk conversion in C,
-        cheaper than the ``Row``-object marshalling of
-        `_query_statement_data` – and
+        Rows come from ``RecordBatch.to_pylist`` – a bulk conversion in C – and
         carry `STATEMENT_CSV_COLUMNS`, which covers everything an entity
         aggregation needs. They arrive entity-contiguous (the select orders by
         ``entity_id`` and an entity lives in one partition), so
@@ -1027,12 +1138,12 @@ class ParquetStore:
             tee: Yield row dicts. ``False`` keeps the scan purely
                 columnar – nothing is materialised in Python – which is what
                 a csv-only export wants.
+            throughput: Counter fed the Arrow bytes of every batch scanned –
+                a progress bar's, so it can show how fast the scan moves.
 
         Yields:
             ``StatementDict`` rows, unless ``tee`` is off.
         """
-        if not self.exists:
-            return
         sql = statement_csv_select()
         # a batch is materialised as Python objects only when rows are asked
         # for, so the cap is on rows-in-flight, not on bytes scanned
@@ -1046,6 +1157,8 @@ class ParquetStore:
             writer: CSVWriter | None = None
             for reader in self._execute_partitioned(sql, batch_size):
                 for batch in reader:
+                    if throughput is not None:
+                        throughput.add(batch.nbytes)
                     if out is not None:
                         if writer is None:
                             writer = CSVWriter(out, batch.schema)
@@ -1061,105 +1174,194 @@ class ParquetStore:
     ) -> Iterator[str]:
         """Get entity IDs for given query. Use ``self.source_raw`` to
         target physical storage without tombstones merged"""
-
-        if not self.exists:
-            return
-
-        sql = Sql(q or Query(), source=source or self.source).canonical_ids
-        for reader in self._execute_partitioned(sql):
+        source = source or self.source
+        sql = Sql(q or Query(), source=source).canonical_ids
+        prune = self._prune_values(q, source)
+        for reader in self._execute_partitioned(sql, prune=prune):
             for batch in reader:
                 yield from batch["entity_id"].to_pylist()
 
-    def destroy(self) -> None:
+    def deleted_candidates(self, since: datetime) -> Iterator[DeleteCandidate]:
+        """Every entity carrying a tombstone at or after ``since``.
+
+        One `deleted_candidates_select` pass over the raw view of every
+        partition – ``deleted_at`` is no partition column, so there is nothing
+        to prune by and the pass is the whole table either way. That is why it
+        is one pass: a diff series needs its tombstoned ids before the sweep
+        opens, and asking per series paid for this scan per series.
+
+        Args:
+            since: Earliest tombstone any caller cares about – the earliest
+                window of the series being served.
+
+        Yields:
+            `DeleteCandidate`, one per entity.
         """
-        Destroy the deltalake by removing the transaction log in "_delta_log"
-        directory. This is soft deleting, as the parquet files remain (but will
-        be cleaned up on optimize --vacuum)
-        """
-        with Took() as t:
-            self.log.warn("🔥 Destroying deltalake store ...")
-            prefix = f"{path.STATEMENTS}/_delta_log"
-            for key in self._store.iterate_keys(prefix):
-                self._store.delete(key)
-        self.log.info("Deleted statement store.", took=t.took)
+        sql = deleted_candidates_select(since)
+        for reader in self._execute_partitioned(sql, batch_size=SWEEP_BATCH_SIZE):
+            for batch in reader:
+                for row in batch.to_pylist():
+                    yield DeleteCandidate(
+                        id=row["entity_id"],
+                        deleted_at=row["deleted_at"],
+                        origins=frozenset(row["origins"] or ()),
+                        schemata=frozenset(row["schemata"] or ()),
+                        content_hash=bool(row["content_hash"]),
+                    )
 
     def _list_partitions(self) -> list[tuple[str, str, str]]:
         """List all ``(shard, bucket, origin)`` triples currently in the table.
 
-        Queries ``statement_raw`` so the enumeration scans the underlying
-        Delta partitions directly, seeing pre-merge duplicates and
-        tombstones (the live view hides tombstones).
+        Read from the snapshot's active files (`_snapshot_pairs`) – metadata,
+        no data scan; a ``SELECT DISTINCT`` over ``statement_raw`` opened every
+        file of the table to answer this. Every partition holding a file is
+        listed, whatever its rows are (pre-merge duplicates, tombstones).
         """
-        if not self.exists:
-            return []
+        return sorted(self._snapshot_partitions()[1])
+
+    @staticmethod
+    def _prune_values(q: Query | None, source: SqlSource) -> dict[str, set[str]]:
+        """Partition values ``q`` can match, per prune column of ``source``.
+
+        The values ftmq folds into the compiled query as ``column IN (...)``
+        (``shard`` from an entity id, ``bucket`` from a schema), under the
+        same soundness rule: only a plain positive conjunction prunes – below
+        ``~`` / ``|`` a filter no longer confines the matching entities to the
+        partitions it names. ``_is_flat_and`` is ftmq's own check for that.
+        """
+        if q is None or not Sql(q, source)._is_flat_and:
+            return {}
+        return {
+            column: set(values)
+            for column, prune in source.prune.items()
+            if (values := prune(q))
+        }
+
+    @staticmethod
+    def _pruned_keys(
+        pairs: Pairs, prune: dict[str, set[str]] | None
+    ) -> list[tuple[str, str]]:
+        """The ``(shard, bucket)`` keys of ``pairs`` that ``prune``
+        (`_prune_values`) leaves in – all of them without a prune."""
+        prune = prune or {}
+        return [
+            (s, b)
+            for s, b in sorted(pairs)
+            if s in prune.get("shard", {s}) and b in prune.get("bucket", {b})
+        ]
+
+    def _scoped_sources(
+        self, prune: dict[str, set[str]] | None = None
+    ) -> Iterator[tuple[str, bool]]:
+        """Yield one ``(shard, bucket)`` pair's files as a relation, per pair.
+
+        Each relation unions the pair's origin partitions
+        ([`partition_source_sql`][ftm_lakehouse.logic.parquet.partition_source_sql]).
+        Reads iterate per pair because entity ids (and so statement ids) are
+        placed in exactly one ``(shard, bucket)`` by the model layer: one
+        pair at a time keeps a full-store ``ORDER BY entity_id`` bounded to a
+        partition, and every filter pushes to the files' statistics. The
+        snapshot is taken once, so a sweep reads one version of the store.
+        Each relation comes with whether every partition in it is clean
+        (`Pairs`), which decides the view `_cursor_over` builds on it.
+
+        Pairs outside ``prune`` (`_prune_values`) are skipped rather than
+        queried: the compiled query carries the same ``shard IN (...)`` /
+        ``bucket IN (...)`` predicate, so they would come back empty – an id
+        lookup used to pay a query for every pair of the store.
+
+        A read pruned to shards selects entities by id, so its rows are
+        bounded by the ids asked for, not by partition size: every pair it can
+        touch goes into one relation and one query. An id alone does not tell
+        the bucket, so a lookup touches every bucket of its shard – five
+        queries where one does.
+        """
+        root, pairs = self._snapshot_pairs()
+
+        def union(sources: list[tuple[Partition, Files, bool]]) -> tuple[str, bool]:
+            sql = " UNION ALL ".join(
+                partition_source_sql(
+                    [f"{root}/{file}" for file, _ in files], *partition
+                )
+                for partition, files, _ in sources
+            )
+            return f"({sql})", all(clean for _, _, clean in sources)
+
+        keys = self._pruned_keys(pairs, prune)
+        if prune and "shard" in prune:
+            if keys:
+                yield union([source for key in keys for source in pairs[key]])
+            return
+        for key in keys:
+            yield union(pairs[key])
+
+    @contextmanager
+    def _cursor_over(
+        self, source: str, clean: bool
+    ) -> Iterator[duckdb.DuckDBPyConnection]:
+        """A cursor whose ``statement`` / ``statement_raw`` read ``source``.
+
+        Temporary views, so they shadow the connection's ``delta_scan`` views
+        for this cursor only: a query compiled against `TABLE` /
+        `TABLE_RAW` runs unchanged, over the files the snapshot named.
+        ``statement`` is a plain scan when ``source`` is clean
+        ([`live_rows_sql`][ftm_lakehouse.logic.parquet.live_rows_sql]) and the
+        dedupe query otherwise
+        ([`dedupe_rows_sql`][ftm_lakehouse.logic.parquet.dedupe_rows_sql]) –
+        the one place a read consults whether a merge has run, and only to
+        pick the cheaper of two equivalent queries.
+
+        Parquet footers are cached: data files are immutable (a rewrite writes
+        new ones), so a cached footer never goes stale, and a lookup reads each
+        file's footer for the view and again for the query. Set here rather
+        than in [`duckdb_config`][ftm_lakehouse.logic.parquet.duckdb_config]:
+        as a connect-time option it would make DuckDB autoload the parquet
+        extension before it registers, which fails offline.
+        """
         with self._lake.cursor() as cur:
-            rows = cur.execute(
-                f"SELECT DISTINCT shard, bucket, origin FROM {TABLE_RAW.name} "
-                "ORDER BY shard, bucket, origin"
-            ).fetchall()
-        return [(s, b, o) for s, b, o in rows]
-
-    def _iter_shard_buckets(self) -> Iterator[tuple[str, str]]:
-        """Yield unique ``(shard, bucket)`` pairs from existing partitions.
-
-        Reads (`_query_statement_data`) iterate per ``(shard,
-        bucket)`` because entity IDs (and thus statement IDs) are uniquely
-        placed in one ``(shard, bucket)`` by the model layer. Adding
-        ``WHERE shard = ? AND bucket = ?`` per iteration keeps a full-store
-        ``ORDER BY entity_id`` bounded to one partition and lets the
-        predicate push through the live view's plain scan to the parquet
-        file statistics.
-        """
-        seen: set[tuple[str, str]] = set()
-        for s, b, _ in self._list_partitions():
-            key = (s, b)
-            if key not in seen:
-                seen.add(key)
-                yield s, b
-
-    def _scoped_partition_sql(self, sql: Select) -> Iterator[Select]:
-        """Yield ``sql`` scoped with ``WHERE shard = ? AND bucket = ?`` per
-        ``(shard, bucket)`` partition.
-
-        The per-partition scoping keeps a full-store ``ORDER BY entity_id``
-        bounded to one partition (an entity lives in one ``(shard, bucket)``)
-        and lets every filter push through the live ``statement`` view's plain
-        ``deleted_at IS NULL`` scan to ``delta_scan``'s per-file statistics.
-        """
-        for s, b in self._iter_shard_buckets():
-            yield sql.where(column("shard") == s, column("bucket") == b)
+            cur.execute("SET parquet_metadata_cache = true")
+            cur.execute(
+                f"CREATE OR REPLACE TEMP VIEW {TABLE_RAW.name} AS SELECT * FROM {source}"
+            )
+            live = live_rows_sql if clean else dedupe_rows_sql
+            cur.execute(
+                f"CREATE OR REPLACE TEMP VIEW {TABLE.name} AS {live(TABLE_RAW.name)}"
+            )
+            yield cur
 
     def _execute_partitioned(
-        self, sql: Select | None = None, batch_size: int | None = None
+        self,
+        sql: Select,
+        batch_size: int | None = None,
+        prune: dict[str, set[str]] | None = None,
     ) -> Iterator[pa.RecordBatchReader]:
         """Yield a streamed Arrow reader per ``(shard, bucket)`` partition.
 
-        Hands back each partition's result (scoped via
-        `_scoped_partition_sql`) as a lazy
-        `pyarrow.RecordBatchReader` streamed from DuckDB's execution
-        pipeline, so memory stays bounded per batch instead of materialising
-        the partition.
+        Runs ``sql`` over each pair's files (`_scoped_sources`) and hands back
+        the result as a lazy `pyarrow.RecordBatchReader` streamed from
+        DuckDB's execution pipeline, so memory stays bounded per batch instead
+        of materialising the partition.
 
         Consume each reader fully before advancing to the next: the backing
         cursor is held open only across its ``yield`` and closes when the
         generator resumes for the following partition.
 
         Args:
-            sql: Optional SQLAlchemy ``Select`` (default: `_compile_query`).
+            sql: The SQLAlchemy ``Select`` to run.
             batch_size: Rows per Arrow batch. DuckDB's default of 1M is right
                 for a purely columnar consumer, but a consumer that turns
                 batches into Python objects wants a smaller one – the cap is
                 on *materialised rows*, not bytes.
+            prune: Partition values the query can match (`_prune_values`) –
+                the others are not queried.
 
         Yields:
             One `pyarrow.RecordBatchReader` per ``(shard, bucket)``
             partition.
         """
-        if sql is None:
-            sql = self._compile_query()
-        for scoped in self._scoped_partition_sql(sql):
-            compiled = str(scoped.compile(compile_kwargs={"literal_binds": True}))
-            with self._lake.cursor() as cur:
+        compiled = str(sql.compile(compile_kwargs={"literal_binds": True}))
+        for source, clean in self._scoped_sources(prune):
+            with self._cursor_over(source, clean) as cur:
                 res = cur.execute(compiled)
                 if batch_size is None:
                     yield res.to_arrow_reader()
@@ -1169,10 +1371,8 @@ class ParquetStore:
     def _query_statement_data(self, q: Query | None = None) -> Iterator[StatementDict]:
         """Query statement dicts from the live view, bypassing FtM construction.
 
-        Iterates ``(shard, bucket)`` partitions via
-        `_scoped_partition_sql`. Correctness assumes an optimized store –
-        on an un-merged store this can surface duplicate ids and rows whose
-        delete has not been applied yet.
+        Iterates ``(shard, bucket)`` pairs (`_execute_partitioned`), turning
+        each Arrow batch into row dicts in one bulk ``to_pylist``.
 
         Args:
             q: Optional ftmq ``Query`` (default: match-all), compiled via
@@ -1181,9 +1381,11 @@ class ParquetStore:
         Yields:
             StatementDict instances.
         """
-        for scoped in self._scoped_partition_sql(self._compile_query(q)):
-            for row in self._lake._execute(scoped):
-                yield StatementDict(**vars(row))
+        prune = self._prune_values(q, self.source)
+        sql = self._compile_query(q)
+        for reader in self._execute_partitioned(sql, SWEEP_BATCH_SIZE, prune):
+            for batch in reader:
+                yield from cast(list[StatementDict], batch.to_pylist())
 
     def _query_data(self, q: Query | None = None) -> Iterator[EntityPayload]:
         """

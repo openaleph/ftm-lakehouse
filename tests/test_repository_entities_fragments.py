@@ -71,7 +71,7 @@ def local_repo(tmp_path) -> Generator[EntityRepository, None, None]:
     yield _make_local_repo(tmp_path)
 
 
-def test_fragment_supersession_replaces_older_emission(repo):
+def test_fragment_supersession_replaces_older_emission(repo, settle):
     """Re-emitting a fragment replaces its older values per prop."""
     repo, _ = repo
     with repo.writer() as w:
@@ -80,12 +80,12 @@ def test_fragment_supersession_replaces_older_emission(repo):
     with repo.writer() as w:
         w.add_statement(_stmt("name", "Acme Corp", T2), fragment="row42")
     repo.flush()
-    repo.merge()
+    settle(repo)
 
     assert _values(repo, "name") == ["Acme Corp"]
 
 
-def test_fragment_multi_value_props_survive_together(repo):
+def test_fragment_multi_value_props_survive_together(repo, settle):
     """All rows of the latest emission survive – they share last_seen."""
     repo, _ = repo
     with repo.writer() as w:
@@ -96,12 +96,12 @@ def test_fragment_multi_value_props_survive_together(repo):
         w.add_statement(_stmt("name", "Acme Corp", T2), fragment="row42")
         w.add_statement(_stmt("name", "Acme Ltd", T2), fragment="row42")
     repo.flush()
-    repo.merge()
+    settle(repo)
 
     assert _values(repo, "name") == ["Acme Corp", "Acme Ltd"]
 
 
-def test_fragment_prop_dropped_between_emissions_survives(repo):
+def test_fragment_prop_dropped_between_emissions_survives(repo, settle):
     """Supersession is per prop – a prop absent from the newer emission
     keeps its older row."""
     repo, _ = repo
@@ -112,7 +112,7 @@ def test_fragment_prop_dropped_between_emissions_survives(repo):
     with repo.writer() as w:
         w.add_statement(_stmt("name", "Acme Corp", T2), fragment="row42")
     repo.flush()
-    repo.merge()
+    settle(repo)
 
     assert _values(repo, "name") == ["Acme Corp"]
     assert _values(repo, "country") == ["de"]
@@ -148,7 +148,7 @@ def test_fragment_and_nonfragment_same_content_coexist(repo):
     assert len({s.id for s in stmts}) == 1
 
 
-def test_add_entity_fragment_emissions(repo):
+def test_add_entity_fragment_emissions(repo, settle):
     """Entity-level emissions with a fragment supersede per prop.
 
     ``last_seen`` has second granularity in the FtM statement model, so
@@ -171,14 +171,14 @@ def test_add_entity_fragment_emissions(repo):
     with repo.writer() as w:
         w.add_entity(changed, fragment="row1")
     repo.flush()
-    repo.merge()
+    settle(repo)
 
     entity = repo.get("jane")
     assert entity is not None
     assert entity.get("name") == ["Jane D. Doe"]
 
 
-def test_delete_entity_with_fragments(repo):
+def test_delete_entity_with_fragments(repo, settle):
     """Tombstones carry the live row's fragment so the delete lands in the
     same supersession group."""
     repo, _ = repo
@@ -191,7 +191,7 @@ def test_delete_entity_with_fragments(repo):
     count = repo.delete_entity("acme")
     assert count == 2
     repo.flush()
-    repo.merge()
+    settle(repo)
 
     assert repo.get("acme") is None
 

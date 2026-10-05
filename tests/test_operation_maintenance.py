@@ -1,4 +1,4 @@
-"""Tests for the OptimizeOperation (merge + compact + vacuum in one pass)."""
+"""Tests for the OptimizeOperation (merge + vacuum in one pass)."""
 
 import os
 
@@ -18,8 +18,13 @@ def count_parquet_files(repo: EntityRepository) -> int:
 
 
 def count_parquet_on_disk(tmp_path) -> int:
+    """Data files on disk – Delta checkpoints are parquet too, so skip the log."""
     return sum(
-        1 for _, _, fs in os.walk(tmp_path) for f in fs if f.endswith(".parquet")
+        1
+        for root, _, fs in os.walk(tmp_path)
+        if "_delta_log" not in root
+        for f in fs
+        if f.endswith(".parquet")
     )
 
 
@@ -39,7 +44,7 @@ def _add_batches(repo: EntityRepository, n: int = 3) -> None:
 
 
 def test_operation_optimize(tmp_path):
-    """OptimizeOperation runs merge, compact and vacuum in one pass.
+    """OptimizeOperation runs merge and vacuum in one pass.
 
     Three separate origin flushes produce three partitions, each with one
     small file. Optimize must succeed, bound the file count, keep the data
@@ -54,16 +59,16 @@ def test_operation_optimize(tmp_path):
 
     job = OptimizeJob.make(dataset=DATASET, retention_hours=0)
     op = OptimizeOperation(job=job, uri=tmp_path)
-    assert op.get_target() == tag.STATEMENTS_OPTIMIZED
-    assert op.get_dependencies() == [tag.STATEMENTS_UPDATED]
+    assert op.get_target() == tag.OP_OPTIMIZE
+    assert op.get_dependencies() == []
 
     result = op.run()
-    assert result.done == 3  # merge + compact + vacuum
+    assert result.done == 2  # merge + vacuum
 
-    target_path = f"tags/lakehouse/{tag.STATEMENTS_OPTIMIZED}"
+    target_path = f"tags/lakehouse/{tag.OP_OPTIMIZE}"
     assert (tmp_path / target_path).exists()
     assert count_parquet_files(repo) <= initial
-    # Vacuum removed files tombstoned by merge/compact
+    # Vacuum removed the files merge replaced
     assert count_parquet_on_disk(tmp_path) <= on_disk_before
 
     # Data still intact
@@ -98,7 +103,7 @@ def test_operation_optimize_collapses_duplicates(tmp_path):
 
     job = OptimizeJob.make(dataset=DATASET)
     result = OptimizeOperation(job=job, uri=tmp_path).run()
-    assert result.done == 3
+    assert result.done == 2
 
     after = row_count()
     assert after == 2  # duplicates collapsed

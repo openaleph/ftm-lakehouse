@@ -4,10 +4,12 @@ import time
 
 import pytest
 from ftmq.util import make_entity
+from rigour.time import utc_now
 from typer.testing import CliRunner
 
 from ftm_lakehouse.cli import cli as cli_app
 from ftm_lakehouse.core.conventions import path
+from ftm_lakehouse.operation.export import ExportJob, ExportKind, ExportOperation
 from ftm_lakehouse.repository.entities.main import EntityRepository
 from tests.shared import BOB, JANE
 
@@ -56,9 +58,9 @@ def test_write_lock_bounded_acquisition(tmp_path, monkeypatch) -> None:
     assert store._store.exists(path.LOCK)
 
 
-def test_append_fence_blocked_by_maintenance_lock(tmp_path, monkeypatch) -> None:
+def test_append_backs_off_while_locked(tmp_path, monkeypatch) -> None:
     """An append on an existing table waits out a held ``.LOCK`` and fails
-    after bounded retries instead of writing under maintenance's feet."""
+    after bounded retries instead of writing under an in-place rewrite."""
     monkeypatch.setenv("LAKEHOUSE_LOCK_MAX_RETRIES", "1")
     repo = EntityRepository("test", tmp_path)
     with repo.writer() as writer:
@@ -71,52 +73,62 @@ def test_append_fence_blocked_by_maintenance_lock(tmp_path, monkeypatch) -> None
         writer.add_entity(make_entity(BOB))
     with pytest.raises(RuntimeError, match="Write fence busy"):
         repo.flush()
-    # the parked appender must not leak its marker (it registers first,
-    # then backs off marker-less while .LOCK is held)
-    assert store._append_markers() == []
     assert store.unlock() is True
 
 
-def test_append_leaves_fence_clear(tmp_path) -> None:
-    """A successful append holds neither ``.LOCK`` nor append markers after."""
+def test_append_proceeds_during_merge(tmp_path) -> None:
+    """A held merge lock does not hold appends: ingest flows through a merge."""
     repo = EntityRepository("test", tmp_path)
     with repo.writer() as writer:
         writer.add_entity(make_entity(JANE))
     repo.flush()
     with repo.writer() as writer:
         writer.add_entity(make_entity(BOB))
-    repo.flush()  # second flush appends via the shared fence
+
+    with repo.merge_lock():
+        assert repo.flush() > 0
+    assert {e.id for e in repo.query()} == {"jane", "bob"}
+
+
+def test_append_leaves_locks_clear(tmp_path) -> None:
+    """A successful append holds neither lock after."""
+    repo = EntityRepository("test", tmp_path)
+    with repo.writer() as writer:
+        writer.add_entity(make_entity(JANE))
+    repo.flush()
+    with repo.writer() as writer:
+        writer.add_entity(make_entity(BOB))
+    repo.flush()
 
     store = repo._statements
     assert not store._store.exists(path.LOCK)
-    assert store._append_markers() == []
+    assert not store._store.exists(path.LOCK_MERGE)
 
 
-def test_merge_blocked_by_stale_append_marker(tmp_path, monkeypatch) -> None:
-    """Maintenance drains append markers – a stale one fails it (bounded),
-    releases the exclusive lock, and clears via unlock."""
+def test_merge_lock_serialises_merge_and_sweep(tmp_path, monkeypatch) -> None:
+    """A merge and an export sweep hold the same lock: neither runs while the
+    other does, so an optimize cannot vacuum files a sweep is reading."""
     monkeypatch.setenv("LAKEHOUSE_LOCK_MAX_RETRIES", "1")
     repo = EntityRepository("test", tmp_path)
     with repo.writer() as writer:
         writer.add_entity(make_entity(JANE))
     repo.flush()
 
-    store = repo._statements
-    store._store.touch(f"{path.LOCK_APPENDS}/deadbeef")
-    with pytest.raises(RuntimeError, match="append markers"):
-        store.merge()
-    # The exclusive lock must be released again after the failed drain.
-    assert not store._store.exists(path.LOCK)
+    with repo.merge_lock():  # a sweep is under way
+        with pytest.raises(RuntimeError, match="Already locked"):
+            repo._statements.merge()
 
-    assert store.unlock() is True
-    assert store._append_markers() == []
-    store.merge()  # fence is clear now
+    repo._statements._store.touch(path.LOCK_MERGE)  # a merge is under way
+    job = ExportJob.make(dataset="test", kind=ExportKind.entities)
+    with pytest.raises(RuntimeError, match="Already locked"):
+        ExportOperation(job=job, uri=tmp_path).export(utc_now())
+    assert repo.unlock() is True
 
 
-def test_unlock_clears_append_markers(tmp_path) -> None:
+def test_unlock_releases_merge_lock(tmp_path) -> None:
     repo = EntityRepository("test", tmp_path)
     store = repo._statements
-    store._store.touch(f"{path.LOCK_APPENDS}/deadbeef")
+    store._store.touch(path.LOCK_MERGE)
     assert store.unlock() is True
     assert store.unlock() is False
 

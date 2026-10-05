@@ -7,7 +7,6 @@ from typing import Any, Generator, Self, TypeAlias
 from anystore.model import Stats
 from anystore.model.base import BaseModel
 from anystore.types import HttpUrlStr, SDict
-from anystore.util import guess_mimetype
 from followthemoney import EntityProxy, StatementEntity
 from ftmq.types import StatementEntities
 from ftmq.util import DEFAULT_DATASET, make_entity
@@ -16,6 +15,7 @@ from pydantic import ConfigDict, computed_field, field_validator, model_validato
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.helpers.file import (
     get_filename,
+    guess_mime,
     make_file_id,
     make_folders,
     mime_to_schema,
@@ -64,7 +64,7 @@ class Document(BaseModel):
             id=d["id"],
             checksum=checksums[0],
             name=name,
-            mimetype=pick_mime(mimetypes, guess_mimetype(name)),
+            mimetype=pick_mime(mimetypes, guess_mime(name)),
             size=int(file_sizes[0]) if file_sizes else 0,
             updated_at=d.get("last_change"),
             public_url=public_url,

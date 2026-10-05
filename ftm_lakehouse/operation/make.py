@@ -12,12 +12,22 @@ class MakeJob(DatasetJobModel):
 
 
 class MakeOperation(DatasetJobOperation[MakeJob]):
+    """Flush the journal and run every export kind.
+
+    Never merges: reads reconcile un-merged rows, so the exports are correct
+    on any store. Merging is
+    [`OptimizeOperation`][ftm_lakehouse.operation.maintenance.OptimizeOperation]'s
+    business – the ``make`` CLI runs it first by default, as an optimisation.
+    """
+
     target = tag.OP_MAKE
-    dependencies = [tag.JOURNAL_UPDATED, tag.STATEMENTS_OPTIMIZED]
+    dependencies = [tag.STATEMENTS_UPDATED]
+    """The content clock. [`prepare`][MakeOperation.prepare] runs ahead of the
+    freshness check, so rows still in the journal cannot hide from a run –
+    they are drained first, and a drain that lands rows moves this tag."""
 
     def prepare(self) -> None:
-        """Drain the journal; each export merges for itself in its own
-        [`ExportOperation.prepare`][ExportOperation.prepare]."""
+        """Drain the journal – a ``LIMIT 1`` probe when it is empty."""
         self.entities.flush()
 
     def handle(self, run: JobRun, *args, **kwargs) -> None:

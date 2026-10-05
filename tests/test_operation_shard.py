@@ -128,12 +128,14 @@ def test_operation_shard_keeps_unmerged_rows(tmp_path):
                 )
             )
         repo.flush()
-    raw = len(list(repo.query_statements()))
-    assert raw > len({s.id for s in repo.query_statements()})
+    # un-merged: physical rows exceed what the reconciled read returns
+    raw = repo._statements.num_rows
+    assert raw > len(list(repo.query_statements()))
 
     ShardOperation(job=ShardJob.make(dataset=DATASET, shards=8), uri=tmp_path).run()
     resharded = EntityRepository(dataset=DATASET, uri=tmp_path)
-    assert len(list(resharded.query_statements())) == raw
+    # a re-shard moves rows, it does not drop any
+    assert resharded._statements.num_rows == raw
     assert resharded.needs_merge
 
     OptimizeOperation(job=OptimizeJob.make(dataset=DATASET), uri=tmp_path).run(

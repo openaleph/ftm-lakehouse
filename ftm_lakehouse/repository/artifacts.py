@@ -26,14 +26,27 @@ from collections import Counter
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import IO, Any, ClassVar, Generator, Iterable, Iterator, Self, cast
+from tempfile import TemporaryDirectory
+from typing import (
+    IO,
+    Any,
+    Callable,
+    ClassVar,
+    Generator,
+    Iterable,
+    Iterator,
+    Self,
+    cast,
+)
 
 from anystore.io import Writer
+from anystore.io.read import smart_stream_json
 from anystore.io.write import Formats
+from anystore.logging import get_logger
 from anystore.logic.compress import CompressKind
 from anystore.model.base import BaseModel
 from anystore.types import SDict
-from anystore.util import join_uri
+from anystore.util import Took, join_uri
 from followthemoney import model
 from followthemoney.dataset import DataResource
 from ftmq.util import datetime_iso
@@ -41,9 +54,13 @@ from rigour.mime.types import CSV, FTM, JSON
 
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.core.settings import CHECKSUM_ALGORITHM
+from ftm_lakehouse.helpers.file import FolderTree, get_filename
+from ftm_lakehouse.helpers.schema import FOLDER_SCHEMATA
 from ftm_lakehouse.logic.entities.aggregate import EntityPayload
+from ftm_lakehouse.logic.entities.stats import StatsCollector
 from ftm_lakehouse.logic.path import DateTimeKey, StoreKey
 from ftm_lakehouse.model.file import Document, Documents
+from ftm_lakehouse.model.statement import DeleteCandidate
 from ftm_lakehouse.repository.base import DatasetHandle
 from ftm_lakehouse.util import validate_origin
 
@@ -54,6 +71,12 @@ A writer would otherwise take it from whichever row comes first, which is
 wrong for a diff – a ``DEL`` row carries only ``op`` and ``id``, and landing
 first it would cap the header at two columns.
 """
+
+log = get_logger(__name__)
+
+Candidates = Callable[[datetime], Iterator[DeleteCandidate]]
+"""The one delete-candidate scan a session distributes – see
+[`ExportSession.load_pending`][ExportSession.load_pending]."""
 
 DOCUMENT_ORIGINS: tuple[str | None, ...] = (None, tag.CRAWL_ORIGIN)
 """Scopes the documents export is written for – every origin, plus a csv /
@@ -116,7 +139,7 @@ class Artifact:
     base: ClassVar[StoreKey]
     kind: ClassVar[ExportKind]
     mime_type: ClassVar[str] = CSV
-    dependencies: ClassVar[tuple[str | StoreKey, ...]] = (tag.STATEMENTS_OPTIMIZED,)
+    dependencies: ClassVar[tuple[str | StoreKey, ...]] = (tag.STATEMENTS_UPDATED,)
     compressed: ClassVar[bool] = True
     fieldnames: ClassVar[list[str] | None] = None
 
@@ -326,8 +349,8 @@ class DocumentsArtifact(DiffableArtifact):
     """Document metadata, and its delta series – origin-scopable.
 
     Owns the *write* side of the documents export: which entities belong in
-    it, and what rows each contributes. The query side – the folder map, the
-    ad-hoc lookups, the tombstoned ids – stays on
+    it, and what each contributes – its row, the name a path segment of it is
+    made of, or both. Reading the result back and the tombstoned ids stay on
     [`DocumentRepository`][ftm_lakehouse.repository.documents.DocumentRepository].
     """
 
@@ -337,57 +360,70 @@ class DocumentsArtifact(DiffableArtifact):
     fieldnames = DOCUMENT_FIELDNAMES
 
     @staticmethod
-    def is_document(data: SDict) -> bool:
-        """Whether an entity dict belongs in the documents export.
+    def is_document_schema(schema: str | None) -> bool:
+        """Whether ``schema`` is one the documents export carries.
 
-        The in-Python spelling of ``Q_DOCUMENTS``: a ``Document`` descendant
-        that is not a bare ``Folder`` (those are the path scaffolding, not
-        files) and actually has a content hash to point at.
+        The schema half of ``Q_DOCUMENTS``: a ``Document`` descendant that is
+        not a bare ``Folder`` (those are the path scaffolding, not files).
+        Split out so the live path (`is_document`, off an entity dict) and the
+        delete path (`DocumentsRun.claims`, off the schemata its tombstoned
+        rows carry) share one spelling of it.
         """
-        schema = data.get("schema")
         if not schema:
             return False
         schema_ = model.get(str(schema))
-        if schema_ is None or not schema_.is_a("Document"):
-            return False
-        if schema_.name == "Folder":
+        return (
+            schema_ is not None
+            and schema_.is_a("Document")
+            and schema_.name != "Folder"
+        )
+
+    @staticmethod
+    def is_parent_schema(schema: str | None) -> bool:
+        """Whether an entity of ``schema`` can be another document's parent.
+
+        Today the ``Folder`` schemata, ``parent`` ranging over ``Folder`` –
+        and the sweep stages one row per such entity whether or not it is a
+        csv row itself, because that row is what the folder paths are built
+        out of (`DocumentsRun.resolve`). A bare ``Folder`` is scaffolding
+        only: no content hash, so nothing to point a reader at.
+        """
+        return schema in FOLDER_SCHEMATA
+
+    @staticmethod
+    def is_document(data: SDict) -> bool:
+        """Whether an entity dict belongs in the documents export.
+
+        The in-Python spelling of ``Q_DOCUMENTS``: a schema the export carries
+        (`is_document_schema`) that actually has a content hash to point at.
+        """
+        if not DocumentsArtifact.is_document_schema(data.get("schema")):
             return False
         return bool(data.get("properties", {}).get("contentHash"))
 
-    def make_documents(
-        self,
-        data: SDict,
-        paths: dict[str, str],
-        public_prefix: str | None = None,
-    ) -> Documents:
-        """The csv rows one entity dict contributes.
+    def make_document(self, data: SDict, public_prefix: str | None = None) -> Document:
+        """The unpathed row an entity dict contributes.
 
-        One row per resolvable parent folder, so a file living in two places is
-        listed under both; a file with no resolvable parent still gets its one
-        unpathed row. Each row is its own object, so a caller may materialise
-        them – the diff writes the same rows the csv did.
+        Everything about a document row that does not depend on the folder
+        tree, which is everything the sweep can know while it is still
+        staging the rows the tree is built from (`DocumentsRun`). The paths
+        are stamped in afterwards – one row per resolvable parent, so a file
+        living in two folders is listed under both, and a file whose parents
+        resolve to nothing keeps this one row.
 
         Args:
             data: Entity dict, as `EntityPayload.to_dict` returns.
-            paths: Folder id to path map from `DocumentRepository.make_paths`.
             public_prefix: Public url prefix to build blob links against.
 
-        Yields:
-            One `Document` per resolvable parent, else a single unpathed one.
+        Returns:
+            The `Document`, its ``path`` unset.
         """
         document = Document.from_entity_dict(data)
         if public_prefix:
             document.public_url = join_uri(
                 public_prefix, path.ArchiveKey(document.checksum).blob
             )
-        paths_ = [p for p in data.get("properties", {}).get("parent", []) if p in paths]
-        if not paths_:
-            yield document
-            return
-        # a copy per parent: the same file in two folders is two rows, and a
-        # caller that materialises them must not get two views of one object
-        for parent in paths_:
-            yield document.model_copy(update={"path": paths[parent]})
+        return document
 
     def stream(self) -> Documents:
         """Stream this variant's csv back as `Document` models."""
@@ -403,10 +439,19 @@ class DocumentsArtifact(DiffableArtifact):
 
 
 class StatisticsArtifact(VersionedArtifact):
-    """Entity counts and facets, from a global SQL aggregate."""
+    """Entity counts and facets, folded from the entity stream.
+
+    A function of the stream like the other artifacts, so the sweep writes it
+    (`StatisticsRun`); ftmq's ``stats()`` answers the same question with six
+    aggregate queries over the reconciling view, which is six more passes over
+    the dataset than the one the sweep is already doing.
+    """
 
     base = path.EXPORTS_STATISTICS
     kind = ExportKind.statistics
+
+    def run(self, now: datetime) -> "StatisticsRun":
+        return StatisticsRun(self, now)
 
 
 class IndexArtifact(VersionedArtifact):
@@ -435,8 +480,16 @@ ARTIFACTS: tuple[type[Artifact], ...] = (
 
 ARTIFACTS_BY_KIND: dict[ExportKind, type[Artifact]] = {a.kind: a for a in ARTIFACTS}
 
-SWEEP_KINDS = (ExportKind.statements, ExportKind.entities, ExportKind.documents)
-"""The kinds the entity sweep produces – the rest are computed, not streamed."""
+SWEEP_KINDS = (
+    ExportKind.statements,
+    ExportKind.entities,
+    ExportKind.documents,
+    ExportKind.statistics,
+)
+"""The kinds the entity sweep produces.
+
+Only ``index.json`` is left out: it registers what the others wrote, so it
+runs after them rather than with them."""
 
 
 class ArtifactRun:
@@ -550,11 +603,21 @@ class DiffableRun(WritingRun):
         self.since_iso = datetime_iso(last_timestamp)
         self.active = True
         self.diff = self.artifact.diff_writer(self.now)
-        self.pending = set(self.deleted_ids(last_timestamp))
+        # `pending` is filled from the session's one scan, not from here - see
+        # `ExportSession.load_pending`
 
-    def deleted_ids(self, since: datetime) -> Iterator[str]:
-        """Ids tombstoned since the given timestamp – the DEL candidates."""
-        return iter(())
+    def claims(self, candidate: DeleteCandidate) -> bool:
+        """Whether this series owns ``candidate`` as one of its DEL candidates.
+
+        The window is this series' own, so the shared scan can run at the
+        earliest bound any of them needs. A scope-restricted series narrows
+        further.
+        """
+        return (
+            self.active
+            and self.since is not None
+            and candidate.deleted_at >= self.since
+        )
 
     def op_for(self, payload: EntityPayload) -> DiffOp | None:
         """This entity's diff op, or ``None`` when it did not change.
@@ -624,9 +687,6 @@ class EntitiesRun(DiffableRun):
 
         self.entities = get_entities(artifact.dataset.dataset, artifact.dataset.uri)
 
-    def deleted_ids(self, since: datetime) -> Iterator[str]:
-        return self.entities.deleted_ids(since)
-
     def consume(self, payload: EntityPayload) -> None:
         data = payload.to_dict()
         self.writer.write(data)
@@ -643,45 +703,168 @@ class EntitiesRun(DiffableRun):
 
 
 class DocumentsRun(DiffableRun):
-    """Writes one origin scope of ``documents.csv`` and its delta series."""
+    """Writes one origin scope of ``documents.csv`` and its delta series.
+
+    Two-phase, because a document's path is not knowable while the sweep
+    runs: it is the chain of its ancestors' names, and those ancestors come
+    past as entities like any other, in no particular order. `consume` stages
+    each row carrying the ``parent`` ids it was asserted with instead of a
+    path, plus one scaffolding row per entity that can *be* a parent; `finish`
+    resolves the tree out of those same rows (`resolve`) and sweeps the staged
+    file into the csv.
+
+    So the second pass goes over the documents of the store – a local
+    json-lines file, under ``TMPDIR`` – where asking the store for the folder
+    tree up front was a pass over every statement in the document bucket
+    before the first row could be written. The tree comes from the staged
+    rows rather than from a structure filled beside them because any document
+    may yet become another's parent, and then the staged rows already are
+    every potential parent there is.
+    """
 
     artifact: DocumentsArtifact
 
     def __init__(self, artifact: DocumentsArtifact, now: datetime) -> None:
         super().__init__(artifact, now)
-        # local import: `factories` imports this module for `ArtifactsRepository`
-        from ftm_lakehouse.repository.factories import get_documents
-
-        self.documents = get_documents(artifact.dataset.dataset, artifact.dataset.uri)
-        self.paths = self.documents.make_paths()
         self.public_prefix = artifact.dataset._model.get_public_prefix()
+        self._tmp = TemporaryDirectory(prefix="ftm-lakehouse-export-")
+        self.staged = f"{self._tmp.name}/documents.json"
+        self.staging = Writer(self.staged)
 
-    def deleted_ids(self, since: datetime) -> Iterator[str]:
-        return self.documents.deleted_ids(since, self.artifact.origin)
+    def prepare(self, version: int | None) -> None:
+        super().prepare(version)
+        self.staging.open()
+
+    def claims(self, candidate: DeleteCandidate) -> bool:
+        """Only tombstoned documents of this origin scope.
+
+        The scoping `consume` applies to a live entity, applied to one that is
+        gone: the aggregates describe the entity's tombstoned rows, which for
+        an entity the sweep never meets alive is all of them.
+        """
+        if not super().claims(candidate):
+            return False
+        if self.artifact.origin and self.artifact.origin not in candidate.origins:
+            return False
+        return candidate.content_hash and any(
+            DocumentsArtifact.is_document_schema(s) for s in candidate.schemata
+        )
 
     def consume(self, payload: EntityPayload) -> None:
-        if self.artifact.origin and self.artifact.origin not in payload.origins:
-            return
-        data = payload.to_dict()
-        if not self.artifact.is_document(data):
-            return
-        rows = list(self.artifact.make_documents(data, self.paths, self.public_prefix))
-        for row in rows:
-            self.writer.write(row.model_dump(by_alias=True, mode="json"))
-        self.counts["total"] += 1
+        """Stage this entity, as a csv row and / or as path scaffolding.
 
-        if self.diff is not None:
-            op = self.op_for(payload)
-            if op is None:
-                return
+        A csv row ``doc`` only for a document of this origin scope; a
+        ``folder`` name for anything that can be a parent
+        (`DocumentsArtifact.is_parent_schema`), whatever the scope – an
+        origin-scoped csv still resolves its paths through parents asserted
+        by another origin, as it did when the map was one unscoped query.
+        Several schemata are both.
+
+        The counts are final here rather than in the second phase: they count
+        the documents the sweep met, which is one per entity whatever its
+        parents turn out to resolve to.
+        """
+        data = payload.to_dict()
+        staged: SDict = {}
+        if self.artifact.is_parent_schema(data.get("schema")):
+            staged["folder"] = get_filename(data)
+        in_scope = not self.artifact.origin or self.artifact.origin in payload.origins
+        if in_scope and self.artifact.is_document(data):
+            document = self.artifact.make_document(data, self.public_prefix)
+            staged["doc"] = document.model_dump(by_alias=True, mode="json")
+            self.counts["total"] += 1
+            if self.diff is not None:
+                # `op_for` claims the id off `pending`, so it runs once per
+                # entity and here rather than in the second phase
+                op = self.op_for(payload)
+                if op is not None:
+                    staged["op"] = str(op)
+                    self.counts[op.lower()] += 1
+        if not staged:
+            return
+        staged["id"] = data["id"]
+        staged["parents"] = data.get("properties", {}).get("parent", [])
+        self.staging.write(staged)
+
+    def resolve(self) -> dict[str, str]:
+        """The paths this run's staged rows resolve their parents against.
+
+        Built out of the staged rows themselves: every entity that can be a
+        parent staged its name and its own parents, so the whole chain is in
+        the file. One pass, and only the scaffolding rows are kept – a leaf
+        document is nobody's ancestor.
+        """
+        tree = FolderTree()
+        with Took() as t:
+            for staged in smart_stream_json(self.staged):
+                if folder := staged.get("folder"):
+                    tree.put(staged["id"], folder, staged["parents"])
+            paths = tree.paths()
+        log.info(
+            "Resolved folder paths.",
+            artifact=self.name,
+            folders=len(paths),
+            took=t.took,
+        )
+        return paths
+
+    def finish(self) -> None:
+        """Sweep the staged rows into the csv, paths stamped in, then the DELs.
+
+        One row per resolvable parent and one unpathed row for a document
+        whose parents resolve to nothing (`DocumentsArtifact.make_document`).
+        Each row is its own dict, so the diff can write what the csv wrote.
+        A scaffolding row that is no document of this scope carries no
+        ``doc`` and leaves nothing behind.
+        """
+        self.staging.close()
+        paths = self.resolve()
+        for staged in smart_stream_json(self.staged):
+            document = staged.get("doc")
+            if document is None:
+                continue
+            rows = [
+                {**document, "path": paths[parent]}
+                for parent in staged["parents"]
+                if parent in paths
+            ] or [cast(SDict, document)]
             for row in rows:
-                self.diff.write(
-                    {"op": str(op), **row.model_dump(by_alias=True, mode="json")}
-                )
-            self.counts[op.lower()] += 1
+                self.writer.write(row)
+            op = staged.get("op")
+            if op is not None and self.diff is not None:
+                for row in rows:
+                    self.diff.write({"op": op, **row})
+        super().finish()
 
     def write_delete(self, entity_id: str) -> None:
         cast(Writer, self.diff).write({"op": str(DiffOp.DEL), "id": entity_id})
+
+    def close(self) -> None:
+        super().close()
+        self.staging.close()
+        self._tmp.cleanup()
+
+
+class StatisticsRun(ArtifactRun):
+    """Folds ``statistics.json`` out of the stream and writes it at the end.
+
+    Writes nothing row by row, so it needs no writer and no eager open: a
+    sweep that yields nothing still writes the statistics of an empty
+    dataset, which is the whole picture it is supposed to be.
+    """
+
+    artifact: StatisticsArtifact
+
+    def __init__(self, artifact: Artifact, now: datetime) -> None:
+        super().__init__(artifact, now)
+        self.collector = StatsCollector()
+
+    def consume(self, payload: EntityPayload) -> None:
+        self.collector.collect(payload.to_dict())
+
+    def finish(self) -> None:
+        self.artifact.write(self.collector.export())
+        self.counts["total"] += self.collector.entities
 
 
 class ExportSession:
@@ -697,10 +880,12 @@ class ExportSession:
         runs: tuple[ArtifactRun, ...],
         version: int | None,
         make_diff: bool = True,
+        candidates: Candidates | None = None,
     ) -> None:
         self.runs = runs
         self.version = version
         self.make_diff = make_diff
+        self.candidates = candidates
         self.counts: Counter[str] = Counter()
 
     def __enter__(self) -> Self:
@@ -709,7 +894,44 @@ class ExportSession:
         version = self.version if self.make_diff else None
         for run in self.runs:
             run.prepare(version)
+        self.load_pending()
         return self
+
+    def load_pending(self) -> None:
+        """Fill every active series' DEL candidates from one raw scan.
+
+        Deletes never come past a live-view sweep, so each series has to know
+        its tombstoned ids before the sweep opens. The sets are per series –
+        their windows and scopes differ – but the scan behind them is the same
+        pass over every partition (``deleted_at`` is no partition column, so
+        nothing prunes), and it used to run once per series: on a full export
+        that is three passes over the whole store before the first row is
+        written. It runs once now, at the earliest window any series needs,
+        and each one claims what it owns (`DiffableRun.claims`) – a candidate
+        outside a series' window or scope is simply not its own.
+        """
+        active = [r for r in self.diffable if r.active and r.since is not None]
+        if not active or self.candidates is None:
+            return
+        since = min(cast(datetime, r.since) for r in active)
+        log.info(
+            "Loading delete candidates ...",
+            series=[str(r.artifact.tag) for r in active],
+            since=datetime_iso(since),
+        )
+        with Took() as t:
+            total = 0
+            for candidate in self.candidates(since):
+                total += 1
+                for run in active:
+                    if run.claims(candidate):
+                        run.pending.add(candidate.id)
+        log.info(
+            "Loaded delete candidates.",
+            candidates=total,
+            claimed={str(r.artifact.tag): len(r.pending) for r in active},
+            took=t.took,
+        )
 
     def __exit__(self, exc_type: type | None, *args: Any) -> None:
         try:
@@ -821,8 +1043,12 @@ class ArtifactsRepository(DatasetHandle):
                 resolve their window against.
             make_diff: Whether diff series run at all.
         """
+        # local import: `factories` imports this module for `ArtifactsRepository`
+        from ftm_lakehouse.repository.factories import get_entities
+
         runs = tuple(a.run(now) for a in self.written_by(kinds))
-        return ExportSession(runs, version, make_diff)
+        entities = get_entities(self.dataset, self.uri)
+        return ExportSession(runs, version, make_diff, entities.deleted_candidates)
 
     def resources(self) -> Iterator[DataResource]:
         """Describe every written artifact for ``index.json``.

@@ -86,8 +86,7 @@ class DatasetJobOperation(DatasetHandle, Generic[DJ]):
 
         No-op by default;
         [`ExportOperation`][ftm_lakehouse.operation.export.ExportOperation] drains the
-        journal and merges the statement store here, since exports read
-        canonical rows.
+        journal here, so an export covers the rows that were still buffered.
         """
 
     def is_fresh(self) -> bool:

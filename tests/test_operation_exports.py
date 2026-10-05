@@ -42,11 +42,11 @@ def test_operation_export_statements(tmp_path):
 
     assert op.get_target() == path.EXPORTS_STATEMENTS
     assert op.get_target() == "exports/statements.csv"
-    # exports reflect canonical content, so they go stale against the merge
-    # clock - not against raw appends or the journal, which `prepare()` has
-    # already resolved by the time the freshness check runs
-    assert op.get_dependencies() == [tag.STATEMENTS_OPTIMIZED]
-    assert op.get_dependencies() == ["statements/last_optimized"]
+    # exports go stale against the content clock – rows landing, an origin
+    # dropped – which `prepare()`'s flush has already moved by the time the
+    # freshness check runs; a merge changes no content and leaves it alone
+    assert op.get_dependencies() == [tag.STATEMENTS_UPDATED]
+    assert op.get_dependencies() == ["statements/last_updated"]
 
     # Run the export operation
     result = op.run()
@@ -77,7 +77,7 @@ def test_operation_export_entities(tmp_path):
 
     assert op.get_target() == path.ENTITIES_JSON
     assert op.get_target() == "entities.ftm.json"
-    assert op.get_dependencies() == [tag.STATEMENTS_OPTIMIZED]
+    assert op.get_dependencies() == [tag.STATEMENTS_UPDATED]
 
     # Run the export operation
     result = op.run()
@@ -108,7 +108,7 @@ def test_operation_export_statistics(tmp_path):
 
     assert op.get_target() == path.EXPORTS_STATISTICS
     assert op.get_target() == "exports/statistics.json"
-    assert op.get_dependencies() == [tag.STATEMENTS_OPTIMIZED]
+    assert op.get_dependencies() == [tag.STATEMENTS_UPDATED]
 
     # Run the export operation
     result = op.run()
@@ -193,7 +193,7 @@ def test_export_sweep_writes_every_artifact_once(tmp_path):
     op = make_op(ExportKind.all, tmp_path)
     assert op.get_target() == tag.OP_EXPORT
     assert op.get_target() == "operations/export/last_run"
-    assert op.get_dependencies() == [tag.STATEMENTS_OPTIMIZED]
+    assert op.get_dependencies() == [tag.STATEMENTS_UPDATED]
 
     result = op.run()
     assert result.done == 1
@@ -204,38 +204,32 @@ def test_export_sweep_writes_every_artifact_once(tmp_path):
     # single-kind export afterwards sees itself up to date
     assert (tmp_path / "tags/lakehouse" / path.EXPORTS_STATEMENTS).exists()
     assert (tmp_path / "tags/lakehouse" / path.ENTITIES_JSON).exists()
-    assert repo._tags.is_latest(path.ENTITIES_JSON, [tag.STATEMENTS_OPTIMIZED])
+    assert repo._tags.is_latest(path.ENTITIES_JSON, [tag.STATEMENTS_UPDATED])
     assert make_op(ExportKind.entities, tmp_path).is_fresh()
 
 
-def test_export_stale_after_optimize(tmp_path):
-    """A merge that rewrote partitions stamps STATEMENTS_OPTIMIZED, so exports
-    taken before it go stale and re-run instead of skipping as 'up-to-date'
-    with duplicate / undeleted rows baked in."""
+def test_export_fresh_across_merge_stale_after_write(tmp_path):
+    """Exports key on the content clock, ``statements/last_updated``: a merge
+    rewrites files but changes no content, so it leaves an export fresh; a
+    write makes it stale and the re-run regenerates it."""
     repo = EntityRepository(dataset=DATASET, uri=tmp_path)
     setup_entities(repo)
-    setup_entities(repo)  # duplicate physical rows -> merge will rewrite
+    setup_entities(repo)  # duplicate physical rows – the read reconciles them
 
     def is_fresh() -> bool:
-        return repo._tags.is_latest(path.EXPORTS_STATEMENTS, [tag.STATEMENTS_OPTIMIZED])
+        return repo._tags.is_latest(path.EXPORTS_STATEMENTS, [tag.STATEMENTS_UPDATED])
 
     make_op(ExportKind.statements, tmp_path).run()
-    # the run prepared itself: the duplicates were merged *before* the CSV was
-    # written, so it is canonical and fresh straight away
+    assert repo.needs_merge  # the export did not merge for itself
+    assert is_fresh()
+
+    repo.merge()
     assert not repo.needs_merge
-    assert is_fresh()
+    assert is_fresh()  # same content, other files
 
-    # a merge with nothing to rewrite does not dirty anything
-    repo.merge()
-    assert is_fresh()
-
-    # new duplicate rows, then a merge that rewrites them: the CSV predates
-    # the canonical content it claims to hold
     setup_entities(repo)
-    repo.merge()
     assert not is_fresh()
 
-    # a re-run regenerates instead of skipping, and is fresh once more
     make_op(ExportKind.statements, tmp_path).run()
     assert is_fresh()
 
@@ -264,7 +258,7 @@ def test_operation_export_documents(tmp_path, fixtures_path):
 
     assert op.get_target() == path.EXPORTS_DOCUMENTS
     assert op.get_target() == "exports/documents.csv"
-    assert op.get_dependencies() == [tag.STATEMENTS_OPTIMIZED]
+    assert op.get_dependencies() == [tag.STATEMENTS_UPDATED]
 
     # Run the export operation
     result = op.run()

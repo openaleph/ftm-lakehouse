@@ -11,7 +11,7 @@ Entities in `ftm-lakehouse` are stored as **statements** – granular property-l
 - **Incremental updates**: Add new data without reprocessing everything
 - **Simple identity**: entities are keyed on `entity_id`; this is a single-dataset store with no cross-source resolution, so `canonical_id` is not persisted (it always equals `entity_id`)
 
-The underlying storage is a single Delta Lake table per dataset, partitioned by `(shard, bucket, origin)` – see [Sharded append-only pattern](../architecture.md#sharded-append-only-pattern) for the partition keys, write fence and merge semantics. Writes are **append-only**: deduplication, `first_seen` folding, and tombstone reaping happen via the async `optimize` operation.
+The underlying storage is a single Delta Lake table per dataset, partitioned by `(shard, bucket, origin)` – see [Sharded append-only pattern](../architecture.md#sharded-append-only-pattern) for the partition keys, write fence and merge semantics. Writes are **append-only**; reads reconcile duplicates, superseded fragments and tombstones at read time, and the async `optimize` operation compacts them physically.
 
 ## Quick Start
 
@@ -102,8 +102,8 @@ The CLI command `ftm-lakehouse entities import` does exactly this.
 
 ## Reading Entities
 
-!!! note "Reads assume an optimized store"
-    Statement reads target a live `WHERE deleted_at IS NULL` view with no read-time dedupe. Dedupe, fragment supersession, and tombstone reaping all happen in `merge` (see [Deduplication](#deduplication)), so between a write and the next `optimize`/`merge`, `query` can surface duplicate statements and entities whose delete hasn't been applied yet. Run `optimize` before querying, exporting, or computing statistics.
+!!! note "Reads reconcile – `optimize` is an optimisation"
+    Statement reads collapse duplicates, apply fragment supersession and hide tombstoned rows at read time (see [Deduplication](#deduplication)), so `query`, exports and statistics are correct between a write and the next `optimize`. A merged partition is read as a plain scan, so run `optimize` on a schedule for speed and disk, not for correctness.
 
 ### Get by ID
 
@@ -283,7 +283,7 @@ In storage, "no fragment" is the empty string, never NULL; the SDK translates `f
 
 ## Deleting Entities
 
-Deletes are tombstones routed through the journal (or `EntityBuffer` for the bulk path). They land in parquet as rows with `deleted_at` set. The default query view filters out tombstones via `deleted_at IS NULL`, so deleted entities disappear from `query()` and `stream()` as soon as `merge` has collapsed the live + tombstone pair.
+Deletes are tombstones routed through the journal (or `EntityBuffer` for the bulk path). They land in parquet as rows with `deleted_at` set. The read collapses the live + tombstone pair and hides the tombstone, so a deleted entity disappears from `query()` as soon as the tombstone is flushed (`stream()` reads the last export). `merge` removes both rows physically once the tombstone passes the grace period.
 
 ### Delete an Entity
 
@@ -333,11 +333,11 @@ entities.flush()   # two rows now; same statement.id
 entities.merge()   # back to one row, last_seen=now, first_seen=original
 ```
 
-Dedup is `merge`'s job alone – there is no write-time collapse to lean on, so run `merge` on a schedule (or via `optimize`) and treat queries as accurate on an optimized store.
+There is no write-time collapse: duplicates land as rows and the read collapses them. `merge` (via `optimize`) makes that physical – run it on a schedule for read speed and disk; the results are the same either way.
 
 ## Maintenance
 
-Three independent async operations on the parquet statement store, held under the exclusive [maintenance fence](../architecture.md#sharded-append-only-pattern) so they never race each other or in-flight appends.
+Independent async operations on the parquet statement store, serialised by the dataset's [locks](../architecture.md#sharded-append-only-pattern): `merge` holds the merge lock, which appends do not wait for, so ingest flows through it; the in-place rewrites hold the exclusive fence as well.
 
 ### Flush (journal → parquet)
 
@@ -354,14 +354,6 @@ ftm-lakehouse -d my_dataset maintenance flush
 ftm-lakehouse maintenance flush --all
 ```
 
-### Compact (cheap)
-
-Bin-packs small parquet files within each `(shard, bucket, origin)` partition via Delta's `OPTIMIZE compact`. Does not change row contents.
-
-```python
-entities._statements.compact()
-```
-
 ### Merge (expensive)
 
 Per-partition rewrite that collapses duplicates, folds `first_seen` to the min across each group, and drops tombstones whose `deleted_at` is older than the grace cutoff. Non-fragment rows dedupe per statement `id` (`ROW_NUMBER OVER (PARTITION BY id ORDER BY last_seen DESC) = 1`); fragment rows keep the latest emission per `(entity_id, prop, fragment)` group.
@@ -374,7 +366,7 @@ Grace comes from `LAKEHOUSE_GRACE_PERIOD_DAYS` (default 30 days); set it to `0` 
 
 ### Vacuum
 
-Deletes obsolete parquet files that `merge` / `compact` have tombstoned in the Delta log.
+Deletes the obsolete parquet files that `merge` replaced in the Delta log.
 
 ```python
 entities._statements.vacuum()
@@ -413,7 +405,6 @@ def main():
     print(f"Flushed {count} statements")
 
     # Maintenance – run on a schedule in production
-    entities._statements.compact()
     entities.merge()
 
     # Read back

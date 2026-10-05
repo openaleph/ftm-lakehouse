@@ -79,7 +79,6 @@ storage/
   parquet.py         # ParquetStore - Delta Lake statement store
                      #   .append (sorted per-shard write)
                      #   .merge (per-partition dedup + tombstone reap)
-                     #   .compact (file bin-pack)
                      #   .vacuum (delete obsolete files)
   journal/
     base.py          # BaseJournalStore
@@ -102,34 +101,37 @@ The parquet statement store is partitioned by `(shard, bucket, origin)`:
 - `bucket` – coarse FtM schema group (thing / interval / document / page / pages / mention)
 - `origin` – caller-supplied source tag
 
-Each row carries `first_seen`, `last_seen`, `fragment`, `role`, and `deleted_at` directly in the parquet schema (no separate translog). The live `statement` query view is a plain `WHERE deleted_at IS NULL` scan – **no read-time dedupe** – so a filter (`schema` / `prop` / `entity_id`) pushes straight through to DuckDB's per-file statistics.
+Each row carries `first_seen`, `last_seen`, `fragment`, `role`, and `deleted_at` directly in the parquet schema (no separate translog). Reads reconcile: a read over a partition holding files `merge` did not write runs the dedupe query, while a partition made of merge output alone – canonical by construction – is a plain `WHERE deleted_at IS NULL` scan whose filters (`schema` / `prop` / `entity_id`) push straight through to DuckDB's per-file statistics; `entity_id` sits in the dedupe windows' keys, so an id lookup pushes below them too.
 
 Writes are **append-only**: `append` derives each row's `shard` from its `entity_id`, then writes one parquet file per `(shard, bucket, origin)` partition the batch spans. It deliberately does not sort – nothing reads in physical order, and `merge` rewrites every partition an append touched anyway. Duplicates and tombstones land as additional rows.
 
-Deriving the partition key at the last moment is what keeps the layout honest. Rows reach `append` in `JOURNAL_SCHEMA`, which has no `shard` column at all: a journalled row routinely outlives the process that wrote it, so a shard key packed at write time could encode a count that is no longer configured. Because the key is a function of `entity_id` and the *writing store's* count, a producer that resolved a stale config can no longer mis-route a partition – at worst it hands over a batch spanning several shards, which costs extra files that `compact` bin-packs.
+Deriving the partition key at the last moment is what keeps the layout honest. Rows reach `append` in `JOURNAL_SCHEMA`, which has no `shard` column at all: a journalled row routinely outlives the process that wrote it, so a shard key packed at write time could encode a count that is no longer configured. Because the key is a function of `entity_id` and the *writing store's* count, a producer that resolved a stale config can no longer mis-route a partition – at worst it hands over a batch spanning several shards, which costs extra files that the next `merge` rewrites into one per partition.
 
-**Correctness assumes an optimized store.** Dedupe, fragment supersession, `first_seen`/`last_seen` folding, and tombstone reaping all happen in `merge`; between a write and the next merge, reads can surface duplicate ids and rows whose delete has not been applied. Run `optimize` before you query or export. `merge` routes every row into one of two isolated branches on the `fragment` column (empty-string sentinel, never NULL):
+**Reads are correct on any store; `merge` is compaction.** Dedupe, fragment supersession, `first_seen`/`last_seen` folding and tombstone hiding happen in one DuckDB query, `_dedupe_sql`, which a read runs over a dirty partition and `merge` runs to rewrite it – so the rows a read returns are the same before and after a merge, and what a merge changes is the cost (a clean partition is a plain scan) and the disk (tombstones past grace and the rows they shadow are gone). The query routes every row into one of two isolated branches on the `fragment` column (empty-string sentinel, never NULL):
 
 - **non-fragment** (`fragment = ''`, the default): content-addressed dedup – latest `last_seen` per statement `id` wins; distinct ids never interact. Scoped per `(shard, bucket, origin)` partition, so the *same* statement observed under two origins is kept once per origin (merge cannot cross origin partitions).
 - **fragment-bearing** (`fragment != ''`): supersession per `(origin, entity_id, prop, fragment, role)` group – every row tied at the group's max `last_seen` survives (the latest emission, multi-valued props included), older emissions go. See [Fragment Supersession](usage/entities.md#fragment-supersession) for semantics and the producer contract.
 
 `role` – who asserted the statement, as opposed to `origin`'s where – sits in the window key of both branches, making it the fourth row-identity dimension after `id` / `origin` / `fragment`: two roles asserting identical content survive as two rows (full provenance) while one role re-asserting collapses. It is nullable, and DuckDB groups NULLs together in a `PARTITION BY`, so role-less rows dedupe against each other. `first_seen` folds per `(id, role)` rather than per `id`, so a role's first assertion of content an older role already wrote keeps its own date and stays visible to `first_seen`-based diffs. See [The Role Field](usage/entities.md#the-role-field).
 
-The async `optimize` operation produces this canonical state by running the three storage primitives in order. Each acquires the exclusive maintenance fence – the dataset-wide `.LOCK` plus a drain of in-flight append markers (`.LOCK-APPENDS/`) – so maintenance never races other maintenance or an append it could tombstone. Appends themselves only register a marker and run concurrently; Delta's optimistic concurrency serializes their commits:
+The async `optimize` operation runs the two storage primitives in order. `merge` holds the merge lock (`.LOCK-MERGE`), which the export sweep holds too – so an optimize never vacuums files a running sweep still reads – but which appends do not wait for: a merge removes exactly the files it read and an append only adds, Delta commits both, and a read reconciles the result, so ingest flows through an hours-long merge. The in-place rewrites (re-shard, `delete_origin`, schema changes, `vacuum`) take the exclusive `.LOCK` as well, and appends back off while it is held. Delta's optimistic concurrency serializes concurrent append commits:
 
 | Step | Cost | What it does |
 |------|------|--------------|
 | `merge()` | expensive | Per-partition rewrite: keep latest row per `(id, role)` (`ROW_NUMBER`) / latest emission per fragment group, fold `first_seen` to min, drop tombstones past grace |
-| `compact()` | cheap | Delta `OPTIMIZE compact` per partition – bin-packs small files |
 | `vacuum()` | cheap | Delta `VACUUM` – delete files no longer referenced in the Delta log |
+
+`merge` reads the Delta log once per run: it loads one snapshot, hands each dirty partition's files from it to DuckDB (`read_parquet` over exactly those files, no `delta_scan`), writes the merged files with DuckDB's `COPY`, and commits the results in batches of 64 partitions – one transaction of `add` and `remove` actions each. Replaying the log per partition is what made merges slow on large stores: every `delta_scan` and every `write_deltalake` replays the latest checkpoint, which lists every live file of the table. The dedupe query is the one reads use over a dirty partition, so a merge and a read can never disagree about what the rows mean. A run that committed anything ends with a Delta checkpoint: Delta writes one only every hundredth commit, and until then every load replays the previous one – which still lists every file the merge removed. Memory is DuckDB's to bound: the windows and the sort spill past `LAKEHOUSE_DUCKDB_MEMORY_LIMIT`; a partition too large to merge in acceptable time wants more shards.
+
+The store's Delta table is created with `delta.deletedFileRetentionDuration = 1 hour` and `delta.logRetentionDuration = 1 day` (the `migrate_parquet_table_properties` migration applies them to older stores). The Delta defaults – a week of `remove` actions in every checkpoint, 30 days of superseded checkpoints on disk – let the log of a frequently merged store outgrow the data it describes.
 
 #### Sharding – why, and how many shards
 
 The `shard` partition key is the unit that keeps per-partition working sets bounded, independent of total dataset size. Everything expensive in the lakehouse operates one `(shard, bucket)` partition at a time:
 
 - **Writes:** producers hand over whole batches without a partition key and `append` derives each row's shard, writing one file per `(shard, bucket, origin)` partition the batch spans. Bigger batches therefore cost fewer files, not more.
-- **Reads:** statement queries iterate `(shard, bucket)` partitions in Python and push `WHERE shard = ?` into DuckDB; the live view is a plain scan, so filters push to file statistics and a full-store `ORDER BY entity_id` stays bounded to one partition. Single-entity lookups hash the entity id and scan just its own shard.
-- **Optimize:** the merge rewrite materializes one partition at a time – its memory and rewrite cost scale with the largest partition, not the whole table.
+- **Reads:** statement queries iterate `(shard, bucket)` partitions in Python, each over that pair's files; the live view is a plain scan, so filters push to file statistics and a full-store `ORDER BY entity_id` stays bounded to one partition. Single-entity lookups hash the entity id and scan just its own shard, in one query. The files come from a Delta snapshot each process keeps and advances incrementally (appends write through the same one), so a read never replays the log – `delta_scan` replayed it per query. Global aggregates (`count`, statistics, sorted or sliced queries) still use `delta_scan`.
+- **Optimize:** the merge rewrite materializes one partition at a time (per worker) – its memory and rewrite cost scale with the largest partition, not the whole table.
 
 Sharding is a trade-off, not a free win: every shard multiplies the partition count (`shard × bucket × origin`), which means more small parquet files, more Delta log metadata, and more per-partition query iterations. For small and medium datasets that overhead costs more than the bounded working sets gain.
 
@@ -139,9 +141,9 @@ That's why the **default is `0`** – a single shard (`shard <= 1` collapses to 
 
 `ShardOperation` (`ftm-lakehouse -d <dataset> maintenance shard --shards <n>`, or `operation.shard(dataset, shards)`) changes the count after the fact. It drains the journal, then rewrites the statement store onto the new layout and records the new count in `config.yml` – in that order, since the config is what every other process resolves the layout from.
 
-`bucket` and `origin` are invariant under a re-shard – only `shard` moves – so the rewrite runs one `write_deltalake` per `(bucket, origin)` group: every source partition of the group streams through a single chained Arrow reader (`SELECT *` with the `shard` column recomputed from `entity_id` in DuckDB), and the group's partitions are replaced wholesale in one atomic commit. Nothing is materialized in Python.
+`bucket` and `origin` are invariant under a re-shard – only `shard` moves – so the rewrite runs one `write_deltalake` per `(bucket, origin)` group: every source partition of the group streams through a single chained Arrow reader (`SELECT *` with the `shard` column recomputed from `entity_id` in DuckDB), and the group's partitions are replaced wholesale in one atomic commit. Nothing is materialized in Python. Like `merge`, the re-shard reads the Delta log once: source partitions are read from one snapshot's file lists (`read_parquet`, no `delta_scan` per partition) and every group write goes through that same table handle.
 
-Deliberately **not** a merge: rows are neither deduped nor sorted on the way through, because the trigger is a store whose partitions have grown too big to query well, not one whose content is wrong. Every rewritten partition therefore comes out marked dirty – run `optimize` afterwards to restore canonical content and file sort order. Re-running a re-shard is safe: each row's target shard is a function of its `entity_id` and the target count alone, so a run interrupted between group commits is repaired by running it again.
+Deliberately **not** a merge: rows are neither deduped nor sorted on the way through, because the trigger is a store whose partitions have grown too big to query well, not one whose content is wrong. Every rewritten partition therefore comes out dirty (delta-rs names its files `part-*`), so reads reconcile it; run `optimize` afterwards to get plain-scan reads and the file sort order back. Re-running a re-shard is safe: each row's target shard is a function of its `entity_id` and the target count alone, so a run interrupted between group commits is repaired by running it again.
 
 Two caveats. The write fence holds off parquet appends but not journal writes, so statements journalled under the old count and flushed after the rewrite land in the wrong partition – **run it with writers stopped**. And the operation skips when `config.yml` already names the target count, so a config edited by hand to a count the store was never rewritten for needs `--force`.
 
@@ -187,7 +189,7 @@ operation/
   base.py          # DatasetJobOperation - base class with freshness checks
   export.py        # ExportOperation - every export from one entity sweep
   crawl.py         # CrawlOperation - source → files → entities
-  maintenance.py   # OptimizeOperation - merge + compact + vacuum in one pass
+  maintenance.py   # OptimizeOperation - merge + vacuum in one pass
   make.py          # MakeOperation - flush + all exports + index
   download.py      # DownloadArchiveOperation
 ```
@@ -239,7 +241,7 @@ core/
   config.py             # Config loading utilities (load_config)
   conventions/
     path.py             # Path patterns (archive/, exports/, etc.)
-    tag.py              # Tag keys (journal/last_updated, exports/statements, etc.)
+    tag.py              # Tag keys (statements/last_updated, exports/statements, etc.)
 ```
 
 **Principles:**
@@ -351,24 +353,21 @@ flowchart TD
     B --> |"flush()"| C[(Parquet Store)]
     A3[Tenant bulk imports] --> |"EntityBuffer + write_batches"| C
 
-    C --> |"optimize() – merge + compact + vacuum"| C
+    C --> |"optimize() – merge + vacuum"| C
 
     C --> |"export(statements)"| D[statements.csv]
     C --> |"export(entities)"| E[entities.ftm.json]
     C --> |"export(statistics)"| F[statistics.json]
     F --> |"export(index)"| G[index.json]
 
-    B -.-> T1[journal/last_updated]
-    B -.-> T1b[journal/last_flushed]
     C -.-> T2[statements/last_updated]
-    C -.-> T2a[statements/last_optimized]
     D -.-> T3[exports/statements]
     E -.-> T4[exports/entities_json]
     F -.-> T5[exports/statistics]
 
     classDef tag fill:#f9f,stroke:#333,stroke-width:1px
     classDef storage fill:#69b,stroke:#333,stroke-width:2px,color:#fff
-    class T0,T1,T1b,T2,T2a,T3,T4,T5 tag
+    class T0,T2,T3,T4,T5 tag
     class B,C,AR storage
 ```
 

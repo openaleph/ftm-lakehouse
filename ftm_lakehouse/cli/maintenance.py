@@ -59,11 +59,15 @@ def cli_make(
     ] = True,
     optimize: Annotated[
         Optional[bool],
-        typer.Option(help="Optimize parquet store beforehand when using --exports"),
+        typer.Option(
+            help="Optimize (merge) the statement store before exporting (with "
+            "--exports). Reads reconcile un-merged rows, so exports are correct "
+            "either way; an optimized store exports faster and reclaims disk."
+        ),
     ] = True,
     force_optimize: Annotated[
         Optional[bool],
-        typer.Option(help="Re-optimize even if up-to-date."),
+        typer.Option(help="Optimize even when no partition is dirty."),
     ] = False,
     force_exports: Annotated[
         Optional[bool],
@@ -72,9 +76,11 @@ def cli_make(
 ):
     """Make or update a dataset.
 
-    By default this flushes the journal, optimizes the parquet store and
-    regenerates all exports. Use ``--no-exports`` to only flush and refresh
-    ``index.json``, or ``--no-optimize`` to export without the maintenance pass.
+    By default this flushes the journal, optimizes the parquet store (merge
+    + vacuum) and regenerates all exports. Use ``--no-exports`` to only flush
+    and refresh ``index.json``, or ``--no-optimize`` to export without the
+    maintenance pass – exports read reconciled rows, so they are correct on
+    an un-merged store too.
     """
     with DatasetContext() as (name, uri):
         if config:
@@ -164,8 +170,10 @@ def cli_optimize(
     ] = 0,
     force: OPT_FORCE = False,
 ):
-    """Optimize the statement store: collapse duplicates and reap expired
-    tombstones, bin-pack small parquet files, delete obsolete files.
+    """Optimize the statement store: rewrite every dirty partition into one
+    canonical file (collapse duplicates, reap expired tombstones), then
+    delete the files that replaced. Reads reconcile un-merged rows, so this is
+    an optimisation and a disk reclaim, not a precondition.
 
     Tombstones older than ``LAKEHOUSE_GRACE_PERIOD_DAYS`` are dropped. Each
     step is held under the dataset write fence.
@@ -245,9 +253,9 @@ def cli_migrate(
 def cli_unlock():
     """Forcibly release the dataset write fence.
 
-    Use when a previous writer (flush / merge / compact / vacuum / append)
-    died with the lock held and subsequent writes hang trying to acquire
-    it. The lock is just a file at ``<dataset>/.LOCK``.
+    Use when a previous writer (merge, vacuum, re-shard, an export sweep)
+    died with a lock held and later runs fail to acquire it. The locks are
+    files at ``<dataset>/.LOCK`` and ``<dataset>/.LOCK-MERGE``.
 
     **Confirm no process is actively writing** before running – breaking
     a held lock can corrupt an in-flight write. No-op if no lock is held.

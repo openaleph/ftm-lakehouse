@@ -54,13 +54,12 @@ def repo(
         yield make_docker_repo()
 
 
-def test_delete_entity_filters_from_query_after_merge(repo):
-    """delete + flush + merge → entity disappears from queries.
+def test_delete_entity_filters_from_query(repo, settle):
+    """delete + flush → entity disappears from queries.
 
-    In append-only mode the live row and tombstone coexist after flush; the
-    query view's ``deleted_at IS NULL`` filter still picks the live row.
-    Merge collapses the (live, tombstone) pair to the tombstone, which the
-    view then filters out.
+    The live row and the tombstone coexist physically after the flush; the
+    read collapses the pair to the tombstone, which the live rows filter
+    out – merge only makes that physical.
     """
     repo, _ = repo
     _populate(repo)
@@ -69,31 +68,31 @@ def test_delete_entity_filters_from_query_after_merge(repo):
     count = repo.delete_entity("jane")
     assert count > 0
     repo.flush()
-    repo.merge()
+    settle(repo)
 
     assert {e.id for e in repo.query()} == {"john"}
 
 
-def test_delete_entity_filters_from_stats_after_merge(repo):
+def test_delete_entity_filters_from_stats(repo, settle):
     repo, _ = repo
     _populate(repo)
     assert repo.stats().entity_count == 2
 
     repo.delete_entity("jane")
     repo.flush()
-    repo.merge()
+    settle(repo)
 
     assert repo.stats().entity_count == 1
 
 
-def test_delete_then_readd_via_merge(repo):
-    """Delete, then merge; re-add lands fresh."""
+def test_delete_then_readd(repo, settle):
+    """Delete; re-add lands fresh."""
     repo, _ = repo
     _populate(repo)
 
     repo.delete_entity("jane")
     repo.flush()
-    repo.merge()
+    settle(repo)
     assert {e.id for e in repo.query()} == {"john"}
 
     jane = EntityProxy.from_dict(
@@ -110,11 +109,12 @@ def test_delete_then_readd_via_merge(repo):
     assert {e.id for e in repo.query()} == {"jane", "john"}
 
 
-def test_delete_entity_in_journal_only(repo):
-    """Add + delete inside the same journal window: both rows flush, merge collapses.
+def test_delete_entity_in_journal_only(repo, settle):
+    """Add + delete inside the same journal window: both rows flush, the
+    read collapses them.
 
-    The journal is append-only – it no longer collapses a tombstone over the
-    live row it shadows – so the pair reaches parquet and ``merge`` applies
+    The journal is append-only – it does not collapse a tombstone over the
+    live row it shadows – so the pair reaches parquet and the read applies
     the delete, exactly as for a delete in a later window.
     """
     repo, _ = repo
@@ -129,7 +129,8 @@ def test_delete_entity_in_journal_only(repo):
     with repo.writer() as writer:
         writer.add_entity(jane)
     repo.delete_entity("jane")
-    repo.merge()
+    repo.flush()
+    settle(repo)
 
     assert list(repo.query()) == []
 
@@ -140,8 +141,8 @@ def test_delete_nonexistent_entity(repo):
     assert repo.delete_entity("nonexistent") == 0
 
 
-def test_delete_statement(repo):
-    """Tombstoning a single statement removes it from the live view (after merge)."""
+def test_delete_statement(repo, settle):
+    """Tombstoning a single statement removes it from the live rows."""
     repo, _ = repo
     _populate(repo)
 
@@ -151,19 +152,19 @@ def test_delete_statement(repo):
     target = jane_stmts[0]
     repo.delete_statement(target)
     repo.flush()
-    repo.merge()
+    settle(repo)
 
     stmt_ids = {s.id for s in repo.query_statements()}
     assert target.id not in stmt_ids
 
 
-def test_delete_preserves_others(repo):
+def test_delete_preserves_others(repo, settle):
     repo, _ = repo
     _populate(repo)
 
     repo.delete_entity("jane")
     repo.flush()
-    repo.merge()
+    settle(repo)
 
     stmts = list(repo.query_statements())
     assert stmts
@@ -171,7 +172,7 @@ def test_delete_preserves_others(repo):
     assert len(stmts) > 0
 
 
-def test_delete_entity_with_origin(repo):
+def test_delete_entity_with_origin(repo, settle):
     """``origin`` narrows the tombstones to that origin's rows.
 
     Statement ids are content-hashed and carry no origin, so the same entity
@@ -189,7 +190,7 @@ def test_delete_entity_with_origin(repo):
     count = repo.delete_entity("jane", origin="a")
     assert count > 0
     repo.flush()
-    repo.merge()
+    settle(repo)
 
     assert {s.origin for s in repo.query_statements()} == {"b"}
     assert {e.id for e in repo.query()} == {"jane"}
@@ -324,12 +325,11 @@ def test_delete_origin_flushes_journal_first(tmp_path):
     assert {e.id for e in repo.query()} == {"john"}
 
 
-def test_delete_origin_stamps_optimized_tag(tmp_path):
-    """Dropping a partition moves canonical content, so exports go stale.
+def test_delete_origin_stamps_updated_tag(tmp_path):
+    """Dropping a partition moves the store's content, so exports go stale.
 
-    ``STATEMENTS_OPTIMIZED`` is the clock every export / statistic / diff
-    keys on. A physical delete changes what a merged store says without
-    ``merge`` running, so the drop stamps it itself.
+    ``STATEMENTS_UPDATED`` is the clock every export / statistic / diff keys
+    on; appends move it, and so does a physical drop.
     """
     repo = _make_local_repo(tmp_path)
     with repo.writer(origin="a") as writer:
@@ -337,31 +337,27 @@ def test_delete_origin_stamps_optimized_tag(tmp_path):
     with repo.writer(origin="b") as writer:
         writer.add_entity(EntityProxy.from_dict(JOHN))
     repo.flush()
-    repo.merge()
 
-    # an export taken now is fresh against the merged store
+    # an export taken now is fresh against the store
     repo._tags.set(repo.EXPORTS_STATEMENTS)
-    assert repo._tags.is_latest(repo.EXPORTS_STATEMENTS, [tag.STATEMENTS_OPTIMIZED])
-    before = repo._tags.get(tag.STATEMENTS_OPTIMIZED)
+    assert repo._tags.is_latest(repo.EXPORTS_STATEMENTS, [tag.STATEMENTS_UPDATED])
+    before = repo._tags.get(tag.STATEMENTS_UPDATED)
 
     repo.delete_origin("a")
 
-    assert repo._tags.get(tag.STATEMENTS_OPTIMIZED) > before
-    assert not repo._tags.is_latest(repo.EXPORTS_STATEMENTS, [tag.STATEMENTS_OPTIMIZED])
-    # the append-side clock is not the drop's to move – no rows landed
-    assert repo._tags.get(tag.STATEMENTS_UPDATED) < before
+    assert repo._tags.get(tag.STATEMENTS_UPDATED) > before
+    assert not repo._tags.is_latest(repo.EXPORTS_STATEMENTS, [tag.STATEMENTS_UPDATED])
 
 
 def test_delete_origin_unknown_leaves_tags_alone(tmp_path):
     """Nothing removed, nothing invalidated – no spurious re-export."""
     repo = _make_local_repo(tmp_path)
     _populate(repo)
-    repo.merge()
-    before = repo._tags.get(tag.STATEMENTS_OPTIMIZED)
+    before = repo._tags.get(tag.STATEMENTS_UPDATED)
 
     repo.delete_origin("nope")
 
-    assert repo._tags.get(tag.STATEMENTS_OPTIMIZED) == before
+    assert repo._tags.get(tag.STATEMENTS_UPDATED) == before
 
 
 def test_delete_origin_blocked_by_maintenance_lock(tmp_path, monkeypatch):
@@ -393,7 +389,7 @@ def _future_stmt(prop: str, value: str, entity_id: str = "acme") -> Statement:
 
 
 @pytest.mark.parametrize("fragment", [None, "f"])
-def test_delete_entity_dated_in_the_future(tmp_path, fragment):
+def test_delete_entity_dated_in_the_future(tmp_path, fragment, settle):
     """A row dated ahead of the wall clock is still deletable.
 
     ``last_seen`` comes from input – a skewed crawler host, a CSV with a bad
@@ -410,18 +406,18 @@ def test_delete_entity_dated_in_the_future(tmp_path, fragment):
     with repo.writer() as w:
         w.add_statement(_future_stmt("name", "Acme Inc"), fragment=fragment)
     repo.flush()
-    repo.merge()
+    settle(repo)
     assert repo.get("acme") is not None
 
     repo.delete_entity("acme")
     repo.flush()
-    repo.merge()
+    settle(repo)
 
     assert repo.get("acme") is None
     assert list(repo.query_statements()) == []
 
 
-def test_delete_then_readd_still_resurrects(tmp_path):
+def test_delete_then_readd_still_resurrects(tmp_path, settle):
     """Tombstones stay time-ranked, so a later emission still wins.
 
     The guard against the future-dated row above is a ``MAX``, not "tombstones
@@ -430,15 +426,15 @@ def test_delete_then_readd_still_resurrects(tmp_path):
     """
     repo = _make_local_repo(tmp_path)
     _populate(repo)
-    repo.merge()
+    settle(repo)
     repo.delete_entity("jane")
     repo.flush()
-    repo.merge()
+    settle(repo)
     assert repo.get("jane") is None
 
     with repo.writer() as w:
         w.add_entity(EntityProxy.from_dict(JANE))
     repo.flush()
-    repo.merge()
+    settle(repo)
 
     assert repo.get("jane") is not None

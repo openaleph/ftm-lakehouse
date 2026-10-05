@@ -6,6 +6,8 @@ from functools import cached_property
 from typing import Generator, Iterable, Iterator, cast
 
 import pyarrow as pa
+from anystore.interface.lock import Lock
+from anystore.io.progress import Throughput
 from anystore.types import Uri
 from anystore.util import Took, mask_uri
 from followthemoney import EntityProxy, Statement, StatementEntity
@@ -18,9 +20,8 @@ from ftmq.types import StatementEntities, Statements, ValueEntities
 from rigour.time import utc_now
 
 from ftm_lakehouse.core.api import no_api
-from ftm_lakehouse.core.conventions import tag
 from ftm_lakehouse.core.settings import Settings
-from ftm_lakehouse.model.statement import LakehouseStatement
+from ftm_lakehouse.model.statement import DeleteCandidate, LakehouseStatement
 from ftm_lakehouse.repository.artifacts import (
     EntitiesArtifact,
     StatementsArtifact,
@@ -93,10 +94,9 @@ class EntityRepository(DatasetHandle):
     ) -> Generator[BaseJournalWriter, None, None]:
         """Get a bulk writer for adding entities/statements.
 
-        The writer owns its own lifecycle (insert the tail on success, drop
+        The writer owns its own lifecycle: insert the tail on success, drop
         the un-inserted buffer on error, close either way – see
-        `BaseJournalWriter.__exit__`); this adds the freshness tag,
-        stamped only when the block leaves cleanly.
+        `BaseJournalWriter.__exit__`.
 
         Example:
             ```python
@@ -112,10 +112,7 @@ class EntityRepository(DatasetHandle):
         Yields:
             The journal writer, open for the duration of the block.
         """
-        with (
-            self._tags.touch(tag.JOURNAL_UPDATED),
-            self._journal.writer(origin, role) as writer,
-        ):
+        with self._journal.writer(origin, role) as writer:
             yield writer
 
     def add(
@@ -146,16 +143,22 @@ class EntityRepository(DatasetHandle):
         The journal holds the parquet statement columns, so this streams Arrow
         batches from one store into the other via
         [`write_batches`][EntityRepository.write_batches]. Duplicates and
-        tombstones land as new rows; call [`merge`][EntityRepository.merge]
-        afterwards to collapse them.
+        tombstones land as new rows; reads reconcile them, and
+        [`merge`][EntityRepository.merge] collapses them physically.
+
+        A concurrent flush holds the drain lock and makes this one a no-op –
+        `JournalStore.flush_batches` yields nothing, as for an empty journal –
+        so ``0`` does not mean the journal is empty. Nothing is stamped here:
+        the rows that land stamp
+        [`STATEMENTS_UPDATED`][ftm_lakehouse.core.conventions.tag.STATEMENTS_UPDATED]
+        through [`ParquetStore.append`][ftm_lakehouse.storage.parquet.ParquetStore.append].
 
         Returns:
             Number of statements appended.
         """
-        with self._tags.touch(tag.JOURNAL_FLUSHED), Took() as t:
+        with Took() as t:
             self.log.info("Flushing journal ...", journal=mask_uri(self._journal.uri))
             total = self.write_batches(self._journal.flush_batches())
-
         if total:
             self.log.info(
                 "Flushed statements from journal to lake",
@@ -163,12 +166,6 @@ class EntityRepository(DatasetHandle):
                 took=t.took,
                 journal=mask_uri(self._journal.uri),
             )
-        elif not self._tags.exists(tag.STATEMENTS_OPTIMIZED):
-            # initial run: give freshness comparisons a baseline. An empty
-            # store is trivially canonical, and without the tag every
-            # consumer keyed on it would re-run forever (`is_latest` is
-            # False when no dependency exists at all).
-            self._tags.set(tag.STATEMENTS_OPTIMIZED)
         return total
 
     @no_api
@@ -205,8 +202,8 @@ class EntityRepository(DatasetHandle):
     def merge(self, force: bool = False) -> None:
         """Collapse duplicates and reap expired tombstones from parquet store.
 
-        Flushes the journal first. ``force`` rewrites every partition
-        regardless of freshness tags.
+        Flushes the journal first, so the rows it holds are merged too.
+        ``force`` rewrites every partition, clean ones included.
         """
         self.flush()
         self._statements.merge(force)
@@ -234,18 +231,24 @@ class EntityRepository(DatasetHandle):
         self.shards = shards
 
     @no_api
-    def compact(self) -> None:
-        """Bin-pack small parquet files within each partition."""
-        self._statements.compact()
-
-    @no_api
     def vacuum(self, retention_hours: int = 0) -> None:
         """Delete obsolete parquet files tombstoned in the Delta log."""
         self._statements.vacuum(retention_hours=retention_hours)
 
     @no_api
+    def merge_lock(self) -> Lock:
+        """The statement store's merge lock – what an export sweep holds so an
+        ``optimize`` cannot vacuum the files it is reading. See
+        [`ParquetStore.merge_lock`][ParquetStore.merge_lock].
+        """
+        return self._statements.merge_lock()
+
+    @no_api
     def sweep(
-        self, with_csv_export: bool = True, tee: bool = True
+        self,
+        with_csv_export: bool = True,
+        tee: bool = True,
+        throughput: Throughput | None = None,
     ) -> Iterator[StatementDict]:
         """One scan of the store, optionally writing ``statements.csv`` from it.
 
@@ -256,12 +259,13 @@ class EntityRepository(DatasetHandle):
             with_csv_export: Write the ``statements.csv`` artifact from the same
                 Arrow batches the rows come from.
             tee: Yield row dicts. ``False`` keeps the scan columnar.
+            throughput: Counter fed the Arrow bytes of every batch scanned.
 
         Yields:
             ``StatementDict`` rows, unless ``tee`` is off.
         """
         key = self.EXPORTS_STATEMENTS if with_csv_export else None
-        yield from self._statements.sweep(key, tee)
+        yield from self._statements.sweep(key, tee, throughput)
 
     @property
     @no_api
@@ -275,9 +279,8 @@ class EntityRepository(DatasetHandle):
         """Whether the statement store has writes that
         [`merge`][EntityRepository.merge] has not collapsed yet – local only.
 
-        Reads are canonical only on a merged store, so anything publishing
-        canonical rows (the exports, and their diffs strictly) checks
-        this first. See [`ParquetStore.needs_merge`][ParquetStore.needs_merge].
+        Reads reconcile such writes, so this decides whether an optimize has
+        work, nothing more. See [`ParquetStore.needs_merge`][ParquetStore.needs_merge].
         """
         return self._statements.needs_merge
 
@@ -303,6 +306,18 @@ class EntityRepository(DatasetHandle):
             Names of the columns added – empty if the store is already current.
         """
         return self._statements.evolve_schema()
+
+    @no_api
+    def configure_table(self) -> dict[str, str]:
+        """Apply the statement store's Delta table properties.
+
+        Delegates to [`ParquetStore.configure_table`][ParquetStore.configure_table],
+        the primitive behind the table-properties migration.
+
+        Returns:
+            The properties that changed – empty if the store is already current.
+        """
+        return self._statements.configure_table()
 
     @no_api
     def unlock(self) -> bool:
@@ -410,7 +425,7 @@ class EntityRepository(DatasetHandle):
         Args:
             stmt: The Statement to delete. A
                 `ftm_lakehouse.model.statement.LakehouseStatement` (e.g. read
-                back via `ParquetStore.get_statements`) carries its own
+                back via `query_statements`) carries its own
                 fragment and role.
             fragment: Fragment override – required to shadow a
                 fragment-bearing row when passing a plain ``Statement``;
@@ -495,3 +510,11 @@ class EntityRepository(DatasetHandle):
         """
         q = Query(C(deleted_at__gte=since))
         return self._statements.get_entity_ids(q, source=self._statements.source_raw)
+
+    @no_api
+    def deleted_candidates(self, since: datetime) -> Iterator[DeleteCandidate]:
+        """Every tombstoned entity since ``since``, described well enough for
+        any diff series to pick its own ``DEL`` candidates out of the one scan
+        ([`ParquetStore.deleted_candidates`][ftm_lakehouse.storage.parquet.ParquetStore.deleted_candidates]).
+        """
+        return self._statements.deleted_candidates(since)

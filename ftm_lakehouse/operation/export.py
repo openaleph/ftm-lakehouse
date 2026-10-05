@@ -14,21 +14,23 @@ This operation decides only which artifacts a run covers, and drives the
 stream through them.
 
 `ExportKind` selects them; [`ExportKind.all`][ftm_lakehouse.repository.artifacts.ExportKind]
-covers every streamed one. The two artifacts that are not functions of the
-entity stream – ``statistics.json`` (a global SQL aggregate) and ``index.json``
-(store metadata) – are written directly, outside the sweep.
+covers every streamed one, ``statistics.json`` included – its counts are a
+function of the same stream
+([`StatsCollector`][ftm_lakehouse.logic.entities.stats.StatsCollector]), where
+asking the store for them costs six aggregate queries over every row. Only
+``index.json`` is written outside the sweep: it registers what the others
+wrote, so it runs after them.
 """
 
-import warnings
 from datetime import datetime
 from functools import cached_property
 from typing import Any, Iterator
 
+from anystore.io import SyncProgressBar
+from anystore.io.progress import Throughput
 from anystore.util import mask_uri
 from ftmq.model.stats import DatasetStats
 from rigour.time import utc_now
-from tqdm import TqdmExperimentalWarning
-from tqdm.rich import tqdm
 
 from ftm_lakehouse.core.conventions import tag
 from ftm_lakehouse.core.settings import Settings
@@ -42,9 +44,10 @@ __all__ = ["ExportJob", "ExportKind", "ExportOperation", "MAKE_KINDS", "SWEEP_KI
 
 settings = Settings()
 
-MAKE_KINDS = (ExportKind.all, ExportKind.statistics, ExportKind.index)
+MAKE_KINDS = (ExportKind.all, ExportKind.index)
 """What a full ``make`` runs, in order. ``all`` covers `SWEEP_KINDS` in one
-pass; ``index`` goes last because it registers what the others wrote."""
+pass – ``statistics.json`` among them; ``index`` goes last because it
+registers what the others wrote."""
 
 
 class ExportJob(DatasetJobModel):
@@ -60,8 +63,9 @@ class ExportJob(DatasetJobModel):
 class ExportOperation(DatasetJobOperation[ExportJob]):
     """Export the dataset, in one sweep over the entity stream.
 
-    Flushes and merges first ([`prepare`][ExportOperation.prepare]) – exports
-    read canonical rows. Skips if the target is newer than the last optimize.
+    Flushes the journal first ([`prepare`][ExportOperation.prepare]) and reads
+    the store as it is – reads reconcile un-merged rows, so no merge is
+    needed. Skips if the target is newer than the last write.
 
     A run stamps a freshness tag per artifact it wrote, so a later single-kind
     export sees itself up to date and ``index.json`` still finds the
@@ -84,27 +88,36 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
 
     def get_dependencies(self) -> list[str]:
         if self.job.kind == ExportKind.all:
-            return [tag.STATEMENTS_OPTIMIZED]
+            return [tag.STATEMENTS_UPDATED]
         return [str(d) for d in self.artifacts[self.job.kind].dependencies]
 
     def prepare(self) -> None:
-        """Drain the journal and merge, so the export reads canonical rows."""
-        if not self._tags.is_latest(tag.JOURNAL_FLUSHED, [tag.JOURNAL_UPDATED]):
-            self.entities.flush()
-        if self.entities.exists and self.entities.needs_merge:
-            self.entities.merge()
+        """Drain the journal, so the export covers the rows still buffered.
 
-    def iterate(self) -> Iterator[EntityPayload]:
+        On an empty journal this is a ``LIMIT 1`` probe. Ahead of the
+        freshness window, as the base class requires: a drain that lands rows
+        moves [`STATEMENTS_UPDATED`][ftm_lakehouse.core.conventions.tag.STATEMENTS_UPDATED],
+        which this operation depends on.
+        """
+        self.entities.flush()
+
+    def iterate(self, throughput: Throughput | None = None) -> Iterator[EntityPayload]:
         """Every entity in the store, folded from one scan.
 
         Writes ``statements.csv`` from the same Arrow batches when this run
         covers it, so the csv costs a tee rather than a second pass. Rows are
         only materialised when something downstream needs them – a
-        statements-only export stays columnar end to end.
+        statements-only export stays columnar end to end, every other kind
+        folds entities out of them.
+
+        Args:
+            throughput: Counter fed the Arrow bytes the scan pulls – the
+                progress bar's, so it shows how fast the sweep reads.
         """
         with_csv_export = ExportKind.statements in self.kinds
-        tee = bool({ExportKind.entities, ExportKind.documents} & set(self.kinds))
-        rows = self.entities.sweep(with_csv_export=with_csv_export, tee=tee)
+        # every kind but the csv wants the rows, not just the Arrow batches
+        tee = bool(set(self.kinds) - {ExportKind.statements})
+        rows = self.entities.sweep(with_csv_export, tee, throughput)
         yield from aggregate_unsafe(rows, self.dataset)
 
     def export(self, now: datetime) -> dict[str, int]:
@@ -114,36 +127,26 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
             now: Timestamp the run started – the diff files are named after it
                 and the diff states are recorded at it.
 
+        Held under the statement store's merge lock: the sweep pins one
+        snapshot's files, and an ``optimize`` – a merge, then a retention-0
+        vacuum – would delete them under it. Appends are not affected.
+
         Returns:
             Counts per artifact and per diff op.
         """
-        version = self.entities.version
-        if self.job.make_diff and version is not None and self.entities.needs_merge:
-            raise RuntimeError(
-                "Cannot export diffs: the statement store has un-merged writes "
-                "and a diff publishes canonical entities. Run "
-                "`ftm-lakehouse maintenance optimize` first."
+        with self.entities.merge_lock():
+            version = self.entities.version
+            session = self.artifacts.session(
+                now, self.kinds, version, self.job.make_diff
             )
-        session = self.artifacts.session(now, self.kinds, version, self.job.make_diff)
-        count = self.entities._statements.deltatable.count()
-        with session, self.progress(count) as bar:
-            for payload in self.iterate():
-                session.consume(payload)
-                bar.update(len(payload.statements))
-        return session.result()
-
-    @staticmethod
-    def progress(total: int) -> tqdm:
-        """Progress bar over the sweep, counted in statements."""
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", TqdmExperimentalWarning)
-            return tqdm(
-                total=total, unit="Statement", dynamic_ncols=True, smoothing=0.1
-            )
-
-    def export_statistics(self) -> None:
-        """Write ``statistics.json`` from the store's global SQL aggregate."""
-        self.artifacts.statistics.write(self.entities.stats())
+            count = self.entities._statements.num_rows
+            # advanced per statement folded; its throughput is the Arrow
+            # bytes the scan pulls from the store
+            with session, SyncProgressBar("Exporting statements", count) as bar:
+                for payload in self.iterate(bar.throughput):
+                    session.consume(payload)
+                    bar.advance(len(payload.statements))
+            return session.result()
 
     def export_index(self) -> None:
         """Write ``index.json``, registering what the exports produced."""
@@ -165,11 +168,6 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
                 "Statement store empty, skipping ...",
                 uri=mask_uri(self.entities.uri),
             )
-            return
-
-        if run.job.kind == ExportKind.statistics:
-            self.export_statistics()
-            run.job.done = 1
             return
 
         started = utc_now()

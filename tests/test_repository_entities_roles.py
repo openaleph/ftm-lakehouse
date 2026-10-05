@@ -69,7 +69,7 @@ def local_repo(tmp_path) -> Generator[EntityRepository, None, None]:
     yield _make_local_repo(tmp_path)
 
 
-def test_roles_both_survive_merge(repo):
+def test_roles_both_survive(repo, settle):
     """Two roles asserting the same content keep one row each."""
     repo, _ = repo
     with repo.writer(role="user:42") as w:
@@ -78,12 +78,12 @@ def test_roles_both_survive_merge(repo):
     with repo.writer(role="user:7") as w:
         w.add_statement(_stmt("name", "Acme Inc", T2))
     repo.flush()
-    repo.merge()
+    settle(repo)
 
     assert _roles(repo) == ["user:42", "user:7"]
 
 
-def test_role_reassertion_collapses(repo):
+def test_role_reassertion_collapses(repo, settle):
     """One role re-asserting the same content still dedupes to one row –
     only the *cross-role* case multiplies."""
     repo, _ = repo
@@ -91,12 +91,12 @@ def test_role_reassertion_collapses(repo):
         with repo.writer(role="user:42") as w:
             w.add_statement(_stmt("name", "Acme Inc", last_seen))
         repo.flush()
-    repo.merge()
+    settle(repo)
 
     assert _roles(repo) == ["user:42"]
 
 
-def test_roleless_and_role_rows_are_distinct(repo):
+def test_roleless_and_role_rows_are_distinct(repo, settle):
     """No role is its own identity, not a wildcard: a role-less assertion
     and a role-bearing one of the same content are two rows."""
     repo, _ = repo
@@ -105,12 +105,12 @@ def test_roleless_and_role_rows_are_distinct(repo):
     with repo.writer(role="user:42") as w:
         w.add_statement(_stmt("name", "Acme Inc", T1))
     repo.flush()
-    repo.merge()
+    settle(repo)
 
     assert _roles(repo) == ["", "user:42"]
 
 
-def test_role_entity_values_unaffected(repo):
+def test_role_entity_values_unaffected(repo, settle):
     """Row multiplication is provenance only – the assembled entity still
     has one value per distinct value, whoever asserted it."""
     repo, _ = repo
@@ -118,14 +118,14 @@ def test_role_entity_values_unaffected(repo):
         with repo.writer(role=role) as w:
             w.add_statement(_stmt("name", "Acme Inc", T1))
     repo.flush()
-    repo.merge()
+    settle(repo)
 
     entity = repo.get("acme")
     assert entity is not None
     assert entity.get("name") == ["Acme Inc"]
 
 
-def test_role_query_filter(repo):
+def test_role_query_filter(repo, settle):
     """``role`` is an ordinary storage column, so the ftmq ``C`` family
     filters it with no query-layer work.
 
@@ -139,7 +139,7 @@ def test_role_query_filter(repo):
     with repo.writer(role="user:7") as w:
         w.add_statement(_stmt("name", "Beta Ltd", T1, entity_id="beta"))
     repo.flush()
-    repo.merge()
+    settle(repo)
 
     stmts = list(repo.query_statements(Query(C(role="user:42"))))
     assert {s.entity_id for s in stmts} == {"acme"}
@@ -148,7 +148,7 @@ def test_role_query_filter(repo):
     ) == ["beta"]
 
 
-def test_delete_entity_tombstones_every_role(repo):
+def test_delete_entity_tombstones_every_role(repo, settle):
     """Deleting an entity deletes what *every* role asserted.
 
     ``delete_entity`` reads the live rows and writes one matching tombstone
@@ -161,13 +161,13 @@ def test_delete_entity_tombstones_every_role(repo):
         with repo.writer(role=role) as w:
             w.add_statement(_stmt("name", "Acme Inc", T1))
     repo.flush()
-    repo.merge()
+    settle(repo)
     assert repo.get("acme") is not None
 
     count = repo.delete_entity("acme")
     assert count == 2  # one tombstone per role
     repo.flush()
-    repo.merge()
+    settle(repo)
 
     assert repo.get("acme") is None
 
@@ -188,14 +188,14 @@ def test_query_statements_role_roundtrip(repo):
     assert {s.prop: s.role for s in stmts} == {"name": "user:42", "country": "user:7"}
 
 
-def test_delete_statement_shadows_only_its_role(local_repo):
+def test_delete_statement_shadows_only_its_role(local_repo, settle):
     """A statement read back carries its role, so deleting it leaves the
     identical assertion of another role live."""
     for role in ("user:42", "user:7"):
         with local_repo.writer(role=role) as w:
             w.add_statement(_stmt("name", "Acme Inc", T1))
     local_repo.flush()
-    local_repo.merge()
+    settle(local_repo)
 
     target = next(
         s
@@ -204,12 +204,12 @@ def test_delete_statement_shadows_only_its_role(local_repo):
     )
     local_repo.delete_statement(target)
     local_repo.flush()
-    local_repo.merge()
+    settle(local_repo)
 
     assert _roles(local_repo) == ["user:7"]
 
 
-def test_tombstone_ignores_the_writer_default_role(local_repo):
+def test_tombstone_ignores_the_writer_default_role(local_repo, settle):
     """A tombstone takes the shadowed row's role, never the writer's default.
 
     The one way a delete can miss because of ``role``: a role-less row
@@ -220,19 +220,19 @@ def test_tombstone_ignores_the_writer_default_role(local_repo):
     with local_repo.writer() as w:
         w.add_statement(_stmt("name", "Acme Inc", T1))
     local_repo.flush()
-    local_repo.merge()
+    settle(local_repo)
     (live,) = list(local_repo.query_statements())
     assert live.role is None
 
     with local_repo.writer(role="user:42") as w:
         w.add_statement(live, deleted_at=utc_now())
     local_repo.flush()
-    local_repo.merge()
+    settle(local_repo)
 
     assert list(local_repo.query_statements()) == []
 
 
-def test_delete_entity_across_prior_role_emissions(local_repo):
+def test_delete_entity_across_prior_role_emissions(local_repo, settle):
     """Deletion is unconditional on role – prior, superseded and unflushed
     emissions of every role die together.
 
@@ -250,14 +250,13 @@ def test_delete_entity_across_prior_role_emissions(local_repo):
     with local_repo.writer() as w:
         w.add_statement(_stmt("country", "de", T1))
     local_repo.flush()
-    local_repo.merge()
-    # a role-bearing emission that never reached parquet
+    settle(local_repo)
     with local_repo.writer(role="user:9") as w:
         w.add_statement(_stmt("country", "de", T2))
 
     local_repo.delete_entity("acme")
     local_repo.flush()
-    local_repo.merge()
+    settle(local_repo)
 
     assert local_repo.get("acme") is None
     assert list(local_repo.query_statements()) == []

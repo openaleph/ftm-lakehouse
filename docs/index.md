@@ -65,7 +65,7 @@ for entity in entities.query(Query(M(origin="crawl"))):
     process(entity)
 ```
 
-The parquet statement store is partitioned by `(shard, bucket, origin)` and written append-only on the hot path. Three async maintenance ops collapse the redundancy – `compact` (file bin-pack), `merge` (per-partition dedup + tombstone reaping), `vacuum` (drop obsolete files) – all coordinated by a dataset-wide write fence.
+The parquet statement store is partitioned by `(shard, bucket, origin)` and written append-only on the hot path. Reads reconcile the redundancy; two async maintenance ops collapse it physically – `merge` (per-partition dedup + tombstone reaping, one file per partition) and `vacuum` (drop the replaced files) – coordinated by a dataset-wide write fence.
 
 ### Archive
 
