@@ -57,6 +57,7 @@ from ftm_lakehouse.core.settings import CHECKSUM_ALGORITHM
 from ftm_lakehouse.helpers.file import FolderTree, get_filename
 from ftm_lakehouse.helpers.schema import FOLDER_SCHEMATA
 from ftm_lakehouse.logic.entities.aggregate import EntityPayload
+from ftm_lakehouse.logic.entities.stats import StatsCollector
 from ftm_lakehouse.logic.path import DateTimeKey, StoreKey
 from ftm_lakehouse.model.file import Document, Documents
 from ftm_lakehouse.model.statement import DeleteCandidate
@@ -438,10 +439,19 @@ class DocumentsArtifact(DiffableArtifact):
 
 
 class StatisticsArtifact(VersionedArtifact):
-    """Entity counts and facets, from a global SQL aggregate."""
+    """Entity counts and facets, folded from the entity stream.
+
+    A function of the stream like the other artifacts, so the sweep writes it
+    (`StatisticsRun`); ftmq's ``stats()`` answers the same question with six
+    aggregate queries over the reconciling view, which is six more passes over
+    the dataset than the one the sweep is already doing.
+    """
 
     base = path.EXPORTS_STATISTICS
     kind = ExportKind.statistics
+
+    def run(self, now: datetime) -> "StatisticsRun":
+        return StatisticsRun(self, now)
 
 
 class IndexArtifact(VersionedArtifact):
@@ -470,8 +480,16 @@ ARTIFACTS: tuple[type[Artifact], ...] = (
 
 ARTIFACTS_BY_KIND: dict[ExportKind, type[Artifact]] = {a.kind: a for a in ARTIFACTS}
 
-SWEEP_KINDS = (ExportKind.statements, ExportKind.entities, ExportKind.documents)
-"""The kinds the entity sweep produces – the rest are computed, not streamed."""
+SWEEP_KINDS = (
+    ExportKind.statements,
+    ExportKind.entities,
+    ExportKind.documents,
+    ExportKind.statistics,
+)
+"""The kinds the entity sweep produces.
+
+Only ``index.json`` is left out: it registers what the others wrote, so it
+runs after them rather than with them."""
 
 
 class ArtifactRun:
@@ -825,6 +843,28 @@ class DocumentsRun(DiffableRun):
         super().close()
         self.staging.close()
         self._tmp.cleanup()
+
+
+class StatisticsRun(ArtifactRun):
+    """Folds ``statistics.json`` out of the stream and writes it at the end.
+
+    Writes nothing row by row, so it needs no writer and no eager open: a
+    sweep that yields nothing still writes the statistics of an empty
+    dataset, which is the whole picture it is supposed to be.
+    """
+
+    artifact: StatisticsArtifact
+
+    def __init__(self, artifact: Artifact, now: datetime) -> None:
+        super().__init__(artifact, now)
+        self.collector = StatsCollector()
+
+    def consume(self, payload: EntityPayload) -> None:
+        self.collector.collect(payload.to_dict())
+
+    def finish(self) -> None:
+        self.artifact.write(self.collector.export())
+        self.counts["total"] += self.collector.entities
 
 
 class ExportSession:

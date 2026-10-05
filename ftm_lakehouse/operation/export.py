@@ -14,9 +14,12 @@ This operation decides only which artifacts a run covers, and drives the
 stream through them.
 
 `ExportKind` selects them; [`ExportKind.all`][ftm_lakehouse.repository.artifacts.ExportKind]
-covers every streamed one. The two artifacts that are not functions of the
-entity stream – ``statistics.json`` (a global SQL aggregate) and ``index.json``
-(store metadata) – are written directly, outside the sweep.
+covers every streamed one, ``statistics.json`` included – its counts are a
+function of the same stream
+([`StatsCollector`][ftm_lakehouse.logic.entities.stats.StatsCollector]), where
+asking the store for them costs six aggregate queries over every row. Only
+``index.json`` is written outside the sweep: it registers what the others
+wrote, so it runs after them.
 """
 
 from datetime import datetime
@@ -41,9 +44,10 @@ __all__ = ["ExportJob", "ExportKind", "ExportOperation", "MAKE_KINDS", "SWEEP_KI
 
 settings = Settings()
 
-MAKE_KINDS = (ExportKind.all, ExportKind.statistics, ExportKind.index)
+MAKE_KINDS = (ExportKind.all, ExportKind.index)
 """What a full ``make`` runs, in order. ``all`` covers `SWEEP_KINDS` in one
-pass; ``index`` goes last because it registers what the others wrote."""
+pass – ``statistics.json`` among them; ``index`` goes last because it
+registers what the others wrote."""
 
 
 class ExportJob(DatasetJobModel):
@@ -103,14 +107,16 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
         Writes ``statements.csv`` from the same Arrow batches when this run
         covers it, so the csv costs a tee rather than a second pass. Rows are
         only materialised when something downstream needs them – a
-        statements-only export stays columnar end to end.
+        statements-only export stays columnar end to end, every other kind
+        folds entities out of them.
 
         Args:
             throughput: Counter fed the Arrow bytes the scan pulls – the
                 progress bar's, so it shows how fast the sweep reads.
         """
         with_csv_export = ExportKind.statements in self.kinds
-        tee = bool({ExportKind.entities, ExportKind.documents} & set(self.kinds))
+        # every kind but the csv wants the rows, not just the Arrow batches
+        tee = bool(set(self.kinds) - {ExportKind.statements})
         rows = self.entities.sweep(with_csv_export, tee, throughput)
         yield from aggregate_unsafe(rows, self.dataset)
 
@@ -142,10 +148,6 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
                     bar.advance(len(payload.statements))
             return session.result()
 
-    def export_statistics(self) -> None:
-        """Write ``statistics.json`` from the store's global SQL aggregate."""
-        self.artifacts.statistics.write(self.entities.stats())
-
     def export_index(self) -> None:
         """Write ``index.json``, registering what the exports produced."""
         dataset = self._model
@@ -166,11 +168,6 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
                 "Statement store empty, skipping ...",
                 uri=mask_uri(self.entities.uri),
             )
-            return
-
-        if run.job.kind == ExportKind.statistics:
-            self.export_statistics()
-            run.job.done = 1
             return
 
         started = utc_now()
