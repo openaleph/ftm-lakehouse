@@ -22,7 +22,7 @@ requires-python = ">=3.12,<3.15"
 dependencies = [
     "ftmq[lake] @ git+https://github.com/dataresearchcenter/ftmq.git",
     "followthemoney (>=4.11.0,<5.0.0)",
-    "anystore (>=1.5.1,<2.0.0)",
+    "anystore (>=1.5.2,<2.0.0)",
     "httpx (>=0.28.1,<0.29.0)",
     "zfs-agent (>=0.0.1,<0.0.2)",
 ]
