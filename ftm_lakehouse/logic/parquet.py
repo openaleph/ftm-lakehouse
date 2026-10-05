@@ -132,16 +132,20 @@ def duckdb_config() -> dict[str, str]:
     return config
 
 
-def merge_duckdb_config(workers: int) -> dict[str, str]:
-    """[`duckdb_config`][duckdb_config] for one of ``workers`` merge processes.
+def worker_duckdb_config(workers: int) -> dict[str, str]:
+    """[`duckdb_config`][duckdb_config] for one of ``workers`` processes.
 
     Each worker is its own DuckDB instance, so the memory limit and the
     threads are split between them – ``LAKEHOUSE_DUCKDB_MEMORY_LIMIT`` stays
-    the ceiling for the whole merge, not per worker. A limit that is not a
+    the ceiling for the whole operation, not per worker. A limit that is not a
     byte size (a percentage) falls back to `FALLBACK_MEMORY_LIMIT`.
 
+    Shared by the two parallel maintenance paths – a merge and an export
+    sweep, both sized by ``LAKEHOUSE_WORKERS`` – which fan partitions out to
+    processes that each run a full dedupe or sort.
+
     Args:
-        workers: Number of merge processes the budget is split between.
+        workers: Number of processes the budget is split between.
 
     Returns:
         The DuckDB config one worker connects with.

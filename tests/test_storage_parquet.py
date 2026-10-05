@@ -14,7 +14,11 @@ from ftmq.types import Statements
 
 from ftm_lakehouse.helpers.shards import entity_shard
 from ftm_lakehouse.logic.parquet import MERGED_PREFIX, TABLE_CONFIGURATION
-from ftm_lakehouse.model.statement import JOURNAL_SCHEMA, TABLE_RAW
+from ftm_lakehouse.model.statement import (
+    JOURNAL_SCHEMA,
+    TABLE_RAW,
+    statement_csv_header,
+)
 from ftm_lakehouse.storage import parquet as storage_parquet
 from ftm_lakehouse.storage.parquet import ParquetStore
 
@@ -315,11 +319,62 @@ def test_storage_parquet_merge_escaped_origin(tmp_path):
     assert not store.needs_merge
 
 
+def test_storage_parquet_sweep_header(tmp_path):
+    """`statement_csv_header` is the header a real sweep writes, and a part
+    carries none.
+
+    A parallel sweep's parts are headerless and the assembled file takes its
+    header from that function, so the two must not drift – which is what makes
+    the hand-spelled header safe.
+    """
+    store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
+    _flush(store, _origin_rows("a"))
+
+    list(store.sweep("sweep.csv", False))
+
+    with store._store.open("sweep.csv", "rb") as fh:
+        assert fh.readline() == statement_csv_header()
+
+    # one pair, written as a worker writes its part
+    key, source, clean = store.sweep_sources()[0]
+    with open(tmp_path / "part.csv", "wb") as out:
+        with storage_parquet.partition_cursor(source, clean, {}) as cur:
+            list(storage_parquet.sweep_partition(cur, out, header=False, tee=False))
+    body = (tmp_path / "part.csv").read_bytes()
+    assert body and not body.startswith(statement_csv_header())
+    assert key == store.sweep_sources()[0][0]
+
+
+def test_storage_parquet_sweep_sources_cover_every_row(tmp_path):
+    """The pairs a parallel sweep fans out over are the whole store, once."""
+    store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
+    _flush(store, _origin_rows("a"))
+    _flush(store, _origin_rows("b"))
+
+    sources = store.sweep_sources()
+
+    assert len(sources) > 1, "a sharded store must have several pairs to fan out"
+    swept = []
+    for _, source, clean in sources:
+        with storage_parquet.partition_cursor(source, clean, {}) as cur:
+            swept.extend(storage_parquet.sweep_partition(cur))
+    # same rows as the serial sweep, and every entity in exactly one pair
+    serial = list(store.sweep())
+    assert sorted(r["id"] for r in swept) == sorted(r["id"] for r in serial)
+    per_pair = []
+    for _, source, clean in sources:
+        with storage_parquet.partition_cursor(source, clean, {}) as cur:
+            per_pair.append(
+                {r["entity_id"] for r in storage_parquet.sweep_partition(cur)}
+            )
+    assert not set.intersection(*per_pair) if len(per_pair) > 1 else True
+
+
 def test_storage_parquet_merge_workers(tmp_path, monkeypatch):
     """Merging in worker processes gives what merging in-process gives."""
     merged = []
     for workers in (1, 2):
-        monkeypatch.setenv("LAKEHOUSE_MERGE_WORKERS", str(workers))
+        monkeypatch.setenv("LAKEHOUSE_WORKERS", str(workers))
         store = ParquetStore(tmp_path / str(workers), DATASET, shards=SHARDS)
         _flush(store, _origin_rows("a"))
         _flush(store, _origin_rows("b"))
@@ -335,7 +390,7 @@ def test_storage_parquet_merge_commit_batches(tmp_path, monkeypatch, workers):
     per partition. The pool changes who produces the results, not how the
     parent commits them."""
     monkeypatch.setattr(storage_parquet, "MERGE_COMMIT_BATCH", 3)
-    monkeypatch.setenv("LAKEHOUSE_MERGE_WORKERS", str(workers))
+    monkeypatch.setenv("LAKEHOUSE_WORKERS", str(workers))
     store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
     _flush(store, _origin_rows("a"))
     partitions = len(store._list_partitions())

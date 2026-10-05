@@ -49,11 +49,26 @@ class Settings(BaseSettings):
 
     duckdb_memory_limit: str = "8GB"
 
-    merge_workers: int = 1
-    """Processes a ``merge`` runs partitions in (``LAKEHOUSE_MERGE_WORKERS``).
-    ``1`` merges in-process. `duckdb_memory_limit` and the CPU threads are
-    split between the workers, so the limit stays the ceiling for the whole
-    merge – each worker also carries its own Python heap on top of it."""
+    workers: int = 1
+    """Processes the parallel maintenance paths fan their partitions out to
+    (``LAKEHOUSE_WORKERS``). ``1`` runs in-process, which is exactly the
+    serial path.
+
+    Shared by `ftm_lakehouse.storage.parquet.ParquetStore.merge`, which fans
+    out ``(shard, bucket, origin)`` partitions, and the export sweep, which
+    fans out ``(shard, bucket)`` pairs – one knob, because both are the same
+    trade: `duckdb_memory_limit` and the CPU threads are split between the
+    workers, so the limit stays the ceiling for the whole operation and each
+    worker also carries its own Python heap on top of it.
+
+    Two bounds worth knowing before raising it. A sweep cannot use more
+    workers than the dataset has ``(shard, bucket)`` pairs – ``shards`` times
+    the buckets it holds, at most five – so an unsharded dataset has at most
+    five. And each worker runs a full dedupe or ``ORDER BY entity_id`` over
+    its partition, which multiplies peak RAM and peak spill: size this against
+    memory and `duckdb_temp_directory` space rather than core count. A
+    parallel sweep's parts also need roughly one export's worth of free space
+    under ``TMPDIR``."""
 
     duckdb_temp_directory: str | None = Field(
         default_factory=lambda: str(Path(gettempdir()) / "duckdb")

@@ -130,6 +130,45 @@ def test_logic_stats_collector():
     assert collector.export().entity_count == 6
 
 
+def test_logic_stats_collector_merge():
+    """Collecting in pieces and merging says what collecting whole says.
+
+    The property a parallel sweep rests on: every field is a commutative
+    accumulator, so the fan-in cannot change the published numbers.
+    """
+
+    def collect(entities) -> StatsCollector:
+        collector = StatsCollector()
+        for data in entities:
+            collector.collect(
+                {
+                    "id": data["id"],
+                    "schema": data["schema"],
+                    "properties": data["properties"],
+                }
+            )
+        return collector
+
+    whole = collect(ENTITIES)
+    # three disjoint pieces, as three workers would see them
+    pieces = [collect(ENTITIES[i::3]) for i in range(3)]
+    merged = pieces[0]
+    for piece in pieces[1:]:
+        merged.merge(piece)
+
+    assert _normalize(merged.export()) == _normalize(whole.export())
+    assert merged.entities == whole.entities == 6
+    # the date bounds are a min / max, not a last-write
+    assert (str(merged.export().start), str(merged.export().end)) == (
+        "1999-05-05",
+        "2020-01-01",
+    )
+    # merging an empty collector changes nothing
+    before = _normalize(merged.export())
+    merged.merge(StatsCollector())
+    assert _normalize(merged.export()) == before
+
+
 def test_logic_stats_matches_the_store(tmp_path):
     """The exported artifact equals what ftmq's aggregate queries answer.
 
