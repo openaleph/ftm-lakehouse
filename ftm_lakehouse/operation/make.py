@@ -3,7 +3,7 @@
 from ftm_lakehouse.core.conventions import tag
 from ftm_lakehouse.model.job import DatasetJobModel
 from ftm_lakehouse.operation.base import DatasetJobOperation
-from ftm_lakehouse.operation.export import MAKE_KINDS, ExportJob, ExportOperation
+from ftm_lakehouse.operation.export import ExportJob, ExportOperation
 from ftm_lakehouse.repository.job import JobRun
 
 
@@ -12,7 +12,7 @@ class MakeJob(DatasetJobModel):
 
 
 class MakeOperation(DatasetJobOperation[MakeJob]):
-    """Flush the journal and run every export kind.
+    """Flush the journal and run the export.
 
     Never merges: reads reconcile un-merged rows, so the exports are correct
     on any store. Merging is
@@ -31,9 +31,7 @@ class MakeOperation(DatasetJobOperation[MakeJob]):
         self.entities.flush()
 
     def handle(self, run: JobRun, *args, **kwargs) -> None:
-        """Run the export sweep, then the two artifacts computed from it."""
-        force = kwargs.get("force", False)
-        for kind in MAKE_KINDS:
-            job = ExportJob.make(dataset=self.dataset, kind=kind)
-            ExportOperation(job, self.uri).run(force=force)
+        """Run the export – one sweep over every artifact, then ``index.json``."""
+        job = ExportJob.make(dataset=self.dataset)
+        ExportOperation(job, self.uri).run(force=kwargs.get("force", False))
         run.job.done = 1

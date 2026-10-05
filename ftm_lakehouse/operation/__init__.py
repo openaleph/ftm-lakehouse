@@ -9,9 +9,9 @@ Factory functions provide convenient ways to run operations from a Dataset:
     from ftm_lakehouse.operation import export, make, optimize
 
     dataset = get_dataset("my_dataset")
-    export(dataset, "statements")  # Run single export
-    optimize(dataset)              # Merge + vacuum
-    make(dataset)                  # Run full workflow
+    export(dataset)    # Write every export artifact from one sweep
+    optimize(dataset)  # Merge + vacuum
+    make(dataset)      # Run full workflow
 """
 
 from ftm_lakehouse.operation.crawl import CrawlOperation, crawl

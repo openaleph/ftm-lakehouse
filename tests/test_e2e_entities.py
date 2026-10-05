@@ -11,7 +11,7 @@ from ftmq.util import make_entity
 
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.lake import get_lakehouse
-from ftm_lakehouse.operation import ExportKind, export, optimize
+from ftm_lakehouse.operation import export, optimize
 from ftm_lakehouse.repository.base import DatasetRef
 from ftm_lakehouse.repository.factories import get_entities
 from tests.conftest import (
@@ -79,8 +79,8 @@ def test_entities(dataset):
     assert jane.first("firstName") == "Jane"
     assert set(jane.to_dict()["origin"]) == {"default", "update"}
 
-    # Export statements.csv
-    export(dataset.name, ExportKind.statements, dataset.uri)
+    # Export every artifact
+    export(dataset.name, dataset.uri)
 
     # Add a new entity to trigger re-export
     john = make_entity(
@@ -88,9 +88,7 @@ def test_entities(dataset):
     )
     with entities.writer() as bulk:
         bulk.add_entity(john)
-    export(
-        dataset.name, ExportKind.statements, dataset.uri
-    )  # Operation's ensure_flush handles flushing
+    export(dataset.name, dataset.uri)  # ensure_flush handles the flushing
 
     with entities._store.open(
         entities.EXPORTS_STATEMENTS, "r", compression=entities.compression
@@ -107,8 +105,8 @@ def test_entities(dataset):
     # Merge
     optimize(dataset.name, dataset.uri)
 
-    # Statistics
-    export(dataset.name, ExportKind.statistics, dataset.uri)
+    # Statistics, as the sweep above folded them: a merge moves no content,
+    # so re-exporting here would skip as fresh and assert nothing
     stats: DatasetStats = entities._store.get(
         path.EXPORTS_STATISTICS, model=DatasetStats
     )
@@ -126,10 +124,7 @@ def test_entities_export(dataset):
     with entities.writer(origin="update") as bulk:
         bulk.add_entity(jane_fragment)
 
-    export(
-        dataset.name, ExportKind.statements, dataset.uri
-    )  # Operation's ensure_flush handles flushing
-    export(dataset.name, ExportKind.entities, dataset.uri)
+    export(dataset.name, dataset.uri)  # ensure_flush handles the flushing
 
     # stream() reads from exported entities.ftm.json
     ents = [e for e in entities.stream()]
@@ -172,8 +167,7 @@ def test_entity_multi_origin_fragments(dataset):
 
     # Flush and export
     entities.flush()
-    export(dataset.name, ExportKind.statements, dataset.uri)
-    export(dataset.name, ExportKind.entities, dataset.uri)
+    export(dataset.name, dataset.uri)
 
     # Query merged entity (all origins)
     merged = entities.get("multi-origin-person")
@@ -267,8 +261,7 @@ def test_entity_multi_origin_statements(dataset):
 
     # Flush and export
     entities.flush()
-    export(dataset.name, ExportKind.statements, dataset.uri)
-    export(dataset.name, ExportKind.entities, dataset.uri)
+    export(dataset.name, dataset.uri)
 
     # Query merged entity
     merged = entities.get("stmt-entity")

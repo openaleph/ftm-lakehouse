@@ -5,7 +5,7 @@ from ftm_lakehouse.operation.download import (
     DownloadArchiveJob,
     DownloadArchiveOperation,
 )
-from ftm_lakehouse.operation.export import ExportJob, ExportKind, ExportOperation
+from ftm_lakehouse.operation.export import ExportJob, ExportOperation
 from ftm_lakehouse.repository import ArchiveRepository, EntityRepository
 
 DATASET = "download_test"
@@ -26,7 +26,7 @@ def test_operation_download_archive(tmp_path, fixtures_path):
     repo.flush()
 
     # Run the documents export first (it's a dependency)
-    docs_job = ExportJob.make(dataset=DATASET, kind=ExportKind.documents)
+    docs_job = ExportJob.make(dataset=DATASET)
     ExportOperation(job=docs_job, uri=dataset_path).run()
     assert (dataset_path / path.EXPORTS_DOCUMENTS).exists()
 

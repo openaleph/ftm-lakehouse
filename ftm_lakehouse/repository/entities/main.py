@@ -244,28 +244,21 @@ class EntityRepository(DatasetHandle):
         return self._statements.merge_lock()
 
     @no_api
-    def sweep(
-        self,
-        with_csv_export: bool = True,
-        tee: bool = True,
-        throughput: Throughput | None = None,
-    ) -> Iterator[StatementDict]:
-        """One scan of the store, optionally writing ``statements.csv`` from it.
+    def sweep(self, throughput: Throughput | None = None) -> Iterator[StatementDict]:
+        """One scan of the store, writing ``statements.csv`` from it.
 
         Delegates to [`ParquetStore.sweep`][ParquetStore.sweep] with this
-        dataset's csv key, so the artifact carries the configured codec.
+        dataset's csv key, so the artifact carries the configured codec, and
+        takes the rows as well – an export writes the csv *and* folds the
+        entities out of the same scan.
 
         Args:
-            with_csv_export: Write the ``statements.csv`` artifact from the same
-                Arrow batches the rows come from.
-            tee: Yield row dicts. ``False`` keeps the scan columnar.
             throughput: Counter fed the Arrow bytes of every batch scanned.
 
         Yields:
-            ``StatementDict`` rows, unless ``tee`` is off.
+            ``StatementDict`` rows.
         """
-        key = self.EXPORTS_STATEMENTS if with_csv_export else None
-        yield from self._statements.sweep(key, tee, throughput)
+        yield from self._statements.sweep(self.EXPORTS_STATEMENTS, True, throughput)
 
     @property
     @no_api

@@ -15,7 +15,7 @@ from ftmq.util import make_entity
 
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.lake import get_lakehouse
-from ftm_lakehouse.operation import ExportKind, export
+from ftm_lakehouse.operation import export
 from ftm_lakehouse.repository.base import DatasetRef
 from ftm_lakehouse.repository.factories import get_archive, get_documents, get_entities
 from tests.shared import BOB, JANE, JOHN
@@ -58,8 +58,7 @@ def _seed(tmp_path, name: str, **config):
         bulk.add_entity(make_entity(JANE))
         bulk.add_entity(make_entity(JOHN))
     entities.flush()
-    export(dataset.name, ExportKind.statements, dataset.uri)
-    export(dataset.name, ExportKind.entities, dataset.uri)
+    export(dataset.name, dataset.uri)
     return dataset
 
 
@@ -113,7 +112,7 @@ def test_export_compression_from_dataset_config(tmp_path, algorithm):
     with entities_repo.writer() as bulk:
         bulk.add_entity(make_entity(BOB))
     entities_repo.flush()
-    export(dataset.name, ExportKind.entities, dataset.uri, force=True)
+    export(dataset.name, dataset.uri, force=True)
 
     (diff_key,) = list(entities_repo._store.iterate_keys(prefix=path.DIFFS_ENTITIES))
     diff = _read(dataset, diff_key)
@@ -143,7 +142,7 @@ def test_export_compression_documents(tmp_path, fixtures_path, algorithm):
             bulk.add_entity(entity)
     entities.flush()
 
-    export(dataset.name, ExportKind.documents, dataset.uri, force=True)
+    export(dataset.name, dataset.uri, force=True)
 
     documents = get_documents(*dataset)
     key = path.EXPORTS_DOCUMENTS + algorithm
@@ -163,7 +162,7 @@ def test_export_compression_documents(tmp_path, fixtures_path, algorithm):
         for entity in file.make_entities():
             bulk.add_entity(entity)
     entities.flush()
-    export(dataset.name, ExportKind.documents, dataset.uri, force=True)
+    export(dataset.name, dataset.uri, force=True)
 
     (diff_key,) = list(entities._store.iterate_keys(prefix=path.DIFFS_DOCUMENTS))
     assert diff_key.endswith(algorithm.value)

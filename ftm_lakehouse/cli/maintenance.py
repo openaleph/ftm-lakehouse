@@ -3,7 +3,7 @@
 ``make`` and ``export`` stay at the top level as frequently-used shortcuts:
 
     ftm-lakehouse -d <dataset> make
-    ftm-lakehouse -d <dataset> export <kind>
+    ftm-lakehouse -d <dataset> export
 
 Everything else groups under ``maintenance``:
 
@@ -30,7 +30,6 @@ from ftm_lakehouse.cli import (
     sub_typer,
     write_config,
 )
-from ftm_lakehouse.operation.export import ExportKind
 from ftm_lakehouse.repository.factories import get_entities
 
 maintenance = sub_typer("maintenance", "Dataset maintenance operations")
@@ -54,7 +53,8 @@ def cli_make(
     exports: Annotated[
         Optional[bool],
         typer.Option(
-            help="Include export statements/entities and diffs, compute stats"
+            help="Write the exports – statements, entities, documents, their "
+            "diffs, the statistics and the index. `--no-exports` flushes only."
         ),
     ] = True,
     optimize: Annotated[
@@ -77,10 +77,10 @@ def cli_make(
     """Make or update a dataset.
 
     By default this flushes the journal, optimizes the parquet store (merge
-    + vacuum) and regenerates all exports. Use ``--no-exports`` to only flush
-    and refresh ``index.json``, or ``--no-optimize`` to export without the
-    maintenance pass – exports read reconciled rows, so they are correct on
-    an un-merged store too.
+    + vacuum) and regenerates every export. Use ``--no-exports`` to flush
+    only, or ``--no-optimize`` to export without the maintenance pass –
+    exports read reconciled rows, so they are correct on an un-merged store
+    too.
     """
     with DatasetContext() as (name, uri):
         if config:
@@ -91,8 +91,6 @@ def cli_make(
             if optimize:
                 op.optimize(name, uri, force=bool(force_optimize))
             op.make(name, uri, force=bool(force_exports))
-        else:
-            op.export(name, ExportKind.index, uri, force=bool(force_exports))
         console.print(get_dataset_index(name, uri))
 
 
@@ -102,19 +100,13 @@ def cli_make(
 
 
 @cli.command("export")
-def cli_export(
-    kind: Annotated[
-        ExportKind, typer.Argument(help="Which export to produce.")
-    ] = ExportKind.all,
-    force: OPT_FORCE = False,
-):
-    """Export the dataset: ``all`` (the default – statements.csv,
-    entities.ftm.json and documents.csv from a single pass, with their diffs),
-    or one of ``statements`` (statements.csv), ``entities``
-    (entities.ftm.json), ``documents`` (documents.csv), ``statistics``
-    (statistics.json), ``index`` (index.json)."""
+def cli_export(force: OPT_FORCE = False):
+    """Export the dataset: ``statements.csv``, ``entities.ftm.json``,
+    ``documents.csv`` (per origin scope) and ``statistics.json`` from a single
+    pass over the entities, with their diffs, then ``index.json`` registering
+    what they wrote."""
     with DatasetContext() as (name, uri):
-        res = op.export(name, kind, uri, force=bool(force))
+        res = op.export(name, uri, force=bool(force))
         console.print(res)
 
 

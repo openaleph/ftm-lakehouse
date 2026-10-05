@@ -76,7 +76,7 @@ The export artifacts one dataset produces – `statements.csv`, `entities.ftm.js
 from ftm_lakehouse.repository import get_artifacts
 
 artifacts = get_artifacts("my_dataset")
-artifacts.entities.is_fresh()
+artifacts.entities.exists()
 artifacts.documents["crawl"].key
 ```
 

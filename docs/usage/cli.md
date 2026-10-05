@@ -14,7 +14,7 @@ ftm-lakehouse [OPTIONS] <group> <command> [ARGS]
 | `maintenance` | Storage maintenance (flush, optimize, unlock) |
 | `zfs` | ZFS dataset management |
 
-Top-level (no group), as frequently-used shortcuts: `ls` (dataset names), `datasets` (metadata), `configure` (write dataset configuration), `make` (build/update a dataset), `export` (produce the exports, or a single kind), `crawl` (ingest documents into the archive).
+Top-level (no group), as frequently-used shortcuts: `ls` (dataset names), `datasets` (metadata), `configure` (write dataset configuration), `make` (build/update a dataset), `export` (produce every export artifact), `crawl` (ingest documents into the archive).
 
 Environment variables configure storage locations and behavior – see the [configuration reference](../deployment/configuration.md).
 
@@ -23,7 +23,7 @@ Environment variables configure storage locations and behavior – see the [conf
 ```bash
 export LAKEHOUSE_URI=./data
 
-# Initialise the dataset – no data yet, so skip the exports pipeline
+# Initialise the dataset – no data yet, so flush only
 ftm-lakehouse -d my_dataset make --no-exports
 
 # Record its configuration (title, summary, shards, compression, ...)
@@ -42,11 +42,8 @@ cat entities.ftm.json | ftm-lakehouse -d my_dataset entities import --unsafe
 # Flush the journal, optimize the store and build all exports – the default
 ftm-lakehouse -d my_dataset make
 
-# The export sweep on its own – every streamed artifact from one pass
+# The export on its own – every artifact from one pass over the entities
 ftm-lakehouse -d my_dataset export
-
-# ... or a single kind
-ftm-lakehouse -d my_dataset export statistics
 
 # Drain the journal on its own – one dataset, or the whole catalog
 ftm-lakehouse -d my_dataset maintenance flush
@@ -84,7 +81,7 @@ Layout-affecting settings (`shards`) belong in the config *before* a dataset is 
 |------|---------|--------|
 | `-c <config.yml>` | – | Same merge-write as `configure`, before anything else |
 | `--flush` / `--no-flush` | on | Flush outstanding journal statements into the parquet store |
-| `--exports` / `--no-exports` | on | Build statements/entities/documents/statistics exports and diffs. With `--no-exports` only `index.json` is refreshed |
+| `--exports` / `--no-exports` | on | Write every export artifact – statements, entities, documents, their diffs, the statistics and the index. `--no-exports` flushes only |
 | `--optimize` / `--no-optimize` | on | Run the [optimize](entities.md#maintenance) pass (merge + vacuum) before exporting (only applies with `--exports`). Reads reconcile un-merged rows, so exports are correct either way – an optimized store exports faster and reclaims disk |
 | `--force-optimize` | off | Optimize even when no partition is dirty |
 | `--force-exports` | off | Re-compute the exports pipeline even when the tags say it is fresh |

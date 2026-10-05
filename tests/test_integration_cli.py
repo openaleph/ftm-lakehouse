@@ -51,6 +51,28 @@ def test_cli(fixtures_path):
     # )
 
 
+def test_cli_export(tmp_path):
+    """`export` takes no argument – it writes every artifact from one sweep."""
+    lake, name = str(tmp_path / "lake"), "export_cli"
+    base = ["--uri", lake, "-d", name]
+
+    repo = get_entities(name, f"{lake}/{name}")
+    with repo.writer(origin="test") as writer:
+        writer.add_entity(make_entity(JANE))
+    repo.flush()
+
+    res = runner.invoke(cli, base + ["export"])
+    assert res.exit_code == 0, res.output
+
+    dataset = tmp_path / "lake" / name
+    assert (dataset / "exports/statements.csv").exists()
+    assert (dataset / "entities.ftm.json").exists()
+    assert (dataset / "index.json").exists()
+
+    # the command takes no arguments
+    assert runner.invoke(cli, base + ["export", "statistics"]).exit_code != 0
+
+
 def test_cli_configure(tmp_path):
     lake, name = str(tmp_path / "lake"), "cfg_dataset"
     config = tmp_path / "config.yml"

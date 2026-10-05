@@ -10,13 +10,13 @@ from ftmq.util import make_entity
 
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.helpers.shards import entity_shard
-from ftm_lakehouse.operation.export import ExportJob, ExportKind, ExportOperation
+from ftm_lakehouse.operation.export import ExportJob, ExportOperation
 from ftm_lakehouse.repository import EntityRepository
 
 
 def _export(tmp_path, make_diff: bool = True) -> None:
     """Run the entities export sweep, which writes the diff alongside."""
-    job = ExportJob.make(dataset="test", kind=ExportKind.entities, make_diff=make_diff)
+    job = ExportJob.make(dataset="test", make_diff=make_diff)
     ExportOperation(job=job, uri=tmp_path).run(force=True)
 
 

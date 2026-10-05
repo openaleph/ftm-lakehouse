@@ -12,7 +12,6 @@ from ftm_lakehouse.cli.io import import_entities_unsafe
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.lake import get_lakehouse
 from ftm_lakehouse.operation import factories as op
-from ftm_lakehouse.operation.export import ExportKind
 from ftm_lakehouse.repository.entities.main import EntityRepository
 from ftm_lakehouse.repository.factories import get_entities
 from tests.shared import JANE, JOHN
@@ -49,7 +48,7 @@ def test_cli_statements_import_roundtrip(tmp_path, cli_runner):
     and crashed the parquet append (and would have been truthy otherwise).
     """
     src = _seed_source(tmp_path)
-    op.export(src.dataset, ExportKind.statements, uri=tmp_path / "src")
+    op.export(src.dataset, uri=tmp_path / "src")
     csv_uri = str(tmp_path / "src" / path.EXPORTS_STATEMENTS)
 
     result = cli_runner.invoke(
@@ -74,7 +73,7 @@ def test_cli_statements_import_override_origin(tmp_path, cli_runner):
     """--override-origin forces the CLI origin over CSV-carried origins – on
     both the safe and the --unsafe path."""
     src = _seed_source(tmp_path)
-    op.export(src.dataset, ExportKind.statements, uri=tmp_path / "src")
+    op.export(src.dataset, uri=tmp_path / "src")
     csv_uri = str(tmp_path / "src" / path.EXPORTS_STATEMENTS)
 
     for dst_name, flags in (("dst_safe", []), ("dst_unsafe", ["--unsafe"])):
@@ -207,7 +206,7 @@ def test_cli_statements_import_unsafe_roundtrip(tmp_path, cli_runner):
     roots via ``--uri`` – statement ids content-hash under the target
     dataset)."""
     src = _seed_source(tmp_path)
-    op.export(src.dataset, ExportKind.statements, uri=tmp_path / "src")
+    op.export(src.dataset, uri=tmp_path / "src")
     csv_uri = str(tmp_path / "src" / path.EXPORTS_STATEMENTS)
 
     for root, flags in (("root_safe", []), ("root_unsafe", ["--unsafe"])):
@@ -317,7 +316,7 @@ def test_cli_statements_import_role_roundtrip(tmp_path, cli_runner):
     src = _seed_source(tmp_path)
     with src.writer(origin="test", role="user:42") as w:
         w.add_entity(make_entity(JANE))
-    op.export(src.dataset, ExportKind.statements, uri=tmp_path / "src")
+    op.export(src.dataset, uri=tmp_path / "src")
     csv_uri = str(tmp_path / "src" / path.EXPORTS_STATEMENTS)
 
     for root, flags in (("root_safe", []), ("root_unsafe", ["--unsafe"])):

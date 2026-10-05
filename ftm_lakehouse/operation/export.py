@@ -4,26 +4,23 @@ documents.csv, statistics.json, index.json) plus their diff series.
 Every artifact that is a function of the entity stream is written in **one
 sweep**: `ExportOperation.export` scans the statement store once
 ([`ParquetStore.sweep`][ftm_lakehouse.storage.parquet.ParquetStore.sweep]),
-folds the rows into entities and hands each one to every artifact the run
-covers.
+folds the rows into entities and hands each one to every artifact.
 
-What an artifact *is* – where it lives, whether it is current, how it is
-written, what its diff series does with an entity – belongs to
+What an artifact *is* – where it lives, how it is written, what its diff
+series does with an entity – belongs to
 [`ArtifactsRepository`][ftm_lakehouse.repository.artifacts.ArtifactsRepository].
-This operation decides only which artifacts a run covers, and drives the
-stream through them.
+This operation only drives the stream through them.
 
-`ExportKind` selects them; [`ExportKind.all`][ftm_lakehouse.repository.artifacts.ExportKind]
-covers every streamed one, ``statistics.json`` included – its counts are a
-function of the same stream
-([`StatsCollector`][ftm_lakehouse.logic.entities.stats.StatsCollector]), where
-asking the store for them costs six aggregate queries over every row. Only
-``index.json`` is written outside the sweep: it registers what the others
-wrote, so it runs after them.
+A run writes every artifact
+([`streamed`][ftm_lakehouse.repository.artifacts.ArtifactsRepository.streamed])
+and then ``index.json``, which registers what they wrote. Everything but
+``statements.csv`` is folded out of the entity stream – ``statistics.json``
+among them
+([`StatsCollector`][ftm_lakehouse.logic.entities.stats.StatsCollector]) – so
+one scan of the store is what the whole set costs.
 """
 
 from datetime import datetime
-from functools import cached_property
 from typing import Any, Iterator
 
 from anystore.io import SyncProgressBar
@@ -37,25 +34,19 @@ from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.logic.entities.aggregate import EntityPayload, aggregate_unsafe
 from ftm_lakehouse.model.job import DatasetJobModel
 from ftm_lakehouse.operation.base import DatasetJobOperation
-from ftm_lakehouse.repository.artifacts import SWEEP_KINDS, ExportKind
+from ftm_lakehouse.repository.artifacts import ExportKind
 from ftm_lakehouse.repository.job import JobRun
 
-__all__ = ["ExportJob", "ExportKind", "ExportOperation", "MAKE_KINDS", "SWEEP_KINDS"]
+__all__ = ["ExportJob", "ExportKind", "ExportOperation"]
 
 settings = Settings()
 
-MAKE_KINDS = (ExportKind.all, ExportKind.index)
-"""What a full ``make`` runs, in order. ``all`` covers `SWEEP_KINDS` in one
-pass – ``statistics.json`` among them; ``index`` goes last because it
-registers what the others wrote."""
-
 
 class ExportJob(DatasetJobModel):
-    """Job model for all export kinds."""
+    """Job model for the export."""
 
-    kind: ExportKind = ExportKind.all
     make_diff: bool = True
-    """Also export delta diff files (``entities`` / ``documents`` kinds)."""
+    """Also export the delta diff files of the diffable artifacts."""
     result: dict[str, int] | None = None
     """What the run wrote, per artifact and per diff op."""
 
@@ -67,29 +58,14 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
     the store as it is – reads reconcile un-merged rows, so no merge is
     needed. Skips if the target is newer than the last write.
 
-    A run stamps a freshness tag per artifact it wrote, so a later single-kind
-    export sees itself up to date and ``index.json`` still finds the
-    dependencies it registers.
+    A run stamps a freshness tag per artifact it wrote, which is the record of
+    when each one was last produced.
     """
 
-    @cached_property
-    def kinds(self) -> tuple[ExportKind, ...]:
-        """The sweep artifacts this run writes."""
-        if self.job.kind == ExportKind.all:
-            return SWEEP_KINDS
-        if self.job.kind in SWEEP_KINDS:
-            return (self.job.kind,)
-        return ()
-
-    def get_target(self) -> str:
-        if self.job.kind == ExportKind.all:
-            return tag.OP_EXPORT
-        return str(self.artifacts[self.job.kind].tag)
-
-    def get_dependencies(self) -> list[str]:
-        if self.job.kind == ExportKind.all:
-            return [tag.STATEMENTS_UPDATED]
-        return [str(d) for d in self.artifacts[self.job.kind].dependencies]
+    target = tag.OP_EXPORT
+    dependencies = [tag.STATEMENTS_UPDATED]
+    """The content clock – rows landing or an origin dropped. A merge rewrites
+    files without changing content, so it leaves the exports fresh."""
 
     def prepare(self) -> None:
         """Drain the journal, so the export covers the rows still buffered.
@@ -104,24 +80,17 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
     def iterate(self, throughput: Throughput | None = None) -> Iterator[EntityPayload]:
         """Every entity in the store, folded from one scan.
 
-        Writes ``statements.csv`` from the same Arrow batches when this run
-        covers it, so the csv costs a tee rather than a second pass. Rows are
-        only materialised when something downstream needs them – a
-        statements-only export stays columnar end to end, every other kind
-        folds entities out of them.
+        ``statements.csv`` is written from the same Arrow batches the entities
+        are folded out of, so the csv costs a tee rather than a second pass.
 
         Args:
             throughput: Counter fed the Arrow bytes the scan pulls – the
                 progress bar's, so it shows how fast the sweep reads.
         """
-        with_csv_export = ExportKind.statements in self.kinds
-        # every kind but the csv wants the rows, not just the Arrow batches
-        tee = bool(set(self.kinds) - {ExportKind.statements})
-        rows = self.entities.sweep(with_csv_export, tee, throughput)
-        yield from aggregate_unsafe(rows, self.dataset)
+        yield from aggregate_unsafe(self.entities.sweep(throughput), self.dataset)
 
     def export(self, now: datetime) -> dict[str, int]:
-        """Write every requested artifact from one pass over the entities.
+        """Write every streamed artifact from one pass over the entities.
 
         Args:
             now: Timestamp the run started – the diff files are named after it
@@ -136,9 +105,7 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
         """
         with self.entities.merge_lock():
             version = self.entities.version
-            session = self.artifacts.session(
-                now, self.kinds, version, self.job.make_diff
-            )
+            session = self.artifacts.session(now, version, self.job.make_diff)
             count = self.entities._statements.num_rows
             # advanced per statement folded; its throughput is the Arrow
             # bytes the scan pulls from the store
@@ -158,22 +125,28 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
         self.artifacts.index.write(dataset)
 
     def handle(self, run: JobRun[ExportJob], *args: Any, **kwargs: Any) -> None:
-        if run.job.kind == ExportKind.index:
-            self.export_index()
-            run.job.done = 1
-            return
+        """One sweep, every artifact's freshness tag, then ``index.json``.
 
-        if not self.entities.exists:
+        The tags are stamped after the sweep returns, so a crash part-way
+        stamps nothing. They are what each artifact was last written at, and
+        `ftm_lakehouse.operation.download.DownloadArchiveOperation` keys its
+        own freshness on one of them (``exports/documents.csv``).
+
+        ``index.json`` runs last because it registers what the others wrote –
+        and runs even on an empty store, where there is no sweep to do but the
+        dataset still has metadata to publish.
+        """
+        if self.entities.exists:
+            started = utc_now()
+            result = self.export(started)
+            for artifact in self.artifacts.streamed():
+                artifact.touch(started)
+            self.log.info("Export(s) done.", **result)
+            run.job.result = result
+        else:
             self.log.info(
-                "Statement store empty, skipping ...",
+                "Statement store empty, nothing to sweep ...",
                 uri=mask_uri(self.entities.uri),
             )
-            return
-
-        started = utc_now()
-        result = self.export(started)
-        for artifact in self.artifacts.written_by(self.kinds):
-            artifact.touch(started)
-        self.log.info("Export(s) done.", **result)
-        run.job.result = result
+        self.export_index()
         run.job.done = 1
