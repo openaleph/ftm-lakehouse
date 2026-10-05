@@ -5,6 +5,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 import pyarrow as pa
+import pytest
 from followthemoney import Statement
 from ftmq.query import M, Query
 from ftmq.store.base import DEFAULT_ORIGIN
@@ -314,10 +315,27 @@ def test_storage_parquet_merge_escaped_origin(tmp_path):
     assert not store.needs_merge
 
 
-def test_storage_parquet_merge_commit_batches(tmp_path, monkeypatch):
+def test_storage_parquet_merge_workers(tmp_path, monkeypatch):
+    """Merging in worker processes gives what merging in-process gives."""
+    merged = []
+    for workers in (1, 2):
+        monkeypatch.setenv("LAKEHOUSE_MERGE_WORKERS", str(workers))
+        store = ParquetStore(tmp_path / str(workers), DATASET, shards=SHARDS)
+        _flush(store, _origin_rows("a"))
+        _flush(store, _origin_rows("b"))
+        store.merge()
+        merged.append(sorted((s.id, s.origin) for s in store.query_statements()))
+    assert merged[0] == merged[1]
+    assert len(merged[0]) == 40
+
+
+@pytest.mark.parametrize("workers", (1, 2))
+def test_storage_parquet_merge_commit_batches(tmp_path, monkeypatch, workers):
     """Merged partitions commit in batches – a Delta version per batch, not
-    per partition."""
+    per partition. The pool changes who produces the results, not how the
+    parent commits them."""
     monkeypatch.setattr(storage_parquet, "MERGE_COMMIT_BATCH", 3)
+    monkeypatch.setenv("LAKEHOUSE_MERGE_WORKERS", str(workers))
     store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
     _flush(store, _origin_rows("a"))
     partitions = len(store._list_partitions())

@@ -15,6 +15,7 @@ paths that need them (``merge``, ``get_entity_ids`` over the raw source).
 See `_dedupe_sql` for the two-branch fragment semantics.
 """
 
+import os
 from datetime import datetime
 from typing import Iterable
 
@@ -29,7 +30,7 @@ from ftmq.store.lake import BUCKET_DOCUMENT, BUCKET_PAGE, TARGET_SIZE
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.helpers.shards import entity_shard, shard_hex_width
 from ftm_lakehouse.model.statement import PA_TS, SHARDED_SCHEMA, TABLE_RAW
-from ftm_lakehouse.util import validate_origin
+from ftm_lakehouse.util import parse_byte_size, validate_origin
 
 SWEEP_BATCH_SIZE = 50_000
 """Rows per Arrow batch when `ParquetStore.sweep` materialises them as
@@ -50,6 +51,12 @@ applied, timestamps folded – so a read over it needs no reconciling; any
 other file (delta-rs appends and the re-shard write ``part-*``) makes the
 partition dirty. The signal lives in the Delta snapshot's file list, so it
 costs no tag I/O and cannot drift from the data."""
+
+FALLBACK_MEMORY_LIMIT = "8GB"
+"""Per-worker budget when ``LAKEHOUSE_DUCKDB_MEMORY_LIMIT`` is not a
+parseable byte size (a DuckDB percentage limit, e.g. ``80%``, which
+`ftm_lakehouse.util.parse_byte_size` rejects) – mirrors the conservative
+[`Settings`][ftm_lakehouse.core.settings.Settings] default."""
 
 MERGE_COMMIT_BATCH = 64
 """Merged partitions per Delta commit. Every commit is a log entry, and every
@@ -122,6 +129,30 @@ def duckdb_config() -> dict[str, str]:
         config["temp_directory"] = settings.duckdb_temp_directory
     if settings.duckdb_extension_directory:
         config["extension_directory"] = settings.duckdb_extension_directory
+    return config
+
+
+def merge_duckdb_config(workers: int) -> dict[str, str]:
+    """[`duckdb_config`][duckdb_config] for one of ``workers`` merge processes.
+
+    Each worker is its own DuckDB instance, so the memory limit and the
+    threads are split between them – ``LAKEHOUSE_DUCKDB_MEMORY_LIMIT`` stays
+    the ceiling for the whole merge, not per worker. A limit that is not a
+    byte size (a percentage) falls back to `FALLBACK_MEMORY_LIMIT`.
+
+    Args:
+        workers: Number of merge processes the budget is split between.
+
+    Returns:
+        The DuckDB config one worker connects with.
+    """
+    config = duckdb_config()
+    try:
+        budget = parse_byte_size(config["memory_limit"])
+    except ValueError:
+        budget = parse_byte_size(FALLBACK_MEMORY_LIMIT)
+    config["memory_limit"] = f"{budget // max(workers, 1)}B"
+    config["threads"] = str(max((os.cpu_count() or 1) // max(workers, 1), 1))
     return config
 
 
