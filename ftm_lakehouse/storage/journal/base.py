@@ -15,9 +15,6 @@ log = get_logger(__name__)
 
 WRITE_BATCH_SIZE = 10_000
 
-DRAIN_BATCH_SIZE = 1_000_000
-"""Rows per table handed to a flush consumer."""
-
 RecordBatches: TypeAlias = Generator[pa.RecordBatch, None, None]
 """What a reader hands over, on its way into a table."""
 

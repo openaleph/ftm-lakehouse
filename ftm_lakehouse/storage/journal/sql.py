@@ -30,7 +30,6 @@ from ftm_lakehouse.model.statement import (
     journal_table,
 )
 from ftm_lakehouse.storage.journal.base import (
-    DRAIN_BATCH_SIZE,
     BaseJournalStore,
     BaseJournalWriter,
     RecordBatches,
@@ -52,12 +51,7 @@ READ_BATCH_SIZE = 10_000
 """Rows per cursor fetch when draining a segment through SQLAlchemy."""
 
 SEGMENT_INFIX = "-seg-"
-"""Separates a journal table from its rotated segments.
-
-``-`` is illegal in dataset names (followthemoney's ``dataset_name_check``
-allows lowercase alphanumerics and ``_``), so a segment name can never
-collide with another dataset's journal table.
-"""
+"""Separates a journal table from its rotated segments."""
 
 ROTATE_LOCK_TIMEOUT = "5s"
 ROTATE_MAX_RETRIES = 5
@@ -334,7 +328,7 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
         for chunk in self.read_segment(name):
             pending.append(chunk)
             rows += chunk.num_rows
-            if rows >= DRAIN_BATCH_SIZE:
+            if rows >= settings.journal_drain_rows:
                 yield pa.Table.from_batches(pending, schema=JOURNAL_SCHEMA)
                 pending, rows = [], 0
         if pending:

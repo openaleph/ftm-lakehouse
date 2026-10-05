@@ -31,25 +31,20 @@ class Settings(BaseSettings):
     api_secret: str | None = None
     on_zfs: bool = False
     zfs_pool: str | None = None
-    """ZFS dataset path the lakehouse's tuned datasets are created under.
-    Transport / agent configuration (socket, owner, peer auth) lives in the
-    external ``zfs-agent`` package's own ``ZFS_*`` environment."""
+    """ZFS dataset path the lakehouse's datasets are created under"""
 
     grace_period_days: int = 30
     max_buffer_rows: int = 1_000_000
 
-    journal_pool_size: int = 5
-    """Postgres journal connections kept warm between writers
-    (``LAKEHOUSE_JOURNAL_POOL_SIZE``). ``0`` pools nothing. One pool per journal
-    uri per process, whatever the dataset count, so this times the worker count
-    is the idle figure to size against postgres ``max_connections``."""
+    journal_drain_rows: int = 1_000_000
+    """Rows per Arrow table a journal flush hands to the parquet store"""
 
-    lock_max_retries: int = 22
+    journal_pool_size: int = 5
+    """Postgres journal connections (adbc)"""
+
+    lock_max_retries: int = 10
     """Retry bound for every wait on a dataset lock: acquiring ``.LOCK`` or
-    ``.LOCK-MERGE``, and an append backing off while ``.LOCK`` is held. Retry
-    ``n`` sleeps ``n + rand(0, 1)`` seconds, so the total wait is roughly
-    ``N²/2`` seconds – the default of 22 gives up after ~4.5 minutes; a lock
-    left behind by a crashed writer must be released via ``ftm-lakehouse
+    ``.LOCK-MERGE``. A lock left behind can be released via ``ftm-lakehouse
     maintenance unlock``."""
 
     duckdb_memory_limit: str = "8GB"
