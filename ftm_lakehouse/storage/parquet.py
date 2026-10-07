@@ -17,7 +17,7 @@ from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import cache
-from itertools import batched, chain
+from itertools import chain
 from threading import RLock
 from typing import IO, Any, Callable, Iterable, Iterator, cast
 from urllib.parse import unquote
@@ -626,8 +626,9 @@ class ParquetStore:
 
         Partitions merge in ``LAKEHOUSE_WORKERS`` processes from one snapshot and
         are committed in batches of `MERGE_COMMIT_BATCH`, followed by a
-        checkpoint. Held under [`merge_lock`][ParquetStore.merge_lock] only, so
-        appends keep flowing.
+        checkpoint. A run that fails still commits the partitions that finished,
+        so the next one picks up the rest. Held under
+        [`merge_lock`][ParquetStore.merge_lock] only, so appends keep flowing.
 
         Args:
             force: Rewrite clean partitions too – with a grace period of ``0``
@@ -654,16 +655,22 @@ class ParquetStore:
                 process_map(workers, ordered=False) as run,
             ):
                 by_partition = {task.partition: task for task in tasks}
-
-                def results() -> Iterator[tuple[MergeTask, MergeResult]]:
+                done: list[tuple[MergeTask, MergeResult]] = []
+                try:
                     for result in run(merge_partition, tasks):
                         task = by_partition[result.partition]
                         bar.advance(size=sum(size for _, size in task.files))
-                        yield task, result
-
-                for batch in batched(results(), MERGE_COMMIT_BATCH):
-                    self._commit_merged(batch)
-                    merged += len(batch)
+                        done.append((task, result))
+                        if len(done) == MERGE_COMMIT_BATCH:
+                            batch, done = done, []
+                            self._commit_merged(batch)
+                            merged += len(batch)
+                finally:
+                    # also when a partition failed or a worker died: what finished
+                    # is committed, so the next run resumes instead of starting over
+                    if done:
+                        self._commit_merged(done)
+                        merged += len(done)
             if merged:
                 with self._snapshot_lock, Took() as t:
                     snapshot = self._current_snapshot()

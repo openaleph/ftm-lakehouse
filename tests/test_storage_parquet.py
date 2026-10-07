@@ -411,6 +411,40 @@ def test_storage_parquet_merge_workers(tmp_path, monkeypatch):
     assert len(merged[0]) == 40
 
 
+def test_storage_parquet_merge_commits_before_failure(tmp_path, monkeypatch):
+    """A failing partition – or a dead worker – ends the merge, but what finished
+    before it is committed, so the next run merges only the rest."""
+    monkeypatch.setenv("LAKEHOUSE_WORKERS", "1")
+    store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
+    _flush(store, _origin_rows("a"))
+    _flush(store, _origin_rows("b"))
+    merge_partition = storage_parquet.merge_partition
+    calls: list[tuple[str, str, str]] = []
+    fail_at: int | None = 4
+
+    def record(task):
+        calls.append(task.partition)
+        if len(calls) == fail_at:
+            raise RuntimeError("worker died")
+        return merge_partition(task)
+
+    monkeypatch.setattr(storage_parquet, "merge_partition", record)
+    with pytest.raises(RuntimeError, match="worker died"):
+        store.merge()
+    partitions = store._partitions()[1]
+    assert len(partitions) > 4
+    assert sorted(p for p, (_, clean) in partitions.items() if clean) == sorted(
+        calls[:3]
+    )
+
+    calls.clear()
+    fail_at = None
+    store.merge()
+    assert len(calls) == len(partitions) - 3
+    assert not store.needs_merge
+    assert _row_count(store) == 40
+
+
 def test_storage_parquet_merge_spill_directory_per_task(tmp_path, monkeypatch):
     """Each partition's DuckDB instance spills into its own directory – workers
     sharing one crash on each other's spill files."""
