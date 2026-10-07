@@ -62,10 +62,6 @@ def _build_entities(dataset: str, uri: str) -> EntityRepository:
     return EntityRepository(dataset, uri)
 
 
-def _build_jobs(dataset: str, uri: str, model: type[J]) -> JobRepository[J]:
-    return JobRepository(dataset, uri, model)
-
-
 def _build_versions(dataset: str, uri: str) -> VersionStore:
     return VersionStore(ensure_api_uri(uri))
 
@@ -110,7 +106,7 @@ def get_jobs(dataset: str, model: type[J], uri: Uri | None = None) -> JobReposit
     """Get the job repository for a dataset and job model class (cached)."""
     return cast(
         JobRepository[J],
-        _resolve(_build_jobs, dataset, dataset_uri(dataset, uri), model),
+        _resolve(JobRepository, dataset, dataset_uri(dataset, uri), model),
     )
 
 

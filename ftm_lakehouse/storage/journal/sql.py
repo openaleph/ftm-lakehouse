@@ -89,14 +89,7 @@ class SqlJournalWriter(BaseJournalWriter["SqlJournalStore"]):
     `close` gives it back.
     """
 
-    def __init__(
-        self,
-        store: "SqlJournalStore",
-        origin: str | None = None,
-        role: str | None = None,
-    ) -> None:
-        super().__init__(store, origin=origin, role=role)
-        self._conn: Any = None
+    _conn: Any = None
 
     @property
     def conn(self) -> Any:
@@ -152,7 +145,8 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
     # -- dialect hooks
 
     def make_engine(self) -> Engine:
-        raise NotImplementedError
+        # no idle connections: `get_journal` caches a store per dataset forever
+        return create_engine(self.uri, hide_parameters=True, poolclass=NullPool)
 
     def connect(self) -> Any:
         """Open a connection for a writer's inserts."""
@@ -410,7 +404,7 @@ class SqliteJournalStore(SqlJournalStore):
                 connect_args={"check_same_thread": False},
                 poolclass=StaticPool,
             )
-        return create_engine(self.uri, hide_parameters=True, poolclass=NullPool)
+        return super().make_engine()
 
     def connect(self) -> Any:
         return self.engine.connect()
@@ -493,16 +487,6 @@ class PostgresJournalStore(SqlJournalStore):
     """Journal on postgres – Arrow row IO through ADBC, binary ``COPY``."""
 
     lock_timeout = ROTATE_LOCK_TIMEOUT
-
-    def make_engine(self) -> Engine:
-        # NullPool: connections opened on demand, closed after use. The
-        # engine only carries DDL, counts and the advisory lock here – the
-        # write path goes through ADBC and the pool below – and
-        # ``get_journal`` is an unbounded ``@cache``, so a default QueuePool
-        # of 5+10 idle connections per cached dataset would multiply for no
-        # gain. What to size against postgres ``max_connections`` is
-        # ``journal_pool_size``, not this.
-        return create_engine(self.uri, hide_parameters=True, poolclass=NullPool)
 
     @cached_property
     def adbc_uri(self) -> str:

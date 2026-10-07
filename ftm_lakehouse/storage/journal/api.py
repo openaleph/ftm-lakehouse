@@ -1,13 +1,10 @@
 """ApiJournalStore - HTTP API journal speaking the Arrow IPC stream format."""
 
 import pyarrow as pa
-from anystore.logging import get_logger
 
 from ftm_lakehouse.core.api import LakehouseApiMixin
 from ftm_lakehouse.core.arrow import ARROW_CONTENT_TYPE, serialize_table
 from ftm_lakehouse.storage.journal.base import BaseJournalStore, BaseJournalWriter
-
-log = get_logger(__name__)
 
 
 class ApiJournalWriter(BaseJournalWriter["ApiJournalStore"]):

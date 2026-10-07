@@ -25,7 +25,7 @@ from typing import (
     cast,
 )
 
-from anystore.io import Writer, smart_open
+from anystore.io import SyncProgressBar, Writer, smart_open
 from anystore.io.read import smart_stream_json
 from anystore.io.write import Formats
 from anystore.logging import get_logger
@@ -56,6 +56,9 @@ DOCUMENT_FIELDNAMES = list(Document.model_fields)
 first would otherwise cap the header at ``op`` and ``id``."""
 
 log = get_logger(__name__)
+
+PROGRESS_STEP = 10_000
+"""Documents per progress bar update – one per row would cost a lock each."""
 
 Candidates = Callable[[datetime], Iterator[DeleteCandidate]]
 """The delete-candidate scan an `ExportSession` distributes."""
@@ -674,42 +677,54 @@ class DocumentsRun(DiffableRun):
         staged["parents"] = data.get("properties", {}).get("parent", [])
         self.staging.write(staged)
 
-    def resolve(self) -> dict[str, str]:
-        """The folder paths, built from the staged ``folder`` rows."""
+    def resolve(self) -> tuple[dict[str, str], int]:
+        """The folder paths, built from the staged ``folder`` rows, and the
+        number of staged documents."""
         tree = FolderTree()
+        documents = 0
+        log.info("Resolving folder paths ...", artifact=self.name)
         with Took() as t:
             for staged in self._staged_rows():
                 if folder := staged.get("folder"):
                     tree.put(staged["id"], folder, staged["parents"])
+                documents += "doc" in staged
             paths = tree.paths()
         log.info(
             "Resolved folder paths.",
             artifact=self.name,
             folders=len(paths),
+            documents=documents,
             took=t.took,
         )
-        return paths
+        return paths, documents
 
     def finish(self) -> None:
         """Write the staged documents – one row per resolvable parent, one
         unpathed row otherwise – then the DELs."""
         self.staging.close()
-        paths = self.resolve()
-        for staged in self._staged_rows():
-            document = staged.get("doc")
-            if document is None:
-                continue
-            rows = [
-                {**document, "path": paths[parent]}
-                for parent in staged["parents"]
-                if parent in paths
-            ] or [cast(SDict, document)]
-            for row in rows:
-                self.writer.write(row)
-            op = staged.get("op")
-            if op is not None and self.diff is not None:
+        paths, documents = self.resolve()
+        written = 0
+        with Took() as t, SyncProgressBar(f"Writing {self.name}", documents) as bar:
+            for staged in self._staged_rows():
+                document = staged.get("doc")
+                if document is None:
+                    continue
+                rows = [
+                    {**document, "path": paths[parent]}
+                    for parent in staged["parents"]
+                    if parent in paths
+                ] or [cast(SDict, document)]
                 for row in rows:
-                    self.diff.write({"op": op, **row})
+                    self.writer.write(row)
+                op = staged.get("op")
+                if op is not None and self.diff is not None:
+                    for row in rows:
+                        self.diff.write({"op": op, **row})
+                written += 1
+                if not written % PROGRESS_STEP:
+                    bar.advance(PROGRESS_STEP)
+            bar.advance(written % PROGRESS_STEP)
+        log.info(f"Wrote `{self.name}`.", documents=written, took=t.took)
         super().finish()
 
     def write_delete(self, entity_id: str) -> None:

@@ -3,7 +3,6 @@
 from typing import Generator, Generic, Self, TypeAlias, TypeVar
 
 import pyarrow as pa
-from anystore.logging import get_logger
 
 from ftm_lakehouse.core.api import no_api
 from ftm_lakehouse.core.settings import Settings
@@ -11,7 +10,6 @@ from ftm_lakehouse.logic.entities.buffer import EntityBuffer
 from ftm_lakehouse.model.statement import JOURNAL_SCHEMA, LakehouseStatements
 
 settings = Settings()
-log = get_logger(__name__)
 
 WRITE_BATCH_SIZE = 10_000
 
@@ -119,8 +117,7 @@ class BaseJournalWriter(EntityBuffer, Generic[S]):
         harmless in an append-only journal, where re-emissions accumulate and
         ``merge`` collapses them.
         """
-        self._buffer.clear()
-        self._buffer_size = 0
+        self.flush_buffer()
 
     def close(self) -> None:
         """Close the connection."""

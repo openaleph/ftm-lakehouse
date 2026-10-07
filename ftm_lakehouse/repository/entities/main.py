@@ -1,9 +1,8 @@
 """EntityRepository - entity/statement operations using JournalStore + ParquetStore."""
 
-from contextlib import contextmanager
 from datetime import datetime
 from functools import cached_property
-from typing import Generator, Iterable, Iterator, cast
+from typing import Iterable, Iterator, cast
 
 import pyarrow as pa
 from anystore.interface.lock import Lock
@@ -18,7 +17,6 @@ from ftmq.types import StatementEntities, Statements, ValueEntities
 from rigour.time import utc_now
 
 from ftm_lakehouse.core.api import no_api
-from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.model.statement import DeleteCandidate, LakehouseStatement
 from ftm_lakehouse.repository.artifacts import (
     EntitiesArtifact,
@@ -29,8 +27,6 @@ from ftm_lakehouse.storage.journal import get_journal
 from ftm_lakehouse.storage.journal.base import BaseJournalWriter
 from ftm_lakehouse.storage.parquet import ParquetStore
 from ftm_lakehouse.util import validate_origin
-
-settings = Settings()
 
 
 class EntityRepository(DatasetHandle):
@@ -76,10 +72,9 @@ class EntityRepository(DatasetHandle):
             )
         return ParquetStore(self.uri, self.dataset, self.shards)
 
-    @contextmanager
     def writer(
         self, origin: str | None = None, role: str | None = None
-    ) -> Generator[BaseJournalWriter, None, None]:
+    ) -> BaseJournalWriter:
         """A bulk journal writer – inserts its tail on success, drops it on error.
 
         Example:
@@ -92,8 +87,7 @@ class EntityRepository(DatasetHandle):
             origin: Origin of the statements written through it.
             role: Who asserts them, for statements that carry no role.
         """
-        with self._journal.writer(origin, role) as writer:
-            yield writer
+        return self._journal.writer(origin, role)
 
     def add(
         self,
@@ -273,8 +267,6 @@ class EntityRepository(DatasetHandle):
         """
         now = utc_now()
         stmts = self._collect_entity_statements(entity_id)
-        if not stmts:
-            return 0
         if origin:
             stmts = [s for s in stmts if s.origin == origin]
         with self.writer() as w:
