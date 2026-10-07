@@ -34,8 +34,8 @@ import posixpath
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from functools import cache, cached_property
-from itertools import batched
+from functools import cache
+from itertools import batched, chain
 from threading import RLock
 from typing import IO, Any, Callable, Iterable, Iterator, cast
 from urllib.parse import unquote
@@ -76,7 +76,6 @@ from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.helpers.shards import entity_shard
 from ftm_lakehouse.logic.entities import aggregate_unsafe
-from ftm_lakehouse.logic.entities.aggregate import EntityPayload
 from ftm_lakehouse.logic.parquet import (
     MERGE_COMMIT_BATCH,
     MERGED_PREFIX,
@@ -146,10 +145,17 @@ class MergeResult:
     took: timedelta
 
 
+Partitions = dict[Partition, tuple[Files, bool]]
+"""``(files, clean)`` per partition – ``clean`` when every file was written by
+`merge` (`MERGED_PREFIX`), so a read over it can skip the dedupe."""
+
 Pairs = dict[tuple[str, str], list[tuple[Partition, Files, bool]]]
-"""``(partition, files, clean)`` per ``(shard, bucket)`` pair, one entry per
-origin partition. ``clean`` is whether every file was written by `merge`
-(`MERGED_PREFIX`), i.e. whether a read over it can skip the dedupe."""
+"""`Partitions` grouped per ``(shard, bucket)`` pair."""
+
+
+def _merged(file: str) -> bool:
+    """Whether ``file`` was written by `merge` (`MERGED_PREFIX`)."""
+    return posixpath.basename(file).startswith(MERGED_PREFIX)
 
 
 def merge_partition(task: MergeTask) -> MergeResult:
@@ -312,13 +318,10 @@ def sweep_partition(
 
 
 @cache
-def make_source(table: str, shards: int) -> SqlSource:
+def make_source(shards: int) -> SqlSource:
     """The `SqlSource` reads compile against, pruning by ``shards``."""
-    config = {
-        "id_column": "entity_id",
-        "prune": {**PRUNE, "shard": make_prune_by_shard(shards)},
-    }
-    return SqlSource(table, **config)
+    prune = {**PRUNE, "shard": make_prune_by_shard(shards)}
+    return SqlSource(TABLE, id_column="entity_id", prune=prune)
 
 
 class _LakeStore(LakeStore):
@@ -369,7 +372,7 @@ class ParquetStore:
         self._tags = TagStore(uri)
         self._snapshot_lock = RLock()
         self._snapshot: DeltaTable | None = None
-        self._pairs: tuple[int, Pairs] | None = None
+        self._files: tuple[int, str, Partitions] | None = None
         self._lake = _LakeStore(
             uri=str(self.uri),
             dataset=self.dataset,
@@ -440,131 +443,89 @@ class ParquetStore:
             return None
         return self._snapshot
 
-    def _snapshot_pairs(self) -> tuple[str, Pairs]:
-        """The table root and the current snapshot's data files per
-        ``(shard, bucket)`` pair, from its add actions – file-level metadata,
-        no data scan. Regrouped only when the version moved; empty without a
-        table."""
+    def _partitions(self) -> tuple[str, Partitions]:
+        """The table root and the snapshot's files per partition, from its add
+        actions – regrouped only when the version moved; empty without a table."""
         with self._snapshot_lock:
             snapshot = self._current_snapshot()
             if snapshot is None:
                 return "", {}
             version = snapshot.version()
-            if self._pairs is None or self._pairs[0] != version:
+            if self._files is None or self._files[0] != version:
                 actions = pa.table(snapshot.get_add_actions(flatten=True))
-                partitions: dict[Partition, Files] = {}
-                for file, size, shard, bucket, origin in zip(
+                files: dict[Partition, Files] = {}
+                for file, size, *partition in zip(
                     actions["path"].to_pylist(),
                     actions["size_bytes"].to_pylist(),
                     actions["partition.shard"].to_pylist(),
                     actions["partition.bucket"].to_pylist(),
                     actions["partition.origin"].to_pylist(),
                 ):
-                    key = (shard, bucket, origin)
-                    partitions.setdefault(key, []).append((unquote(file), size))
-                pairs: Pairs = {}
-                for partition, files in sorted(partitions.items()):
-                    clean = all(
-                        posixpath.basename(file).startswith(MERGED_PREFIX)
-                        for file, _ in files
-                    )
-                    pairs.setdefault(partition[:2], []).append(
-                        (partition, files, clean)
-                    )
-                self._pairs = (version, pairs)
-            return snapshot.table_uri.rstrip("/"), self._pairs[1]
+                    key = cast(Partition, tuple(partition))
+                    files.setdefault(key, []).append((unquote(file), size))
+                partitions = {
+                    key: (fs, all(_merged(f) for f, _ in fs))
+                    for key, fs in sorted(files.items())
+                }
+                root = snapshot.table_uri.rstrip("/")
+                self._files = (version, root, partitions)
+            return self._files[1], self._files[2]
 
-    def _snapshot_partitions(self) -> tuple[str, dict[Partition, tuple[Files, bool]]]:
-        """The table root and the snapshot's ``(files, clean)`` per partition."""
-        root, pairs = self._snapshot_pairs()
-        return root, {
-            partition: (files, clean)
-            for sources in pairs.values()
-            for partition, files, clean in sources
-        }
+    def _pairs(self) -> tuple[str, Pairs]:
+        """`_partitions`, grouped per ``(shard, bucket)`` pair."""
+        root, partitions = self._partitions()
+        pairs: Pairs = {}
+        for partition, (files, clean) in partitions.items():
+            pairs.setdefault(partition[:2], []).append((partition, files, clean))
+        return root, pairs
 
-    def _dirty_partitions(self) -> dict[Partition, Files]:
-        """The partitions holding a file `merge` did not write, with their
-        files – what a default merge rewrites."""
-        _, partitions = self._snapshot_partitions()
-        return {p: files for p, (files, clean) in partitions.items() if not clean}
-
-    @cached_property
+    @property
     def source(self) -> SqlSource:
-        return make_source(TABLE, self.shards)
-
-    def _compile_query(self, q: Query | None = None) -> Select:
-        """Compile ``q`` to a statements ``Select`` against the live view.
-
-        Compiles through `self.source`, so a schema filter folds into
-        a ``bucket IN (...)`` predicate (ftmq's `SqlSource`
-        ``prune``) and a schema-scoped read prunes to the matching bucket
-        partitions instead of scanning all of them. The single entry point every
-        lakehouse read funnels its `Query` through.
-        """
-        return (q or Query()).compile(self.source)
+        return make_source(self.shards)
 
     def _statement_data(self, q: Query | None = None) -> Iterator[StatementDict]:
-        """Statement dicts for ``q``.
+        """Statement dicts for ``q``, entity-contiguous.
 
-        A sorted or sliced query runs as ONE query over the whole table: the
-        compiled ``LIMIT`` / ``OFFSET`` live in ftmq's un-scoped
-        ``canonical_ids`` subquery and ``ORDER BY`` only orders within a
-        partition, so under the per-``(shard, bucket)`` iteration it would
-        over-return (one limit *per partition*) and mis-order. It reads
-        ``delta_scan`` on a cursor of its own (`_cursor_over`), reconciling
-        unless every pair it can touch is clean. Everything else iterates the
-        pairs (`_query_statement_data`). Rows stay entity-contiguous either
-        way – ftmq's statement selects order by ``entity_id`` (unsorted) or
-        ``(sortable_value, id)`` (sorted) – so aggregation can run over the
-        stream directly.
+        Iterates the ``(shard, bucket)`` pairs ``q`` can touch – except a sorted
+        or sliced query, whose ``LIMIT`` and ``ORDER BY`` must hold across
+        partitions: that runs as one query over ``delta_scan``.
         """
+        sql = (q or Query()).compile(self.source)
+        prune = self._prune_values(q, self.source)
         if q is not None and (q.sort is not None or q.slice is not None):
-            root, pairs = self._snapshot_pairs()
+            root, pairs = self._pairs()
             if not root:
                 return
-            keys = self._pruned_keys(pairs, self._prune_values(q, self.source))
+            keys = self._pruned_keys(pairs, prune)
             clean = all(c for key in keys for _, _, c in pairs[key])
-            compiled = str(
-                self._compile_query(q).compile(compile_kwargs={"literal_binds": True})
-            )
-            with self._cursor_over(delta_scan_sql(root), clean) as cur:
-                res = cur.execute(compiled)
-                columns = [d[0] for d in res.description]
-                while rows := res.fetchmany(100_000):
-                    for row in rows:
-                        yield cast(StatementDict, dict(zip(columns, row)))
+            sources: Iterable[tuple[str, bool]] = [(delta_scan_sql(root), clean)]
         else:
-            yield from self._query_statement_data(q)
+            sources = self._scoped_sources(prune)
+        yield from cast(Iterator[StatementDict], self._rows(sql, sources))
 
     def query(self, q: Query | None = None) -> StatementEntities:
         """Query entities from the store.
 
         Args:
             q: Optional ``Query`` of entity-level filters (schema, properties,
-                ids, ...) plus ordering / slicing – a sorted or sliced query
-                executes globally (`_statement_data`) so ``LIMIT`` and
-                ``ORDER BY`` hold across partitions.
+                ids, ...) plus ordering / slicing.
 
         Yields:
             StatementEntity objects matching the query.
         """
-        for data in self._query_data(q):
+        for data in aggregate_unsafe(self._statement_data(q), self.dataset):
             yield data.to_entity()
 
     def query_statements(self, q: Query | None = None) -> Statements:
-        """Query ordered Statements from the store.
+        """Query statements from the store.
 
         Args:
-            q: Optional ``Query`` – executed via `_statement_data`;
-                sorted / sliced queries execute globally.
+            q: Optional ``Query`` – filters plus ordering / slicing.
 
         Yields:
-            `LakehouseStatement` objects matching the query – carrying their
-            ``fragment`` and ``role``, so a statement read back here can be
-            handed straight to
-            [`delete_statement`][ftm_lakehouse.repository.EntityRepository.delete_statement]
-            and land in the merge group it came from.
+            `LakehouseStatement` objects, carrying their ``fragment`` and
+            ``role`` so one can be handed straight to
+            [`delete_statement`][ftm_lakehouse.repository.EntityRepository.delete_statement].
         """
         for stmt_dict in self._statement_data(q):
             yield LakehouseStatement.from_dict(stmt_dict)
@@ -875,7 +836,7 @@ class ParquetStore:
         Answered from the snapshot's file list (`MERGED_PREFIX`), which is
         what `merge` itself selects partitions by, so the two cannot disagree.
         """
-        return bool(self._dirty_partitions())
+        return not all(clean for _, clean in self._partitions()[1].values())
 
     def merge(self, force: bool = False) -> None:
         """Collapse duplicates and reap expired tombstones, partition by partition.
@@ -957,7 +918,7 @@ class ParquetStore:
         config = worker_duckdb_config(workers)
         merged = skipped = 0
         with self.merge_lock():
-            root, partitions = self._snapshot_partitions()
+            root, partitions = self._partitions()
             tasks = [
                 MergeTask(partition, files, root, grace_cutoff, config)
                 for partition, (files, clean) in partitions.items()
@@ -1035,35 +996,6 @@ class ParquetStore:
                 grace_period_days=self.settings.grace_period_days,
             )
 
-    def _chained_reader(
-        self, cur: duckdb.DuckDBPyConnection, sqls: list[str]
-    ) -> pa.RecordBatchReader:
-        """Chain queries into one lazily-executed reader for a single write.
-
-        Each query's ``to_arrow_reader`` streams from DuckDB's execution
-        pipeline and ``write_deltalake`` consumes batch by batch, so a
-        rewrite never materialises its input in Python memory. The
-        queries execute strictly sequentially – query ``i + 1`` only
-        starts once query ``i`` is exhausted – so at most one of them
-        holds a sort window in DuckDB at a time.
-
-        [`shard`][ParquetStore.shard] feeds it one query per source
-        partition, deliberately unordered.
-
-        Args:
-            cur: Open DuckDB cursor – must stay alive until the returned
-                reader is fully consumed.
-            sqls: Queries in output order.
-        """
-        first = cur.execute(sqls[0]).to_arrow_reader()
-
-        def batches() -> Iterator[pa.RecordBatch]:
-            yield from first
-            for sql in sqls[1:]:
-                yield from cur.execute(sql).to_arrow_reader()
-
-        return pa.RecordBatchReader.from_batches(first.schema, batches())
-
     def shard(self, shards: int) -> None:
         """Re-key the whole store onto ``shards`` entity-hash shards.
 
@@ -1075,8 +1007,8 @@ class ParquetStore:
         moves – so the rewrite runs one ``write_deltalake`` per
         ``(bucket, origin)`` group, replacing that group's partitions
         wholesale via ``predicate`` while the group's source partitions
-        stream in through a single chained reader
-        (`_chained_reader`). Nothing is materialised in Python, and
+        stream in through a single chained reader. Nothing is materialised
+        in Python, and
         each group's rows land in one atomic Delta commit with the
         bucket-appropriate ``writer_properties``.
 
@@ -1115,8 +1047,6 @@ class ParquetStore:
         if self.exists:
             self._rewrite_shards(shards)
         self.shards = shards
-        # the cached sources prune by the shard count they were built with
-        self.__dict__.pop("source", None)
         self.log.info("Re-shard complete.", shards=shards)
 
     def _rewrite_shards(self, shards: int) -> None:
@@ -1132,7 +1062,7 @@ class ParquetStore:
         from a process that does nothing else.
         """
         with self._maintenance_fence():
-            root, partitions = self._snapshot_partitions()
+            root, partitions = self._partitions()
             groups: dict[tuple[str, str], list[tuple[Partition, Files]]] = {}
             for partition, (files, _) in partitions.items():
                 _, bucket, origin = partition
@@ -1157,9 +1087,14 @@ class ParquetStore:
                         )
                         for partition, files in sources
                     ]
+                    # lazily, one query at a time: a connection streams one
+                    # result, and executing the next one closes it
+                    readers = (con.execute(sql).to_arrow_reader() for sql in sqls)
+                    first = next(readers)
+                    batches = chain.from_iterable(chain([first], readers))
                     write_deltalake(
                         snapshot,
-                        self._chained_reader(con, sqls),
+                        pa.RecordBatchReader.from_batches(first.schema, batches),
                         mode="overwrite",
                         partition_by=PARTITIONS,
                         predicate=(
@@ -1273,7 +1208,7 @@ class ParquetStore:
         Returns:
             ``((shard, bucket), relation sql, clean)`` per pair, in key order.
         """
-        root, pairs = self._snapshot_pairs()
+        root, pairs = self._pairs()
         return [(key, *pair_source(root, pairs[key])) for key in sorted(pairs)]
 
     def deleted_candidates(self, since: datetime) -> Iterator[DeleteCandidate]:
@@ -1293,26 +1228,14 @@ class ParquetStore:
             `DeleteCandidate`, one per entity.
         """
         sql = deleted_candidates_select(since)
-        for reader in self._execute_partitioned(sql, batch_size=SWEEP_BATCH_SIZE):
-            for batch in reader:
-                for row in batch.to_pylist():
-                    yield DeleteCandidate(
-                        id=row["entity_id"],
-                        deleted_at=row["deleted_at"],
-                        origins=frozenset(row["origins"] or ()),
-                        schemata=frozenset(row["schemata"] or ()),
-                        content_hash=bool(row["content_hash"]),
-                    )
-
-    def _list_partitions(self) -> list[tuple[str, str, str]]:
-        """List all ``(shard, bucket, origin)`` triples currently in the table.
-
-        Read from the snapshot's active files (`_snapshot_pairs`) – metadata,
-        no data scan; a ``SELECT DISTINCT`` over ``statement_raw`` opened every
-        file of the table to answer this. Every partition holding a file is
-        listed, whatever its rows are (pre-merge duplicates, tombstones).
-        """
-        return sorted(self._snapshot_partitions()[1])
+        for row in self._rows(sql, self._scoped_sources()):
+            yield DeleteCandidate(
+                id=row["entity_id"],
+                deleted_at=row["deleted_at"],
+                origins=frozenset(row["origins"] or ()),
+                schemata=frozenset(row["schemata"] or ()),
+                content_hash=bool(row["content_hash"]),
+            )
 
     @staticmethod
     def _prune_values(q: Query | None, source: SqlSource) -> dict[str, set[str]]:
@@ -1371,7 +1294,7 @@ class ParquetStore:
         the bucket, so a lookup touches every bucket of its shard – five
         queries where one does.
         """
-        root, pairs = self._snapshot_pairs()
+        root, pairs = self._pairs()
         keys = self._pruned_keys(pairs, prune)
         if prune and "shard" in prune:
             if keys:
@@ -1393,73 +1316,13 @@ class ParquetStore:
             register_partition(cur, source, clean)
             yield cur
 
-    def _execute_partitioned(
-        self,
-        sql: Select,
-        batch_size: int | None = None,
-        prune: dict[str, set[str]] | None = None,
-    ) -> Iterator[pa.RecordBatchReader]:
-        """Yield a streamed Arrow reader per ``(shard, bucket)`` partition.
-
-        Runs ``sql`` over each pair's files (`_scoped_sources`) and hands back
-        the result as a lazy `pyarrow.RecordBatchReader` streamed from
-        DuckDB's execution pipeline, so memory stays bounded per batch instead
-        of materialising the partition.
-
-        Consume each reader fully before advancing to the next: the backing
-        cursor is held open only across its ``yield`` and closes when the
-        generator resumes for the following partition.
-
-        Args:
-            sql: The SQLAlchemy ``Select`` to run.
-            batch_size: Rows per Arrow batch. DuckDB's default of 1M is right
-                for a purely columnar consumer, but a consumer that turns
-                batches into Python objects wants a smaller one – the cap is
-                on *materialised rows*, not bytes.
-            prune: Partition values the query can match (`_prune_values`) –
-                the others are not queried.
-
-        Yields:
-            One `pyarrow.RecordBatchReader` per ``(shard, bucket)``
-            partition.
-        """
+    def _rows(
+        self, sql: Select, sources: Iterable[tuple[str, bool]]
+    ) -> Iterator[dict[str, Any]]:
+        """``sql``'s rows over each ``(relation, clean)`` source in turn
+        (`_scoped_sources`), in Arrow batches of `SWEEP_BATCH_SIZE`."""
         compiled = str(sql.compile(compile_kwargs={"literal_binds": True}))
-        for source, clean in self._scoped_sources(prune):
+        for source, clean in sources:
             with self._cursor_over(source, clean) as cur:
-                res = cur.execute(compiled)
-                if batch_size is None:
-                    yield res.to_arrow_reader()
-                else:
-                    yield res.to_arrow_reader(batch_size)
-
-    def _query_statement_data(self, q: Query | None = None) -> Iterator[StatementDict]:
-        """Query statement dicts from the live view, bypassing FtM construction.
-
-        Iterates ``(shard, bucket)`` pairs (`_execute_partitioned`), turning
-        each Arrow batch into row dicts in one bulk ``to_pylist``.
-
-        Args:
-            q: Optional ftmq ``Query`` (default: match-all), compiled via
-                `_compile_query`.
-
-        Yields:
-            StatementDict instances.
-        """
-        prune = self._prune_values(q, self.source)
-        sql = self._compile_query(q)
-        for reader in self._execute_partitioned(sql, SWEEP_BATCH_SIZE, prune):
-            for batch in reader:
-                yield from cast(list[StatementDict], batch.to_pylist())
-
-    def _query_data(self, q: Query | None = None) -> Iterator[EntityPayload]:
-        """
-        Query entity dicts via aggregate_unsafe(), bypassing FtM object construction.
-
-        Args:
-            q: Optional ftmq ``Query`` (default: match-all), executed via
-                `_statement_data`.
-
-        Yields:
-            EntityPayload instances
-        """
-        yield from aggregate_unsafe(self._statement_data(q), self.dataset)
+                for batch in cur.execute(compiled).to_arrow_reader(SWEEP_BATCH_SIZE):
+                    yield from batch.to_pylist()

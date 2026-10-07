@@ -285,8 +285,8 @@ def deleted_candidates_select(since: datetime) -> Select[Any]:
     still prunes every row group that holds no tombstone, which is nearly all
     of them.
 
-    An entity's rows live in one ``(shard, bucket)`` partition, so grouping
-    per partition (`_execute_partitioned`) groups per entity.
+    An entity's rows live in one ``(shard, bucket)`` pair, so grouping per
+    pair groups per entity.
     """
     t = TABLE_RAW
     return (

@@ -111,7 +111,7 @@ def test_storage_parquet_query_statements(tmp_path):
     assert name_values == {"Jane Doe", "John Smith"}
 
 
-def test_storage_parquet_execute_partitioned_multiple_partitions(tmp_path):
+def test_storage_parquet_query_spans_partitions(tmp_path):
     store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
 
     # Two schemas -> two buckets (thing / interval), so at least two
@@ -204,8 +204,12 @@ def test_storage_parquet_create_adds_no_file(tmp_path):
     store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
     store._ensure_table()
     assert store.exists
-    assert store._list_partitions() == []
+    assert store._partitions()[1] == {}
     assert not store.needs_merge
+
+
+def _dirty(store: ParquetStore) -> set:
+    return {p for p, (_, clean) in store._partitions()[1].items() if not clean}
 
 
 def test_storage_parquet_merge_skips_clean_partitions(tmp_path):
@@ -223,7 +227,7 @@ def test_storage_parquet_merge_skips_clean_partitions(tmp_path):
     jane = (jane_shard, "thing", DEFAULT_ORIGIN)
     john = (john_shard, "thing", DEFAULT_ORIGIN)
     assert _row_count(store) == 4
-    assert set(store._dirty_partitions()) == {jane, john}
+    assert _dirty(store) == {jane, john}
     assert store.needs_merge
 
     store.merge()
@@ -240,7 +244,7 @@ def test_storage_parquet_merge_skips_clean_partitions(tmp_path):
 
     # a duplicate into e-jane's partition dirties that one alone
     _flush(store, [_pack(make_statement("e-jane", "name", "e-jane v1"))])
-    assert set(store._dirty_partitions()) == {jane}
+    assert _dirty(store) == {jane}
     assert _row_count(store) == 3
 
     store.merge()
@@ -385,7 +389,7 @@ def test_storage_parquet_merge_commit_batches(tmp_path, monkeypatch, workers):
     monkeypatch.setenv("LAKEHOUSE_WORKERS", str(workers))
     store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
     _flush(store, _origin_rows("a"))
-    partitions = len(store._list_partitions())
+    partitions = len(store._partitions()[1])
     assert partitions > 3
     version = store.version
 
@@ -451,7 +455,7 @@ def test_storage_parquet_lookup_queries_its_partitions(tmp_path, monkeypatch):
     every pair, one query each."""
     store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
     _flush(store, _origin_rows("a"))
-    pairs = sorted({(s, b) for s, b, _ in store._list_partitions()})
+    pairs = sorted({(s, b) for s, b, _ in store._partitions()[1]})
     assert len(pairs) > 2
 
     executed = []
@@ -490,7 +494,7 @@ def test_storage_parquet_shard_escaped_origin(tmp_path):
     assert _row_count(store) == 40
     assert store.needs_merge  # the re-shard writes part-* files
     entity_ids = {s.entity_id for s in store.query_statements()}
-    shards = {shard for shard, _, _ in store._list_partitions()}
+    shards = {shard for shard, _, _ in store._partitions()[1]}
     assert shards == {entity_shard(e, 3) for e in entity_ids}
     store.merge()
     assert {s.origin for s in store.query_statements()} == {origin}
