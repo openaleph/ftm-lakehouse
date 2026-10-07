@@ -117,10 +117,8 @@ def export_partition(task: ExportTask) -> ExportPart:
     """
     with Took() as t:
         artifacts = get_artifacts(task.dataset, task.uri)
-        # built directly rather than through `ArtifactsRepository.session`,
-        # which wires the delete-candidate scan: that is one pass over the
-        # whole store and the parent has already run it
-        runs = tuple(a.run(task.now, task.parts) for a in artifacts.streamed())
+        # no delete-candidate scan: the parent ran it and hands out `pending`
+        runs = artifacts.runs(task.now, task.parts)
         session = ExportSession(runs, task.version, task.make_diff)
         statements = artifacts.statements
         session.prepare()
@@ -215,8 +213,11 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
             sources = store.sweep_sources()
             # the parent writes its own part – the documents csv and the DEL
             # rows its `finish` produces belong in the assembled file too
-            session = self.artifacts.session(
-                now, version, f"{tmp}/parent", self.job.make_diff
+            session = ExportSession(
+                self.artifacts.runs(now, f"{tmp}/parent"),
+                version,
+                self.job.make_diff,
+                self.entities.deleted_candidates,
             )
             parts = [f"{tmp}/{shard}-{bucket}" for (shard, bucket), _, _ in sources]
             with (

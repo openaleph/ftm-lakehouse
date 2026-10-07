@@ -86,15 +86,8 @@ it without the archive's other sources bleeding in."""
 
 
 class ExportKind(StrEnum):
-    """What each export artifact is called.
-
-    An artifact's identity: the name it declares (`Artifact.kind`), the name
-    it is addressed by (`ArtifactsRepository.__getitem__`) and the name an
-    export run reports it under. Lives here rather than with the export
-    operation because each `Artifact` declares its own, and ``repository/``
-    cannot import ``operation/``. `ftm_lakehouse.operation.export`
-    re-exports it.
-    """
+    """What each export artifact is called (`Artifact.kind`) – also the key an
+    export run reports its counts under."""
 
     statements = "statements"
     entities = "entities"
@@ -519,17 +512,6 @@ class IndexArtifact(VersionedArtifact):
 
     base = path.INDEX
     kind = ExportKind.index
-
-
-ARTIFACTS: tuple[type[Artifact], ...] = (
-    StatementsArtifact,
-    EntitiesArtifact,
-    DocumentsArtifact,
-    StatisticsArtifact,
-    IndexArtifact,
-)
-
-ARTIFACTS_BY_KIND: dict[ExportKind, type[Artifact]] = {a.kind: a for a in ARTIFACTS}
 
 
 class ArtifactRun:
@@ -1074,13 +1056,6 @@ class ArtifactsRepository(DatasetHandle):
         ```
     """
 
-    def __getitem__(self, kind: ExportKind | str) -> Artifact:
-        """The artifact of that name, bound to this dataset."""
-        return ARTIFACTS_BY_KIND[ExportKind(kind)](self)
-
-    def __iter__(self) -> Iterator[Artifact]:
-        yield from (a(self) for a in ARTIFACTS)
-
     @property
     def statements(self) -> StatementsArtifact:
         return StatementsArtifact(self)
@@ -1101,48 +1076,25 @@ class ArtifactsRepository(DatasetHandle):
     def index(self) -> IndexArtifact:
         return IndexArtifact(self)
 
-    def document_scopes(self) -> Iterator[DocumentsArtifact]:
-        """The documents variants a full export writes, one per origin."""
-        yield from (self.documents[origin] for origin in DOCUMENT_ORIGINS)
-
     def streamed(self) -> Iterator[Artifact]:
-        """Every artifact the sweep writes, origin scopes expanded.
+        """Every artifact the sweep writes, one documents scope per origin in
+        `DOCUMENT_ORIGINS` – all but ``index.json``, which registers what these
+        wrote."""
+        yield self.statements
+        yield self.entities
+        for origin in DOCUMENT_ORIGINS:
+            yield self.documents[origin]
+        yield self.statistics
 
-        All of them bar ``index.json``, which registers what these wrote and
-        so runs after them rather than with them.
-        """
-        for artifact in self:
-            if isinstance(artifact, IndexArtifact):
-                continue
-            if isinstance(artifact, DocumentsArtifact):
-                yield from self.document_scopes()
-            else:
-                yield artifact
-
-    def session(
-        self,
-        now: datetime,
-        version: int | None,
-        parts: str,
-        make_diff: bool = True,
-    ) -> ExportSession:
-        """The artifacts an export run writes, ready to be driven as one loop.
+    def runs(self, now: datetime, parts: str) -> tuple[ArtifactRun, ...]:
+        """One run per streamed artifact, writing its part into ``parts``.
 
         Args:
-            now: Timestamp the run started – diff files are named after it and
-                diff states are recorded at it.
-            version: Current delta table version, which the diff series
-                resolve their window against.
-            parts: Part directory the session's own rows are written to
-                (`Artifact.part`).
-            make_diff: Whether diff series run at all.
+            now: Timestamp the export started – diff files are named after it
+                and diff states are recorded at it.
+            parts: Part directory the runs write into (`Artifact.part`).
         """
-        # local import: `factories` imports this module for `ArtifactsRepository`
-        from ftm_lakehouse.repository.factories import get_entities
-
-        runs = tuple(a.run(now, parts) for a in self.streamed())
-        entities = get_entities(self.dataset, self.uri)
-        return ExportSession(runs, version, make_diff, entities.deleted_candidates)
+        return tuple(a.run(now, parts) for a in self.streamed())
 
     def resources(self) -> Iterator[DataResource]:
         """Describe every written artifact for ``index.json``.
