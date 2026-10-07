@@ -9,6 +9,7 @@ pins that they produce the same thing, plus a ``DEL``, which no pair can see.
 import hashlib
 import json
 from importlib import import_module
+from pathlib import Path
 
 import orjson
 import pytest
@@ -161,6 +162,35 @@ def test_export_parallel_merged_store(tmp_path):
     assert _rows(uri, path.EXPORTS_STATEMENTS) == csv
     assert _entities_digest(uri) == entities
     assert _stats(uri) == stats
+
+
+def test_export_failed_pair_keeps_previous_artifacts(tmp_path, monkeypatch):
+    """Pairs are appended beside the artifacts as they finish; a pair that fails
+    drops them, and the previous export stays as it was."""
+    uri = _setup(tmp_path, 1)
+    export(DATASET, uri, make_diff=False)
+    root = Path(uri)
+    artifacts = [*(root / "exports").glob("*"), *root.glob("entities.ftm.json*")]
+    before = {file: file.read_bytes() for file in artifacts}
+    assert len(before) > 3
+
+    swept = []
+    sweep = export_module.export_partition
+
+    def fail_second(task):
+        swept.append(task)
+        if len(swept) == 2:
+            raise RuntimeError("pair failed")
+        return sweep(task)
+
+    monkeypatch.setattr(export_module, "export_partition", fail_second)
+    clear_caches()
+    with pytest.raises(RuntimeError, match="pair failed"):
+        export(DATASET, uri, make_diff=False, force=True)
+
+    assert not list(root.rglob("*.tmp"))
+    for file, data in before.items():
+        assert file.read_bytes() == data, file
 
 
 def test_export_parallel_spill_directory_per_pair(tmp_path, monkeypatch):
