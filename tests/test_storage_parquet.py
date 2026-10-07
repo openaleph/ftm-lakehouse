@@ -1,5 +1,6 @@
 """Tests for ParquetStore — append-only sorted writes + async merge."""
 
+import io
 import math
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -11,6 +12,7 @@ from ftmq.query import M, Query
 from ftmq.store.base import DEFAULT_ORIGIN
 from ftmq.store.lake import pack_statement
 from ftmq.types import Statements
+from pyarrow.csv import CSVWriter  # type: ignore[attr-defined]
 
 from ftm_lakehouse.helpers.shards import entity_shard
 from ftm_lakehouse.logic.parquet import MERGED_PREFIX, TABLE_CONFIGURATION
@@ -18,6 +20,7 @@ from ftm_lakehouse.model.statement import (
     JOURNAL_SCHEMA,
     TABLE_RAW,
     statement_csv_header,
+    statement_csv_select,
 )
 from ftm_lakehouse.storage import parquet as storage_parquet
 from ftm_lakehouse.storage.parquet import ParquetStore
@@ -108,7 +111,7 @@ def test_storage_parquet_query_statements(tmp_path):
     assert name_values == {"Jane Doe", "John Smith"}
 
 
-def test_storage_parquet_execute_partitioned_multiple_partitions(tmp_path):
+def test_storage_parquet_query_spans_partitions(tmp_path):
     store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
 
     # Two schemas -> two buckets (thing / interval), so at least two
@@ -119,7 +122,7 @@ def test_storage_parquet_execute_partitioned_multiple_partitions(tmp_path):
     ]
     _flush(store, [_pack(s) for s in stmts])
 
-    assert set(store.get_entity_ids()) == {"jane", "acme-job"}
+    assert {s.entity_id for s in store.query_statements()} == {"jane", "acme-job"}
 
 
 def test_storage_parquet_append_keeps_duplicates(tmp_path):
@@ -201,8 +204,12 @@ def test_storage_parquet_create_adds_no_file(tmp_path):
     store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
     store._ensure_table()
     assert store.exists
-    assert store._list_partitions() == []
+    assert store._partitions()[1] == {}
     assert not store.needs_merge
+
+
+def _dirty(store: ParquetStore) -> set:
+    return {p for p, (_, clean) in store._partitions()[1].items() if not clean}
 
 
 def test_storage_parquet_merge_skips_clean_partitions(tmp_path):
@@ -220,7 +227,7 @@ def test_storage_parquet_merge_skips_clean_partitions(tmp_path):
     jane = (jane_shard, "thing", DEFAULT_ORIGIN)
     john = (john_shard, "thing", DEFAULT_ORIGIN)
     assert _row_count(store) == 4
-    assert set(store._dirty_partitions()) == {jane, john}
+    assert _dirty(store) == {jane, john}
     assert store.needs_merge
 
     store.merge()
@@ -237,7 +244,7 @@ def test_storage_parquet_merge_skips_clean_partitions(tmp_path):
 
     # a duplicate into e-jane's partition dirties that one alone
     _flush(store, [_pack(make_statement("e-jane", "name", "e-jane v1"))])
-    assert set(store._dirty_partitions()) == {jane}
+    assert _dirty(store) == {jane}
     assert _row_count(store) == 3
 
     store.merge()
@@ -320,33 +327,27 @@ def test_storage_parquet_merge_escaped_origin(tmp_path):
 
 
 def test_storage_parquet_sweep_header(tmp_path):
-    """`statement_csv_header` is the header a real sweep writes, and a part
-    carries none.
-
-    A parallel sweep's parts are headerless and the assembled file takes its
-    header from that function, so the two must not drift – which is what makes
-    the hand-spelled header safe.
-    """
+    """`statement_csv_header` is the header pyarrow writes for the sweep's
+    columns, and a swept part carries none."""
     store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
     _flush(store, _origin_rows("a"))
 
-    list(store.sweep("sweep.csv", False))
-
-    with store._store.open("sweep.csv", "rb") as fh:
-        assert fh.readline() == statement_csv_header()
-
-    # one pair, written as a worker writes its part
-    key, source, clean = store.sweep_sources()[0]
-    with open(tmp_path / "part.csv", "wb") as out:
-        with storage_parquet.partition_cursor(source, clean, {}) as cur:
-            list(storage_parquet.sweep_partition(cur, out, header=False, tee=False))
-    body = (tmp_path / "part.csv").read_bytes()
+    _, source, clean = store.sweep_sources()[0]
+    out = io.BytesIO()
+    sql = str(statement_csv_select().compile(compile_kwargs={"literal_binds": True}))
+    with storage_parquet.partition_cursor(source, clean, {}) as cur:
+        list(storage_parquet.sweep_partition(cur, out))
+        schema = cur.execute(sql).to_arrow_reader().schema
+    body = out.getvalue()
     assert body and not body.startswith(statement_csv_header())
-    assert key == store.sweep_sources()[0][0]
+
+    header = io.BytesIO()
+    CSVWriter(header, schema).close()
+    assert header.getvalue() == statement_csv_header()
 
 
 def test_storage_parquet_sweep_sources_cover_every_row(tmp_path):
-    """The pairs a parallel sweep fans out over are the whole store, once."""
+    """The pairs the export sweep fans out over are the whole store, once."""
     store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
     _flush(store, _origin_rows("a"))
     _flush(store, _origin_rows("b"))
@@ -354,20 +355,15 @@ def test_storage_parquet_sweep_sources_cover_every_row(tmp_path):
     sources = store.sweep_sources()
 
     assert len(sources) > 1, "a sharded store must have several pairs to fan out"
-    swept = []
-    for _, source, clean in sources:
-        with storage_parquet.partition_cursor(source, clean, {}) as cur:
-            swept.extend(storage_parquet.sweep_partition(cur))
-    # same rows as the serial sweep, and every entity in exactly one pair
-    serial = list(store.sweep())
-    assert sorted(r["id"] for r in swept) == sorted(r["id"] for r in serial)
     per_pair = []
     for _, source, clean in sources:
         with storage_parquet.partition_cursor(source, clean, {}) as cur:
-            per_pair.append(
-                {r["entity_id"] for r in storage_parquet.sweep_partition(cur)}
-            )
-    assert not set.intersection(*per_pair) if len(per_pair) > 1 else True
+            per_pair.append(list(storage_parquet.sweep_partition(cur, io.BytesIO())))
+    # same rows as a query, and every entity in exactly one pair
+    swept = sorted(r["id"] for rows in per_pair for r in rows)
+    assert swept == sorted(s.id for s in store.query_statements())
+    entities = [{r["entity_id"] for r in rows} for rows in per_pair]
+    assert not set.intersection(*entities)
 
 
 def test_storage_parquet_merge_workers(tmp_path, monkeypatch):
@@ -393,7 +389,7 @@ def test_storage_parquet_merge_commit_batches(tmp_path, monkeypatch, workers):
     monkeypatch.setenv("LAKEHOUSE_WORKERS", str(workers))
     store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
     _flush(store, _origin_rows("a"))
-    partitions = len(store._list_partitions())
+    partitions = len(store._partitions()[1])
     assert partitions > 3
     version = store.version
 
@@ -459,7 +455,7 @@ def test_storage_parquet_lookup_queries_its_partitions(tmp_path, monkeypatch):
     every pair, one query each."""
     store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
     _flush(store, _origin_rows("a"))
-    pairs = sorted({(s, b) for s, b, _ in store._list_partitions()})
+    pairs = sorted({(s, b) for s, b, _ in store._partitions()[1]})
     assert len(pairs) > 2
 
     executed = []
@@ -498,7 +494,7 @@ def test_storage_parquet_shard_escaped_origin(tmp_path):
     assert _row_count(store) == 40
     assert store.needs_merge  # the re-shard writes part-* files
     entity_ids = {s.entity_id for s in store.query_statements()}
-    shards = {shard for shard, _, _ in store._list_partitions()}
+    shards = {shard for shard, _, _ in store._partitions()[1]}
     assert shards == {entity_shard(e, 3) for e in entity_ids}
     store.merge()
     assert {s.origin for s in store.query_statements()} == {origin}

@@ -7,13 +7,13 @@ naive/local leak in the read path fails the suite at large; these tests pin
 the remaining surfaces directly.
 """
 
-from collections import deque
 from datetime import datetime, timedelta, timezone
 
 from ftmq.util import make_entity
 
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.model.job import JobModel
+from ftm_lakehouse.operation.factories import export
 from ftm_lakehouse.repository import EntityRepository
 from ftm_lakehouse.storage.tags import TagStore
 from tests.shared import JANE
@@ -72,8 +72,7 @@ def test_statement_roundtrip_timestamps_are_utc(tmp_path):
         else:
             assert "+00:00" in last_seen or last_seen.endswith("Z"), last_seen
 
-    # the csv is written by the sweep's Arrow tee; the rows are discarded here
-    deque(repo.sweep(), maxlen=0)
+    export(DATASET, tmp_path)
     csv_content = (tmp_path / path.EXPORTS_STATEMENTS).read_text()
     header, first_row = csv_content.splitlines()[:2]
     # UTC may be rendered as `+00:00` or the `Z` (Zulu) suffix – both are UTC.

@@ -16,7 +16,7 @@ from typing import Generator
 
 import pytest
 from followthemoney import EntityProxy
-from ftmq import C, Query
+from ftmq import M, Query
 
 from ftm_lakehouse.repository.entities import EntityRepository
 from ftm_lakehouse.repository.factories import get_entities
@@ -212,8 +212,8 @@ def test_merge_collapses_appended_duplicates(repo):
     assert set(post_merge) == set(pre_merge)
 
 
-def test_get_changed_entity_ids_sees_tombstones(local_repo):
-    """The diff path targets statement_raw so deletions remain visible."""
+def test_deleted_candidates_see_tombstones(local_repo):
+    """The diff path reads statement_raw, so deletions remain visible."""
     repo = local_repo
     jane = EntityProxy.from_dict(JANE)
 
@@ -225,15 +225,11 @@ def test_get_changed_entity_ids_sees_tombstones(local_repo):
     repo.delete_entity("jane")
     repo.flush()
 
-    # Even though the deduped view hides the tombstoned entity from
-    # normal reads, the diff path queries statement_raw so it still
-    # picks up the deletion timestamp.
-    changed = list(
-        repo._statements.get_entity_ids(
-            Query(C(first_seen__gte=before)), source=repo._statements.source_raw
-        )
-    )
-    assert "jane" in changed
+    # the live view hides jane; the raw scan behind the DEL candidates does not
+    assert not list(repo.query(Query(M(entity_id="jane"))))
+    candidates = {c.id: c for c in repo.deleted_candidates(before)}
+    assert set(candidates) == {"jane"}
+    assert candidates["jane"].schemata == {"Person"}
 
 
 def test_flush_mixed_new_and_existing(repo):

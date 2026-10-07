@@ -22,7 +22,7 @@ for entity in aggregate_unsafe(statement_dicts, "my_dataset"):
 
 ## Parquet helpers
 
-The DuckDB config, the per-source `statement` builders a read picks between, the `LakeStore` view builders, and the merge-query builder used by `ParquetStore`.
+The DuckDB SQL `ParquetStore` runs: the `statement` views a read picks between – a plain scan (`live_rows_sql`) over merged partitions, the dedupe query (`dedupe_rows_sql`) otherwise – and the merge and re-shard rewrites, which read a partition's files directly (`partition_source_sql`) instead of going through Delta.
 
 ::: ftm_lakehouse.logic.parquet.duckdb_config
     options:
@@ -54,14 +54,10 @@ The DuckDB config, the per-source `statement` builders a read picks between, the
         heading_level: 3
         show_root_heading: true
 
-The two view builders feed ftmq's `LakeStore`, whose connection-level views over `delta_scan` serve `stats()` and the raw-SQL CLI – `statement` always reconciles there. Partition-scoped reads build their own `statement` view per cursor over the partition's files: `live_rows_sql` – a plain `WHERE deleted_at IS NULL` scan – when every active file was written by `merge`, `dedupe_rows_sql` otherwise, so reads are correct at any time and cheapest on a merged store. `statement_raw` exposes every physical row – tombstones and pre-merge duplicates included – for raw-source `get_entity_ids` queries (diff exports).
-
 ::: ftm_lakehouse.logic.parquet.build_merge_sql
     options:
         heading_level: 3
         show_root_heading: true
-
-An executable DuckDB SQL string holding all dedupe / fragment-supersession logic; it collapses one `(shard, bucket, origin)` partition for physical rewrite. `ParquetStore.merge` runs it over the partition's files (`partition_source_sql`) rather than `statement_raw`, so a merge never replays the Delta log per partition; `dedupe_rows_sql` is the same query without the grace predicate and the sort – what a read over a dirty partition runs. Change-detection for diff exports no longer has its own SQL builder – it is an ftmq `Query` over the raw source (`ParquetStore.get_entity_ids(q, source=store.source_raw)`).
 
 ::: ftm_lakehouse.logic.parquet.partition_source_sql
     options:
@@ -83,8 +79,6 @@ An executable DuckDB SQL string holding all dedupe / fragment-supersession logic
         heading_level: 3
         show_root_heading: true
 
-What a merge reads and writes instead of going through Delta: one partition's files as a `SHARDED_SCHEMA`-shaped relation (partition columns as constants, columns the files predate as `NULL`), the DuckDB `COPY` options per bucket, and the DuckDB config of one of `LAKEHOUSE_WORKERS` worker processes.
-
 ::: ftm_lakehouse.logic.parquet.build_shard_sql
     options:
         heading_level: 3
@@ -94,8 +88,6 @@ What a merge reads and writes instead of going through Delta: one partition's fi
     options:
         heading_level: 3
         show_root_heading: true
-
-The other partition rewrite: `build_shard_sql` re-keys a partition's rows onto a new shard count for `ParquetStore.shard`, recomputing each row's `shard` in DuckDB. `shard_expr_sql` is the SQL twin of `helpers.shards.entity_shard` – `banal.hash_data` of a string is a plain SHA-1 over its UTF-8 bytes, which is what DuckDB's `sha1()` returns, and a parity test pins the two together.
 
 ## Statement Serialization
 

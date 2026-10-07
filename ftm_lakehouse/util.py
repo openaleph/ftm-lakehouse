@@ -1,6 +1,9 @@
+import multiprocessing
 import re
+from concurrent.futures import ProcessPoolExecutor
+from contextlib import contextmanager
 from functools import lru_cache
-from typing import Any
+from typing import Any, Callable, Iterator
 
 from banal import ensure_list
 from followthemoney.dataset.util import dataset_name_check
@@ -222,3 +225,21 @@ def validate_dataset_name(name: str) -> str:
         raise ValueError(f"Invalid dataset name: `{name}` (reserved)")
     dataset_name_check(name)
     return name
+
+
+@contextmanager
+def process_map(workers: int) -> Iterator[Callable[..., Iterator[Any]]]:
+    """An ordered ``map`` over ``workers`` spawned processes – the builtin for one.
+
+    Spawned, not forked: the parent holds DuckDB and Delta threads a fork would
+    copy mid-flight. Pending tasks are cancelled when the caller fails.
+    """
+    if workers <= 1:
+        yield map
+        return
+    context = multiprocessing.get_context("spawn")
+    pool = ProcessPoolExecutor(workers, mp_context=context)
+    try:
+        yield pool.map
+    finally:
+        pool.shutdown(cancel_futures=True)

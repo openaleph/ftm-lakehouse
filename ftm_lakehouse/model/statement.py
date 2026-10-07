@@ -144,12 +144,8 @@ def _sharded_table(name: str) -> TableClause:
 # with tombstones filtered.
 TABLE = _sharded_table(nks.STATEMENT_TABLE)
 
-# Raw view name (``"statement_raw"``) – registered alongside ``TABLE``
-# on the same LakeStore connection and surfaces the underlying Delta
-# rows unchanged. Targeted by paths that need tombstones and per-row
-# physical layout visible: `build_merge_sql` (grace-period
-# tombstone retention) and raw-source ``get_entity_ids`` queries (diff
-# consumers emit DEL ops).
+# Raw view name (``"statement_raw"``): every physical row, tombstones and
+# duplicates included – what `build_merge_sql` and the DEL candidate scan read.
 TABLE_RAW = _sharded_table(f"{nks.STATEMENT_TABLE}_raw")
 
 
@@ -289,8 +285,8 @@ def deleted_candidates_select(since: datetime) -> Select[Any]:
     still prunes every row group that holds no tombstone, which is nearly all
     of them.
 
-    An entity's rows live in one ``(shard, bucket)`` partition, so grouping
-    per partition (`_execute_partitioned`) groups per entity.
+    An entity's rows live in one ``(shard, bucket)`` pair, so grouping per
+    pair groups per entity.
     """
     t = TABLE_RAW
     return (
@@ -321,23 +317,9 @@ def statement_csv_select() -> Select[Any]:
 
 
 def statement_csv_header() -> bytes:
-    """The header row `statement_csv_select`'s csv carries, by itself.
-
-    What the assembled ``statements.csv`` of a parallel sweep takes its header
-    from: the workers write headerless parts
-    ([`sweep_partition`][ftm_lakehouse.storage.parquet.sweep_partition]), so
-    the header has to be produced once, on its own, as the first piece.
-
-    Quoted because ``pyarrow`` quotes every field name and the rows under this
-    header are written by its ``CSVWriter`` – no column name *needs* escaping,
-    but an unquoted header would differ both from the file it heads and from
-    every ``statements.csv`` written so far. That equality is asserted against
-    a real sweep rather than assumed:
-    ``tests/test_storage_parquet.py::test_storage_parquet_sweep_header``.
-
-    Returns:
-        The header line, newline included.
-    """
+    """The ``statements.csv`` header row, quoted as pyarrow's ``CSVWriter``
+    quotes it – the export writes it as its own first part, the swept parts
+    being headerless."""
     names = '","'.join(STATEMENT_CSV_COLUMNS)
     return f'"{names}"\n'.encode()
 

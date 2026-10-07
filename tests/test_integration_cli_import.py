@@ -146,13 +146,13 @@ def test_cli_entities_import_unsafe_roundtrip(tmp_path, cli_runner):
     assert entities["jane"].get("proof") == ["doc-1"]
     assert "Jane Doe" in entities["jane"].get("name")
 
-    stmts = list(dst._statements._query_statement_data())
+    stmts = list(dst._statements._statement_data())
     origins = {r["origin"] for r in stmts if r["entity_id"] == "jane"}
     assert origins == {"crawl"}  # payload origin wins over the bulk default
 
 
 def _sorted_rows(repo: EntityRepository) -> list[dict]:
-    rows = list(repo._statements._query_statement_data())
+    rows = list(repo._statements._statement_data())
     return sorted(rows, key=lambda r: (r["id"], r["fragment"]))
 
 
@@ -195,7 +195,7 @@ def test_import_entities_unsafe_bounded_buffer(tmp_path):
     }
     import_entities_unsafe(repo, [payload], bulk_size=3)
 
-    rows = list(repo._statements._query_statement_data())
+    rows = list(repo._statements._statement_data())
     assert len(rows) == 11  # 10 names + BASE stub
     assert repo.version is not None and repo.version >= 3  # several flushes
 

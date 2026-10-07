@@ -36,7 +36,7 @@ def _fill(repo: EntityRepository, origins: tuple[str, ...] = ("a", "b")) -> None
 
 
 def _shards_on_disk(repo: EntityRepository) -> set[str]:
-    return {s for s, _, _ in repo._statements._list_partitions()}
+    return {s for s, _, _ in repo._statements._partitions()[1]}
 
 
 def test_operation_shard(tmp_path):
@@ -65,7 +65,7 @@ def test_operation_shard(tmp_path):
     assert _shards_on_disk(repo) == {
         entity_shard(f"entity-{i}", 8) for i in range(ENTITIES)
     }
-    for _, bucket, origin in repo._statements._list_partitions():
+    for _, bucket, origin in repo._statements._partitions()[1]:
         assert bucket == "thing"
         assert origin in ("a", "b")
 

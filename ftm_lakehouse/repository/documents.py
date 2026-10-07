@@ -1,21 +1,15 @@
 """DocumentRepository - compiled metadata (csv) about files to consume for
 clients."""
 
-from datetime import datetime
 from functools import cached_property
-from typing import Iterator
 
 from anystore.logic.compress import CompressKind
 from anystore.types import Uri
-from ftmq.query import C, M, P, Query
 
 from ftm_lakehouse.logic.path import StoreKey
 from ftm_lakehouse.model.file import Documents
 from ftm_lakehouse.repository.artifacts import DocumentsArtifact
 from ftm_lakehouse.repository.base import DatasetHandle
-from ftm_lakehouse.storage.parquet import ParquetStore
-
-Q_DOCUMENTS = [M(schemata="Document"), ~M(schema="Folder"), P(contentHash__null=False)]
 
 
 class DocumentRepository(DatasetHandle):
@@ -32,8 +26,7 @@ class DocumentRepository(DatasetHandle):
     which already holds every entity. The row shape and reading the result
     back belong to
     [`DocumentsArtifact`][ftm_lakehouse.repository.artifacts.DocumentsArtifact];
-    this repository owns the read side – streaming the written csv back and
-    the tombstoned ids the diff series need.
+    this repository streams the written csv back.
 
     Example:
         ```python
@@ -44,12 +37,6 @@ class DocumentRepository(DatasetHandle):
             print(document.public_url)  # use uri to download
         ```
     """
-
-    @cached_property
-    def _statements(self) -> ParquetStore:
-        return ParquetStore(
-            self.uri, self.dataset, self._model.shards, self._model.compression
-        )
 
     @cached_property
     def _artifact(self) -> DocumentsArtifact:
@@ -72,14 +59,3 @@ class DocumentRepository(DatasetHandle):
     def stream(self, origin: str | None = None) -> Documents:
         """Stream the exported documents csv, optionally scoped to ``origin``."""
         yield from self._artifact[origin].stream()
-
-    def deleted_ids(self, since: datetime, origin: str | None = None) -> Iterator[str]:
-        """Document ids with statements tombstoned since the given timestamp.
-
-        Reads `ParquetStore.source_raw`, since the live view hides exactly
-        the rows this asks about.
-        """
-        q = Query(*Q_DOCUMENTS, C(deleted_at__gte=since))
-        if origin:
-            q = q.where(C(origin=origin))
-        return self._statements.get_entity_ids(q, source=self._statements.source_raw)
