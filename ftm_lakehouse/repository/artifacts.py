@@ -494,18 +494,7 @@ class ArtifactRun:
         """Release whatever the run opened."""
 
 
-class WritingRun(ArtifactRun):
-    """A run that writes its artifact's part row by row."""
-
-    def __init__(self, artifact: Artifact, now: datetime, parts: str) -> None:
-        super().__init__(artifact, now, parts)
-        self.writer = artifact.writer(parts)
-
-    def close(self) -> None:
-        self.writer.close()
-
-
-class DiffableRun(WritingRun):
+class DiffableRun(ArtifactRun):
     """A run that also writes a diff series.
 
     Additions show in the entities' folded ``first_seen``; deletions do not
@@ -517,9 +506,9 @@ class DiffableRun(WritingRun):
 
     def __init__(self, artifact: DiffableArtifact, now: datetime, parts: str) -> None:
         super().__init__(artifact, now, parts)
+        self.writer = artifact.writer(parts)
         self.since: datetime | None = None
         self.since_iso: str | None = None
-        self.active = False
         self.pending: set[str] = set()
         self.diff: Writer | None = None
 
@@ -538,22 +527,17 @@ class DiffableRun(WritingRun):
         self.since = last_timestamp
         # the folded bounds' spelling, so both sides compare lexically
         self.since_iso = datetime_iso(last_timestamp)
-        self.active = True
         self.diff = self.artifact.diff_writer(self.parts)
 
     def claims(self, candidate: DeleteCandidate) -> bool:
         """Whether ``candidate`` falls into this series' window."""
-        return (
-            self.active
-            and self.since is not None
-            and candidate.deleted_at >= self.since
-        )
+        return self.since is not None and candidate.deleted_at >= self.since
 
     def op_for(self, payload: EntityPayload) -> DiffOp | None:
         """This entity's diff op, ``None`` when it did not change. Claims the id
         off `pending` – a partly tombstoned entity is a ``MOD``, not a ``DEL``.
         """
-        if not self.active or self.since_iso is None or not payload.id:
+        if self.since_iso is None or not payload.id:
             return None
         touched = payload.id in self.pending
         if touched:
@@ -587,7 +571,7 @@ class DiffableRun(WritingRun):
             self.artifact.set_state(self.now, version)
 
     def close(self) -> None:
-        super().close()
+        self.writer.close()
         if self.diff is not None:
             self.diff.close()
 
@@ -763,12 +747,12 @@ class ExportSession:
         self,
         runs: tuple[ArtifactRun, ...],
         version: int | None,
-        make_diff: bool = True,
         candidates: Candidates | None = None,
     ) -> None:
         self.runs = runs
+        # `None` – no table, or no diff asked for – opens no diff window and
+        # records no state
         self.version = version
-        self.make_diff = make_diff
         self.candidates = candidates
         self.counts: Counter[str] = Counter()
 
@@ -778,10 +762,8 @@ class ExportSession:
         A worker calls this directly and never finishes or commits: `finish`
         is work over the whole store and `commit` writes tags – the parent's.
         """
-        # no version, no diff window – what `--no-diff` asks for
-        version = self.version if self.make_diff else None
         for run in self.runs:
-            run.prepare(version)
+            run.prepare(self.version)
 
     def close(self) -> None:
         """Close every writer, whatever happened to the rest."""
@@ -813,7 +795,7 @@ class ExportSession:
     def load_pending(self) -> None:
         """Fill every active series' `pending` from one scan at the earliest
         window – each series claims its own (`DiffableRun.claims`)."""
-        active = [r for r in self.diffable if r.active and r.since is not None]
+        active = [r for r in self.diffable if r.since is not None]
         if not active or self.candidates is None:
             return
         since = min(cast(datetime, r.since) for r in active)
@@ -843,8 +825,7 @@ class ExportSession:
                     run.finish()
         finally:
             self.close()
-        # committing after `make_diff=False` would skip the changes since
-        if exc_type is None and self.make_diff:
+        if exc_type is None:
             for run in self.runs:
                 run.commit(self.version)
 

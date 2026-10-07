@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, Callable
 
 from anystore.io import SyncProgressBar, smart_open
 from anystore.util import Took, mask_uri
@@ -30,7 +30,6 @@ from ftm_lakehouse.model.job import DatasetJobModel
 from ftm_lakehouse.model.statement import statement_csv_header
 from ftm_lakehouse.operation.base import DatasetJobOperation
 from ftm_lakehouse.repository.artifacts import (
-    Artifact,
     Assembly,
     DiffableArtifact,
     ExportKind,
@@ -57,10 +56,7 @@ class ExportTask:
     uri: str
     now: datetime
     version: int | None
-    make_diff: bool
     parts: str
-    shard: str
-    bucket: str
     source: SweepSource
     duckdb_config: dict[str, str]
     pending: dict[str, frozenset[str]]
@@ -88,7 +84,7 @@ def export_partition(task: ExportTask) -> ExportPart:
         artifacts = get_artifacts(task.dataset, task.uri)
         # no delete-candidate scan: the parent ran it and hands out `pending`
         runs = artifacts.runs(task.now, task.parts)
-        session = ExportSession(runs, task.version, task.make_diff)
+        session = ExportSession(runs, task.version)
         statements = artifacts.statements
         session.prepare()
         for run in session.diffable:
@@ -109,7 +105,7 @@ def export_partition(task: ExportTask) -> ExportPart:
             for run in session.diffable
         }
         stats = next(r.collector for r in session.runs if isinstance(r, StatisticsRun))
-        counts = dict(session.result())
+        counts = session.result()
     return ExportPart(task.parts, counts, seen, stats, t.took)
 
 
@@ -158,29 +154,35 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
             self.entities.merge_lock(),
             TemporaryDirectory(prefix="ftm-lakehouse-export-") as tmp,
         ):
-            version = store.version
+            # no diff asked for is no version: no diff window, no state recorded
+            version = store.version if self.job.make_diff else None
             sources = store.sweep_sources()
             # the parent's own part: the documents csv and the DELs of `finish`
             session = ExportSession(
                 self.artifacts.runs(now, f"{tmp}/parent"),
                 version,
-                self.job.make_diff,
                 self.entities.deleted_candidates,
             )
             parts = [f"{tmp}/{s.key[0]}-{s.key[1]}" for s in sources]
-            # the bar's throughput: the bytes each pair read
-            sizes = {part: s.size for part, s in zip(parts, sources)}
-            files = [
-                (artifact, artifact.assembly())
-                for artifact in self.artifacts.streamed()
-                if not isinstance(artifact, VersionedArtifact)
+            streamed = list(self.artifacts.streamed())
+            # one file per artifact and diff series, each part appended as it comes
+            assemblies: list[tuple[Callable[[str], str], Assembly]] = [
+                *(
+                    (a.part, a.assembly())
+                    for a in streamed
+                    if not isinstance(a, VersionedArtifact)
+                ),
+                *(
+                    (a.diff_part, a.diff_assembly(now))
+                    for a in streamed
+                    if isinstance(a, DiffableArtifact)
+                ),
             ]
-            diffs = [
-                (artifact, artifact.diff_assembly(now))
-                for artifact, _ in files
-                if isinstance(artifact, DiffableArtifact)
-            ]
-            assemblies = [assembly for _, assembly in (*files, *diffs)]
+
+            def append(parts: str) -> None:
+                for part, assembly in assemblies:
+                    assembly.append(part(parts))
+
             try:
                 with (
                     session,
@@ -194,10 +196,7 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
                             uri=str(self.uri),
                             now=now,
                             version=version,
-                            make_diff=self.job.make_diff,
                             parts=part,
-                            shard=source.key[0],
-                            bucket=source.key[1],
                             source=source,
                             duckdb_config=worker_duckdb_config(workers),
                             pending=pending.get(source.key[0], {}),
@@ -208,21 +207,22 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
                     done: dict[str, ExportPart] = {}
                     headed = False
                     for part in run(export_partition, tasks):
-                        task = by_parts[part.parts]
+                        shard, bucket = by_parts[part.parts].source.key
                         done[part.parts] = part
                         statements = part.counts.get("statements", 0)
                         counts.update(part.counts)
                         if statements and not headed:
                             # ahead of the first row, so an empty csv stays empty
-                            self._append(self._write_header(tmp), files, diffs)
+                            append(self._write_header(tmp))
                             headed = True
-                        self._append(part.parts, files, diffs)
-                        bar.advance(size=sizes[part.parts])
+                        append(part.parts)
+                        # the bar's throughput: the bytes each pair read
+                        bar.advance(size=by_parts[part.parts].source.size)
                         self.log.info(
-                            f"Processed `{task.shard}/{task.bucket}`.",
+                            f"Processed `{shard}/{bucket}`.",
                             took=part.took,
-                            shard=task.shard,
-                            bucket=task.bucket,
+                            shard=shard,
+                            bucket=bucket,
                             statements=statements,
                         )
                     # in snapshot order, not as finished: the documents csv is
@@ -236,28 +236,16 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
                 # after the session closed: its own writers' codec trailers are
                 # written, so its part is a complete frame
                 with Took() as t:
-                    self._append(f"{tmp}/parent", files, diffs)
-                    for assembly in assemblies:
+                    append(f"{tmp}/parent")
+                    for _, assembly in assemblies:
                         assembly.commit()
                 self.log.info("Moved the artifacts into place.", took=t.took)
             except BaseException:
-                for assembly in assemblies:
+                for _, assembly in assemblies:
                     assembly.abort()
                 raise
             counts.update(session.result())
         return dict(counts)
-
-    @staticmethod
-    def _append(
-        parts: str,
-        files: list[tuple[Artifact, Assembly]],
-        diffs: list[tuple[DiffableArtifact, Assembly]],
-    ) -> None:
-        """Append every part in the ``parts`` directory to its file."""
-        for artifact, assembly in files:
-            assembly.append(artifact.part(parts))
-        for diffable, assembly in diffs:
-            assembly.append(diffable.diff_part(parts))
 
     def _write_header(self, tmp: str) -> str:
         """The ``statements.csv`` header as a part directory of its own."""
