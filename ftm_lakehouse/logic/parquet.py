@@ -115,26 +115,6 @@ def worker_duckdb_config(workers: int) -> dict[str, str]:
     return config
 
 
-def split_duckdb_config(config: dict[str, str], parts: int) -> list[dict[str, str]]:
-    """``config`` shared out between ``parts`` DuckDB instances of one task –
-    memory limit and threads divided, each instance spilling beside the task's
-    directory rather than into it (instances number their spill files alike)."""
-    if parts <= 1:
-        return [config]
-    shares = []
-    for i in range(parts):
-        share = dict(config)
-        if "memory_limit" in config:
-            limit = parse_byte_size(config["memory_limit"])
-            share["memory_limit"] = f"{limit // parts}B"
-        if "threads" in config:
-            share["threads"] = str(max(int(config["threads"]) // parts, 1))
-        if "temp_directory" in config:
-            share["temp_directory"] = f"{config['temp_directory']}-{i}"
-        shares.append(share)
-    return shares
-
-
 def _string_literal(value: str) -> str:
     """Escape ``value`` for interpolation as a single-quoted SQL literal."""
     return value.replace("'", "''")

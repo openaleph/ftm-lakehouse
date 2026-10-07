@@ -76,7 +76,6 @@ from ftm_lakehouse.logic.parquet import (
     partition_source_sql,
     raw_view_sql,
     shard_target_file_size,
-    split_duckdb_config,
     worker_duckdb_config,
 )
 from ftm_lakehouse.model.dataset import DEFAULT_SHARDS
@@ -184,17 +183,27 @@ def _relations(root: str, sources: list[tuple[Partition, Files, bool]]) -> list[
     ]
 
 
-def _union(relations: Iterable[str]) -> str:
-    """``relations`` as one relation."""
-    return f"({' UNION ALL '.join(relations)})"
-
-
 def pair_source(
     root: str, sources: list[tuple[Partition, Files, bool]]
 ) -> tuple[str, bool]:
     """One ``(shard, bucket)`` pair's origin partitions as one relation, and
     whether all of them are clean."""
-    return _union(_relations(root, sources)), all(clean for _, _, clean in sources)
+    sql = " UNION ALL ".join(_relations(root, sources))
+    return f"({sql})", all(clean for _, _, clean in sources)
+
+
+@dataclass(frozen=True)
+class SweepPartition:
+    """One origin partition of a pair, as the sweep reads it."""
+
+    relation: str
+    clean: bool
+    """Only `merge` output – read as a plain scan, else through the dedupe."""
+    presorted: bool
+    """One `merge` file, written in ``entity_id`` order – read as it is, else
+    sorted."""
+    size: int
+    """Bytes of its files."""
 
 
 @dataclass(frozen=True)
@@ -203,20 +212,12 @@ class SweepSource:
     resolved against one snapshot, so it pickles to a worker."""
 
     key: tuple[str, str]
-    relations: list[str]
-    """One relation per origin partition."""
-    clean: bool
-    """Every partition holds only `merge` output."""
-    presorted: bool
-    """Every partition is one `merge` file, written in ``entity_id`` order – so
-    the sweep merges the partitions' streams instead of sorting the pair."""
-    size: int
-    """Bytes of the pair's files."""
+    partitions: list[SweepPartition]
 
     @property
-    def relation(self) -> str:
-        """The pair as one relation."""
-        return _union(self.relations)
+    def size(self) -> int:
+        """Bytes of the pair's files."""
+        return sum(partition.size for partition in self.partitions)
 
 
 def register_partition(
@@ -237,11 +238,9 @@ def register_partition(
 
 
 @contextmanager
-def partition_cursor(
-    source: str, clean: bool, config: dict[str, str]
-) -> Iterator[duckdb.DuckDBPyConnection]:
-    """A standalone connection with `register_partition`'s views over
-    ``source`` – unlike ``LakeStore.cursor`` it loads no ``DeltaTable``."""
+def _connect(config: dict[str, str]) -> Iterator[duckdb.DuckDBPyConnection]:
+    """A standalone in-memory DuckDB – unlike ``LakeStore.cursor`` it loads no
+    ``DeltaTable``. Its cursors inherit the session settings."""
     duck: dict[str, Any] = {
         "autoinstall_known_extensions": "true",
         "autoload_known_extensions": "true",
@@ -254,6 +253,16 @@ def partition_cursor(
         con.execute("SET enable_progress_bar = false")
         con.execute("LOAD icu; SET GLOBAL TimeZone='UTC'")
         setup_duckdb_storage(con)
+        yield con
+
+
+@contextmanager
+def partition_cursor(
+    source: str, clean: bool, config: dict[str, str]
+) -> Iterator[duckdb.DuckDBPyConnection]:
+    """A standalone connection with `register_partition`'s views over
+    ``source``."""
+    with _connect(config) as con:
         register_partition(con, source, clean)
         yield con
 
@@ -267,11 +276,14 @@ def sweep_pair(
     written to ``out`` as headerless csv, in the order it is read (the export
     writes the header as a part of its own; ``out`` stays the caller's to close).
 
-    A presorted pair streams every partition in file order and merges the rows
-    (``heapq.merge``), its memory bounded by the batches in flight. Any other
-    pair is sorted as one relation – a DuckDB sort over a union does not spill,
-    so that needs the whole pair in memory. Batches are read a batch ahead on a
-    thread (`prefetch`).
+    Every partition is read on its own and the rows merged (``heapq.merge``): a
+    presorted one in file order, its memory bounded by the batches in flight,
+    any other sorted – through the dedupe, whose every key holds ``origin``, so
+    per partition is what the pair reads. Never the pair as one: DuckDB failed to
+    spill a sort over a clean pair's union. The partitions' queries run on
+    cursors of one instance, so they share its memory limit and spill for each
+    other – separate instances each fail on their own share. Batches are read a
+    batch ahead on a thread (`prefetch`).
     """
     select = statement_csv_select()
     options = WriteOptions(include_header=False)
@@ -288,21 +300,20 @@ def sweep_pair(
                 writer.write(batch)
                 yield from cast(list[StatementDict], batch.to_pylist())
 
-        if source.presorted:
-            sql = _compile(select.order_by(None))  # file order is entity order
-            configs = split_duckdb_config(config, len(source.relations))
-            streams = []
-            for relation, share in zip(source.relations, configs):
-                cur = stack.enter_context(partition_cursor(relation, True, share))
-                reader = cur.execute(sql).to_arrow_reader(SWEEP_BATCH_SIZE)
-                streams.append(rows(stack.enter_context(prefetch(reader))))
-            yield heapq.merge(*streams, key=itemgetter("entity_id"))
-        else:
-            cur = stack.enter_context(
-                partition_cursor(source.relation, source.clean, config)
-            )
-            reader = cur.execute(_compile(select)).to_arrow_reader(SWEEP_BATCH_SIZE)
-            yield rows(stack.enter_context(prefetch(reader)))
+        con = stack.enter_context(_connect(config))
+        # a presorted partition is read without an ORDER BY, so only this keeps
+        # its rows in entity order – DuckDB's out-of-memory advice is to turn it
+        # off, and the merge and the fold would then split entities silently
+        con.execute("SET preserve_insertion_order = true")
+        streams = []
+        for partition in source.partitions:
+            cur = stack.enter_context(closing(con.cursor()))
+            register_partition(cur, partition.relation, partition.clean)
+            # file order is entity order for a presorted partition
+            sql = _compile(select.order_by(None) if partition.presorted else select)
+            reader = cur.execute(sql).to_arrow_reader(SWEEP_BATCH_SIZE)
+            streams.append(rows(stack.enter_context(prefetch(reader))))
+        yield heapq.merge(*streams, key=itemgetter("entity_id"))
 
 
 @cache
@@ -929,11 +940,18 @@ class ParquetStore:
         root, pairs = self._pairs()
         return [
             SweepSource(
-                key=key,
-                relations=_relations(root, pairs[key]),
-                clean=all(clean for _, _, clean in pairs[key]),
-                presorted=all(clean and len(fs) == 1 for _, fs, clean in pairs[key]),
-                size=sum(size for _, files, _ in pairs[key] for _, size in files),
+                key,
+                [
+                    SweepPartition(
+                        relation=relation,
+                        clean=clean,
+                        presorted=clean and len(files) == 1,
+                        size=sum(size for _, size in files),
+                    )
+                    for relation, (_, files, clean) in zip(
+                        _relations(root, pairs[key]), pairs[key]
+                    )
+                ],
             )
             for key in sorted(pairs)
         ]

@@ -17,7 +17,6 @@ from ftm_lakehouse.logic.parquet import (
     partition_source_sql,
     shard_expr_sql,
     shard_target_file_size,
-    split_duckdb_config,
 )
 from ftm_lakehouse.model.statement import SHARDED_SCHEMA, TABLE_RAW
 from tests.duck import make_duckdb
@@ -821,14 +820,3 @@ def test_partition_source_sql_fills_missing_columns(tmp_path, now):
     assert [d[0] for d in con.execute(f"SELECT * FROM {source}").description] == (
         SHARDED_SCHEMA.names
     )
-
-
-def test_split_duckdb_config():
-    """Memory and threads divided, a spill directory each – beside the task's."""
-    config = {"memory_limit": "3000B", "threads": "7", "temp_directory": "/t/x"}
-    assert split_duckdb_config(config, 1) == [config]
-    assert split_duckdb_config(config, 3) == [
-        {"memory_limit": "1000B", "threads": "2", "temp_directory": f"/t/x-{i}"}
-        for i in range(3)
-    ]
-    assert split_duckdb_config({}, 2) == [{}, {}]

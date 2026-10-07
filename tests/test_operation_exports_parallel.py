@@ -135,8 +135,8 @@ def test_export_parallel_matches_serial(tmp_path):
 
 
 def test_export_parallel_merged_store(tmp_path):
-    """On a merged store every pair is swept by merging its origins' streams
-    instead of sorting it – and writes what the sorted sweep wrote."""
+    """Unmerged, every partition is sorted on its own; merged, read in file
+    order – both merged on ``entity_id``, writing the same artifacts."""
     uri = _setup(tmp_path, 3)
     repo = get_entities(DATASET, uri)
     with repo.writer(origin="extra") as writer:  # a second origin, same entities
@@ -152,8 +152,9 @@ def test_export_parallel_merged_store(tmp_path):
 
     repo.merge()
     sources = repo._statements.sweep_sources()
-    assert all(source.presorted for source in sources)
-    assert any(len(source.relations) > 1 for source in sources)
+    partitions = [partition for source in sources for partition in source.partitions]
+    assert all(partition.presorted for partition in partitions)
+    assert any(len(source.partitions) > 1 for source in sources)
     merged = export(DATASET, uri, make_diff=False, force=True)
 
     assert merged.result == sorted_.result

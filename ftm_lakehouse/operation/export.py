@@ -167,7 +167,7 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
             sizes = {part: s.size for part, s in zip(parts, sources)}
             with (
                 session,
-                SyncProgressBar("Exporting statements", store.num_rows) as bar,
+                SyncProgressBar("Exporting...", len(sources)) as bar,
                 process_map(workers, ordered=False) as run,
             ):
                 pending = self._pending_by_shard(session)
@@ -194,9 +194,9 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
                     done[part.parts] = part
                     statements = part.counts.get("statements", 0)
                     counts.update(part.counts)
-                    bar.advance(statements, size=sizes[part.parts])
+                    bar.advance(size=sizes[part.parts])
                     self.log.info(
-                        f"Swept pair `{task.shard}/{task.bucket}`.",
+                        f"Processed `{task.shard}/{task.bucket}`.",
                         took=part.took,
                         shard=task.shard,
                         bucket=task.bucket,

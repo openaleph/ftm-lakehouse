@@ -6,7 +6,6 @@ import subprocess
 import sys
 from collections import defaultdict
 from contextlib import nullcontext
-from dataclasses import replace
 from datetime import datetime, timezone
 
 import pyarrow as pa
@@ -341,7 +340,8 @@ def test_storage_parquet_sweep_header(tmp_path):
     with storage_parquet.sweep_pair(source, {}, out) as rows:
         list(rows)
     sql = str(statement_csv_select().compile(compile_kwargs={"literal_binds": True}))
-    with storage_parquet.partition_cursor(source.relation, source.clean, {}) as cur:
+    partition = source.partitions[0]
+    with storage_parquet.partition_cursor(partition.relation, False, {}) as cur:
         schema = cur.execute(sql).to_arrow_reader().schema
     body = out.getvalue()
     assert body and not body.startswith(statement_csv_header())
@@ -369,9 +369,9 @@ def test_storage_parquet_partition_cursor_no_progress_bar(tmp_path):
     turns it off."""
     store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
     _flush(store, _origin_rows("a"))
-    source = store.sweep_sources()[0]
+    partition = store.sweep_sources()[0].partitions[0]
     out = subprocess.run(
-        [sys.executable, "-c", PROGRESS_BAR, source.relation, str(source.clean)],
+        [sys.executable, "-c", PROGRESS_BAR, partition.relation, str(partition.clean)],
         capture_output=True,
         text=True,
         check=True,
@@ -408,31 +408,38 @@ def _swept(source: storage_parquet.SweepSource) -> list[dict]:
         return list(rows)
 
 
-def test_storage_parquet_sweep_presorted(tmp_path, monkeypatch):
-    """A merged pair is swept by merging its origins' streams in file order –
-    the rows sorting the pair gives, in entity order; a pair holding any other
-    file is sorted."""
+def test_storage_parquet_sweep(tmp_path, monkeypatch):
+    """Every partition of a pair is read on its own and the rows merged in
+    entity order – a merged one in file order, any other sorted through the
+    dedupe – giving the rows the store reads, whatever mix a pair holds."""
     monkeypatch.setattr(storage_parquet, "SWEEP_BATCH_SIZE", 7)  # cut entities
     store = ParquetStore(tmp_path, DATASET, shards=2)
     for origin, entities in (("a", 60), ("b", 60), ("c", 15)):
         _flush(store, _origin_rows(origin, entities))
-    assert not any(source.presorted for source in store.sweep_sources())
+    tombstone = _pack(
+        make_statement("e0", "name", "Name 0"),
+        deleted_at=datetime(2024, 1, 2, tzinfo=timezone.utc),
+    )
+    _flush(store, [{**tombstone, "origin": "a"}])
 
+    def check(presorted: set[bool]) -> None:
+        sources = store.sweep_sources()
+        assert {p.presorted for s in sources for p in s.partitions} == presorted
+        assert all(len(source.partitions) == 3 for source in sources)
+        swept = []
+        for source in sources:
+            rows = _swept(source)
+            ids = [row["entity_id"] for row in rows]
+            assert ids == sorted(ids)
+            swept.extend(rows)
+        expected = [(s.id, s.origin) for s in store.query_statements()]
+        assert sorted((r["id"], r["origin"]) for r in swept) == sorted(expected)
+
+    check({False})  # duplicates and a tombstone, deduped per partition
     store.merge()
-    sources = store.sweep_sources()
-    assert sources and all(s.presorted and len(s.relations) == 3 for s in sources)
-    for source in sources:
-        merged = _swept(source)
-        ids = [row["entity_id"] for row in merged]
-        assert ids == sorted(ids)
-        rows = sorted(tuple((k, str(v)) for k, v in sorted(r.items())) for r in merged)
-        expected = _swept(replace(source, presorted=False))
-        assert rows == sorted(
-            tuple((k, str(v)) for k, v in sorted(r.items())) for r in expected
-        )
-
+    check({True})  # one sorted file each
     _flush(store, _origin_rows("a", 1))
-    assert sum(not source.presorted for source in store.sweep_sources()) == 1
+    check({True, False})
 
 
 def test_storage_parquet_merge_workers(tmp_path, monkeypatch):
