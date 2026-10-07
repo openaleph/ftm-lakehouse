@@ -1,22 +1,11 @@
-"""Export operations (parquet -> statements.csv, entities.ftm.json,
-documents.csv, statistics.json, index.json) plus their diff series.
+"""The export: every artifact that is a function of the entity stream –
+``statements.csv``, ``entities.ftm.json``, ``documents.csv`` per origin scope,
+``statistics.json`` and their diff series – from one sweep over the statement
+store, then ``index.json``.
 
-Every artifact that is a function of the entity stream is written in **one
-sweep**: `ExportOperation.export` scans the statement store once, pair by
-pair, folds the rows into entities and hands each one to every artifact.
-
-What an artifact *is* – where it lives, how it is written, what its diff
-series does with an entity – belongs to
-[`ArtifactsRepository`][ftm_lakehouse.repository.artifacts.ArtifactsRepository].
-This operation only drives the stream through them.
-
-A run writes every artifact
-([`streamed`][ftm_lakehouse.repository.artifacts.ArtifactsRepository.streamed])
-and then ``index.json``, which registers what they wrote. Everything but
-``statements.csv`` is folded out of the entity stream – ``statistics.json``
-among them
-([`StatsCollector`][ftm_lakehouse.logic.entities.stats.StatsCollector]) – so
-one scan of the store is what the whole set costs.
+What an artifact is and how it is written belongs to
+[`ArtifactsRepository`][ftm_lakehouse.repository.artifacts.ArtifactsRepository];
+this operation drives the stream through them.
 """
 
 from collections import Counter
@@ -58,13 +47,8 @@ settings = Settings()
 
 @dataclass
 class ExportTask:
-    """One ``(shard, bucket)`` pair's sweep as handed to a worker.
-
-    Plain data, so it pickles, and nothing in it reaches the Delta log: the
-    parent resolves the pair against **one** snapshot and ships the relation
-    SQL, so every worker reads the same version of the store and none of them
-    replays a 15GB transaction log to find out which files to read.
-    """
+    """One ``(shard, bucket)`` pair's sweep as handed to a worker – plain data,
+    resolved against the parent's snapshot, so no worker replays the log."""
 
     dataset: str
     uri: str
@@ -93,27 +77,9 @@ class ExportPart:
 def export_partition(task: ExportTask) -> ExportPart:
     """Sweep one ``(shard, bucket)`` pair into one part of every artifact.
 
-    The whole fan-out, unchanged – the artifacts are the same classes writing
-    the same formats through the same codec, pointed at a part directory
-    instead of at the artifact keys
-    ([`Artifact.part`][ftm_lakehouse.repository.artifacts.Artifact.part]).
-
-    Prepares and closes its session but never finishes or commits it: every
-    `ArtifactRun.finish` is work over the whole store – the folder tree spans
-    shards, the statistics are a fold of every entity, a ``DEL`` is what no
-    worker met alive – and a commit writes tags, which is the parent's.
-
-    Deliberately silent, like
-    [`merge_partition`][ftm_lakehouse.storage.parquet.merge_partition]: a
-    spawned worker re-imports the library without the CLI's logging setup, so
-    ``took`` travels back in the `ExportPart` for the parent to log.
-
-    Args:
-        task: The pair, its relation, and the window and candidates its diff
-            series need.
-
-    Returns:
-        `ExportPart` – the counts, the candidates met alive, the statistics.
+    Prepares and closes its session but never finishes or commits it – that is
+    work over the whole store, and the parent's. Silent: a spawned worker has no
+    logging setup, so ``took`` travels back in the `ExportPart`.
     """
     with Took() as t:
         artifacts = get_artifacts(task.dataset, task.uri)
@@ -157,46 +123,28 @@ class ExportJob(DatasetJobModel):
 
 
 class ExportOperation(DatasetJobOperation[ExportJob]):
-    """Export the dataset, in one sweep over the entity stream.
-
-    Flushes the journal first ([`prepare`][ExportOperation.prepare]) and reads
-    the store as it is – reads reconcile un-merged rows, so no merge is
-    needed. Skips if the target is newer than the last write.
-
-    A run stamps a freshness tag per artifact it wrote, which is the record of
-    when each one was last produced.
-    """
+    """Export the dataset in one sweep over the entity stream – skipped while
+    the exports are newer than the last content change."""
 
     target = tag.OP_EXPORT
     dependencies = [tag.STATEMENTS_UPDATED]
-    """The content clock – rows landing or an origin dropped. A merge rewrites
-    files without changing content, so it leaves the exports fresh."""
+    """The content clock – a merge does not move it."""
 
     def prepare(self) -> None:
-        """Drain the journal, so the export covers the rows still buffered.
-
-        On an empty journal this is a ``LIMIT 1`` probe. Ahead of the
-        freshness window, as the base class requires: a drain that lands rows
-        moves [`STATEMENTS_UPDATED`][ftm_lakehouse.core.conventions.tag.STATEMENTS_UPDATED],
-        which this operation depends on.
-        """
+        """Drain the journal ahead of the freshness check, so buffered rows
+        count."""
         self.entities.flush()
 
     def export(self, now: datetime) -> dict[str, int]:
         """Write every streamed artifact from one pass over the entities.
 
-        Each ``(shard, bucket)`` pair is swept into parts of every artifact –
-        by ``LAKEHOUSE_WORKERS`` processes, or in this one – and the parts are
-        concatenated. The parent keeps what cannot be partitioned: the
-        snapshot every pair is read from, the delete-candidate scan, the folder
-        tree, the statistics merge and the tags.
-
-        Held under the statement store's merge lock: an ``optimize`` would
-        vacuum the files the snapshot names. Appends are not affected.
+        Each ``(shard, bucket)`` pair is swept into parts of every artifact, in
+        ``LAKEHOUSE_WORKERS`` processes, and the parts are concatenated. Held
+        under the merge lock, so an ``optimize`` cannot vacuum the snapshot's
+        files.
 
         Args:
-            now: Timestamp the run started – the diff files are named after it
-                and the diff states are recorded at it.
+            now: When the run started – diff files are named after it.
 
         Returns:
             Counts per artifact and per diff op.
@@ -211,8 +159,7 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
         ):
             version = store.version
             sources = store.sweep_sources()
-            # the parent writes its own part – the documents csv and the DEL
-            # rows its `finish` produces belong in the assembled file too
+            # the parent's own part: the documents csv and the DELs of `finish`
             session = ExportSession(
                 self.artifacts.runs(now, f"{tmp}/parent"),
                 version,
@@ -264,20 +211,8 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
         return dict(counts)
 
     def _write_header(self, tmp: str, statements: int) -> list[str]:
-        """The ``statements.csv`` header, as the first part of the assembly.
-
-        The workers write headerless parts, so the header is its own piece –
-        written through the dataset's codec, so the assembly stays a verbatim
-        copy of frames. A run that swept nothing writes none, so an empty
-        export's csv stays empty.
-
-        Args:
-            tmp: The run's part root.
-            statements: Statements the run swept.
-
-        Returns:
-            The header's part directory, or nothing when there was no row.
-        """
+        """The ``statements.csv`` header as the first part – none for an empty
+        sweep, so an empty export's csv stays empty."""
         if not statements:
             return []
         artifact = self.artifacts.statements
@@ -292,21 +227,9 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
     def _pending_by_shard(
         self, session: ExportSession
     ) -> dict[str, dict[str, frozenset[str]]]:
-        """Each diff series' DEL candidates, split by the shard they live in.
-
-        A worker can only claim an id it meets alive, and it only ever meets
-        ids of its own pair – so it is handed its shard's candidates and
-        nothing else. By **shard**, not by pair: an id determines its shard but
-        not its bucket, and an entity's live rows may sit in a different bucket
-        than its tombstoned ones, so narrowing any further would turn a missed
-        claim into a ``DEL`` for an entity that is still there.
-
-        Args:
-            session: The parent's session, its candidates already loaded.
-
-        Returns:
-            Per shard, per run name, the candidate ids to hand that worker.
-        """
+        """Each diff series' DEL candidates per shard – not per pair: an id names
+        its shard but not its bucket, and its live rows may sit in another
+        bucket than its tombstones."""
         shards = self.entities.shards
         out: dict[str, dict[str, set[str]]] = {}
         for run in session.diffable:
@@ -328,17 +251,8 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
         self.artifacts.index.write(dataset)
 
     def handle(self, run: JobRun[ExportJob], *args: Any, **kwargs: Any) -> None:
-        """One sweep, every artifact's freshness tag, then ``index.json``.
-
-        The tags are stamped after the sweep returns, so a crash part-way
-        stamps nothing. They are what each artifact was last written at, and
-        `ftm_lakehouse.operation.download.DownloadArchiveOperation` keys its
-        own freshness on one of them (``exports/documents.csv``).
-
-        ``index.json`` runs last because it registers what the others wrote –
-        and runs even on an empty store, where there is no sweep to do but the
-        dataset still has metadata to publish.
-        """
+        """The sweep, then every artifact's freshness tag – none if it crashed –
+        then ``index.json``, also for an empty store."""
         if self.entities.exists:
             started = utc_now()
             result = self.export(started)

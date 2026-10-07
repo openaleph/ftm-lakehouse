@@ -1,24 +1,9 @@
-"""ArtifactsRepository
+"""The export artifacts of a dataset – one class per artifact.
 
-Store, access and check freshness of the diff-able export artifacts a dataset
-produces and keeps track of.
-
-One class per artifact, the class body *is* the declaration. The ways
-artifacts differ – whether they carry a diff series, whether they are
-compressed, whether they are written as a versioned model dump – are
-behaviour, so they are subclasses rather than flags nobody would enjoy
-branching on later.
-
-The distinction everything else rests on is `Artifact.tag` versus
-`Artifact.key`: the tag is the codec-free key, which is also the freshness tag
-and the name a diff series takes; the key carries the dataset's compression
-codec and is what actually exists on disk. Conflating them moves a dataset's
-tags the moment it configures a codec.
-
-An `Artifact` is a *declaration bound to a dataset* and holds no state of its
-own, so constructing one is free and the accessors below hand out fresh
-instances. Everything true only while an export is running – the open writers,
-the diff window, the counters – lives on an `ArtifactRun` instead.
+`Artifact.tag` is the codec-free key (freshness tag, diff series name),
+`Artifact.key` carries the dataset's codec and is what exists on disk. An
+`Artifact` is stateless; everything that lives only while an export runs – open
+writers, diff window, counters – is on its `ArtifactRun`.
 """
 
 import csv
@@ -66,23 +51,16 @@ from ftm_lakehouse.repository.base import DatasetHandle
 from ftm_lakehouse.util import validate_origin
 
 DOCUMENT_FIELDNAMES = list(Document.model_fields)
-"""Column order of the documents csv, fixed up front.
-
-A writer would otherwise take it from whichever row comes first, which is
-wrong for a diff – a ``DEL`` row carries only ``op`` and ``id``, and landing
-first it would cap the header at two columns.
-"""
+"""Column order of the documents csv, fixed up front – a ``DEL`` row landing
+first would otherwise cap the header at ``op`` and ``id``."""
 
 log = get_logger(__name__)
 
 Candidates = Callable[[datetime], Iterator[DeleteCandidate]]
-"""The one delete-candidate scan a session distributes – see
-[`ExportSession.load_pending`][ExportSession.load_pending]."""
+"""The delete-candidate scan an `ExportSession` distributes."""
 
 DOCUMENT_ORIGINS: tuple[str | None, ...] = (None, tag.CRAWL_ORIGIN)
-"""Scopes the documents export is written for – every origin, plus a csv /
-diff series restricted to crawled files, so a consumer of the crawl can follow
-it without the archive's other sources bleeding in."""
+"""Scopes the documents export is written for: every origin, and the crawl."""
 
 
 class ExportKind(StrEnum):
@@ -124,12 +102,9 @@ def make_envelope(data: SDict, op: DiffOp | str = DiffOp.ADD) -> SDict:
 class Artifact:
     """One export artifact, bound to a dataset.
 
-    Stateless – see the module docstring. Per-run state lives on `ArtifactRun`.
-
     Args:
         dataset: The dataset handle the artifact belongs to.
-        origin: Source tag this variant is scoped to, ``None`` for the
-            unscoped one.
+        origin: Origin this variant is scoped to, ``None`` for all.
     """
 
     base: ClassVar[StoreKey]
@@ -140,8 +115,6 @@ class Artifact:
 
     def __init__(self, dataset: DatasetHandle, origin: str | None = None) -> None:
         self.dataset = dataset
-        # an origin scope names a file *and* reaches SQL as a filter, so it is
-        # validated where it enters, like every other origin in the codebase
         self.origin = validate_origin(origin) if origin else None
 
     def __repr__(self) -> str:
@@ -189,26 +162,11 @@ class Artifact:
         return self.dataset._store.exists(self.key)
 
     def touch(self, ts: datetime | None = None) -> None:
-        """Stamp the freshness tag – when this artifact was last written"""
+        """Stamp the freshness tag."""
         self.dataset._tags.set(self.tag, ts)
 
     def part(self, parts: str) -> str:
-        """Where this artifact's piece of a parallel run is written.
-
-        A part is a *destination*, never a name: `key` is identity – the
-        freshness tag plus codec, the ``index.json`` resource url and
-        checksum, and what a reader asks the store for – so a parallel run
-        changes where a writer points and nothing else. The parts carry the
-        dataset's codec, so the assembled artifact is their frames copied
-        verbatim (`assemble`).
-
-        Args:
-            parts: Directory holding one run's parts.
-
-        Returns:
-            The path of this artifact's part, named after `name`, which is
-            already unique per artifact a sweep writes.
-        """
+        """Where this artifact's part of a run is written, inside ``parts``."""
         return f"{parts}/{self.name}"
 
     def writer(self, parts: str | None = None) -> Writer:
@@ -223,19 +181,13 @@ class Artifact:
         )
 
     def assemble(self, parts: Iterable[str]) -> int:
-        """Write this artifact from the parts of a parallel run, verbatim.
+        """Write this artifact from a run's parts, their encoded bytes copied
+        as they are – a multi-frame stream the codec reads back as one file.
 
-        The parts already carry the dataset's codec, so the artifact is opened
-        **uncompressed** and their bytes copied through: the result is a
-        multi-frame zstd / multi-member gzip stream, which the codec reads back
-        as one file. Opening it encoded would wrap a frame in a frame.
-
-        Eager: an artifact is a whole picture of the store, so a run that swept
-        nothing truncates a stale file rather than leaving it.
+        Eager: a run that wrote nothing still truncates a stale artifact.
 
         Args:
-            parts: The run's part directories, in the order their rows belong
-                in the artifact.
+            parts: The run's part directories, in output order.
 
         Returns:
             How many parts had been written.
@@ -243,7 +195,7 @@ class Artifact:
         return self._concat(self.key, (self.part(d) for d in parts), lazy=False)
 
     def _concat(self, key: StoreKey, parts: Iterable[str], lazy: bool) -> int:
-        """Copy already-encoded parts into ``key``. See `assemble`."""
+        """Copy already-encoded parts into ``key`` (`assemble`)."""
         found = [part for part in parts if Path(part).exists()]
         if lazy and not found:
             return 0
@@ -292,16 +244,9 @@ class Artifact:
 
 
 class DiffableArtifact(Artifact):
-    """An artifact that keeps a diff series alongside it.
-
-    Owns the series' paths and its stored ``{timestamp}:{version}`` state.
-    Whether *this* run writes a diff, and against which window, belongs to
-    `DiffableRun`.
-
-    The series directory carries neither extension nor codec – it doubles as
-    the series' freshness tag and diff-state key, so it must not move when a
-    dataset changes its compression.
-    """
+    """An artifact with a diff series: its files and its stored
+    ``{timestamp}:{version}`` state. The series directory carries no codec, so
+    it does not move when the dataset's compression does."""
 
     diffs: ClassVar[DateTimeKey]
 
@@ -332,7 +277,7 @@ class DiffableArtifact(Artifact):
         self.dataset._tags.put(self.state_key, f"{ts_str}:{version}")
 
     def diff_part(self, parts: str) -> str:
-        """Where this series' piece of a parallel run is written."""
+        """Where this series' part of a run's diff is written."""
         return f"{self.part(parts)}.diff"
 
     def diff_writer(self, parts: str) -> Writer:
@@ -347,11 +292,8 @@ class DiffableArtifact(Artifact):
         )
 
     def assemble_diff(self, ts: datetime, parts: Iterable[str]) -> int:
-        """Write this run's diff file from the parts, verbatim (`assemble`).
-
-        Lazy, unlike `assemble`: a window with no changes leaves no diff file
-        at all, so an empty series must not create one.
-        """
+        """Write this run's diff file from the parts, like `assemble` – but lazily:
+        a window without changes leaves no file."""
         return self._concat(
             self.series(ts) + self.compression,
             (self.diff_part(d) for d in parts),
@@ -360,11 +302,7 @@ class DiffableArtifact(Artifact):
 
 
 class VersionedArtifact(Artifact):
-    """An artifact written as a versioned model dump, never compressed.
-
-    `VersionStore` keeps a timestamped snapshot beside the current copy, so
-    these are plain JSON whatever the dataset configures.
-    """
+    """An artifact written whole as a versioned model dump – plain JSON."""
 
     mime_type = JSON
     compressed = False
@@ -380,11 +318,8 @@ class VersionedArtifact(Artifact):
 
 
 class StatementsArtifact(Artifact):
-    """Every statement, sorted.
-
-    Written by the vectorised Arrow tee inside the sweep rather than row by
-    row, so its run consumes nothing.
-    """
+    """Every statement – written by the sweep's Arrow tee, so its run consumes
+    nothing."""
 
     base = path.EXPORTS_STATEMENTS
     kind = ExportKind.statements
@@ -403,13 +338,8 @@ class EntitiesArtifact(DiffableArtifact):
 
 
 class DocumentsArtifact(DiffableArtifact):
-    """Document metadata, and its delta series – origin-scopable.
-
-    Owns the *write* side of the documents export: which entities belong in
-    it, and what each contributes – its row, the name a path segment of it is
-    made of, or both. Reading the result back and the tombstoned ids stay on
-    [`DocumentRepository`][ftm_lakehouse.repository.documents.DocumentRepository].
-    """
+    """Document metadata and its diff series, scoped per origin – which entities
+    belong in it and the row each contributes."""
 
     base = path.EXPORTS_DOCUMENTS
     kind = ExportKind.documents
@@ -433,14 +363,8 @@ class DocumentsArtifact(DiffableArtifact):
 
     @staticmethod
     def is_parent_schema(schema: str | None) -> bool:
-        """Whether an entity of ``schema`` can be another document's parent.
-
-        Today the ``Folder`` schemata, ``parent`` ranging over ``Folder`` –
-        and the sweep stages one row per such entity whether or not it is a
-        csv row itself, because that row is what the folder paths are built
-        out of (`DocumentsRun.resolve`). A bare ``Folder`` is scaffolding
-        only: no content hash, so nothing to point a reader at.
-        """
+        """Whether an entity of ``schema`` can be a document's parent – the folder
+        paths are built from these (`DocumentsRun.resolve`)."""
         return schema in FOLDER_SCHEMATA
 
     @staticmethod
@@ -452,21 +376,12 @@ class DocumentsArtifact(DiffableArtifact):
         return bool(data.get("properties", {}).get("contentHash"))
 
     def make_document(self, data: SDict, public_prefix: str | None = None) -> Document:
-        """The unpathed row an entity dict contributes.
-
-        Everything about a document row that does not depend on the folder
-        tree, which is everything the sweep can know while it is still
-        staging the rows the tree is built from (`DocumentsRun`). The paths
-        are stamped in afterwards – one row per resolvable parent, so a file
-        living in two folders is listed under both, and a file whose parents
-        resolve to nothing keeps this one row.
+        """The row an entity dict contributes, ``path`` unset – stamped in once the
+        folder tree is known (`DocumentsRun.finish`).
 
         Args:
             data: Entity dict, as `EntityPayload.to_dict` returns.
             public_prefix: Public url prefix to build blob links against.
-
-        Returns:
-            The `Document`, its ``path`` unset.
         """
         document = Document.from_entity_dict(data)
         if public_prefix:
@@ -489,13 +404,7 @@ class DocumentsArtifact(DiffableArtifact):
 
 
 class StatisticsArtifact(VersionedArtifact):
-    """Entity counts and facets, folded from the entity stream.
-
-    A function of the stream like the other artifacts, so the sweep writes it
-    (`StatisticsRun`); ftmq's ``stats()`` answers the same question with six
-    aggregate queries over the reconciling view, which is six more passes over
-    the dataset than the one the sweep is already doing.
-    """
+    """Entity counts and facets, folded from the export's entity stream."""
 
     base = path.EXPORTS_STATISTICS
     kind = ExportKind.statistics
@@ -505,24 +414,16 @@ class StatisticsArtifact(VersionedArtifact):
 
 
 class IndexArtifact(VersionedArtifact):
-    """The dataset index – the config enriched with resources and statistics.
-
-    Depends on what the other exports produced, which is why it runs last.
-    """
+    """The dataset index – the config with resources and statistics, so it is
+    written after the others."""
 
     base = path.INDEX
     kind = ExportKind.index
 
 
 class ArtifactRun:
-    """One artifact being written by one export run.
-
-    Everything true only for the duration of an export – the open writer, the
-    diff window, the counts – lives here rather than on the stateless
-    `Artifact`. `consume` is the hook the sweep calls for every entity; the
-    base does nothing, which is right for ``statements.csv``, written by the
-    Arrow tee rather than row by row.
-    """
+    """One artifact being written by one export run. The hooks do nothing by
+    default – right for ``statements.csv``, written by the Arrow tee."""
 
     def __init__(self, artifact: Artifact, now: datetime, parts: str) -> None:
         self.artifact = artifact
@@ -542,11 +443,7 @@ class ArtifactRun:
         """Resolve anything this run needs before the sweep starts."""
 
     def consume(self, payload: EntityPayload) -> None:
-        """Take one entity from the sweep.
-
-        `EntityPayload.to_dict` is memoised, so every run can ask the
-        payload for its own view without the fan-out paying for it twice.
-        """
+        """Take one entity from the sweep."""
 
     def finish(self) -> None:
         """Write anything only knowable once the sweep has ended."""
@@ -570,13 +467,11 @@ class WritingRun(ArtifactRun):
 
 
 class DiffableRun(WritingRun):
-    """An artifact run that also maintains a diff series.
+    """A run that also writes a diff series.
 
-    A diff has two halves. Gaining statements the sweep can see for itself,
-    from the entity's folded ``first_seen`` bounds. Losing them it cannot – a
-    fully tombstoned entity never comes past – so the tombstoned ids are
-    loaded up front and claimed as the sweep meets them alive; whatever is
-    left over at `finish` is gone, and becomes a ``DEL``.
+    Additions show in the entities' folded ``first_seen``; deletions do not
+    come past at all, so the tombstoned ids are loaded up front (`pending`),
+    claimed as the sweep meets them alive, and the rest become ``DEL``.
     """
 
     artifact: DiffableArtifact
@@ -590,17 +485,8 @@ class DiffableRun(WritingRun):
         self.diff: Writer | None = None
 
     def prepare(self, version: int | None) -> None:
-        """Decide whether this run writes a diff, and against what.
-
-        A series is inactive when there is nothing to diff *or* nothing to
-        diff against:
-
-        - no table yet – there is no content at all;
-        - no prior state – the first run records where the next diff starts
-          and writes no file. The full picture at that point is the export
-          sitting next to it;
-        - the delta version has not moved since the last run.
-        """
+        """Activate the diff unless there is no table, no prior state (a first
+        run only records one) or no new version since."""
         super().prepare(version)
         if version is None:
             return
@@ -611,24 +497,13 @@ class DiffableRun(WritingRun):
         if last_version >= version:
             return
         self.since = last_timestamp
-        # through the same `datetime_iso` the folded bounds use, so both sides
-        # are the fixed-width UTC spelling and compare lexically - including
-        # the timestamps FtM truncated to whole seconds, whose `isoformat`
-        # drops the fractional part and sorts before any same-second value
-        # that has one
+        # the folded bounds' spelling, so both sides compare lexically
         self.since_iso = datetime_iso(last_timestamp)
         self.active = True
         self.diff = self.artifact.diff_writer(self.parts)
-        # `pending` is filled from the session's one scan, not from here - see
-        # `ExportSession.load_pending`
 
     def claims(self, candidate: DeleteCandidate) -> bool:
-        """Whether this series owns ``candidate`` as one of its DEL candidates.
-
-        The window is this series' own, so the shared scan can run at the
-        earliest bound any of them needs. A scope-restricted series narrows
-        further.
-        """
+        """Whether ``candidate`` falls into this series' window."""
         return (
             self.active
             and self.since is not None
@@ -636,19 +511,8 @@ class DiffableRun(WritingRun):
         )
 
     def op_for(self, payload: EntityPayload) -> DiffOp | None:
-        """This entity's diff op, or ``None`` when it did not change.
-
-        Claims the id off `pending` if it is a candidate: a partly-tombstoned
-        entity is still here, so it is a change and not a delete, and claiming
-        it now is what keeps it out of the DEL drain.
-
-        ``ADD`` means every statement is new – the bound spans *all* of them,
-        ``id`` rows included, so an entity that existed as a bare id and just
-        gained its first properties is a ``MOD``. The answer is only ever as
-        good as what survived: a fragment re-emission supersedes every row it
-        replaces, so an entity rewritten wholesale leaves nothing older behind
-        and reads as an ``ADD``. Both carry the entity whole and a consumer
-        indexes either the same way – only ``DEL`` means something different.
+        """This entity's diff op, ``None`` when it did not change. Claims the id
+        off `pending` – a partly tombstoned entity is a ``MOD``, not a ``DEL``.
         """
         if not self.active or self.since_iso is None or not payload.id:
             return None
@@ -678,12 +542,8 @@ class DiffableRun(WritingRun):
             self.counts[DiffOp.DEL.lower()] += 1
 
     def commit(self, version: int | None) -> None:
-        """Record the state the next diff is taken against.
-
-        Whether or not a file was written – a run that found no changes still
-        moves the series forward, so the next one does not re-examine the same
-        window.
-        """
+        """Record the state the next diff is taken against – also when this one
+        found no changes."""
         if version is not None:
             self.artifact.set_state(self.now, version)
 
@@ -699,8 +559,7 @@ class EntitiesRun(DiffableRun):
     def consume(self, payload: EntityPayload) -> None:
         data = payload.to_dict()
         self.writer.write(data)
-        # no `total`: every entity the sweep yields is written, so the count is
-        # the session's `entities` – adding it here would double it
+        # no `total`: that is the session's `entities`
         op = self.op_for(payload)
         if op is None or self.diff is None:
             return
@@ -712,23 +571,12 @@ class EntitiesRun(DiffableRun):
 
 
 class DocumentsRun(DiffableRun):
-    """Writes one origin scope of ``documents.csv`` and its delta series.
+    """Writes one origin scope of ``documents.csv`` and its diff series.
 
-    Two-phase, because a document's path is not knowable while the sweep
-    runs: it is the chain of its ancestors' names, and those ancestors come
-    past as entities like any other, in no particular order. `consume` stages
-    each row carrying the ``parent`` ids it was asserted with instead of a
-    path, plus one scaffolding row per entity that can *be* a parent; `finish`
-    resolves the tree out of those same rows (`resolve`) and sweeps the staged
-    file into the csv.
-
-    So the second pass goes over the documents of the store – a local
-    json-lines file, under ``TMPDIR`` – where asking the store for the folder
-    tree up front was a pass over every statement in the document bucket
-    before the first row could be written. The tree comes from the staged
-    rows rather than from a structure filled beside them because any document
-    may yet become another's parent, and then the staged rows already are
-    every potential parent there is.
+    Two-phase: a document's path is the chain of its ancestors' names, which
+    come past in no order. `consume` stages each row with its ``parent`` ids,
+    plus a name row for every possible parent; `finish` builds the folder tree
+    from the staged rows and writes the csv.
     """
 
     artifact: DocumentsArtifact
@@ -736,29 +584,17 @@ class DocumentsRun(DiffableRun):
     def __init__(self, artifact: DocumentsArtifact, now: datetime, parts: str) -> None:
         super().__init__(artifact, now, parts)
         self.public_prefix = artifact.dataset._model.get_public_prefix()
-        # the staged rows *are* this run's part: the csv they become cannot be
-        # written until every potential parent has been seen
         self.staged = self.staged_part(parts)
         self.staging = Writer(self.staged)
         # the workers' staged files, adopted by the parent before it resolves
         self.staged_parts: list[str] = []
 
     def staged_part(self, parts: str) -> str:
-        """Where a worker stages this scope's rows.
-
-        Named after the artifact, not the directory: ``documents`` and
-        ``crawl_documents`` stage *different* row sets into the same part
-        directory, since only the csv half of a staged row is scope-filtered.
-        """
+        """Where this scope's rows are staged, inside ``parts``."""
         return f"{self.artifact.part(parts)}.staged.json"
 
     def _staged_rows(self) -> Iterator[SDict]:
-        """Every staged row of this run – the workers' parts, then its own.
-
-        The folder tree has to be built from *all* of them: a document's path
-        is the chain of its ancestors' names, and an ancestor is placed by its
-        own id, so it routinely sits in another worker's partition.
-        """
+        """Every staged row – the adopted parts, then this run's own."""
         for staged in (*self.staged_parts, self.staged):
             if Path(staged).exists():
                 yield from smart_stream_json(staged)
@@ -768,12 +604,7 @@ class DocumentsRun(DiffableRun):
         self.staging.open()
 
     def claims(self, candidate: DeleteCandidate) -> bool:
-        """Only tombstoned documents of this origin scope.
-
-        The scoping `consume` applies to a live entity, applied to one that is
-        gone: the aggregates describe the entity's tombstoned rows, which for
-        an entity the sweep never meets alive is all of them.
-        """
+        """Only tombstoned documents of this origin scope."""
         if not super().claims(candidate):
             return False
         if self.artifact.origin and self.artifact.origin not in candidate.origins:
@@ -783,19 +614,9 @@ class DocumentsRun(DiffableRun):
         )
 
     def consume(self, payload: EntityPayload) -> None:
-        """Stage this entity, as a csv row and / or as path scaffolding.
-
-        A csv row ``doc`` only for a document of this origin scope; a
-        ``folder`` name for anything that can be a parent
-        (`DocumentsArtifact.is_parent_schema`), whatever the scope – an
-        origin-scoped csv still resolves its paths through parents asserted
-        by another origin, as it did when the map was one unscoped query.
-        Several schemata are both.
-
-        The counts are final here rather than in the second phase: they count
-        the documents the sweep met, which is one per entity whatever its
-        parents turn out to resolve to.
-        """
+        """Stage this entity: a ``doc`` row if it is a document of this scope, a
+        ``folder`` name if it can be a parent – of any scope, so paths resolve
+        across origins."""
         data = payload.to_dict()
         staged: SDict = {}
         if self.artifact.is_parent_schema(data.get("schema")):
@@ -806,8 +627,7 @@ class DocumentsRun(DiffableRun):
             staged["doc"] = document.model_dump(by_alias=True, mode="json")
             self.counts["total"] += 1
             if self.diff is not None:
-                # `op_for` claims the id off `pending`, so it runs once per
-                # entity and here rather than in the second phase
+                # here, not in `finish`: `op_for` claims the id off `pending`
                 op = self.op_for(payload)
                 if op is not None:
                     staged["op"] = str(op)
@@ -819,13 +639,7 @@ class DocumentsRun(DiffableRun):
         self.staging.write(staged)
 
     def resolve(self) -> dict[str, str]:
-        """The paths this run's staged rows resolve their parents against.
-
-        Built out of the staged rows themselves: every entity that can be a
-        parent staged its name and its own parents, so the whole chain is in
-        the file. One pass, and only the scaffolding rows are kept – a leaf
-        document is nobody's ancestor.
-        """
+        """The folder paths, built from the staged ``folder`` rows."""
         tree = FolderTree()
         with Took() as t:
             for staged in self._staged_rows():
@@ -841,14 +655,8 @@ class DocumentsRun(DiffableRun):
         return paths
 
     def finish(self) -> None:
-        """Sweep the staged rows into the csv, paths stamped in, then the DELs.
-
-        One row per resolvable parent and one unpathed row for a document
-        whose parents resolve to nothing (`DocumentsArtifact.make_document`).
-        Each row is its own dict, so the diff can write what the csv wrote.
-        A scaffolding row that is no document of this scope carries no
-        ``doc`` and leaves nothing behind.
-        """
+        """Write the staged documents – one row per resolvable parent, one
+        unpathed row otherwise – then the DELs."""
         self.staging.close()
         paths = self.resolve()
         for staged in self._staged_rows():
@@ -877,12 +685,7 @@ class DocumentsRun(DiffableRun):
 
 
 class StatisticsRun(ArtifactRun):
-    """Folds ``statistics.json`` out of the stream and writes it at the end.
-
-    Writes nothing row by row, so it needs no writer and no eager open: a
-    sweep that yields nothing still writes the statistics of an empty
-    dataset, which is the whole picture it is supposed to be.
-    """
+    """Folds ``statistics.json`` out of the stream, written in `finish`."""
 
     artifact: StatisticsArtifact
 
@@ -899,11 +702,10 @@ class StatisticsRun(ArtifactRun):
 
 
 class ExportSession:
-    """Every artifact one export run is writing, driven as one loop.
+    """Every run of one export, driven as one loop.
 
-    Opens on entry, drains the DEL candidates and closes on a clean exit; on
-    an exception the writers still close (so no codec frame is truncated) but
-    nothing is finished or committed.
+    On entry: prepare and load the DEL candidates. On a clean exit: finish and
+    commit. The writers close either way, so no codec frame is cut off.
     """
 
     def __init__(
@@ -925,16 +727,13 @@ class ExportSession:
         A worker calls this directly and never finishes or commits: `finish`
         is work over the whole store and `commit` writes tags – the parent's.
         """
-        # a run prepared against no version has no window to diff, which is
-        # exactly what `--no-diff` asks for
+        # no version, no diff window – what `--no-diff` asks for
         version = self.version if self.make_diff else None
         for run in self.runs:
             run.prepare(version)
 
     def close(self) -> None:
         """Close every writer, whatever happened to the rest."""
-        # every artifact gets closed even if one fails, or the rest are left
-        # with an unterminated codec frame
         with ExitStack() as closing:
             for run in self.runs:
                 closing.callback(run.close)
@@ -945,18 +744,8 @@ class ExportSession:
         seen: dict[str, frozenset[str]],
         stats: StatsCollector,
     ) -> None:
-        """Fold one worker's part back into this session.
-
-        The three things a worker resolves that the parent has to know about:
-        which of its DEL candidates it met alive (so the leftover is what is
-        really gone), where it staged its documents rows (so the tree is built
-        over all of them), and what it counted.
-
-        Args:
-            parts: The worker's part directory.
-            seen: Per run name, the candidate ids it met alive.
-            stats: The worker's statistics collector.
-        """
+        """Fold a worker's part back in: the DEL candidates it met alive (per
+        run name), its staged documents rows and its statistics."""
         for run in self.runs:
             if isinstance(run, DiffableRun):
                 run.pending -= seen.get(run.name, frozenset())
@@ -971,18 +760,8 @@ class ExportSession:
         return self
 
     def load_pending(self) -> None:
-        """Fill every active series' DEL candidates from one raw scan.
-
-        Deletes never come past a live-view sweep, so each series has to know
-        its tombstoned ids before the sweep opens. The sets are per series –
-        their windows and scopes differ – but the scan behind them is the same
-        pass over every partition (``deleted_at`` is no partition column, so
-        nothing prunes), and it used to run once per series: on a full export
-        that is three passes over the whole store before the first row is
-        written. It runs once now, at the earliest window any series needs,
-        and each one claims what it owns (`DiffableRun.claims`) – a candidate
-        outside a series' window or scope is simply not its own.
-        """
+        """Fill every active series' `pending` from one scan at the earliest
+        window – each series claims its own (`DiffableRun.claims`)."""
         active = [r for r in self.diffable if r.active and r.since is not None]
         if not active or self.candidates is None:
             return
@@ -1013,8 +792,7 @@ class ExportSession:
                     run.finish()
         finally:
             self.close()
-        # only a run that actually resolved a window may move it: committing
-        # after `make_diff=False` would skip every change since the last diff
+        # committing after `make_diff=False` would skip the changes since
         if exc_type is None and self.make_diff:
             for run in self.runs:
                 run.commit(self.version)
@@ -1042,11 +820,7 @@ class ExportSession:
 
 
 class ArtifactsRepository(DatasetHandle):
-    """The export artifacts one dataset produces.
-
-    Binds the declarations above to this dataset, so a caller addresses an
-    artifact by name and gets something that knows where it lives, how to
-    write it and how to describe itself in ``index.json``.
+    """The export artifacts of one dataset.
 
     Example:
         ```python
@@ -1077,9 +851,8 @@ class ArtifactsRepository(DatasetHandle):
         return IndexArtifact(self)
 
     def streamed(self) -> Iterator[Artifact]:
-        """Every artifact the sweep writes, one documents scope per origin in
-        `DOCUMENT_ORIGINS` – all but ``index.json``, which registers what these
-        wrote."""
+        """Every artifact the sweep writes – all but ``index.json`` – with a
+        documents scope per `DOCUMENT_ORIGINS`."""
         yield self.statements
         yield self.entities
         for origin in DOCUMENT_ORIGINS:
@@ -1087,20 +860,16 @@ class ArtifactsRepository(DatasetHandle):
         yield self.statistics
 
     def runs(self, now: datetime, parts: str) -> tuple[ArtifactRun, ...]:
-        """One run per streamed artifact, writing its part into ``parts``.
+        """One run per streamed artifact.
 
         Args:
-            now: Timestamp the export started – diff files are named after it
-                and diff states are recorded at it.
-            parts: Part directory the runs write into (`Artifact.part`).
+            now: When the export started – diff files are named after it.
+            parts: Directory the runs write their parts into.
         """
         return tuple(a.run(now, parts) for a in self.streamed())
 
     def resources(self) -> Iterator[DataResource]:
-        """Describe every written artifact for ``index.json``.
-
-        ``index.json`` itself is left out – it is the file being written.
-        """
+        """Describe every written streamed artifact for ``index.json``."""
         public_prefix = self._model.get_public_prefix()
         if not public_prefix:
             return

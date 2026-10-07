@@ -17,7 +17,12 @@ from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.lake import get_lakehouse
 from ftm_lakehouse.operation import export
 from ftm_lakehouse.repository.base import DatasetRef
-from ftm_lakehouse.repository.factories import get_archive, get_documents, get_entities
+from ftm_lakehouse.repository.factories import (
+    get_archive,
+    get_artifacts,
+    get_documents,
+    get_entities,
+)
 from tests.shared import BOB, JANE, JOHN
 
 MAGIC = {
@@ -89,8 +94,8 @@ def test_export_compression_from_dataset_config(tmp_path, algorithm):
     argument anywhere in the export path."""
     dataset = _seed(tmp_path, f"packed_{algorithm.value}", compression=algorithm)
     assert get_entities(*dataset).compression == algorithm
-    # ... and reaches the parquet store that writes statements.csv
-    assert get_entities(*dataset)._statements.compression == algorithm
+    # ... and reaches the artifact statements.csv is written through
+    assert get_artifacts(*dataset).statements.compression == algorithm
 
     statements = _read(dataset, path.EXPORTS_STATEMENTS + algorithm)
     entities = _read(dataset, path.ENTITIES_JSON + algorithm)
