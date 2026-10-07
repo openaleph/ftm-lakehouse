@@ -335,7 +335,7 @@ def test_storage_parquet_sweep_header(tmp_path):
     store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
     _flush(store, _origin_rows("a"))
 
-    _, source, clean = store.sweep_sources()[0]
+    _, source, clean, _ = store.sweep_sources()[0]
     out = io.BytesIO()
     sql = str(statement_csv_select().compile(compile_kwargs={"literal_binds": True}))
     with storage_parquet.partition_cursor(source, clean, {}) as cur:
@@ -367,7 +367,7 @@ def test_storage_parquet_partition_cursor_no_progress_bar(tmp_path):
     turns it off."""
     store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
     _flush(store, _origin_rows("a"))
-    _, source, clean = store.sweep_sources()[0]
+    _, source, clean, _ = store.sweep_sources()[0]
     out = subprocess.run(
         [sys.executable, "-c", PROGRESS_BAR, source, str(clean)],
         capture_output=True,
@@ -387,7 +387,7 @@ def test_storage_parquet_sweep_sources_cover_every_row(tmp_path):
 
     assert len(sources) > 1, "a sharded store must have several pairs to fan out"
     per_pair = []
-    for _, source, clean in sources:
+    for _, source, clean, _ in sources:
         with storage_parquet.partition_cursor(source, clean, {}) as cur:
             per_pair.append(list(storage_parquet.sweep_partition(cur, io.BytesIO())))
     # same rows as a query, and every entity in exactly one pair
@@ -395,6 +395,10 @@ def test_storage_parquet_sweep_sources_cover_every_row(tmp_path):
     assert swept == sorted(s.id for s in store.query_statements())
     entities = [{r["entity_id"] for r in rows} for rows in per_pair]
     assert not set.intersection(*entities)
+    # and every file's bytes, for the bar's throughput
+    _, partitions = store._partitions()
+    files = sum(size for fs, _ in partitions.values() for _, size in fs)
+    assert sum(size for *_, size in sources) == files > 0
 
 
 def test_storage_parquet_merge_workers(tmp_path, monkeypatch):

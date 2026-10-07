@@ -166,7 +166,9 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
                 self.job.make_diff,
                 self.entities.deleted_candidates,
             )
-            parts = [f"{tmp}/{shard}-{bucket}" for (shard, bucket), _, _ in sources]
+            parts = [f"{tmp}/{shard}-{bucket}" for (shard, bucket), *_ in sources]
+            # the bar's throughput: the bytes each pair read
+            sizes = {part: size for part, (*_, size) in zip(parts, sources)}
             with (
                 session,
                 SyncProgressBar("Exporting statements", store.num_rows) as bar,
@@ -188,7 +190,7 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
                         duckdb_config=worker_duckdb_config(workers),
                         pending=pending.get(shard, {}),
                     )
-                    for part, ((shard, bucket), source, clean) in zip(parts, sources)
+                    for part, ((shard, bucket), source, clean, _) in zip(parts, sources)
                 ]
                 by_parts = {task.parts: task for task in tasks}
                 done: dict[str, ExportPart] = {}
@@ -197,7 +199,7 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
                     done[part.parts] = part
                     statements = part.counts.get("statements", 0)
                     counts.update(part.counts)
-                    bar.advance(statements)
+                    bar.advance(statements, size=sizes[part.parts])
                     self.log.info(
                         f"Swept pair `{task.shard}/{task.bucket}`.",
                         took=part.took,

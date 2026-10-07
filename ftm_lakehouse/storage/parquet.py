@@ -855,11 +855,18 @@ class ParquetStore:
                 )
         self.log.info("Vacuumed.", files=len(deleted), took=t.took)
 
-    def sweep_sources(self) -> list[tuple[tuple[str, str], str, bool]]:
+    def sweep_sources(self) -> list[tuple[tuple[str, str], str, bool, int]]:
         """Every ``(shard, bucket)`` pair of one snapshot as ``(key, relation,
-        clean)`` – the units an export sweeps, no entity spanning two."""
+        clean, bytes)`` – the units an export sweeps, no entity spanning two."""
         root, pairs = self._pairs()
-        return [(key, *pair_source(root, pairs[key])) for key in sorted(pairs)]
+        return [
+            (
+                key,
+                *pair_source(root, pairs[key]),
+                sum(size for _, files, _ in pairs[key] for _, size in files),
+            )
+            for key in sorted(pairs)
+        ]
 
     def deleted_candidates(self, since: datetime) -> Iterator[DeleteCandidate]:
         """Every entity with a tombstone at or after ``since`` – one raw scan over
