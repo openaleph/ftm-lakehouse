@@ -341,8 +341,9 @@ def test_storage_parquet_sweep_header(tmp_path):
         list(rows)
     sql = str(statement_csv_select().compile(compile_kwargs={"literal_binds": True}))
     partition = source.partitions[0]
-    with storage_parquet.partition_cursor(partition.relation, False, {}) as cur:
-        schema = cur.execute(sql).to_arrow_reader().schema
+    with storage_parquet._connect({}) as con:
+        storage_parquet.register_partition(con, partition.relation, False)
+        schema = con.execute(sql).to_arrow_reader().schema
     body = out.getvalue()
     assert body and not body.startswith(statement_csv_header())
 
@@ -352,26 +353,22 @@ def test_storage_parquet_sweep_header(tmp_path):
 
 
 PROGRESS_BAR = """
-import sys
 import duckdb
-from ftm_lakehouse.storage.parquet import partition_cursor
+from ftm_lakehouse.storage.parquet import _connect
 SQL = "SELECT current_setting('enable_progress_bar')"
 print(duckdb.connect().execute(SQL).fetchone()[0])
-with partition_cursor(sys.argv[1], sys.argv[2] == "True", {}) as cur:
-    print(cur.execute(SQL).fetchone()[0])
+with _connect({}) as con:
+    print(con.execute(SQL).fetchone()[0])
 """
 
 
-def test_storage_parquet_partition_cursor_no_progress_bar(tmp_path):
+def test_storage_parquet_connect_no_progress_bar():
     """DuckDB draws its own progress bar over ours when it takes the process for
     an interactive session – no ``__main__.__file__`` at import, as in a spawned
-    worker of the CLI, or here under ``-c`` (the first line) – unless the cursor
-    turns it off."""
-    store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
-    _flush(store, _origin_rows("a"))
-    partition = store.sweep_sources()[0].partitions[0]
+    worker of the CLI, or here under ``-c`` (the first line) – unless the
+    connection turns it off."""
     out = subprocess.run(
-        [sys.executable, "-c", PROGRESS_BAR, partition.relation, str(partition.clean)],
+        [sys.executable, "-c", PROGRESS_BAR],
         capture_output=True,
         text=True,
         check=True,

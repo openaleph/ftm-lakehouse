@@ -49,7 +49,7 @@ def test_write_lock_bounded_acquisition(tmp_path, monkeypatch) -> None:
 
     started = time.monotonic()
     with pytest.raises(RuntimeError, match="Already locked"):
-        with store._write_lock():
+        with store._lock(path.LOCK):
             pass
     # One retry sleeps ~1–2s; anything near this bound means we hung.
     assert time.monotonic() - started < 10

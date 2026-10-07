@@ -21,7 +21,7 @@ from functools import cache
 from itertools import chain
 from operator import itemgetter
 from threading import RLock
-from typing import IO, Any, Callable, Iterable, Iterator, cast
+from typing import IO, Any, Callable, Iterable, Iterator, TypeVar, cast
 from urllib.parse import unquote
 
 import duckdb
@@ -93,6 +93,8 @@ from ftm_lakehouse.util import prefetch, process_map, validate_origin
 
 PARTITIONS = ["shard", "bucket", "origin"]
 
+T = TypeVar("T")
+
 Partition = tuple[str, str, str]
 """A ``(shard, bucket, origin)`` partition key."""
 
@@ -118,7 +120,7 @@ class MergeResult:
     merged file, ``None`` when the merge reaped it entirely, and how long it
     took – workers do not log."""
 
-    partition: Partition
+    task: MergeTask
     file: tuple[str, int, int] | None
     took: timedelta
 
@@ -136,9 +138,9 @@ def _compile(sql: Select) -> str:
     return str(sql.compile(compile_kwargs={"literal_binds": True}))
 
 
-def _merged(file: str) -> bool:
-    """Whether ``file`` was written by `merge` (`MERGED_PREFIX`)."""
-    return posixpath.basename(file).startswith(MERGED_PREFIX)
+def _relation(root: str, partition: Partition, files: Files) -> str:
+    """One partition's files as a relation (`partition_source_sql`)."""
+    return partition_source_sql([f"{root}/{file}" for file, _ in files], *partition)
 
 
 def merge_partition(task: MergeTask) -> MergeResult:
@@ -150,9 +152,7 @@ def merge_partition(task: MergeTask) -> MergeResult:
     """
     shard, bucket, origin = task.partition
     with Took() as t, _connect(task.duckdb_config) as con:
-        source = partition_source_sql(
-            [f"{task.root}/{file}" for file, _ in task.files], shard, bucket, origin
-        )
+        source = _relation(task.root, task.partition, task.files)
         sql = build_merge_sql(
             shard,
             bucket,
@@ -169,16 +169,8 @@ def merge_partition(task: MergeTask) -> MergeResult:
             f"COPY ({sql}) TO '{target}' ({merge_copy_options(bucket)})"
         ).fetchone()
     if stats and stats[1]:
-        return MergeResult(task.partition, (file, int(stats[2]), int(stats[1])), t.took)
-    return MergeResult(task.partition, None, t.took)
-
-
-def _relations(root: str, sources: list[tuple[Partition, Files, bool]]) -> list[str]:
-    """One relation per partition."""
-    return [
-        partition_source_sql([f"{root}/{file}" for file, _ in files], *partition)
-        for partition, files, _ in sources
-    ]
+        return MergeResult(task, (file, int(stats[2]), int(stats[1])), t.took)
+    return MergeResult(task, None, t.took)
 
 
 def pair_source(
@@ -186,7 +178,7 @@ def pair_source(
 ) -> tuple[str, bool]:
     """One ``(shard, bucket)`` pair's origin partitions as one relation, and
     whether all of them are clean."""
-    sql = " UNION ALL ".join(_relations(root, sources))
+    sql = " UNION ALL ".join(_relation(root, p, files) for p, files, _ in sources)
     return f"({sql})", all(clean for _, _, clean in sources)
 
 
@@ -255,17 +247,6 @@ def _connect(config: dict[str, str]) -> Iterator[duckdb.DuckDBPyConnection]:
 
 
 @contextmanager
-def partition_cursor(
-    source: str, clean: bool, config: dict[str, str]
-) -> Iterator[duckdb.DuckDBPyConnection]:
-    """A standalone connection with `register_partition`'s views over
-    ``source``."""
-    with _connect(config) as con:
-        register_partition(con, source, clean)
-        yield con
-
-
-@contextmanager
 def sweep_pair(
     source: SweepSource, config: dict[str, str], out: IO[bytes]
 ) -> Iterator[Iterator[StatementDict]]:
@@ -284,33 +265,30 @@ def sweep_pair(
     batch ahead on a thread (`prefetch`).
     """
     select = statement_csv_select()
-    options = WriteOptions(include_header=False)
     with ExitStack() as stack:
-        writer = None
-
-        def rows(batches: Iterable[pa.RecordBatch]) -> Iterator[StatementDict]:
-            nonlocal writer
-            for batch in batches:
-                if writer is None:
-                    writer = stack.enter_context(
-                        CSVWriter(out, batch.schema, write_options=options)
-                    )
-                writer.write(batch)
-                yield from cast(list[StatementDict], batch.to_pylist())
-
         con = stack.enter_context(_connect(config))
         # a presorted partition is read without an ORDER BY, so only this keeps
         # its rows in entity order – DuckDB's out-of-memory advice is to turn it
         # off, and the merge and the fold would then split entities silently
         con.execute("SET preserve_insertion_order = true")
-        streams = []
+        readers = []
         for partition in source.partitions:
             cur = stack.enter_context(closing(con.cursor()))
             register_partition(cur, partition.relation, partition.clean)
             # file order is entity order for a presorted partition
             sql = _compile(select.order_by(None) if partition.presorted else select)
-            reader = cur.execute(sql).to_arrow_reader(SWEEP_BATCH_SIZE)
-            streams.append(rows(stack.enter_context(prefetch(reader))))
+            readers.append(cur.execute(sql).to_arrow_reader(SWEEP_BATCH_SIZE))
+        options = WriteOptions(include_header=False)
+        writer = stack.enter_context(
+            CSVWriter(out, readers[0].schema, write_options=options)
+        )
+
+        def rows(batches: Iterable[pa.RecordBatch]) -> Iterator[StatementDict]:
+            for batch in batches:
+                writer.write(batch)
+                yield from cast(list[StatementDict], batch.to_pylist())
+
+        streams = [rows(stack.enter_context(prefetch(r))) for r in readers]
         yield heapq.merge(*streams, key=itemgetter("entity_id"))
 
 
@@ -413,6 +391,14 @@ class ParquetStore:
             return None
         return self._snapshot
 
+    def _existing_snapshot(self) -> DeltaTable:
+        """`_current_snapshot` of a table that must exist. Callers hold
+        `_snapshot_lock`."""
+        snapshot = self._current_snapshot()
+        if snapshot is None:
+            raise RuntimeError(f"Statement store vanished: `{self.uri}`")
+        return snapshot
+
     def _partitions(self) -> tuple[str, Partitions]:
         """The table root and the snapshot's files per partition, from its add
         actions – regrouped only when the version moved; empty without a table."""
@@ -434,7 +420,13 @@ class ParquetStore:
                     key = cast(Partition, tuple(partition))
                     files.setdefault(key, []).append((unquote(file), size))
                 partitions = {
-                    key: (fs, all(_merged(f) for f, _ in fs))
+                    key: (
+                        fs,
+                        all(
+                            posixpath.basename(f).startswith(MERGED_PREFIX)
+                            for f, _ in fs
+                        ),
+                    )
                     for key, fs in sorted(files.items())
                 }
                 root = snapshot.table_uri.rstrip("/")
@@ -501,33 +493,28 @@ class ParquetStore:
         view."""
         return self._lake.default_view().stats()
 
-    def _write_lock(self) -> Lock:
-        """The exclusive ``.LOCK`` – held by the in-place rewrites and table
-        creation. Appends back off while it is held (`_await_unlocked`); a
-        crashed holder needs [`unlock`][ParquetStore.unlock]."""
-        return Lock(
-            self._store, key=path.LOCK, max_retries=self.settings.lock_max_retries
-        )
+    def _lock(self, key: Uri) -> Lock:
+        """A store lock file, waited for at most ``lock_max_retries`` times."""
+        return Lock(self._store, key=key, max_retries=self.settings.lock_max_retries)
 
-    def _fence_retry(self, attempt: Callable[[], None]) -> None:
+    def _fence_retry(self, attempt: Callable[[], T]) -> T:
         """Retry ``attempt`` until it stops raising – ``lock_max_retries``
         attempts, ``N²/2`` seconds in total, then the error propagates."""
-        error_handler(
-            max_retries=self.settings.lock_max_retries,
-            backoff_factor=1,
-            do_raise=True,
-        )(attempt)()
+        return cast(
+            T,
+            error_handler(
+                max_retries=self.settings.lock_max_retries,
+                backoff_factor=1,
+                do_raise=True,
+            )(attempt)(),
+        )
 
     def merge_lock(self) -> Lock:
         """The ``.LOCK-MERGE`` – held by [`merge`][ParquetStore.merge] and the export
         sweep, and by the exclusive maintenance alongside ``.LOCK``. Appends
         don't wait for it; it keeps an ``optimize`` from vacuuming files a
         running sweep still reads."""
-        return Lock(
-            self._store,
-            key=path.LOCK_MERGE,
-            max_retries=self.settings.lock_max_retries,
-        )
+        return self._lock(path.LOCK_MERGE)
 
     def _await_unlocked(self) -> None:
         """Back off while ``.LOCK`` is held. An append that passed this may still be
@@ -549,7 +536,7 @@ class ParquetStore:
         imports cannot both commit version ``0``."""
         if self.exists:
             return
-        with self._write_lock():
+        with self._lock(path.LOCK):
             if self.exists:  # lost the create race - the table is there now
                 return
             write_deltalake(
@@ -565,7 +552,7 @@ class ParquetStore:
     def _maintenance_fence(self) -> Iterator[None]:
         """``.LOCK`` plus ``.LOCK-MERGE``, for maintenance that rewrites or drops
         files in place."""
-        with self._write_lock(), self.merge_lock():
+        with self._lock(path.LOCK), self.merge_lock():
             yield
 
     def unlock(self) -> bool:
@@ -673,9 +660,7 @@ class ParquetStore:
             self._ensure_table()
             self._await_unlocked()
             with self._snapshot_lock:
-                snapshot = self._current_snapshot()
-                if snapshot is None:
-                    raise RuntimeError(f"Statement store vanished: `{self.uri}`")
+                snapshot = self._existing_snapshot()
                 for bucket in buckets:
                     sub = batch.filter(pc.equal(batch["bucket"], bucket))
                     write_deltalake(
@@ -731,13 +716,11 @@ class ParquetStore:
                 SyncProgressBar("Merging partitions", len(tasks)) as bar,
                 process_map(workers, ordered=False) as run,
             ):
-                by_partition = {task.partition: task for task in tasks}
-                done: list[tuple[MergeTask, MergeResult]] = []
+                done: list[MergeResult] = []
                 try:
                     for result in run(merge_partition, tasks):
-                        task = by_partition[result.partition]
-                        bar.advance(size=sum(size for _, size in task.files))
-                        done.append((task, result))
+                        bar.advance(size=sum(size for _, size in result.task.files))
+                        done.append(result)
                         if len(done) == MERGE_COMMIT_BATCH:
                             batch, done = done, []
                             self._commit_merged(batch)
@@ -750,9 +733,7 @@ class ParquetStore:
                         merged += len(done)
             if merged:
                 with self._snapshot_lock, Took() as t:
-                    snapshot = self._current_snapshot()
-                    if snapshot is not None:
-                        snapshot.create_checkpoint()
+                    self._existing_snapshot().create_checkpoint()
                 self.log.info("Wrote checkpoint.", took=t.took)
         self.log.info(
             "Merge complete.",
@@ -762,13 +743,13 @@ class ParquetStore:
             grace_period_days=self.settings.grace_period_days,
         )
 
-    def _commit_merged(self, batch: Iterable[tuple[MergeTask, MergeResult]]) -> None:
+    def _commit_merged(self, batch: list[MergeResult]) -> None:
         """Commit a batch of merged partitions as one transaction: each merged file
         added, the files it replaced removed, all ``dataChange = false``."""
-        batch = list(batch)
         now = int(utc_now().timestamp() * 1000)
         actions: list[AddAction | RemoveAction] = []
-        for task, result in batch:
+        for result in batch:
+            task = result.task
             values: dict[str, str | None] = dict(zip(PARTITIONS, task.partition))
             if result.file is not None:
                 file, size, rows = result.file
@@ -777,9 +758,7 @@ class ParquetStore:
             for file, size in task.files:
                 actions.append(RemoveAction(file, False, now, size, values))
         with self._snapshot_lock:
-            snapshot = self._current_snapshot()
-            if snapshot is None:
-                raise RuntimeError(f"Statement store vanished: `{self.uri}`")
+            snapshot = self._existing_snapshot()
             snapshot.create_write_transaction(
                 actions,
                 mode="append",
@@ -787,8 +766,8 @@ class ParquetStore:
                 partition_by=PARTITIONS,
             )
             snapshot.update_incremental()
-        for task, result in batch:
-            shard, bucket, origin = task.partition
+        for result in batch:
+            shard, bucket, origin = result.task.partition
             self.log.info(
                 f"Merged partition `{shard}/{bucket}/{origin}`.",
                 took=result.took,
@@ -830,16 +809,10 @@ class ParquetStore:
                     _connect(config) as con,
                     self._snapshot_lock,
                 ):
-                    snapshot = self._current_snapshot()
-                    if snapshot is None:
-                        raise RuntimeError(f"Statement store vanished: `{self.uri}`")
+                    snapshot = self._existing_snapshot()
                     sqls = [
                         build_shard_sql(
-                            *partition,
-                            shards,
-                            source=partition_source_sql(
-                                [f"{root}/{file}" for file, _ in files], *partition
-                            ),
+                            *partition, shards, source=_relation(root, partition, files)
                         )
                         for partition, files in sources
                     ]
@@ -888,18 +861,10 @@ class ParquetStore:
         if not self.exists:
             return 0
         with self._maintenance_fence(), Took() as t, self._snapshot_lock:
-            if self._current_snapshot() is None:
-                return 0
-            metrics: dict[str, Any] = {}
-
-            def drop() -> None:
-                nonlocal metrics
-                snapshot = self._current_snapshot()
-                assert snapshot is not None
-                # safe to interpolate: `validate_origin` rejects quotes
-                metrics = snapshot.delete(f"origin = '{origin}'")
-
-            self._fence_retry(drop)
+            # safe to interpolate: `validate_origin` rejects quotes
+            metrics: dict[str, Any] = self._fence_retry(
+                lambda: self._existing_snapshot().delete(f"origin = '{origin}'")
+            )
             deleted = int(metrics.get("num_deleted_rows") or 0)
             if deleted:
                 self._tags.set(tag.STATEMENTS_UPDATED)
@@ -920,16 +885,13 @@ class ParquetStore:
         """
         if not self.exists:
             return
-        deleted: list[str] = []
         with self._maintenance_fence(), Took() as t, self._snapshot_lock:
-            snapshot = self._current_snapshot()
-            if snapshot is not None:
-                deleted = snapshot.vacuum(
-                    retention_hours=retention_hours,
-                    dry_run=False,
-                    enforce_retention_duration=False,
-                    full=True,
-                )
+            deleted = self._existing_snapshot().vacuum(
+                retention_hours=retention_hours,
+                dry_run=False,
+                enforce_retention_duration=False,
+                full=True,
+            )
         self.log.info("Vacuumed.", files=len(deleted), took=t.took)
 
     def sweep_sources(self) -> list[SweepSource]:
@@ -941,14 +903,12 @@ class ParquetStore:
                 key,
                 [
                     SweepPartition(
-                        relation=relation,
+                        relation=_relation(root, partition, files),
                         clean=clean,
                         presorted=clean and len(files) == 1,
                         size=sum(size for _, size in files),
                     )
-                    for relation, (_, files, clean) in zip(
-                        _relations(root, pairs[key]), pairs[key]
-                    )
+                    for partition, files, clean in pairs[key]
                 ],
             )
             for key in sorted(pairs)
