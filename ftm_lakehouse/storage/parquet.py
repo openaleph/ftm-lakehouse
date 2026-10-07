@@ -11,6 +11,7 @@ Layout:
     statements/shard={s}/bucket={b}/origin={o}/{part,merged}-*.parquet
 """
 
+import heapq
 import json
 import posixpath
 from contextlib import ExitStack, closing, contextmanager
@@ -18,6 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import cache
 from itertools import chain
+from operator import itemgetter
 from threading import RLock
 from typing import IO, Any, Callable, Iterable, Iterator, cast
 from urllib.parse import unquote
@@ -71,7 +73,6 @@ from ftm_lakehouse.logic.parquet import (
     live_view_sql,
     make_prune_by_shard,
     merge_copy_options,
-    merge_sorted,
     partition_source_sql,
     raw_view_sql,
     shard_target_file_size,
@@ -258,19 +259,35 @@ def partition_cursor(
 
 
 @contextmanager
-def sweep_batches(
-    source: SweepSource, config: dict[str, str]
-) -> Iterator[Iterator[pa.RecordBatch]]:
-    """A pair's live statements (`statement_csv_select`) as Arrow batches in
-    ``entity_id`` order, each read a batch ahead on a thread (`prefetch`).
+def sweep_pair(
+    source: SweepSource, config: dict[str, str], out: IO[bytes]
+) -> Iterator[Iterator[StatementDict]]:
+    """A pair's live statements (`statement_csv_select`) in ``entity_id`` order,
+    so ``aggregate_unsafe`` can fold them directly – every Arrow batch also
+    written to ``out`` as headerless csv, in the order it is read (the export
+    writes the header as a part of its own; ``out`` stays the caller's to close).
 
-    A presorted pair streams every partition in file order and merges the
-    streams (`merge_sorted`), its memory bounded by the batches in flight. Any
-    other pair is sorted as one relation – a DuckDB sort over a union does not
-    spill, so that needs the whole pair in memory.
+    A presorted pair streams every partition in file order and merges the rows
+    (``heapq.merge``), its memory bounded by the batches in flight. Any other
+    pair is sorted as one relation – a DuckDB sort over a union does not spill,
+    so that needs the whole pair in memory. Batches are read a batch ahead on a
+    thread (`prefetch`).
     """
     select = statement_csv_select()
+    options = WriteOptions(include_header=False)
     with ExitStack() as stack:
+        writer = None
+
+        def rows(batches: Iterable[pa.RecordBatch]) -> Iterator[StatementDict]:
+            nonlocal writer
+            for batch in batches:
+                if writer is None:
+                    writer = stack.enter_context(
+                        CSVWriter(out, batch.schema, write_options=options)
+                    )
+                writer.write(batch)
+                yield from cast(list[StatementDict], batch.to_pylist())
+
         if source.presorted:
             sql = _compile(select.order_by(None))  # file order is entity order
             configs = split_duckdb_config(config, len(source.relations))
@@ -278,35 +295,14 @@ def sweep_batches(
             for relation, share in zip(source.relations, configs):
                 cur = stack.enter_context(partition_cursor(relation, True, share))
                 reader = cur.execute(sql).to_arrow_reader(SWEEP_BATCH_SIZE)
-                streams.append(stack.enter_context(prefetch(reader)))
-            yield merge_sorted(streams)
+                streams.append(rows(stack.enter_context(prefetch(reader))))
+            yield heapq.merge(*streams, key=itemgetter("entity_id"))
         else:
             cur = stack.enter_context(
                 partition_cursor(source.relation, source.clean, config)
             )
             reader = cur.execute(_compile(select)).to_arrow_reader(SWEEP_BATCH_SIZE)
-            yield stack.enter_context(prefetch(reader))
-
-
-def sweep_partition(
-    batches: Iterable[pa.RecordBatch], out: IO[bytes]
-) -> Iterator[StatementDict]:
-    """A pair's statements (`sweep_batches`), each batch also written to ``out``
-    as headerless csv – the export writes the header as a part of its own.
-
-    Rows arrive ordered by ``entity_id``, so ``aggregate_unsafe`` can fold them
-    directly. ``out`` stays the caller's to close.
-    """
-    options = WriteOptions(include_header=False)
-    with ExitStack() as stack:
-        writer = None
-        for batch in batches:
-            if writer is None:
-                writer = stack.enter_context(
-                    CSVWriter(out, batch.schema, write_options=options)
-                )
-            writer.write(batch)
-            yield from cast(list[StatementDict], batch.to_pylist())
+            yield rows(stack.enter_context(prefetch(reader)))
 
 
 @cache

@@ -338,8 +338,8 @@ def test_storage_parquet_sweep_header(tmp_path):
 
     source = store.sweep_sources()[0]
     out = io.BytesIO()
-    with storage_parquet.sweep_batches(source, {}) as batches:
-        list(storage_parquet.sweep_partition(batches, out))
+    with storage_parquet.sweep_pair(source, {}, out) as rows:
+        list(rows)
     sql = str(statement_csv_select().compile(compile_kwargs={"literal_binds": True}))
     with storage_parquet.partition_cursor(source.relation, source.clean, {}) as cur:
         schema = cur.execute(sql).to_arrow_reader().schema
@@ -390,8 +390,7 @@ def test_storage_parquet_sweep_sources_cover_every_row(tmp_path):
     assert len(sources) > 1, "a sharded store must have several pairs to fan out"
     per_pair = []
     for source in sources:
-        with storage_parquet.sweep_batches(source, {}) as batches:
-            rows = storage_parquet.sweep_partition(batches, io.BytesIO())
+        with storage_parquet.sweep_pair(source, {}, io.BytesIO()) as rows:
             per_pair.append(list(rows))
     # same rows as a query, and every entity in exactly one pair
     swept = sorted(r["id"] for rows in per_pair for r in rows)
@@ -405,8 +404,8 @@ def test_storage_parquet_sweep_sources_cover_every_row(tmp_path):
 
 
 def _swept(source: storage_parquet.SweepSource) -> list[dict]:
-    with storage_parquet.sweep_batches(source, {}) as batches:
-        return list(storage_parquet.sweep_partition(batches, io.BytesIO()))
+    with storage_parquet.sweep_pair(source, {}, io.BytesIO()) as rows:
+        return list(rows)
 
 
 def test_storage_parquet_sweep_presorted(tmp_path, monkeypatch):

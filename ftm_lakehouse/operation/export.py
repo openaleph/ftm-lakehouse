@@ -37,7 +37,7 @@ from ftm_lakehouse.repository.artifacts import (
 )
 from ftm_lakehouse.repository.factories import get_artifacts
 from ftm_lakehouse.repository.job import JobRun
-from ftm_lakehouse.storage.parquet import SweepSource, sweep_batches, sweep_partition
+from ftm_lakehouse.storage.parquet import SweepSource, sweep_pair
 from ftm_lakehouse.util import process_map
 
 __all__ = ["ExportJob", "ExportKind", "ExportOperation"]
@@ -96,8 +96,7 @@ def export_partition(task: ExportTask) -> ExportPart:
                 "wb",
                 compression=statements.compression,
             ) as csv:
-                with sweep_batches(task.source, task.duckdb_config) as batches:
-                    rows = sweep_partition(batches, csv)
+                with sweep_pair(task.source, task.duckdb_config, csv) as rows:
                     for payload in aggregate_unsafe(rows, task.dataset):
                         session.consume(payload)
         finally:
