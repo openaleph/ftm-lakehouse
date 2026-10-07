@@ -188,8 +188,9 @@ class EntityPayload:
         properties = compiled["properties"]
         caption = None
         for prop_name in schema.caption:
-            for value in properties.get(prop_name, []):
-                caption = value
+            values = properties.get(prop_name)
+            if values:
+                caption = next(iter(values))
                 break
         if caption is None:
             caption = schema.label
