@@ -84,3 +84,34 @@ def test_process_map_order(tmp_path):
     Path(marker).unlink()
     with util.process_map(2) as run:
         assert list(run(_finish, tasks)) == [True, False]
+
+
+def test_prefetch():
+    """Every item in order, a producer's error raised to the consumer, and no
+    read left running once the context is left early."""
+    with util.prefetch(range(5)) as items:
+        assert list(items) == [0, 1, 2, 3, 4]
+
+    def failing():
+        yield 1
+        raise ValueError("producer")
+
+    with util.prefetch(failing()) as items:
+        assert next(items) == 1
+        with pytest.raises(ValueError, match="producer"):
+            next(items)
+
+    produced = []
+
+    def slow():
+        for i in range(10):
+            time.sleep(0.02)
+            produced.append(i)
+            yield i
+
+    with util.prefetch(slow()) as items:
+        assert next(items) == 0
+    # the item read ahead finished before the context let go – and nothing since
+    assert produced == [0, 1]
+    time.sleep(0.1)
+    assert produced == [0, 1]

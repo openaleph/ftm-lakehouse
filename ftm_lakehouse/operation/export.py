@@ -37,7 +37,7 @@ from ftm_lakehouse.repository.artifacts import (
 )
 from ftm_lakehouse.repository.factories import get_artifacts
 from ftm_lakehouse.repository.job import JobRun
-from ftm_lakehouse.storage.parquet import partition_cursor, sweep_partition
+from ftm_lakehouse.storage.parquet import SweepSource, sweep_batches, sweep_partition
 from ftm_lakehouse.util import process_map
 
 __all__ = ["ExportJob", "ExportKind", "ExportOperation"]
@@ -58,8 +58,7 @@ class ExportTask:
     parts: str
     shard: str
     bucket: str
-    source: str
-    clean: bool
+    source: SweepSource
     duckdb_config: dict[str, str]
     pending: dict[str, frozenset[str]]
 
@@ -97,10 +96,8 @@ def export_partition(task: ExportTask) -> ExportPart:
                 "wb",
                 compression=statements.compression,
             ) as csv:
-                with partition_cursor(
-                    task.source, task.clean, task.duckdb_config
-                ) as cur:
-                    rows = sweep_partition(cur, csv)
+                with sweep_batches(task.source, task.duckdb_config) as batches:
+                    rows = sweep_partition(batches, csv)
                     for payload in aggregate_unsafe(rows, task.dataset):
                         session.consume(payload)
         finally:
@@ -166,9 +163,9 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
                 self.job.make_diff,
                 self.entities.deleted_candidates,
             )
-            parts = [f"{tmp}/{shard}-{bucket}" for (shard, bucket), *_ in sources]
+            parts = [f"{tmp}/{s.key[0]}-{s.key[1]}" for s in sources]
             # the bar's throughput: the bytes each pair read
-            sizes = {part: size for part, (*_, size) in zip(parts, sources)}
+            sizes = {part: s.size for part, s in zip(parts, sources)}
             with (
                 session,
                 SyncProgressBar("Exporting statements", store.num_rows) as bar,
@@ -183,14 +180,13 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
                         version=version,
                         make_diff=self.job.make_diff,
                         parts=part,
-                        shard=shard,
-                        bucket=bucket,
+                        shard=source.key[0],
+                        bucket=source.key[1],
                         source=source,
-                        clean=clean,
                         duckdb_config=worker_duckdb_config(workers),
-                        pending=pending.get(shard, {}),
+                        pending=pending.get(source.key[0], {}),
                     )
-                    for part, ((shard, bucket), source, clean, _) in zip(parts, sources)
+                    for part, source in zip(parts, sources)
                 ]
                 by_parts = {task.parts: task for task in tasks}
                 done: dict[str, ExportPart] = {}

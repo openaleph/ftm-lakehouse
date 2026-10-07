@@ -14,9 +14,11 @@ from ftm_lakehouse.logic.parquet import (
     build_merge_sql,
     build_shard_sql,
     make_prune_by_shard,
+    merge_sorted,
     partition_source_sql,
     shard_expr_sql,
     shard_target_file_size,
+    split_duckdb_config,
 )
 from ftm_lakehouse.model.statement import SHARDED_SCHEMA, TABLE_RAW
 from tests.duck import make_duckdb
@@ -820,3 +822,51 @@ def test_partition_source_sql_fills_missing_columns(tmp_path, now):
     assert [d[0] for d in con.execute(f"SELECT * FROM {source}").description] == (
         SHARDED_SCHEMA.names
     )
+
+
+def _stream(keys: list[str], tag: str, cuts: list[int]) -> list[pa.RecordBatch]:
+    """``keys`` (sorted) as batches cut at ``cuts`` – empty batches included."""
+    schema = pa.schema({"entity_id": pa.string(), "tag": pa.string()})
+    bounds = [0, *cuts, len(keys)]
+    return [
+        pa.RecordBatch.from_pydict(
+            {"entity_id": keys[a:b], "tag": [f"{tag}{i}" for i in range(a, b)]},
+            schema=schema,
+        )
+        for a, b in zip(bounds, bounds[1:])
+    ]
+
+
+def test_merge_sorted():
+    """Sorted streams merge into one sorted stream holding every row once –
+    keys overlapping across streams, batches cut anywhere, empty ones too."""
+    a = sorted(f"e{i:03d}" for i in range(0, 100, 2))  # every other key
+    b = sorted(f"e{i:03d}" for i in range(100) for _ in range(3))  # each key 3x
+    c = ["e050", "e051"]
+    streams = [
+        _stream(a, "a", [0, 7, 7, 30]),
+        _stream(b, "b", [1, 100, 101, 250]),
+        _stream(c, "c", [1]),
+        [],
+    ]
+    merged = pa.Table.from_batches(list(merge_sorted([iter(s) for s in streams])))
+    keys = merged["entity_id"].to_pylist()
+    assert keys == sorted(keys)
+    expected = pa.Table.from_batches([b for s in streams for b in s])
+    assert sorted(merged["tag"].to_pylist()) == sorted(expected["tag"].to_pylist())
+
+    # one stream passes through as it is
+    (only,) = [_stream(a, "a", [10, 20])]
+    assert list(merge_sorted([iter(only)])) == only
+    assert list(merge_sorted([])) == []
+
+
+def test_split_duckdb_config():
+    """Memory and threads divided, a spill directory each – beside the task's."""
+    config = {"memory_limit": "3000B", "threads": "7", "temp_directory": "/t/x"}
+    assert split_duckdb_config(config, 1) == [config]
+    assert split_duckdb_config(config, 3) == [
+        {"memory_limit": "1000B", "threads": "2", "temp_directory": f"/t/x-{i}"}
+        for i in range(3)
+    ]
+    assert split_duckdb_config({}, 2) == [{}, {}]

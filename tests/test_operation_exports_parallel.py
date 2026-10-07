@@ -134,6 +134,34 @@ def test_export_parallel_matches_serial(tmp_path):
     assert _rows(uri, path.EXPORTS_DOCUMENTS) == serial_documents
 
 
+def test_export_parallel_merged_store(tmp_path):
+    """On a merged store every pair is swept by merging its origins' streams
+    instead of sorting it – and writes what the sorted sweep wrote."""
+    uri = _setup(tmp_path, 3)
+    repo = get_entities(DATASET, uri)
+    with repo.writer(origin="extra") as writer:  # a second origin, same entities
+        for data in ENTITIES[::3]:
+            writer.add_entity(make_entity({**data, "properties": {"alias": ["A"]}}))
+    repo.flush()
+    sorted_ = export(DATASET, uri, make_diff=False)
+    csv, entities, stats = (
+        _rows(uri, path.EXPORTS_STATEMENTS),
+        _entities_digest(uri),
+        _stats(uri),
+    )
+
+    repo.merge()
+    sources = repo._statements.sweep_sources()
+    assert all(source.presorted for source in sources)
+    assert any(len(source.relations) > 1 for source in sources)
+    merged = export(DATASET, uri, make_diff=False, force=True)
+
+    assert merged.result == sorted_.result
+    assert _rows(uri, path.EXPORTS_STATEMENTS) == csv
+    assert _entities_digest(uri) == entities
+    assert _stats(uri) == stats
+
+
 def test_export_parallel_spill_directory_per_pair(tmp_path, monkeypatch):
     """Each pair's DuckDB instance spills into its own directory – workers
     sharing one crash on each other's spill files."""

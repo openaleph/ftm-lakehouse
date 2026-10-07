@@ -9,9 +9,10 @@ files ([`build_merge_sql`][build_merge_sql]).
 
 import os
 from datetime import datetime
-from typing import Iterable
+from typing import Iterable, Iterator
 
 import pyarrow as pa
+import pyarrow.compute as pc
 from anystore.util import ensure_uuid
 from banal import ensure_list
 from deltalake import DeltaTable
@@ -113,6 +114,63 @@ def worker_duckdb_config(workers: int) -> dict[str, str]:
     config["memory_limit"] = f"{budget // max(workers, 1)}B"
     config["threads"] = str(max((os.cpu_count() or 1) // max(workers, 1), 1))
     return config
+
+
+def split_duckdb_config(config: dict[str, str], parts: int) -> list[dict[str, str]]:
+    """``config`` shared out between ``parts`` DuckDB instances of one task –
+    memory limit and threads divided, each instance spilling beside the task's
+    directory rather than into it (instances number their spill files alike)."""
+    if parts <= 1:
+        return [config]
+    shares = []
+    for i in range(parts):
+        share = dict(config)
+        if "memory_limit" in config:
+            limit = parse_byte_size(config["memory_limit"])
+            share["memory_limit"] = f"{limit // parts}B"
+        if "threads" in config:
+            share["threads"] = str(max(int(config["threads"]) // parts, 1))
+        if "temp_directory" in config:
+            share["temp_directory"] = f"{config['temp_directory']}-{i}"
+        shares.append(share)
+    return shares
+
+
+def _next_rows(stream: Iterator[pa.RecordBatch]) -> pa.RecordBatch | None:
+    """The next non-empty batch of ``stream``, ``None`` once it is exhausted."""
+    return next((batch for batch in stream if batch.num_rows), None)
+
+
+def merge_sorted(
+    streams: list[Iterator[pa.RecordBatch]], key: str = "entity_id"
+) -> Iterator[pa.RecordBatch]:
+    """Merge streams of batches, each sorted on ``key``, into one sorted stream –
+    sorting no more than the rows the streams' current batches overlap on.
+
+    A chunk at a time: every row up to the smallest last ``key`` among the
+    current batches – a prefix of each, as they are sorted – sorted together in
+    Arrow. The rows of one ``key`` stay contiguous, since whatever any stream has
+    left sorts at or after the key a chunk ends on. The last stream left passes
+    through as it is.
+    """
+    heads = {i: b for i, s in enumerate(streams) if (b := _next_rows(s)) is not None}
+    while len(heads) > 1:
+        frontier = min(batch[key][-1].as_py() for batch in heads.values())
+        chunk = []
+        for i, batch in list(heads.items()):
+            n = pc.sum(pc.less_equal(batch[key], frontier)).as_py() or 0
+            if n:
+                chunk.append(batch.slice(0, n))
+            if n < batch.num_rows:
+                heads[i] = batch.slice(n)
+            elif (following := _next_rows(streams[i])) is not None:
+                heads[i] = following
+            else:
+                del heads[i]
+        yield from pa.Table.from_batches(chunk).sort_by(key).to_batches()
+    for i, batch in heads.items():
+        yield batch
+        yield from (b for b in streams[i] if b.num_rows)
 
 
 def _string_literal(value: str) -> str:

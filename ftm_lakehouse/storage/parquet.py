@@ -13,7 +13,7 @@ Layout:
 
 import json
 import posixpath
-from contextlib import closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import cache
@@ -71,9 +71,11 @@ from ftm_lakehouse.logic.parquet import (
     live_view_sql,
     make_prune_by_shard,
     merge_copy_options,
+    merge_sorted,
     partition_source_sql,
     raw_view_sql,
     shard_target_file_size,
+    split_duckdb_config,
     worker_duckdb_config,
 )
 from ftm_lakehouse.model.dataset import DEFAULT_SHARDS
@@ -87,7 +89,7 @@ from ftm_lakehouse.model.statement import (
     statement_csv_select,
 )
 from ftm_lakehouse.storage.tags import TagStore
-from ftm_lakehouse.util import process_map, validate_origin
+from ftm_lakehouse.util import prefetch, process_map, validate_origin
 
 PARTITIONS = ["shard", "bucket", "origin"]
 
@@ -129,6 +131,11 @@ Pairs = dict[tuple[str, str], list[tuple[Partition, Files, bool]]]
 """`Partitions` grouped per ``(shard, bucket)`` pair."""
 
 
+def _compile(sql: Select) -> str:
+    """``sql`` as DuckDB SQL, parameters inlined."""
+    return str(sql.compile(compile_kwargs={"literal_binds": True}))
+
+
 def _merged(file: str) -> bool:
     """Whether ``file`` was written by `merge` (`MERGED_PREFIX`)."""
     return posixpath.basename(file).startswith(MERGED_PREFIX)
@@ -168,16 +175,47 @@ def merge_partition(task: MergeTask) -> MergeResult:
     return MergeResult(task.partition, None, t.took)
 
 
+def _relations(root: str, sources: list[tuple[Partition, Files, bool]]) -> list[str]:
+    """One relation per partition."""
+    return [
+        partition_source_sql([f"{root}/{file}" for file, _ in files], *partition)
+        for partition, files, _ in sources
+    ]
+
+
+def _union(relations: Iterable[str]) -> str:
+    """``relations`` as one relation."""
+    return f"({' UNION ALL '.join(relations)})"
+
+
 def pair_source(
     root: str, sources: list[tuple[Partition, Files, bool]]
 ) -> tuple[str, bool]:
     """One ``(shard, bucket)`` pair's origin partitions as one relation, and
     whether all of them are clean."""
-    sql = " UNION ALL ".join(
-        partition_source_sql([f"{root}/{file}" for file, _ in files], *partition)
-        for partition, files, _ in sources
-    )
-    return f"({sql})", all(clean for _, _, clean in sources)
+    return _union(_relations(root, sources)), all(clean for _, _, clean in sources)
+
+
+@dataclass(frozen=True)
+class SweepSource:
+    """One ``(shard, bucket)`` pair as the export sweeps it – plain data,
+    resolved against one snapshot, so it pickles to a worker."""
+
+    key: tuple[str, str]
+    relations: list[str]
+    """One relation per origin partition."""
+    clean: bool
+    """Every partition holds only `merge` output."""
+    presorted: bool
+    """Every partition is one `merge` file, written in ``entity_id`` order – so
+    the sweep merges the partitions' streams instead of sorting the pair."""
+    size: int
+    """Bytes of the pair's files."""
+
+    @property
+    def relation(self) -> str:
+        """The pair as one relation."""
+        return _union(self.relations)
 
 
 def register_partition(
@@ -219,20 +257,54 @@ def partition_cursor(
         yield con
 
 
+@contextmanager
+def sweep_batches(
+    source: SweepSource, config: dict[str, str]
+) -> Iterator[Iterator[pa.RecordBatch]]:
+    """A pair's live statements (`statement_csv_select`) as Arrow batches in
+    ``entity_id`` order, each read a batch ahead on a thread (`prefetch`).
+
+    A presorted pair streams every partition in file order and merges the
+    streams (`merge_sorted`), its memory bounded by the batches in flight. Any
+    other pair is sorted as one relation – a DuckDB sort over a union does not
+    spill, so that needs the whole pair in memory.
+    """
+    select = statement_csv_select()
+    with ExitStack() as stack:
+        if source.presorted:
+            sql = _compile(select.order_by(None))  # file order is entity order
+            configs = split_duckdb_config(config, len(source.relations))
+            streams = []
+            for relation, share in zip(source.relations, configs):
+                cur = stack.enter_context(partition_cursor(relation, True, share))
+                reader = cur.execute(sql).to_arrow_reader(SWEEP_BATCH_SIZE)
+                streams.append(stack.enter_context(prefetch(reader)))
+            yield merge_sorted(streams)
+        else:
+            cur = stack.enter_context(
+                partition_cursor(source.relation, source.clean, config)
+            )
+            reader = cur.execute(_compile(select)).to_arrow_reader(SWEEP_BATCH_SIZE)
+            yield stack.enter_context(prefetch(reader))
+
+
 def sweep_partition(
-    cur: duckdb.DuckDBPyConnection, out: IO[bytes]
+    batches: Iterable[pa.RecordBatch], out: IO[bytes]
 ) -> Iterator[StatementDict]:
-    """One partition's statements, each Arrow batch also written to ``out`` as
-    headerless csv – the export writes the header as a part of its own.
+    """A pair's statements (`sweep_batches`), each batch also written to ``out``
+    as headerless csv – the export writes the header as a part of its own.
 
     Rows arrive ordered by ``entity_id``, so ``aggregate_unsafe`` can fold them
     directly. ``out`` stays the caller's to close.
     """
-    sql = str(statement_csv_select().compile(compile_kwargs={"literal_binds": True}))
-    reader = cur.execute(sql).to_arrow_reader(SWEEP_BATCH_SIZE)
     options = WriteOptions(include_header=False)
-    with CSVWriter(out, reader.schema, write_options=options) as writer:
-        for batch in reader:
+    with ExitStack() as stack:
+        writer = None
+        for batch in batches:
+            if writer is None:
+                writer = stack.enter_context(
+                    CSVWriter(out, batch.schema, write_options=options)
+                )
             writer.write(batch)
             yield from cast(list[StatementDict], batch.to_pylist())
 
@@ -855,15 +927,17 @@ class ParquetStore:
                 )
         self.log.info("Vacuumed.", files=len(deleted), took=t.took)
 
-    def sweep_sources(self) -> list[tuple[tuple[str, str], str, bool, int]]:
-        """Every ``(shard, bucket)`` pair of one snapshot as ``(key, relation,
-        clean, bytes)`` – the units an export sweeps, no entity spanning two."""
+    def sweep_sources(self) -> list[SweepSource]:
+        """Every ``(shard, bucket)`` pair of one snapshot as a ``SweepSource`` –
+        the units an export sweeps, no entity spanning two."""
         root, pairs = self._pairs()
         return [
-            (
-                key,
-                *pair_source(root, pairs[key]),
-                sum(size for _, files, _ in pairs[key] for _, size in files),
+            SweepSource(
+                key=key,
+                relations=_relations(root, pairs[key]),
+                clean=all(clean for _, _, clean in pairs[key]),
+                presorted=all(clean and len(fs) == 1 for _, fs, clean in pairs[key]),
+                size=sum(size for _, files, _ in pairs[key] for _, size in files),
             )
             for key in sorted(pairs)
         ]
@@ -937,7 +1011,7 @@ class ParquetStore:
     ) -> Iterator[dict[str, Any]]:
         """``sql``'s rows over each ``(relation, clean)`` source in turn
         (`_scoped_sources`), in Arrow batches of `SWEEP_BATCH_SIZE`."""
-        compiled = str(sql.compile(compile_kwargs={"literal_binds": True}))
+        compiled = _compile(sql)
         for source, clean in sources:
             with self._cursor_over(source, clean) as cur:
                 for batch in cur.execute(compiled).to_arrow_reader(SWEEP_BATCH_SIZE):
