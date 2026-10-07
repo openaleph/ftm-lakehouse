@@ -229,11 +229,17 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
                     # written from the staged parts in the order they are adopted
                     for part in (done[p] for p in parts):
                         session.adopt(part.parts, part.seen, part.stats)
+                    self.log.info(
+                        "Swept every pair, writing the documents ...",
+                        pairs=len(sources),
+                    )
                 # after the session closed: its own writers' codec trailers are
                 # written, so its part is a complete frame
-                self._append(f"{tmp}/parent", files, diffs)
-                for assembly in assemblies:
-                    assembly.commit()
+                with Took() as t:
+                    self._append(f"{tmp}/parent", files, diffs)
+                    for assembly in assemblies:
+                        assembly.commit()
+                self.log.info("Moved the artifacts into place.", took=t.took)
             except BaseException:
                 for assembly in assemblies:
                     assembly.abort()
