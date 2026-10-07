@@ -2,9 +2,8 @@
 documents.csv, statistics.json, index.json) plus their diff series.
 
 Every artifact that is a function of the entity stream is written in **one
-sweep**: `ExportOperation.export` scans the statement store once
-([`ParquetStore.sweep`][ftm_lakehouse.storage.parquet.ParquetStore.sweep]),
-folds the rows into entities and hands each one to every artifact.
+sweep**: `ExportOperation.export` scans the statement store once, pair by
+pair, folds the rows into entities and hands each one to every artifact.
 
 What an artifact *is* – where it lives, how it is written, what its diff
 series does with an entity – belongs to
@@ -20,18 +19,14 @@ among them
 one scan of the store is what the whole set costs.
 """
 
-import multiprocessing
 from collections import Counter
-from concurrent.futures import ProcessPoolExecutor
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, Callable, Iterator
+from typing import Any
 
 from anystore.io import SyncProgressBar, smart_open
-from anystore.io.progress import Throughput
 from anystore.util import Took, mask_uri
 from ftmq.model.stats import DatasetStats
 from rigour.time import utc_now
@@ -39,7 +34,7 @@ from rigour.time import utc_now
 from ftm_lakehouse.core.conventions import tag
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.helpers.shards import entity_shard
-from ftm_lakehouse.logic.entities.aggregate import EntityPayload, aggregate_unsafe
+from ftm_lakehouse.logic.entities.aggregate import aggregate_unsafe
 from ftm_lakehouse.logic.entities.stats import StatsCollector
 from ftm_lakehouse.logic.parquet import worker_duckdb_config
 from ftm_lakehouse.model.job import DatasetJobModel
@@ -54,6 +49,7 @@ from ftm_lakehouse.repository.artifacts import (
 from ftm_lakehouse.repository.factories import get_artifacts
 from ftm_lakehouse.repository.job import JobRun
 from ftm_lakehouse.storage.parquet import partition_cursor, sweep_partition
+from ftm_lakehouse.util import process_map
 
 __all__ = ["ExportJob", "ExportKind", "ExportOperation"]
 
@@ -139,7 +135,7 @@ def export_partition(task: ExportTask) -> ExportPart:
                 with partition_cursor(
                     task.source, task.clean, task.duckdb_config
                 ) as cur:
-                    rows = sweep_partition(cur, csv, header=False)
+                    rows = sweep_partition(cur, csv)
                     for payload in aggregate_unsafe(rows, task.dataset):
                         session.consume(payload)
         finally:
@@ -188,89 +184,45 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
         """
         self.entities.flush()
 
-    def iterate(self, throughput: Throughput | None = None) -> Iterator[EntityPayload]:
-        """Every entity in the store, folded from one scan.
-
-        ``statements.csv`` is written from the same Arrow batches the entities
-        are folded out of, so the csv costs a tee rather than a second pass.
-
-        Args:
-            throughput: Counter fed the Arrow bytes the scan pulls – the
-                progress bar's, so it shows how fast the sweep reads.
-        """
-        yield from aggregate_unsafe(self.entities.sweep(throughput), self.dataset)
-
     def export(self, now: datetime) -> dict[str, int]:
         """Write every streamed artifact from one pass over the entities.
+
+        Each ``(shard, bucket)`` pair is swept into parts of every artifact –
+        by ``LAKEHOUSE_WORKERS`` processes, or in this one – and the parts are
+        concatenated. The parent keeps what cannot be partitioned: the
+        snapshot every pair is read from, the delete-candidate scan, the folder
+        tree, the statistics merge and the tags.
+
+        Held under the statement store's merge lock: an ``optimize`` would
+        vacuum the files the snapshot names. Appends are not affected.
 
         Args:
             now: Timestamp the run started – the diff files are named after it
                 and the diff states are recorded at it.
 
-        Held under the statement store's merge lock: the sweep pins one
-        snapshot's files, and an ``optimize`` – a merge, then a retention-0
-        vacuum – would delete them under it. Appends are not affected.
-
         Returns:
             Counts per artifact and per diff op.
         """
-        with self.entities.merge_lock():
-            version = self.entities.version
-            workers = max(settings.workers, 1)
-            if workers > 1:
-                return self.export_parallel(now, version, workers)
-            session = self.artifacts.session(now, version, self.job.make_diff)
-            count = self.entities._statements.num_rows
-            # advanced per statement folded; its throughput is the Arrow
-            # bytes the scan pulls from the store
-            with session, SyncProgressBar("Exporting statements", count) as bar:
-                for payload in self.iterate(bar.throughput):
-                    session.consume(payload)
-                    bar.advance(len(payload.statements))
-            return session.result()
-
-    def export_parallel(
-        self, now: datetime, version: int | None, workers: int
-    ) -> dict[str, int]:
-        """The same export, one worker process per ``(shard, bucket)`` pair.
-
-        The sweep is a single Python thread holding the GIL –
-        ``to_pylist`` into the fold into the artifacts – so on a many-cored
-        host it is the wall whatever the storage does. The pairs are
-        independent (an entity id is placed in exactly one), so each worker
-        folds its own entities into **parts** of every artifact and the parent
-        concatenates them.
-
-        What the parent keeps is what cannot be partitioned: one snapshot (so
-        every worker reads the same version), the one delete-candidate scan,
-        the folder tree (a document's ancestors are placed by their own ids,
-        so they sit in other workers' pairs), the statistics fold, and every
-        tag write.
-
-        Args:
-            now: Timestamp the run started.
-            version: The pinned snapshot's Delta version.
-            workers: Processes to fan the pairs out to.
-
-        Returns:
-            Counts per artifact and per diff op, summed over the parts – every
-            value `ExportSession.result` reports is additive.
-        """
-        store = self.entities._statements
-        sources = store.sweep_sources()
+        workers = max(settings.workers, 1)
         config = worker_duckdb_config(workers)
+        store = self.entities._statements
         counts: Counter[str] = Counter()
-        with TemporaryDirectory(prefix="ftm-lakehouse-export-") as tmp:
+        with (
+            self.entities.merge_lock(),
+            TemporaryDirectory(prefix="ftm-lakehouse-export-") as tmp,
+        ):
+            version = store.version
+            sources = store.sweep_sources()
             # the parent writes its own part – the documents csv and the DEL
             # rows its `finish` produces belong in the assembled file too
             session = self.artifacts.session(
-                now, version, self.job.make_diff, f"{tmp}/parent"
+                now, version, f"{tmp}/parent", self.job.make_diff
             )
             parts = [f"{tmp}/{shard}-{bucket}" for (shard, bucket), _, _ in sources]
             with (
                 session,
                 SyncProgressBar("Exporting statements", store.num_rows) as bar,
-                self._export_runner(workers) as run,
+                process_map(workers) as run,
             ):
                 pending = self._pending_by_shard(session)
                 tasks = [
@@ -315,8 +267,8 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
 
         The workers write headerless parts, so the header is its own piece –
         written through the dataset's codec, so the assembly stays a verbatim
-        copy of frames. A run that swept nothing writes none, which keeps an
-        empty export's csv empty, as the serial path leaves it.
+        copy of frames. A run that swept nothing writes none, so an empty
+        export's csv stays empty.
 
         Args:
             tmp: The run's part root.
@@ -364,24 +316,6 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
             shard: {name: frozenset(ids) for name, ids in runs.items()}
             for shard, runs in out.items()
         }
-
-    @staticmethod
-    @contextmanager
-    def _export_runner(workers: int) -> Iterator[Callable[..., Iterator[Any]]]:
-        """An ordered ``map`` over ``workers`` processes.
-
-        Spawned rather than forked: the parent holds a ``DeltaTable`` with its
-        own threads, a journal connection and a live progress-bar thread, none
-        of which survive a fork intact. Pending pairs are cancelled when the
-        run fails, instead of sweeping partitions whose parts nobody will
-        assemble.
-        """
-        context = multiprocessing.get_context("spawn")
-        pool = ProcessPoolExecutor(workers, mp_context=context)
-        try:
-            yield pool.map
-        finally:
-            pool.shutdown(cancel_futures=True)
 
     def export_index(self) -> None:
         """Write ``index.json``, registering what the exports produced."""

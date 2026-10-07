@@ -30,10 +30,8 @@ Layout:
 """
 
 import json
-import multiprocessing
 import posixpath
-from concurrent.futures import ProcessPoolExecutor
-from contextlib import ExitStack, closing, contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import cache, cached_property
@@ -48,7 +46,6 @@ import pyarrow.compute as pc
 from anystore.decorators import error_handler
 from anystore.interface.lock import Lock
 from anystore.io import SyncProgressBar
-from anystore.io.progress import Throughput
 from anystore.logging import get_logger
 from anystore.logic.compress import CompressKind
 from anystore.store import get_store
@@ -110,7 +107,7 @@ from ftm_lakehouse.model.statement import (
     statement_csv_select,
 )
 from ftm_lakehouse.storage.tags import TagStore
-from ftm_lakehouse.util import validate_origin
+from ftm_lakehouse.util import process_map, validate_origin
 
 PARTITIONS = ["shard", "bucket", "origin"]
 
@@ -297,74 +294,21 @@ def partition_cursor(
 
 
 def sweep_partition(
-    cur: duckdb.DuckDBPyConnection,
-    out: IO[bytes] | None = None,
-    header: bool = True,
-    tee: bool = True,
-    throughput: Throughput | None = None,
+    cur: duckdb.DuckDBPyConnection, out: IO[bytes]
 ) -> Iterator[StatementDict]:
-    """One partition's rows, teeing Arrow batches two ways.
+    """One partition's statements, each Arrow batch also written to ``out`` as
+    headerless csv – the export writes the header as a part of its own.
 
-    The body of a sweep, for a cursor whose views already read one
-    ``(shard, bucket)`` pair – shared by `ParquetStore.sweep`, which loops its
-    own cursors, and by an export worker, which has exactly one.
-
-    Every batch can go to a ``pyarrow`` CSV writer *and* be handed on as row
-    dicts, so a caller that wants both ``statements.csv`` and the rows behind
-    it pays for one scan rather than writing the csv and reading it back.
-
-    Rows come from ``RecordBatch.to_pylist`` – a bulk conversion in C – and
-    carry `STATEMENT_CSV_COLUMNS`, which covers everything an entity
-    aggregation needs. They arrive entity-contiguous (the select orders by
-    ``entity_id`` and an entity lives in one partition), so
-    ``aggregate_unsafe`` can fold them directly.
-
-    The header is written when ``header`` is set *and* nothing has been written
-    to ``out`` yet. On a codec handle ``tell()`` is the uncompressed position,
-    so that is an exact test however many partitions share the handle – and it
-    stays right when the first partitions come back empty. A worker writing its
-    own part passes ``header=False``; the assembled file takes its header from
-    `ftm_lakehouse.model.statement.statement_csv_header`.
-
-    ``out`` stays the caller's to close. The writer is closed on this
-    generator's own unwind, which is before the handle's – so the writer's
-    buffer is flushed into the codec before the codec writes its trailer.
-
-    Args:
-        cur: Cursor whose ``statement`` view reads the partition
-            (`register_partition`).
-        out: Open binary handle to write the csv to. ``None`` scans without
-            writing one.
-        header: Write the csv header if nothing has been written yet.
-        tee: Yield row dicts. ``False`` keeps the scan purely columnar –
-            nothing is materialised in Python – which is what a csv-only
-            export wants.
-        throughput: Counter fed the Arrow bytes of every batch scanned – a
-            progress bar's, so it can show how fast the scan moves.
-
-    Yields:
-        ``StatementDict`` rows, unless ``tee`` is off.
+    Rows arrive ordered by ``entity_id``, so ``aggregate_unsafe`` can fold them
+    directly. ``out`` stays the caller's to close.
     """
     sql = str(statement_csv_select().compile(compile_kwargs={"literal_binds": True}))
-    # a batch is materialised as Python objects only when rows are asked for,
-    # so the cap is on rows-in-flight, not on bytes scanned
-    res = cur.execute(sql)
-    reader = res.to_arrow_reader(SWEEP_BATCH_SIZE) if tee else res.to_arrow_reader()
-    with ExitStack() as stack:
-        writer: CSVWriter | None = None
+    reader = cur.execute(sql).to_arrow_reader(SWEEP_BATCH_SIZE)
+    options = WriteOptions(include_header=False)
+    with CSVWriter(out, reader.schema, write_options=options) as writer:
         for batch in reader:
-            if throughput is not None:
-                throughput.add(batch.nbytes)
-            if out is not None:
-                if writer is None:
-                    options = WriteOptions(include_header=header and out.tell() == 0)
-                    writer = CSVWriter(out, batch.schema, write_options=options)
-                    # on the stack, so an abandoned generator flushes the
-                    # writer's buffer *before* the codec closes
-                    stack.callback(writer.close)
-                writer.write(batch)
-            if tee:
-                yield from cast(list[StatementDict], batch.to_pylist())
+            writer.write(batch)
+            yield from cast(list[StatementDict], batch.to_pylist())
 
 
 @cache
@@ -1027,7 +971,7 @@ class ParquetStore:
             # one bar, advanced per partition, its throughput the bytes read
             with (
                 SyncProgressBar("Merging partitions", len(tasks)) as bar,
-                self._merge_runner(workers) as run,
+                process_map(workers) as run,
             ):
 
                 def results() -> Iterator[tuple[MergeTask, MergeResult]]:
@@ -1051,27 +995,6 @@ class ParquetStore:
             workers=workers,
             grace_period_days=self.settings.grace_period_days,
         )
-
-    @staticmethod
-    @contextmanager
-    def _merge_runner(workers: int) -> Iterator[Callable[..., Iterator[Any]]]:
-        """An ordered ``map`` over ``workers`` processes – the builtin for one.
-
-        Processes are spawned rather than forked: this process holds a DuckDB
-        instance with its own threads and an `RLock`-guarded ``DeltaTable``,
-        which a fork would copy mid-flight. Pending tasks are cancelled when
-        the run fails, instead of merging partitions whose results nobody will
-        commit.
-        """
-        if workers == 1:
-            yield map
-            return
-        context = multiprocessing.get_context("spawn")
-        pool = ProcessPoolExecutor(workers, mp_context=context)
-        try:
-            yield pool.map
-        finally:
-            pool.shutdown(cancel_futures=True)
 
     def _commit_merged(self, batch: Iterable[tuple[MergeTask, MergeResult]]) -> None:
         """Commit a batch of merged partitions as one Delta transaction.
@@ -1342,55 +1265,6 @@ class ParquetStore:
                     full=True,
                 )
         self.log.info("Vacuumed.", files=len(deleted), took=t.took)
-
-    def sweep(
-        self,
-        csv_key: str | None = None,
-        tee: bool = True,
-        throughput: Throughput | None = None,
-    ) -> Iterator[StatementDict]:
-        """One scan of the live view, teeing Arrow batches two ways.
-
-        Each ``(shard, bucket)`` partition streams straight from DuckDB as
-        Arrow batches (`_execute_partitioned`). Every batch can go to a
-        ``pyarrow`` CSV writer *and* be handed on as row dicts, so a caller
-        that wants both ``statements.csv`` and the rows behind it pays for one
-        scan rather than writing the csv and reading it back.
-
-        Rows come from ``RecordBatch.to_pylist`` – a bulk conversion in C – and
-        carry `STATEMENT_CSV_COLUMNS`, which covers everything an entity
-        aggregation needs. They arrive entity-contiguous (the select orders by
-        ``entity_id`` and an entity lives in one partition), so
-        ``aggregate_unsafe`` can fold them directly.
-
-        One cursor per pair, each sweeping through `sweep_partition`, all
-        writing into one csv handle that lives for this generator's lifetime:
-        abandoning the generator closes it through the usual ``GeneratorExit``
-        unwind, so the codec trailer is always written. The header goes in once,
-        with the first partition that actually yields a batch.
-
-        Args:
-            csv_key: Store key to write the sorted statements csv to.
-                ``None`` scans without writing one. Compression comes from
-                `compression` (the dataset's config), not from the caller.
-            tee: Yield row dicts. ``False`` keeps the scan purely
-                columnar – nothing is materialised in Python – which is what
-                a csv-only export wants.
-            throughput: Counter fed the Arrow bytes of every batch scanned –
-                a progress bar's, so it can show how fast the scan moves.
-
-        Yields:
-            ``StatementDict`` rows, unless ``tee`` is off.
-        """
-        with ExitStack() as stack:
-            out: IO[bytes] | None = None
-            if csv_key is not None:
-                out = stack.enter_context(
-                    self._store.open(csv_key, "wb", compression=self.compression)
-                )
-            for source, clean in self._scoped_sources():
-                with self._cursor_over(source, clean) as cur:
-                    yield from sweep_partition(cur, out, True, tee, throughput)
 
     def sweep_sources(self) -> list[tuple[tuple[str, str], str, bool]]:
         """Every ``(shard, bucket)`` pair of this process's snapshot, resolved.

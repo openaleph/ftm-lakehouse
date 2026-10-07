@@ -321,23 +321,9 @@ def statement_csv_select() -> Select[Any]:
 
 
 def statement_csv_header() -> bytes:
-    """The header row `statement_csv_select`'s csv carries, by itself.
-
-    What the assembled ``statements.csv`` of a parallel sweep takes its header
-    from: the workers write headerless parts
-    ([`sweep_partition`][ftm_lakehouse.storage.parquet.sweep_partition]), so
-    the header has to be produced once, on its own, as the first piece.
-
-    Quoted because ``pyarrow`` quotes every field name and the rows under this
-    header are written by its ``CSVWriter`` – no column name *needs* escaping,
-    but an unquoted header would differ both from the file it heads and from
-    every ``statements.csv`` written so far. That equality is asserted against
-    a real sweep rather than assumed:
-    ``tests/test_storage_parquet.py::test_storage_parquet_sweep_header``.
-
-    Returns:
-        The header line, newline included.
-    """
+    """The ``statements.csv`` header row, quoted as pyarrow's ``CSVWriter``
+    quotes it – the export writes it as its own first part, the swept parts
+    being headerless."""
     names = '","'.join(STATEMENT_CSV_COLUMNS)
     return f'"{names}"\n'.encode()
 

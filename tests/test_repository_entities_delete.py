@@ -6,7 +6,6 @@ hidden as soon as a tombstone row for ALL its statements lands in parquet.
 cutoff.
 """
 
-from collections import deque
 from datetime import timedelta
 from pathlib import Path
 from typing import Generator
@@ -16,6 +15,7 @@ from followthemoney import EntityProxy, Statement
 from rigour.time import utc_now
 
 from ftm_lakehouse.core.conventions import path, tag
+from ftm_lakehouse.operation.factories import export
 from ftm_lakehouse.repository.entities import EntityRepository
 from ftm_lakehouse.repository.factories import get_entities
 from tests.conftest import make_docker_repo, make_test_api
@@ -255,8 +255,7 @@ def test_delete_entity_filters_from_export_csv(tmp_path):
     repo.flush()
     repo.merge()
 
-    # `sweep` is a generator – the csv is written as it is drained
-    deque(repo._statements.sweep(path.EXPORTS_STATEMENTS, tee=False), maxlen=0)
+    export(DATASET, tmp_path)
 
     csv_path = str(tmp_path / path.EXPORTS_STATEMENTS)
     with open(csv_path) as f:

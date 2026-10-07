@@ -33,11 +33,8 @@ from ftm_lakehouse.model.statement import PA_TS, SHARDED_SCHEMA, TABLE_RAW
 from ftm_lakehouse.util import parse_byte_size, validate_origin
 
 SWEEP_BATCH_SIZE = 50_000
-"""Rows per Arrow batch when `ParquetStore.sweep` materialises them as
-Python dicts. DuckDB's own default (1M) is sized for a columnar consumer;
-turning a batch that size into dicts would hold a million of them at once, so
-the fused export asks for a smaller one. Bounds rows in flight, not bytes
-scanned – the scan stays streaming either way."""
+"""Rows per Arrow batch when a read materialises them as Python dicts –
+DuckDB's default of 1M would hold a million dicts at once."""
 
 SHARD_MIN_FILE_SIZE = 32 * 1_048_576  # 32 MB
 """Floor for `shard_target_file_size` – below this a re-shard would

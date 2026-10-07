@@ -1,5 +1,6 @@
 """Tests for ParquetStore — append-only sorted writes + async merge."""
 
+import io
 import math
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -11,6 +12,7 @@ from ftmq.query import M, Query
 from ftmq.store.base import DEFAULT_ORIGIN
 from ftmq.store.lake import pack_statement
 from ftmq.types import Statements
+from pyarrow.csv import CSVWriter  # type: ignore[attr-defined]
 
 from ftm_lakehouse.helpers.shards import entity_shard
 from ftm_lakehouse.logic.parquet import MERGED_PREFIX, TABLE_CONFIGURATION
@@ -18,6 +20,7 @@ from ftm_lakehouse.model.statement import (
     JOURNAL_SCHEMA,
     TABLE_RAW,
     statement_csv_header,
+    statement_csv_select,
 )
 from ftm_lakehouse.storage import parquet as storage_parquet
 from ftm_lakehouse.storage.parquet import ParquetStore
@@ -320,33 +323,27 @@ def test_storage_parquet_merge_escaped_origin(tmp_path):
 
 
 def test_storage_parquet_sweep_header(tmp_path):
-    """`statement_csv_header` is the header a real sweep writes, and a part
-    carries none.
-
-    A parallel sweep's parts are headerless and the assembled file takes its
-    header from that function, so the two must not drift – which is what makes
-    the hand-spelled header safe.
-    """
+    """`statement_csv_header` is the header pyarrow writes for the sweep's
+    columns, and a swept part carries none."""
     store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
     _flush(store, _origin_rows("a"))
 
-    list(store.sweep("sweep.csv", False))
-
-    with store._store.open("sweep.csv", "rb") as fh:
-        assert fh.readline() == statement_csv_header()
-
-    # one pair, written as a worker writes its part
-    key, source, clean = store.sweep_sources()[0]
-    with open(tmp_path / "part.csv", "wb") as out:
-        with storage_parquet.partition_cursor(source, clean, {}) as cur:
-            list(storage_parquet.sweep_partition(cur, out, header=False, tee=False))
-    body = (tmp_path / "part.csv").read_bytes()
+    _, source, clean = store.sweep_sources()[0]
+    out = io.BytesIO()
+    sql = str(statement_csv_select().compile(compile_kwargs={"literal_binds": True}))
+    with storage_parquet.partition_cursor(source, clean, {}) as cur:
+        list(storage_parquet.sweep_partition(cur, out))
+        schema = cur.execute(sql).to_arrow_reader().schema
+    body = out.getvalue()
     assert body and not body.startswith(statement_csv_header())
-    assert key == store.sweep_sources()[0][0]
+
+    header = io.BytesIO()
+    CSVWriter(header, schema).close()
+    assert header.getvalue() == statement_csv_header()
 
 
 def test_storage_parquet_sweep_sources_cover_every_row(tmp_path):
-    """The pairs a parallel sweep fans out over are the whole store, once."""
+    """The pairs the export sweep fans out over are the whole store, once."""
     store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
     _flush(store, _origin_rows("a"))
     _flush(store, _origin_rows("b"))
@@ -354,20 +351,15 @@ def test_storage_parquet_sweep_sources_cover_every_row(tmp_path):
     sources = store.sweep_sources()
 
     assert len(sources) > 1, "a sharded store must have several pairs to fan out"
-    swept = []
-    for _, source, clean in sources:
-        with storage_parquet.partition_cursor(source, clean, {}) as cur:
-            swept.extend(storage_parquet.sweep_partition(cur))
-    # same rows as the serial sweep, and every entity in exactly one pair
-    serial = list(store.sweep())
-    assert sorted(r["id"] for r in swept) == sorted(r["id"] for r in serial)
     per_pair = []
     for _, source, clean in sources:
         with storage_parquet.partition_cursor(source, clean, {}) as cur:
-            per_pair.append(
-                {r["entity_id"] for r in storage_parquet.sweep_partition(cur)}
-            )
-    assert not set.intersection(*per_pair) if len(per_pair) > 1 else True
+            per_pair.append(list(storage_parquet.sweep_partition(cur, io.BytesIO())))
+    # same rows as a query, and every entity in exactly one pair
+    swept = sorted(r["id"] for rows in per_pair for r in rows)
+    assert swept == sorted(s.id for s in store.query_statements())
+    entities = [{r["entity_id"] for r in rows} for rows in per_pair]
+    assert not set.intersection(*entities)
 
 
 def test_storage_parquet_merge_workers(tmp_path, monkeypatch):

@@ -26,13 +26,7 @@ DATASET = "export_test"
 
 @pytest.fixture(params=(1, 3), autouse=True)
 def workers(request, monkeypatch) -> int:
-    """Run the whole contract suite on the serial *and* the parallel path.
-
-    Everything an export promises has to hold either way – the artifacts, the
-    freshness tags, the counts, the truncation of a stale file by an empty
-    sweep. `1` is the in-process path verbatim; `3` fans the ``(shard,
-    bucket)`` pairs out to worker processes and assembles their parts.
-    """
+    """Run the whole contract suite in-process (`1`) and in worker processes."""
     # the settings instance the operation module reads, patched directly:
     # `ftm_lakehouse.operation` exports an `export` *function* that shadows
     # the submodule, so it cannot be reached by attribute access

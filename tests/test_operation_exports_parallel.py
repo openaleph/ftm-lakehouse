@@ -1,11 +1,9 @@
-"""The parallel export sweep says what the serial one says.
+"""Worker processes export what one process exports.
 
-`LAKEHOUSE_WORKERS` fans the store's ``(shard, bucket)`` pairs out to worker
-processes, each folding its own entities into *parts* of every artifact, which
-the parent then concatenates. The contract suite
-(`tests/test_operation_exports.py`) already runs on both paths; what is left to
-pin is that the two produce the same thing, and the one piece of the diff
-machinery the fan-out could get wrong – a ``DEL``, which no worker can see.
+The export folds each ``(shard, bucket)`` pair into *parts* of every artifact,
+in `LAKEHOUSE_WORKERS` processes or in-process, and concatenates them. The
+contract suite (`tests/test_operation_exports.py`) runs at both settings; this
+pins that they produce the same thing, plus a ``DEL``, which no pair can see.
 """
 
 import hashlib
@@ -19,6 +17,7 @@ from ftmq.util import make_entity
 from ftm_lakehouse.catalog import ensure_dataset
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.helpers.shards import entity_shard
+from ftm_lakehouse.model.statement import statement_csv_header
 from ftm_lakehouse.operation.export import settings as export_settings
 from ftm_lakehouse.operation.factories import export
 from ftm_lakehouse.repository.factories import (
@@ -171,42 +170,25 @@ def test_export_parallel_diff_del(tmp_path):
 
 @pytest.mark.parametrize("algorithm", (CompressKind.zst, CompressKind.gz))
 def test_export_parallel_multi_frame(tmp_path, algorithm):
-    """A compressed artifact assembled from parts is a multi-frame file.
-
-    The assembly copies each part's bytes verbatim rather than re-encoding, so
-    the result is several codec frames back to back – a multi-member gzip or
-    multi-frame zstd stream. anystore layers the stdlib file classes
-    (``GzipFile`` / ``ZstdFile`` / ...), which are streaming multi-member
-    readers, so it decodes as one file; what would break is a consumer calling
-    a single-shot ``decompress()`` on the whole blob.
-
-    Pinned by comparing against the serial run on the *same* store: different
-    bytes (the framing), identical content (the rows).
-    """
+    """A compressed artifact assembled from parts is several codec frames back
+    to back, and still reads back as one file through anystore's stdlib file
+    classes – a single-shot ``decompress()`` on the blob would not."""
     uri = _setup(tmp_path, 1, compression=algorithm)
     artifacts = get_artifacts(DATASET, uri)
     assert artifacts.statements.compression == algorithm
     assert len(get_entities(DATASET, uri)._statements.sweep_sources()) > 1
 
     export(DATASET, uri, make_diff=False)
-    key = artifacts.statements.key
-    with artifacts.statements.dataset._store.open(key, "rb") as fh:
-        serial_raw = fh.read()
-    with artifacts.statements.reader() as fh:
-        serial_rows = sorted(fh.read().decode().splitlines())
 
-    export_settings.workers = 3
-    clear_caches()
-    export(DATASET, uri, make_diff=False, force=True)
-
-    artifacts = get_artifacts(DATASET, uri)
-    with artifacts.statements.dataset._store.open(key, "rb") as fh:
-        parallel_raw = fh.read()
-    assert parallel_raw.startswith(MAGIC[algorithm])
-    # several frames, not one: same content, different framing
-    assert parallel_raw != serial_raw
+    with artifacts.statements.dataset._store.open(artifacts.statements.key, "rb") as fh:
+        raw = fh.read()
+    assert raw.startswith(MAGIC[algorithm])
+    assert raw.count(MAGIC[algorithm]) > 1
     with artifacts.statements.reader() as fh:
-        assert sorted(fh.read().decode().splitlines()) == serial_rows
+        rows = fh.read().decode().splitlines()
+    assert rows[0].encode() + b"\n" == statement_csv_header()
+    statements = list(get_entities(DATASET, uri).query_statements())
+    assert len(rows) == 1 + len(statements)
     # and the entities artifact, read through the repository's own stream
     assert {e.id for e in get_entities(DATASET, uri).stream()} == {
         data["id"] for data in ENTITIES

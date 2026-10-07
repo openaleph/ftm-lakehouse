@@ -28,7 +28,6 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
 from shutil import copyfileobj
-from tempfile import TemporaryDirectory
 from typing import (
     IO,
     Any,
@@ -219,26 +218,15 @@ class Artifact:
         """
         return f"{parts}/{self.name}"
 
-    def writer(self, lazy: bool = False, parts: str | None = None) -> Writer:
-        """A writer for this artifact, in its own format and codec.
-
-        Args:
-            lazy: Defer creating the file to the first row. An artifact is a
-                whole picture of the store, so it opens eagerly – an empty
-                sweep must truncate a stale one rather than leave it. A diff
-                is the opposite: no changes means no file.
-            parts: Write a part of a parallel run (`part`) instead of the
-                artifact itself. A part is always lazy: truncating a stale
-                artifact is `assemble`'s job once, and a part no worker wrote
-                a row to is one the assembly skips rather than an empty frame
-                in the middle of the file.
-        """
+    def writer(self, parts: str | None = None) -> Writer:
+        """A writer for the artifact itself, or – lazily – for its part of a run
+        (`part`), so a part nobody wrote to is skipped by `assemble`."""
         return Writer(
             self.part(parts) if parts else self.dataset._store.to_uri(self.key),
             output_format=self.format,
             compression=self.compression,
             fieldnames=self.fieldnames,
-            lazy=lazy or parts is not None,
+            lazy=parts is not None,
         )
 
     def assemble(self, parts: Iterable[str]) -> int:
@@ -249,9 +237,8 @@ class Artifact:
         multi-frame zstd / multi-member gzip stream, which the codec reads back
         as one file. Opening it encoded would wrap a frame in a frame.
 
-        Eager, like `writer`: an artifact is a whole picture of the store, so a
-        run that swept nothing truncates a stale file rather than leaving it –
-        which is the guarantee an eagerly-opened writer used to provide.
+        Eager: an artifact is a whole picture of the store, so a run that swept
+        nothing truncates a stale file rather than leaving it.
 
         Args:
             parts: The run's part directories, in the order their rows belong
@@ -268,10 +255,9 @@ class Artifact:
         if lazy and not found:
             return 0
         if not found:
-            # nothing was written, so this leaves what an empty artifact *is*:
-            # the header of a table whose columns are known, an empty file
-            # otherwise – exactly what an eagerly-opened writer leaves on the
-            # serial path, and a truncation of a stale artifact either way
+            # nothing was written: leave what an empty artifact *is* – the
+            # header of a table whose columns are known, an empty file
+            # otherwise – truncating a stale one either way
             writer = self.writer()
             writer.open()
             writer.close()
@@ -307,13 +293,8 @@ class Artifact:
             size=info.size,
         )
 
-    def run(self, now: datetime, parts: str | None = None) -> "ArtifactRun":
-        """The per-run object that writes this artifact.
-
-        Args:
-            now: Timestamp the run started.
-            parts: Write into a part directory of a parallel run (`part`).
-        """
+    def run(self, now: datetime, parts: str) -> "ArtifactRun":
+        """The per-run object that writes this artifact's part into ``parts``."""
         return ArtifactRun(self, now, parts)
 
 
@@ -361,19 +342,14 @@ class DiffableArtifact(Artifact):
         """Where this series' piece of a parallel run is written."""
         return f"{self.part(parts)}.diff"
 
-    def diff_writer(self, ts: datetime, parts: str | None = None) -> Writer:
-        """A writer for one diff file in this series, or for a part of one."""
+    def diff_writer(self, parts: str) -> Writer:
+        """A lazy writer for this series' part of a run's diff file."""
         fieldnames = ["op", *self.fieldnames] if self.fieldnames else None
         return Writer(
-            (
-                self.diff_part(parts)
-                if parts
-                else self.dataset._store.to_uri(self.series(ts) + self.compression)
-            ),
+            self.diff_part(parts),
             output_format=self.format,
             compression=self.compression,
             fieldnames=fieldnames,
-            # a series with no changes in the window leaves no file at all
             lazy=True,
         )
 
@@ -429,7 +405,7 @@ class EntitiesArtifact(DiffableArtifact):
     mime_type = FTM
     diffs = path.DIFFS_ENTITIES
 
-    def run(self, now: datetime, parts: str | None = None) -> "EntitiesRun":
+    def run(self, now: datetime, parts: str) -> "EntitiesRun":
         return EntitiesRun(self, now, parts)
 
 
@@ -522,7 +498,7 @@ class DocumentsArtifact(DiffableArtifact):
                 # csv values arrive as strings; pydantic coerces size / updated_at
                 yield Document(**cast(dict[str, Any], row))
 
-    def run(self, now: datetime, parts: str | None = None) -> "DocumentsRun":
+    def run(self, now: datetime, parts: str) -> "DocumentsRun":
         return DocumentsRun(self, now, parts)
 
 
@@ -538,7 +514,7 @@ class StatisticsArtifact(VersionedArtifact):
     base = path.EXPORTS_STATISTICS
     kind = ExportKind.statistics
 
-    def run(self, now: datetime, parts: str | None = None) -> "StatisticsRun":
+    def run(self, now: datetime, parts: str) -> "StatisticsRun":
         return StatisticsRun(self, now, parts)
 
 
@@ -573,13 +549,10 @@ class ArtifactRun:
     Arrow tee rather than row by row.
     """
 
-    def __init__(
-        self, artifact: Artifact, now: datetime, parts: str | None = None
-    ) -> None:
+    def __init__(self, artifact: Artifact, now: datetime, parts: str) -> None:
         self.artifact = artifact
         self.now = now
-        # set on a worker of a parallel sweep: every writer this run opens
-        # points at a part of the artifact instead of the artifact itself
+        # every writer this run opens points at a part of the artifact
         self.parts = parts
         self.counts: Counter[str] = Counter()
 
@@ -611,26 +584,11 @@ class ArtifactRun:
 
 
 class WritingRun(ArtifactRun):
-    """A run that writes its artifact row by row.
+    """A run that writes its artifact's part row by row."""
 
-    Opens eagerly, because an export is a whole picture of the store: a sweep
-    that yields nothing has to leave an empty artifact, not the previous run's
-    file freshly stamped as current.
-    """
-
-    def __init__(
-        self, artifact: Artifact, now: datetime, parts: str | None = None
-    ) -> None:
+    def __init__(self, artifact: Artifact, now: datetime, parts: str) -> None:
         super().__init__(artifact, now, parts)
-        self.writer = artifact.writer(parts=parts)
-
-    def prepare(self, version: int | None) -> None:
-        # a part is opened by its first row instead: `Writer.open` writes a
-        # known csv header, so opening every worker's part would put a header
-        # in the middle of the assembled file – and an artifact nobody wrote a
-        # row to is one the assembly skips, not an empty frame
-        if self.parts is None:
-            self.writer.open()
+        self.writer = artifact.writer(parts)
 
     def close(self) -> None:
         self.writer.close()
@@ -648,9 +606,7 @@ class DiffableRun(WritingRun):
 
     artifact: DiffableArtifact
 
-    def __init__(
-        self, artifact: DiffableArtifact, now: datetime, parts: str | None = None
-    ) -> None:
+    def __init__(self, artifact: DiffableArtifact, now: datetime, parts: str) -> None:
         super().__init__(artifact, now, parts)
         self.since: datetime | None = None
         self.since_iso: str | None = None
@@ -687,7 +643,7 @@ class DiffableRun(WritingRun):
         # that has one
         self.since_iso = datetime_iso(last_timestamp)
         self.active = True
-        self.diff = self.artifact.diff_writer(self.now, self.parts)
+        self.diff = self.artifact.diff_writer(self.parts)
         # `pending` is filled from the session's one scan, not from here - see
         # `ExportSession.load_pending`
 
@@ -802,22 +758,12 @@ class DocumentsRun(DiffableRun):
 
     artifact: DocumentsArtifact
 
-    def __init__(
-        self, artifact: DocumentsArtifact, now: datetime, parts: str | None = None
-    ) -> None:
+    def __init__(self, artifact: DocumentsArtifact, now: datetime, parts: str) -> None:
         super().__init__(artifact, now, parts)
         self.public_prefix = artifact.dataset._model.get_public_prefix()
-        # a worker stages into the run's part directory – the staged rows *are*
-        # its part, because the csv they become cannot be written until every
-        # potential parent has been seen; a serial run keeps its own temp dir
-        self._tmp: "TemporaryDirectory[str] | None" = (
-            None if parts else TemporaryDirectory(prefix="ftm-lakehouse-export-")
-        )
-        self.staged = (
-            self.staged_part(parts)
-            if parts
-            else f"{cast('TemporaryDirectory[str]', self._tmp).name}/documents.json"
-        )
+        # the staged rows *are* this run's part: the csv they become cannot be
+        # written until every potential parent has been seen
+        self.staged = self.staged_part(parts)
         self.staging = Writer(self.staged)
         # the workers' staged files, adopted by the parent before it resolves
         self.staged_parts: list[str] = []
@@ -953,8 +899,6 @@ class DocumentsRun(DiffableRun):
     def close(self) -> None:
         super().close()
         self.staging.close()
-        if self._tmp is not None:
-            self._tmp.cleanup()
 
 
 class StatisticsRun(ArtifactRun):
@@ -967,9 +911,7 @@ class StatisticsRun(ArtifactRun):
 
     artifact: StatisticsArtifact
 
-    def __init__(
-        self, artifact: Artifact, now: datetime, parts: str | None = None
-    ) -> None:
+    def __init__(self, artifact: Artifact, now: datetime, parts: str) -> None:
         super().__init__(artifact, now, parts)
         self.collector = StatsCollector()
 
@@ -1003,13 +945,10 @@ class ExportSession:
         self.counts: Counter[str] = Counter()
 
     def prepare(self) -> None:
-        """Open every writer and resolve every diff window.
+        """Resolve every diff window and open the staging files.
 
-        What a worker of a parallel sweep calls, where the serial path gets it
-        from ``__enter__``: a worker prepares, consumes and closes, and never
-        finishes or commits – every `ArtifactRun.finish` is work over the whole
-        store (the folder tree, the statistics, the DEL leftover) and
-        `ArtifactRun.commit` writes tags.
+        A worker calls this directly and never finishes or commits: `finish`
+        is work over the whole store and `commit` writes tags – the parent's.
         """
         # a run prepared against no version has no window to diff, which is
         # exactly what `--no-diff` asks for
@@ -1191,8 +1130,8 @@ class ArtifactsRepository(DatasetHandle):
         self,
         now: datetime,
         version: int | None,
+        parts: str,
         make_diff: bool = True,
-        parts: str | None = None,
     ) -> ExportSession:
         """The artifacts an export run writes, ready to be driven as one loop.
 
@@ -1201,9 +1140,9 @@ class ArtifactsRepository(DatasetHandle):
                 diff states are recorded at it.
             version: Current delta table version, which the diff series
                 resolve their window against.
+            parts: Part directory the session's own rows are written to
+                (`Artifact.part`).
             make_diff: Whether diff series run at all.
-            parts: Write into a part directory of a parallel run
-                (`Artifact.part`) instead of over the artifacts themselves.
         """
         # local import: `factories` imports this module for `ArtifactsRepository`
         from ftm_lakehouse.repository.factories import get_entities

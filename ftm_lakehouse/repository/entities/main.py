@@ -7,7 +7,6 @@ from typing import Generator, Iterable, Iterator, cast
 
 import pyarrow as pa
 from anystore.interface.lock import Lock
-from anystore.io.progress import Throughput
 from anystore.types import Uri
 from anystore.util import Took, mask_uri
 from followthemoney import EntityProxy, Statement, StatementEntity
@@ -242,23 +241,6 @@ class EntityRepository(DatasetHandle):
         [`ParquetStore.merge_lock`][ParquetStore.merge_lock].
         """
         return self._statements.merge_lock()
-
-    @no_api
-    def sweep(self, throughput: Throughput | None = None) -> Iterator[StatementDict]:
-        """One scan of the store, writing ``statements.csv`` from it.
-
-        Delegates to [`ParquetStore.sweep`][ParquetStore.sweep] with this
-        dataset's csv key, so the artifact carries the configured codec, and
-        takes the rows as well – an export writes the csv *and* folds the
-        entities out of the same scan.
-
-        Args:
-            throughput: Counter fed the Arrow bytes of every batch scanned.
-
-        Yields:
-            ``StatementDict`` rows.
-        """
-        yield from self._statements.sweep(self.EXPORTS_STATEMENTS, True, throughput)
 
     @property
     @no_api
