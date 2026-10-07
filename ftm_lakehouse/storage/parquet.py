@@ -116,6 +116,7 @@ class MergeResult:
     merged file, ``None`` when the merge reaped it entirely, and how long it
     took – workers do not log."""
 
+    partition: Partition
     file: tuple[str, int, int] | None
     took: timedelta
 
@@ -143,6 +144,7 @@ def merge_partition(task: MergeTask) -> MergeResult:
     shard, bucket, origin = task.partition
     config: dict[str, Any] = {**task.duckdb_config}
     with Took() as t, closing(duckdb.connect(config=config)) as con:
+        con.execute("SET enable_progress_bar = false")  # see `partition_cursor`
         source = partition_source_sql(
             [f"{task.root}/{file}" for file, _ in task.files], shard, bucket, origin
         )
@@ -162,8 +164,8 @@ def merge_partition(task: MergeTask) -> MergeResult:
             f"COPY ({sql}) TO '{target}' ({merge_copy_options(bucket)})"
         ).fetchone()
     if stats and stats[1]:
-        return MergeResult((file, int(stats[2]), int(stats[1])), t.took)
-    return MergeResult(None, t.took)
+        return MergeResult(task.partition, (file, int(stats[2]), int(stats[1])), t.took)
+    return MergeResult(task.partition, None, t.took)
 
 
 def pair_source(
@@ -207,6 +209,10 @@ def partition_cursor(
         **config,
     }
     with closing(duckdb.connect(":memory:", config=duck)) as con:
+        # a spawned worker's DuckDB takes itself for interactive (its `__main__`
+        # has no `__file__` at import) and draws its own bar onto the terminal;
+        # a session setting, refused as a connect-time option
+        con.execute("SET enable_progress_bar = false")
         con.execute("LOAD icu; SET GLOBAL TimeZone='UTC'")
         setup_duckdb_storage(con)
         register_partition(con, source, clean)
@@ -631,12 +637,13 @@ class ParquetStore:
             return
         grace_cutoff = utc_now() - timedelta(days=self.settings.grace_period_days)
         workers = max(self.settings.workers, 1)
-        config = worker_duckdb_config(workers)
         merged = skipped = 0
         with self.merge_lock():
             root, partitions = self._partitions()
             tasks = [
-                MergeTask(partition, files, root, grace_cutoff, config)
+                MergeTask(
+                    partition, files, root, grace_cutoff, worker_duckdb_config(workers)
+                )
                 for partition, (files, clean) in partitions.items()
                 if force or not clean
             ]
@@ -644,11 +651,13 @@ class ParquetStore:
             # one bar, advanced per partition, its throughput the bytes read
             with (
                 SyncProgressBar("Merging partitions", len(tasks)) as bar,
-                process_map(workers) as run,
+                process_map(workers, ordered=False) as run,
             ):
+                by_partition = {task.partition: task for task in tasks}
 
                 def results() -> Iterator[tuple[MergeTask, MergeResult]]:
-                    for task, result in zip(tasks, run(merge_partition, tasks)):
+                    for result in run(merge_partition, tasks):
+                        task = by_partition[result.partition]
                         bar.advance(size=sum(size for _, size in task.files))
                         yield task, result
 

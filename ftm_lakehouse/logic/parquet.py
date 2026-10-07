@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Iterable
 
 import pyarrow as pa
+from anystore.util import ensure_uuid
 from banal import ensure_list
 from deltalake import DeltaTable
 from ftmq.query import Query
@@ -75,20 +76,30 @@ def duckdb_config() -> dict[str, str]:
     """DuckDB config from the lakehouse settings – memory limit, spill and
     extension directories.
 
+    One call per DuckDB instance: each call spills into its own subdirectory of
+    ``LAKEHOUSE_DUCKDB_TEMP_DIRECTORY`` – instances number their spill files
+    alike, so two sharing a directory overwrite each other's blocks. DuckDB
+    creates the subdirectory on its first spill and removes it on close.
+
     No ``TimeZone``: as a connect-time option it makes DuckDB install ``icu``,
     which fails offline; the session is pinned to UTC after connecting instead.
     """
     settings = Settings()
     config: dict[str, str] = {"memory_limit": settings.duckdb_memory_limit}
     if settings.duckdb_temp_directory:
-        config["temp_directory"] = settings.duckdb_temp_directory
+        # DuckDB creates the spill directory but not its parents
+        os.makedirs(settings.duckdb_temp_directory, exist_ok=True)
+        config["temp_directory"] = os.path.join(
+            settings.duckdb_temp_directory, ensure_uuid()
+        )
     if settings.duckdb_extension_directory:
         config["extension_directory"] = settings.duckdb_extension_directory
     return config
 
 
 def worker_duckdb_config(workers: int) -> dict[str, str]:
-    """[`duckdb_config`][duckdb_config] for one of ``workers`` processes.
+    """[`duckdb_config`][duckdb_config] for one of ``workers`` processes – one
+    call per task, as each task connects its own instance.
 
     Memory limit and threads are split between them, so the limit stays the
     ceiling for the whole operation. A limit that is no byte size falls back

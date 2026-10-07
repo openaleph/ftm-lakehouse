@@ -1,9 +1,9 @@
 import multiprocessing
 import re
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import contextmanager
 from functools import lru_cache
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 from banal import ensure_list
 from followthemoney.dataset.util import dataset_name_check
@@ -228,18 +228,27 @@ def validate_dataset_name(name: str) -> str:
 
 
 @contextmanager
-def process_map(workers: int) -> Iterator[Callable[..., Iterator[Any]]]:
-    """An ordered ``map`` over ``workers`` spawned processes – the builtin for one.
+def process_map(
+    workers: int, ordered: bool = True
+) -> Iterator[Callable[..., Iterator[Any]]]:
+    """A ``map`` over ``workers`` spawned processes – the builtin for one.
 
-    Spawned, not forked: the parent holds DuckDB and Delta threads a fork would
-    copy mid-flight. Pending tasks are cancelled when the caller fails.
+    Results come in input order, or with ``ordered=False`` as each finishes, so
+    one slow task holds back none of the others. Spawned, not forked: the parent
+    holds DuckDB and Delta threads a fork would copy mid-flight. Pending tasks
+    are cancelled when the caller fails.
     """
     if workers <= 1:
         yield map
         return
     context = multiprocessing.get_context("spawn")
     pool = ProcessPoolExecutor(workers, mp_context=context)
+
+    def unordered(fn: Callable[[Any], Any], items: Iterable[Any]) -> Iterator[Any]:
+        for future in as_completed([pool.submit(fn, item) for item in items]):
+            yield future.result()
+
     try:
-        yield pool.map
+        yield pool.map if ordered else unordered
     finally:
         pool.shutdown(cancel_futures=True)

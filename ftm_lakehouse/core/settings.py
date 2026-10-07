@@ -59,7 +59,8 @@ class Settings(BaseSettings):
     duckdb_temp_directory: str | None = Field(
         default_factory=lambda: str(Path(gettempdir()) / "duckdb")
     )
-    """Where DuckDB spills a query that outgrows `duckdb_memory_limit`."""
+    """Where DuckDB spills a query that outgrows `duckdb_memory_limit` – each
+    DuckDB instance into its own subdirectory, removed on close."""
 
     duckdb_extension_directory: str | None = None
 

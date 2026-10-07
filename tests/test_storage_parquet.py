@@ -2,7 +2,10 @@
 
 import io
 import math
+import subprocess
+import sys
 from collections import defaultdict
+from contextlib import nullcontext
 from datetime import datetime, timezone
 
 import pyarrow as pa
@@ -346,6 +349,34 @@ def test_storage_parquet_sweep_header(tmp_path):
     assert header.getvalue() == statement_csv_header()
 
 
+PROGRESS_BAR = """
+import sys
+import duckdb
+from ftm_lakehouse.storage.parquet import partition_cursor
+SQL = "SELECT current_setting('enable_progress_bar')"
+print(duckdb.connect().execute(SQL).fetchone()[0])
+with partition_cursor(sys.argv[1], sys.argv[2] == "True", {}) as cur:
+    print(cur.execute(SQL).fetchone()[0])
+"""
+
+
+def test_storage_parquet_partition_cursor_no_progress_bar(tmp_path):
+    """DuckDB draws its own progress bar over ours when it takes the process for
+    an interactive session – no ``__main__.__file__`` at import, as in a spawned
+    worker of the CLI, or here under ``-c`` (the first line) – unless the cursor
+    turns it off."""
+    store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
+    _flush(store, _origin_rows("a"))
+    _, source, clean = store.sweep_sources()[0]
+    out = subprocess.run(
+        [sys.executable, "-c", PROGRESS_BAR, source, str(clean)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert out.stdout.split() == ["True", "False"]
+
+
 def test_storage_parquet_sweep_sources_cover_every_row(tmp_path):
     """The pairs the export sweep fans out over are the whole store, once."""
     store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
@@ -378,6 +409,28 @@ def test_storage_parquet_merge_workers(tmp_path, monkeypatch):
         merged.append(sorted((s.id, s.origin) for s in store.query_statements()))
     assert merged[0] == merged[1]
     assert len(merged[0]) == 40
+
+
+def test_storage_parquet_merge_spill_directory_per_task(tmp_path, monkeypatch):
+    """Each partition's DuckDB instance spills into its own directory – workers
+    sharing one crash on each other's spill files."""
+    monkeypatch.setenv("LAKEHOUSE_WORKERS", "2")  # in-process below, split config
+    monkeypatch.setattr(
+        storage_parquet, "process_map", lambda *_, **__: nullcontext(map)
+    )
+    spill = []
+    merge_partition = storage_parquet.merge_partition
+
+    def record(task):
+        spill.append(task.duckdb_config["temp_directory"])
+        return merge_partition(task)
+
+    monkeypatch.setattr(storage_parquet, "merge_partition", record)
+    store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
+    _flush(store, _origin_rows("a"))
+    store.merge()
+    assert len(spill) == len(store._partitions()[1]) > 1
+    assert len(set(spill)) == len(spill)
 
 
 @pytest.mark.parametrize("workers", (1, 2))

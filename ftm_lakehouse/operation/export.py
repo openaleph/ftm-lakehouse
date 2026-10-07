@@ -150,7 +150,6 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
             Counts per artifact and per diff op.
         """
         workers = max(settings.workers, 1)
-        config = worker_duckdb_config(workers)
         store = self.entities._statements
         counts: Counter[str] = Counter()
         with (
@@ -184,7 +183,7 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
                         shard=shard,
                         source=source,
                         clean=clean,
-                        duckdb_config=config,
+                        duckdb_config=worker_duckdb_config(workers),
                         pending=pending.get(shard, {}),
                     )
                     for part, ((shard, bucket), source, clean) in zip(parts, sources)

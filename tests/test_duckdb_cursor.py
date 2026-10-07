@@ -8,6 +8,7 @@ connection don't race on shared connection state.
 connection so a single complex query can't OOM the worker.
 """
 
+import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from tempfile import gettempdir
@@ -113,13 +114,27 @@ def test_make_duckdb_applies_memory_limit(monkeypatch) -> None:
 
 
 def test_make_duckdb_applies_temp_directory(monkeypatch, tmp_path) -> None:
-    """``Settings.duckdb_temp_directory`` flows into the new connection."""
+    """``Settings.duckdb_temp_directory`` flows into the new connection, as the
+    parent of its own spill directory."""
     monkeypatch.setenv("LAKEHOUSE_DUCKDB_TEMP_DIRECTORY", str(tmp_path))
     assert Settings().duckdb_temp_directory == str(tmp_path)
 
     con = make_duckdb()
     (configured,) = con.execute("SELECT current_setting('temp_directory')").fetchone()
-    assert configured == str(tmp_path)
+    assert os.path.dirname(configured) == str(tmp_path)
+
+
+def test_duckdb_config_spill_directory_per_instance(monkeypatch, tmp_path) -> None:
+    """Every config spills into its own directory – DuckDB instances number
+    their spill files alike, so two sharing one overwrite each other's blocks
+    (``BrokenProcessPool`` / ``Corrupt temporary file`` under parallel merge).
+    The configured parent is created, as DuckDB only creates the leaf."""
+    base = tmp_path / "missing" / "duckdb"
+    monkeypatch.setenv("LAKEHOUSE_DUCKDB_TEMP_DIRECTORY", str(base))
+    first, second = duckdb_config(), duckdb_config()
+    assert first["temp_directory"] != second["temp_directory"]
+    assert os.path.dirname(first["temp_directory"]) == str(base)
+    assert base.is_dir()
 
 
 def test_make_duckdb_default_temp_directory(monkeypatch) -> None:

@@ -8,6 +8,7 @@ pins that they produce the same thing, plus a ``DEL``, which no pair can see.
 
 import hashlib
 import json
+from importlib import import_module
 
 import orjson
 import pytest
@@ -30,6 +31,9 @@ MAGIC = {
     CompressKind.gz: b"\x1f\x8b",
     CompressKind.zst: b"\x28\xb5\x2f\xfd",
 }
+
+# the module, which `ftm_lakehouse.operation.export` (the function) shadows
+export_module = import_module("ftm_lakehouse.operation.export")
 
 DATASET = "export_parallel"
 SHARDS = 4
@@ -128,6 +132,23 @@ def test_export_parallel_matches_serial(tmp_path):
     assert _stats(uri) == serial_stats
     assert serial_stats["entity_count"] == 60
     assert _rows(uri, path.EXPORTS_DOCUMENTS) == serial_documents
+
+
+def test_export_parallel_spill_directory_per_pair(tmp_path, monkeypatch):
+    """Each pair's DuckDB instance spills into its own directory – workers
+    sharing one crash on each other's spill files."""
+    uri = _setup(tmp_path, 1)
+    spill = []
+    export_partition = export_module.export_partition
+
+    def record(task):
+        spill.append(task.duckdb_config["temp_directory"])
+        return export_partition(task)
+
+    monkeypatch.setattr(export_module, "export_partition", record)
+    export(DATASET, uri, make_diff=False)
+    assert len(spill) > 1
+    assert len(set(spill)) == len(spill)
 
 
 def test_export_parallel_diff_del(tmp_path):

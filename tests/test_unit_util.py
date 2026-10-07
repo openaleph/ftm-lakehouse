@@ -1,4 +1,6 @@
 import re
+import time
+from pathlib import Path
 
 import pytest
 
@@ -57,3 +59,28 @@ def test_util_parse_byte_size():
         util.parse_byte_size("GB")
     with pytest.raises(ValueError):
         util.parse_byte_size("8 flops")
+
+
+def _finish(task: tuple[str, bool]) -> bool:
+    """The ``first`` task finishes only after the other one has run."""
+    marker, first = task
+    if first:
+        deadline = time.monotonic() + 30
+        while not Path(marker).exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        time.sleep(0.2)
+    else:
+        Path(marker).touch()
+    return first
+
+
+def test_process_map_order(tmp_path):
+    """``ordered=False`` yields results as they finish, so a slow first task
+    holds back none of the others; the default keeps input order."""
+    marker = str(tmp_path / "marker")
+    tasks = [(marker, True), (marker, False)]
+    with util.process_map(2, ordered=False) as run:
+        assert list(run(_finish, tasks)) == [False, True]
+    Path(marker).unlink()
+    with util.process_map(2) as run:
+        assert list(run(_finish, tasks)) == [True, False]
