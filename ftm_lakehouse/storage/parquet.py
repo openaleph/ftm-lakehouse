@@ -149,9 +149,7 @@ def merge_partition(task: MergeTask) -> MergeResult:
     Reads the files directly, so a worker replays no Delta log.
     """
     shard, bucket, origin = task.partition
-    config: dict[str, Any] = {**task.duckdb_config}
-    with Took() as t, closing(duckdb.connect(config=config)) as con:
-        con.execute("SET enable_progress_bar = false")  # see `partition_cursor`
+    with Took() as t, _connect(task.duckdb_config) as con:
         source = partition_source_sql(
             [f"{task.root}/{file}" for file, _ in task.files], shard, bucket, origin
         )
@@ -825,11 +823,11 @@ class ParquetStore:
             for partition, (files, _) in partitions.items():
                 _, bucket, origin = partition
                 groups.setdefault((bucket, origin), []).append((partition, files))
-            config: dict[str, Any] = {**duckdb_config()}
+            config = duckdb_config()
             for (bucket, origin), sources in groups.items():
                 with (
                     Took() as t,
-                    closing(duckdb.connect(config=config)) as con,
+                    _connect(config) as con,
                     self._snapshot_lock,
                 ):
                     snapshot = self._current_snapshot()

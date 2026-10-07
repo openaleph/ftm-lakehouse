@@ -1,17 +1,10 @@
-"""Layer 4: Multi-step workflow operations.
+"""Layer 4: multi-step workflows across repositories, run through the factories:
 
-Operations coordinate across repositories for complex workflows.
-They are internal and triggered by the Dataset class.
+from ftm_lakehouse.operation import export, make, optimize
 
-Factory functions provide convenient ways to run operations from a Dataset:
-
-    from ftm_lakehouse import get_dataset
-    from ftm_lakehouse.operation import export, make, optimize
-
-    dataset = get_dataset("my_dataset")
-    export(dataset)    # Write every export artifact from one sweep
-    optimize(dataset)  # Merge + vacuum
-    make(dataset)      # Run full workflow
+optimize("my_dataset")  # merge + vacuum
+export("my_dataset")    # every export artifact from one sweep
+make("my_dataset")      # flush the journal, then export
 """
 
 from ftm_lakehouse.operation.crawl import CrawlOperation, crawl

@@ -442,6 +442,26 @@ def test_storage_parquet_sweep(tmp_path, monkeypatch):
     check({True, False})
 
 
+def test_storage_parquet_connections_set_up_storage(tmp_path, monkeypatch):
+    """Merge and re-shard open their DuckDB through `_connect`, so they get the
+    lake's storage secret – an S3 lake's files are unreadable without it."""
+    setups = []
+    setup = storage_parquet.setup_duckdb_storage
+    monkeypatch.setattr(
+        storage_parquet,
+        "setup_duckdb_storage",
+        lambda con: setups.append(con) or setup(con),
+    )
+    store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
+    _flush(store, _origin_rows("a"))
+
+    store.merge()
+    assert setups, "merge connected without the storage setup"
+    setups.clear()
+    store.shard(2)
+    assert setups, "re-shard connected without the storage setup"
+
+
 def test_storage_parquet_merge_workers(tmp_path, monkeypatch):
     """Merging in worker processes gives what merging in-process gives."""
     merged = []
