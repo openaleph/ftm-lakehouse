@@ -54,12 +54,6 @@ for name in get_lakehouse().list_datasets():
     options:
         heading_level: 3
 
-## Custom dataset models
-
-::: ftm_lakehouse.model.dataset.set_model_class
-    options:
-        heading_level: 3
-
 ## Classes
 
 ::: ftm_lakehouse.catalog.Catalog

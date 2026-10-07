@@ -121,7 +121,7 @@ The async `optimize` operation runs the two storage primitives in order. `merge`
 | `merge()` | expensive | Per-partition rewrite: keep latest row per `(id, role)` (`ROW_NUMBER`) / latest emission per fragment group, fold `first_seen` to min, drop tombstones past grace |
 | `vacuum()` | cheap | Delta `VACUUM` – delete files no longer referenced in the Delta log |
 
-`merge` reads the Delta log once per run: it loads one snapshot, hands each dirty partition's files from it to DuckDB (`read_parquet` over exactly those files, no `delta_scan`), writes the merged files with DuckDB's `COPY`, and commits the results in batches of 64 partitions – one transaction of `add` and `remove` actions each. Replaying the log per partition is what made merges slow on large stores: every `delta_scan` and every `write_deltalake` replays the latest checkpoint, which lists every live file of the table. The dedupe query is the one reads use over a dirty partition, so a merge and a read can never disagree about what the rows mean. A run that committed anything ends with a Delta checkpoint: Delta writes one only every hundredth commit, and until then every load replays the previous one – which still lists every file the merge removed. Memory is DuckDB's to bound: the windows and the sort spill past `LAKEHOUSE_DUCKDB_MEMORY_LIMIT`; a partition too large to merge in acceptable time wants more shards.
+`merge` reads the Delta log once per run: it loads one snapshot, hands each dirty partition's files from it to DuckDB (`read_parquet` over exactly those files, no `delta_scan`), writes the merged files with DuckDB's `COPY`, and commits the results in batches of 64 partitions – one transaction of `add` and `remove` actions each. Replaying the log per partition is what made merges slow on large stores: every `delta_scan` and every `write_deltalake` replays the latest checkpoint, which lists every live file of the table. The dedupe query is the one reads use over a dirty partition, so a merge and a read can never disagree about what the rows mean. A run that committed anything ends with a Delta checkpoint: Delta writes one only every hundredth commit, and until then every load replays the previous one – which still lists every file the merge removed. Partitions can merge in parallel processes (`LAKEHOUSE_WORKERS`) – they are independent, a worker writes files and commits nothing, and it replays no log either, since the parent hands it the partition's files. Memory is DuckDB's to bound: the windows and the sort spill past each worker's share of `LAKEHOUSE_DUCKDB_MEMORY_LIMIT`; a partition too large to merge in acceptable time wants more shards.
 
 The store's Delta table is created with `delta.deletedFileRetentionDuration = 1 hour` and `delta.logRetentionDuration = 1 day` (the `migrate_parquet_table_properties` migration applies them to older stores). The Delta defaults – a week of `remove` actions in every checkpoint, 30 days of superseded checkpoints on disk – let the log of a frequently merged store outgrow the data it describes.
 
@@ -227,8 +227,6 @@ archive = get_archive("my_data")                         # ArchiveRepository
 
 **Multi-dataset concerns** go through the slim `Catalog` (`get_lakehouse()`): `list_datasets()`, `dataset_uri(name)`. The API server keeps one as `app.state.lake`.
 
-**Custom dataset models**: register a `DatasetModel` subclass process-wide via `set_model_class()` – every config read constructs through it.
-
 See [Lake Reference](reference/lake.md) for API details.
 
 ## Core
@@ -276,7 +274,7 @@ ftm_lakehouse/
 ├── exceptions.py
 │
 ├── model/                   # Layer 1: Pure data structures
-│   ├── dataset.py           # DatasetModel + set_model_class hook
+│   ├── dataset.py           # DatasetModel - dataset metadata / config
 │   ├── file.py              # File metadata model
 │   ├── job.py               # Job models
 │   └── statement.py         # JOURNAL/SHARDED_SCHEMA, LakehouseStatement

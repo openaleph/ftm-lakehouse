@@ -20,7 +20,6 @@ from moto.server import ThreadedMotoServer
 from ftm_lakehouse.api.main import get_app
 from ftm_lakehouse.core.api import get_api
 from ftm_lakehouse.lake import get_lakehouse
-from ftm_lakehouse.model.dataset import DatasetModel, set_model_class
 from ftm_lakehouse.repository import factories
 from ftm_lakehouse.repository.entities.main import EntityRepository
 from ftm_lakehouse.repository.factories import get_entities
@@ -112,13 +111,11 @@ def clear_factory_caches():
     factories.clear_caches()
     get_journal.cache_clear()
     get_lakehouse.cache_clear()
-    set_model_class(DatasetModel)
     yield
     # Clear after test
     factories.clear_caches()
     get_journal.cache_clear()
     get_lakehouse.cache_clear()
-    set_model_class(DatasetModel)
 
 
 @pytest.fixture(autouse=True, scope="session")

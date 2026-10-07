@@ -103,6 +103,33 @@ class StatsCollector:
             self.schemata[group][schema] += 1
             self.countries[group].update(countries)
 
+    def merge(self, other: "StatsCollector") -> None:
+        """Fold another collector's counts into this one.
+
+        Every field is a commutative accumulator, which is what lets a
+        partitioned sweep collect per partition and merge: ``entities`` and
+        the four ``Counter`` fields sum, ``start`` / ``end`` take the min / max of
+        the stored ISO strings. The result is what one collector that had seen
+        every entity would hold – ftmq's ``compile_stats`` was factored out
+        for exactly this ("so partitioned backends can compile per-partition
+        stats and merge them").
+
+        Sound only because an entity reaches exactly one collector: an entity
+        id is placed in one ``(shard, bucket)`` pair, which is the unit a
+        parallel sweep hands to a worker, so ``entities`` cannot double-count.
+
+        Args:
+            other: A collector over a disjoint set of entities.
+        """
+        self.entities += other.entities
+        for group in self.schemata:
+            self.schemata[group].update(other.schemata[group])
+            self.countries[group].update(other.countries[group])
+        if other.start is not None and (self.start is None or other.start < self.start):
+            self.start = other.start
+        if other.end is not None and (self.end is None or other.end > self.end):
+            self.end = other.end
+
     def export(self) -> DatasetStats:
         """The statistics this collector folded.
 

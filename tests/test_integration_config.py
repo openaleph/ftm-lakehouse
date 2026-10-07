@@ -4,7 +4,7 @@ import yaml
 from anystore.io import smart_read
 from anystore.util import ensure_uri
 
-from ftm_lakehouse import get_lakehouse, set_model_class
+from ftm_lakehouse import get_lakehouse
 from ftm_lakehouse.catalog import (
     dataset_exists,
     ensure_dataset,
@@ -12,7 +12,6 @@ from ftm_lakehouse.catalog import (
     update_dataset,
 )
 from ftm_lakehouse.core.conventions import path
-from ftm_lakehouse.model import DatasetModel
 from ftm_lakehouse.repository.factories import get_entities
 
 
@@ -91,22 +90,3 @@ def test_dataset_metadata(monkeypatch, tmp_path):
 
     # non existing dataset
     assert not dataset_exists("foo")
-
-
-def test_dataset_custom_model_class(monkeypatch, tmp_path):
-    """set_model_class registers a DatasetModel subclass process-wide."""
-    monkeypatch.setenv("LAKEHOUSE_URI", str(tmp_path))
-
-    class MyDatasetModel(DatasetModel):
-        user_id: int = 0
-
-    set_model_class(MyDatasetModel)
-    update_dataset("new_dataset", user_id=17)
-    model = get_dataset_model("new_dataset")
-    assert isinstance(model, MyDatasetModel)
-    assert model.user_id == 17
-
-    # repositories snapshot the registered class too
-    repo = get_entities("new_dataset")
-    assert isinstance(repo._model, MyDatasetModel)
-    assert repo._model.user_id == 17

@@ -30,13 +30,16 @@ Layout:
 """
 
 import json
+import multiprocessing
 import posixpath
+from concurrent.futures import ProcessPoolExecutor
 from contextlib import ExitStack, closing, contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import cache, cached_property
 from itertools import batched
 from threading import RLock
-from typing import Any, Callable, Iterable, Iterator, cast
+from typing import IO, Any, Callable, Iterable, Iterator, cast
 from urllib.parse import unquote
 
 import duckdb
@@ -57,9 +60,18 @@ from deltalake.transaction import AddAction, RemoveAction
 from followthemoney.statement import StatementDict
 from ftmq.model.stats import DatasetStats
 from ftmq.query import Query, Sql, SqlSource
-from ftmq.store.lake import PRUNE, LakeStore, storage_options, writer_for_bucket
+from ftmq.store.lake import (
+    PRUNE,
+    LakeStore,
+    setup_duckdb_storage,
+    storage_options,
+    writer_for_bucket,
+)
 from ftmq.types import StatementEntities, Statements
-from pyarrow.csv import CSVWriter  # type: ignore[attr-defined]  # missing from stubs
+from pyarrow.csv import (  # type: ignore[attr-defined]  # missing from stubs
+    CSVWriter,
+    WriteOptions,
+)
 from rigour.time import utc_now
 from sqlalchemy import Select
 
@@ -85,6 +97,7 @@ from ftm_lakehouse.logic.parquet import (
     partition_source_sql,
     raw_view_sql,
     shard_target_file_size,
+    worker_duckdb_config,
 )
 from ftm_lakehouse.model.dataset import DEFAULT_SHARDS
 from ftm_lakehouse.model.statement import (
@@ -110,15 +123,248 @@ percent-decoded – the form DuckDB (prefixed with the table root) and a Delta
 ``add`` / ``remove`` action take; the log stores it encoded once more, and
 ``get_add_actions`` hands it back that way."""
 
-MergedPartition = tuple[Partition, Files, tuple[str, int, int] | None, timedelta]
-"""What `ParquetStore._merge_partition` produced for one partition: its key,
-the files it read, the ``(path, size, rows)`` it wrote – ``None`` when the
-merge reaped everything – and how long it took."""
+
+@dataclass
+class MergeTask:
+    """One partition's merge as handed to a worker – plain data, so it pickles."""
+
+    partition: Partition
+    files: Files
+    root: str
+    grace_cutoff: datetime
+    duckdb_config: dict[str, str]
+
+
+@dataclass
+class MergeResult:
+    """What a worker wrote for one partition.
+
+    ``file`` is the ``(path, size, rows)`` a Delta ``add`` action takes, the
+    path table-relative – ``None`` when the merge reaped the partition
+    entirely and there is nothing to add. ``took`` is measured in the worker,
+    which emits no log lines of its own, so the parent can log it.
+    """
+
+    file: tuple[str, int, int] | None
+    took: timedelta
+
 
 Pairs = dict[tuple[str, str], list[tuple[Partition, Files, bool]]]
 """``(partition, files, clean)`` per ``(shard, bucket)`` pair, one entry per
 origin partition. ``clean`` is whether every file was written by `merge`
 (`MERGED_PREFIX`), i.e. whether a read over it can skip the dedupe."""
+
+
+def merge_partition(task: MergeTask) -> MergeResult:
+    """Merge one partition into a new data file next to its old ones.
+
+    Writes but does not commit: the file is invisible until
+    [`ParquetStore.merge`][ParquetStore.merge] commits it, so this runs in a
+    worker process as well as in-process, and an uncommitted file is an orphan
+    the next ``vacuum`` removes. Reads the partition's files directly
+    ([`partition_source_sql`][ftm_lakehouse.logic.parquet.partition_source_sql]),
+    so no Delta log is replayed here at all – which is what makes a worker
+    cheap: the task carries plain data and the worker opens nothing but its
+    own DuckDB connection.
+
+    Deliberately silent. A spawned worker re-imports the library without the
+    CLI's logging setup, so ``took`` travels back in the `MergeResult` and the
+    parent logs it from `ParquetStore._commit_merged`.
+
+    Args:
+        task: The partition, its files, the table root, the grace cutoff and
+            the DuckDB config to connect with
+            ([`worker_duckdb_config`][ftm_lakehouse.logic.parquet.worker_duckdb_config]).
+
+    Returns:
+        `MergeResult` – what to add, and how long it took.
+    """
+    shard, bucket, origin = task.partition
+    config: dict[str, Any] = {**task.duckdb_config}
+    with Took() as t, closing(duckdb.connect(config=config)) as con:
+        source = partition_source_sql(
+            [f"{task.root}/{file}" for file, _ in task.files], shard, bucket, origin
+        )
+        sql = build_merge_sql(
+            shard,
+            bucket,
+            origin,
+            task.grace_cutoff,
+            source=source,
+            select=f"* EXCLUDE ({', '.join(PARTITIONS)})",
+        )
+        directory = posixpath.dirname(task.files[0][0])
+        file = f"{directory}/{MERGED_PREFIX}{ensure_uuid()}.zstd.parquet"
+        target = f"{task.root}/{file}".replace("'", "''")
+        # RETURN_STATS: (filename, count, file_size_bytes, ...)
+        stats = con.execute(
+            f"COPY ({sql}) TO '{target}' ({merge_copy_options(bucket)})"
+        ).fetchone()
+    if stats and stats[1]:
+        return MergeResult((file, int(stats[2]), int(stats[1])), t.took)
+    return MergeResult(None, t.took)
+
+
+def pair_source(
+    root: str, sources: list[tuple[Partition, Files, bool]]
+) -> tuple[str, bool]:
+    """One ``(shard, bucket)`` pair's files as a relation, and whether it is clean.
+
+    The pair's origin partitions unioned
+    ([`partition_source_sql`][ftm_lakehouse.logic.parquet.partition_source_sql]),
+    with ``clean`` true when every one of them holds only `merge` output – what
+    decides the view `register_partition` builds on it.
+
+    Plain data in, plain SQL out, so the parent can resolve a pair against its
+    pinned snapshot and hand the result to a worker that replays no Delta log.
+
+    Args:
+        root: The table root the file paths are relative to.
+        sources: The pair's ``(partition, files, clean)`` triples.
+
+    Returns:
+        ``(relation sql, clean)``.
+    """
+    sql = " UNION ALL ".join(
+        partition_source_sql([f"{root}/{file}" for file, _ in files], *partition)
+        for partition, files, _ in sources
+    )
+    return f"({sql})", all(clean for _, _, clean in sources)
+
+
+def register_partition(
+    cur: duckdb.DuckDBPyConnection, source: str, clean: bool
+) -> None:
+    """Point ``statement`` / ``statement_raw`` at ``source`` on ``cur``.
+
+    Temporary views, so on a cursor of the shared connection they shadow its
+    ``delta_scan`` views for that cursor only: a query compiled against
+    `TABLE` / `TABLE_RAW` runs unchanged, over the files the snapshot named.
+    ``statement`` is a plain scan when ``source`` is clean
+    ([`live_rows_sql`][ftm_lakehouse.logic.parquet.live_rows_sql]) and the
+    dedupe query otherwise
+    ([`dedupe_rows_sql`][ftm_lakehouse.logic.parquet.dedupe_rows_sql]) – the one
+    place a read consults whether a merge has run, and only to pick the cheaper
+    of two equivalent queries.
+
+    Parquet footers are cached: data files are immutable (a rewrite writes new
+    ones), so a cached footer never goes stale, and a lookup reads each file's
+    footer for the view and again for the query. Set here rather than in
+    [`duckdb_config`][ftm_lakehouse.logic.parquet.duckdb_config]: as a
+    connect-time option it would make DuckDB autoload the parquet extension
+    before it registers, which fails offline.
+    """
+    cur.execute("SET parquet_metadata_cache = true")
+    cur.execute(
+        f"CREATE OR REPLACE TEMP VIEW {TABLE_RAW.name} AS SELECT * FROM {source}"
+    )
+    live = live_rows_sql if clean else dedupe_rows_sql
+    cur.execute(f"CREATE OR REPLACE TEMP VIEW {TABLE.name} AS {live(TABLE_RAW.name)}")
+
+
+@contextmanager
+def partition_cursor(
+    source: str, clean: bool, config: dict[str, str]
+) -> Iterator[duckdb.DuckDBPyConnection]:
+    """A standalone connection whose views read one partition's files.
+
+    What a worker process uses instead of `ParquetStore._cursor_over`: that one
+    goes through ftmq's ``LakeStore.cursor``, whose connection loads the
+    ``DeltaTable`` and registers ``delta_scan`` views on first use – a log
+    replay per process, and the very thing a worker is handed file lists to
+    avoid. The session setup is otherwise ftmq's: ``icu`` for a UTC session, so
+    ``TIMESTAMPTZ`` does not render in the host timezone, and the storage
+    secret for a remote backend.
+
+    Args:
+        source: The pair's relation (`pair_source`).
+        clean: Whether every partition in it holds only merge output.
+        config: DuckDB config to connect with.
+
+    Yields:
+        The connection, with ``statement`` / ``statement_raw`` registered.
+    """
+    duck: dict[str, Any] = {
+        "autoinstall_known_extensions": "true",
+        "autoload_known_extensions": "true",
+        **config,
+    }
+    with closing(duckdb.connect(":memory:", config=duck)) as con:
+        con.execute("LOAD icu; SET GLOBAL TimeZone='UTC'")
+        setup_duckdb_storage(con)
+        register_partition(con, source, clean)
+        yield con
+
+
+def sweep_partition(
+    cur: duckdb.DuckDBPyConnection,
+    out: IO[bytes] | None = None,
+    header: bool = True,
+    tee: bool = True,
+    throughput: Throughput | None = None,
+) -> Iterator[StatementDict]:
+    """One partition's rows, teeing Arrow batches two ways.
+
+    The body of a sweep, for a cursor whose views already read one
+    ``(shard, bucket)`` pair – shared by `ParquetStore.sweep`, which loops its
+    own cursors, and by an export worker, which has exactly one.
+
+    Every batch can go to a ``pyarrow`` CSV writer *and* be handed on as row
+    dicts, so a caller that wants both ``statements.csv`` and the rows behind
+    it pays for one scan rather than writing the csv and reading it back.
+
+    Rows come from ``RecordBatch.to_pylist`` – a bulk conversion in C – and
+    carry `STATEMENT_CSV_COLUMNS`, which covers everything an entity
+    aggregation needs. They arrive entity-contiguous (the select orders by
+    ``entity_id`` and an entity lives in one partition), so
+    ``aggregate_unsafe`` can fold them directly.
+
+    The header is written when ``header`` is set *and* nothing has been written
+    to ``out`` yet. On a codec handle ``tell()`` is the uncompressed position,
+    so that is an exact test however many partitions share the handle – and it
+    stays right when the first partitions come back empty. A worker writing its
+    own part passes ``header=False``; the assembled file takes its header from
+    `ftm_lakehouse.model.statement.statement_csv_header`.
+
+    ``out`` stays the caller's to close. The writer is closed on this
+    generator's own unwind, which is before the handle's – so the writer's
+    buffer is flushed into the codec before the codec writes its trailer.
+
+    Args:
+        cur: Cursor whose ``statement`` view reads the partition
+            (`register_partition`).
+        out: Open binary handle to write the csv to. ``None`` scans without
+            writing one.
+        header: Write the csv header if nothing has been written yet.
+        tee: Yield row dicts. ``False`` keeps the scan purely columnar –
+            nothing is materialised in Python – which is what a csv-only
+            export wants.
+        throughput: Counter fed the Arrow bytes of every batch scanned – a
+            progress bar's, so it can show how fast the scan moves.
+
+    Yields:
+        ``StatementDict`` rows, unless ``tee`` is off.
+    """
+    sql = str(statement_csv_select().compile(compile_kwargs={"literal_binds": True}))
+    # a batch is materialised as Python objects only when rows are asked for,
+    # so the cap is on rows-in-flight, not on bytes scanned
+    res = cur.execute(sql)
+    reader = res.to_arrow_reader(SWEEP_BATCH_SIZE) if tee else res.to_arrow_reader()
+    with ExitStack() as stack:
+        writer: CSVWriter | None = None
+        for batch in reader:
+            if throughput is not None:
+                throughput.add(batch.nbytes)
+            if out is not None:
+                if writer is None:
+                    options = WriteOptions(include_header=header and out.tell() == 0)
+                    writer = CSVWriter(out, batch.schema, write_options=options)
+                    # on the stack, so an abandoned generator flushes the
+                    # writer's buffer *before* the codec closes
+                    stack.callback(writer.close)
+                writer.write(batch)
+            if tee:
+                yield from cast(list[StatementDict], batch.to_pylist())
 
 
 @cache
@@ -732,8 +978,8 @@ class ParquetStore:
         on: every ``delta_scan`` and every ``write_deltalake`` replays the
         latest checkpoint, which holds every live file of the table. So the
         run loads one snapshot, hands each partition's files from it to
-        `_merge_partition` – which reads them directly and writes the merged
-        file with DuckDB – and commits the results in batches of
+        [`merge_partition`][merge_partition] – which reads them directly and
+        writes the merged file with DuckDB – and commits the results in batches of
         `MERGE_COMMIT_BATCH` partitions, each batch one Delta transaction of
         ``add`` and ``remove`` actions against that snapshot. A batch is
         atomic: its partitions switch to their merged files together, or not
@@ -744,10 +990,21 @@ class ParquetStore:
         plus the merge's commits. The file list is small by now, so the
         checkpoint is cheap, and every load after it is too.
 
+        Partitions merge in ``LAKEHOUSE_WORKERS`` processes (one, the
+        default, merges in this process). They are independent – a worker
+        writes files and commits nothing – so they parallelise without
+        coordination; the DuckDB memory limit and the threads are split
+        between the workers
+        ([`worker_duckdb_config`][ftm_lakehouse.logic.parquet.worker_duckdb_config]).
+        With a partition's dedupe and sort already using every core,
+        more workers pay off where the per-partition pipeline leaves cores
+        idle – which on a many-partition store is most of a run.
+
         Memory is bounded by DuckDB itself: the dedupe windows and the final
-        sort spill to ``LAKEHOUSE_DUCKDB_TEMP_DIRECTORY`` past
-        ``LAKEHOUSE_DUCKDB_MEMORY_LIMIT``. A partition too large to merge in
-        acceptable time wants more shards (`shard`), not a smaller merge.
+        sort spill to ``LAKEHOUSE_DUCKDB_TEMP_DIRECTORY`` past each worker's
+        share of ``LAKEHOUSE_DUCKDB_MEMORY_LIMIT``. A partition too large to
+        merge in acceptable time wants more shards (`shard`), not a smaller
+        merge.
 
         Args:
             force: Rewrite every partition, clean ones included – with
@@ -756,26 +1013,27 @@ class ParquetStore:
         if not self.exists:
             return
         grace_cutoff = utc_now() - timedelta(days=self.settings.grace_period_days)
+        workers = max(self.settings.workers, 1)
+        config = worker_duckdb_config(workers)
         merged = skipped = 0
-        config: dict[str, Any] = {**duckdb_config()}
-        with self.merge_lock(), closing(duckdb.connect(config=config)) as con:
+        with self.merge_lock():
             root, partitions = self._snapshot_partitions()
-            dirty = [
-                (partition, files)
+            tasks = [
+                MergeTask(partition, files, root, grace_cutoff, config)
                 for partition, (files, clean) in partitions.items()
                 if force or not clean
             ]
-            skipped = len(partitions) - len(dirty)
+            skipped = len(partitions) - len(tasks)
             # one bar, advanced per partition, its throughput the bytes read
-            with SyncProgressBar("Merging partitions", len(dirty)) as bar:
+            with (
+                SyncProgressBar("Merging partitions", len(tasks)) as bar,
+                self._merge_runner(workers) as run,
+            ):
 
-                def results() -> Iterator[MergedPartition]:
-                    for partition, files in dirty:
-                        written, took = self._merge_partition(
-                            con, root, partition, files, grace_cutoff
-                        )
-                        bar.advance(size=sum(size for _, size in files))
-                        yield partition, files, written, took
+                def results() -> Iterator[tuple[MergeTask, MergeResult]]:
+                    for task, result in zip(tasks, run(merge_partition, tasks)):
+                        bar.advance(size=sum(size for _, size in task.files))
+                        yield task, result
 
                 for batch in batched(results(), MERGE_COMMIT_BATCH):
                     self._commit_merged(batch)
@@ -790,55 +1048,32 @@ class ParquetStore:
             "Merge complete.",
             merged=merged,
             skipped=skipped,
+            workers=workers,
             grace_period_days=self.settings.grace_period_days,
         )
 
-    def _merge_partition(
-        self,
-        con: duckdb.DuckDBPyConnection,
-        root: str,
-        partition: Partition,
-        files: Files,
-        grace_cutoff: datetime,
-    ) -> tuple[tuple[str, int, int] | None, timedelta]:
-        """Merge one partition into a new data file next to its old ones.
+    @staticmethod
+    @contextmanager
+    def _merge_runner(workers: int) -> Iterator[Callable[..., Iterator[Any]]]:
+        """An ordered ``map`` over ``workers`` processes – the builtin for one.
 
-        Writes but does not commit: the file is invisible until
-        [`merge`][ParquetStore.merge] commits it, so an uncommitted one is an
-        orphan the next ``vacuum`` removes. Reads the partition's files
-        directly ([`partition_source_sql`][ftm_lakehouse.logic.parquet.partition_source_sql]),
-        so no Delta log is replayed here at all.
-
-        Returns:
-            ``((path, size, rows), took)`` – the path table-relative, as a
-            Delta ``add`` action takes it; ``None`` for a partition the merge
-            reaped entirely (nothing left to add), and how long it took.
+        Processes are spawned rather than forked: this process holds a DuckDB
+        instance with its own threads and an `RLock`-guarded ``DeltaTable``,
+        which a fork would copy mid-flight. Pending tasks are cancelled when
+        the run fails, instead of merging partitions whose results nobody will
+        commit.
         """
-        shard, bucket, origin = partition
-        with Took() as t:
-            source = partition_source_sql(
-                [f"{root}/{file}" for file, _ in files], shard, bucket, origin
-            )
-            sql = build_merge_sql(
-                shard,
-                bucket,
-                origin,
-                grace_cutoff,
-                source=source,
-                select=f"* EXCLUDE ({', '.join(PARTITIONS)})",
-            )
-            directory = posixpath.dirname(files[0][0])
-            file = f"{directory}/{MERGED_PREFIX}{ensure_uuid()}.zstd.parquet"
-            target = f"{root}/{file}".replace("'", "''")
-            # RETURN_STATS: (filename, count, file_size_bytes, ...)
-            stats = con.execute(
-                f"COPY ({sql}) TO '{target}' ({merge_copy_options(bucket)})"
-            ).fetchone()
-        if stats and stats[1]:
-            return (file, int(stats[2]), int(stats[1])), t.took
-        return None, t.took
+        if workers == 1:
+            yield map
+            return
+        context = multiprocessing.get_context("spawn")
+        pool = ProcessPoolExecutor(workers, mp_context=context)
+        try:
+            yield pool.map
+        finally:
+            pool.shutdown(cancel_futures=True)
 
-    def _commit_merged(self, batch: Iterable[MergedPartition]) -> None:
+    def _commit_merged(self, batch: Iterable[tuple[MergeTask, MergeResult]]) -> None:
         """Commit a batch of merged partitions as one Delta transaction.
 
         Each partition's merged file is added and every file it was merged
@@ -851,13 +1086,13 @@ class ParquetStore:
         batch = list(batch)
         now = int(utc_now().timestamp() * 1000)
         actions: list[AddAction | RemoveAction] = []
-        for partition, files, written, _ in batch:
-            values: dict[str, str | None] = dict(zip(PARTITIONS, partition))
-            if written is not None:
-                file, size, rows = written
+        for task, result in batch:
+            values: dict[str, str | None] = dict(zip(PARTITIONS, task.partition))
+            if result.file is not None:
+                file, size, rows = result.file
                 stats = json.dumps({"numRecords": rows})
                 actions.append(AddAction(file, size, values, now, False, stats))
-            for file, size in files:
+            for file, size in task.files:
                 actions.append(RemoveAction(file, False, now, size, values))
         with self._snapshot_lock:
             snapshot = self._current_snapshot()
@@ -870,10 +1105,11 @@ class ParquetStore:
                 partition_by=PARTITIONS,
             )
             snapshot.update_incremental()
-        for (shard, bucket, origin), _, _, took in batch:
+        for task, result in batch:
+            shard, bucket, origin = task.partition
             self.log.info(
                 f"Merged partition `{shard}/{bucket}/{origin}`.",
-                took=took,
+                took=result.took,
                 shard=shard,
                 bucket=bucket,
                 origin=origin,
@@ -1127,9 +1363,11 @@ class ParquetStore:
         ``entity_id`` and an entity lives in one partition), so
         ``aggregate_unsafe`` can fold them directly.
 
-        The csv handle lives for the generator's lifetime; abandoning the
-        generator closes it through the usual ``GeneratorExit`` unwind, so the
-        codec trailer is always written.
+        One cursor per pair, each sweeping through `sweep_partition`, all
+        writing into one csv handle that lives for this generator's lifetime:
+        abandoning the generator closes it through the usual ``GeneratorExit``
+        unwind, so the codec trailer is always written. The header goes in once,
+        with the first partition that actually yields a batch.
 
         Args:
             csv_key: Store key to write the sorted statements csv to.
@@ -1144,30 +1382,30 @@ class ParquetStore:
         Yields:
             ``StatementDict`` rows, unless ``tee`` is off.
         """
-        sql = statement_csv_select()
-        # a batch is materialised as Python objects only when rows are asked
-        # for, so the cap is on rows-in-flight, not on bytes scanned
-        batch_size = SWEEP_BATCH_SIZE if tee else None
         with ExitStack() as stack:
-            out = None
+            out: IO[bytes] | None = None
             if csv_key is not None:
                 out = stack.enter_context(
                     self._store.open(csv_key, "wb", compression=self.compression)
                 )
-            writer: CSVWriter | None = None
-            for reader in self._execute_partitioned(sql, batch_size):
-                for batch in reader:
-                    if throughput is not None:
-                        throughput.add(batch.nbytes)
-                    if out is not None:
-                        if writer is None:
-                            writer = CSVWriter(out, batch.schema)
-                            # on the stack, so an abandoned generator flushes
-                            # the writer's buffer *before* the codec closes
-                            stack.callback(writer.close)
-                        writer.write(batch)
-                    if tee:
-                        yield from cast(list[StatementDict], batch.to_pylist())
+            for source, clean in self._scoped_sources():
+                with self._cursor_over(source, clean) as cur:
+                    yield from sweep_partition(cur, out, True, tee, throughput)
+
+    def sweep_sources(self) -> list[tuple[tuple[str, str], str, bool]]:
+        """Every ``(shard, bucket)`` pair of this process's snapshot, resolved.
+
+        What a parallel sweep fans out over: one relation per pair
+        (`pair_source`), taken from **one** snapshot so every worker reads the
+        same version of the store. An entity id is placed in exactly one pair,
+        so a pair is a unit no entity spans – which is what lets each worker
+        fold entities on its own.
+
+        Returns:
+            ``((shard, bucket), relation sql, clean)`` per pair, in key order.
+        """
+        root, pairs = self._snapshot_pairs()
+        return [(key, *pair_source(root, pairs[key])) for key in sorted(pairs)]
 
     def get_entity_ids(
         self, q: Query | None = None, *, source: SqlSource | None = None
@@ -1277,56 +1515,25 @@ class ParquetStore:
         queries where one does.
         """
         root, pairs = self._snapshot_pairs()
-
-        def union(sources: list[tuple[Partition, Files, bool]]) -> tuple[str, bool]:
-            sql = " UNION ALL ".join(
-                partition_source_sql(
-                    [f"{root}/{file}" for file, _ in files], *partition
-                )
-                for partition, files, _ in sources
-            )
-            return f"({sql})", all(clean for _, _, clean in sources)
-
         keys = self._pruned_keys(pairs, prune)
         if prune and "shard" in prune:
             if keys:
-                yield union([source for key in keys for source in pairs[key]])
+                yield pair_source(root, [s for key in keys for s in pairs[key]])
             return
         for key in keys:
-            yield union(pairs[key])
+            yield pair_source(root, pairs[key])
 
     @contextmanager
     def _cursor_over(
         self, source: str, clean: bool
     ) -> Iterator[duckdb.DuckDBPyConnection]:
-        """A cursor whose ``statement`` / ``statement_raw`` read ``source``.
+        """A cursor of the shared connection, its views reading ``source``.
 
-        Temporary views, so they shadow the connection's ``delta_scan`` views
-        for this cursor only: a query compiled against `TABLE` /
-        `TABLE_RAW` runs unchanged, over the files the snapshot named.
-        ``statement`` is a plain scan when ``source`` is clean
-        ([`live_rows_sql`][ftm_lakehouse.logic.parquet.live_rows_sql]) and the
-        dedupe query otherwise
-        ([`dedupe_rows_sql`][ftm_lakehouse.logic.parquet.dedupe_rows_sql]) –
-        the one place a read consults whether a merge has run, and only to
-        pick the cheaper of two equivalent queries.
-
-        Parquet footers are cached: data files are immutable (a rewrite writes
-        new ones), so a cached footer never goes stale, and a lookup reads each
-        file's footer for the view and again for the query. Set here rather
-        than in [`duckdb_config`][ftm_lakehouse.logic.parquet.duckdb_config]:
-        as a connect-time option it would make DuckDB autoload the parquet
-        extension before it registers, which fails offline.
+        `register_partition` does the work; this is the in-process half of the
+        pair, where a worker process has `partition_cursor` instead.
         """
         with self._lake.cursor() as cur:
-            cur.execute("SET parquet_metadata_cache = true")
-            cur.execute(
-                f"CREATE OR REPLACE TEMP VIEW {TABLE_RAW.name} AS SELECT * FROM {source}"
-            )
-            live = live_rows_sql if clean else dedupe_rows_sql
-            cur.execute(
-                f"CREATE OR REPLACE TEMP VIEW {TABLE.name} AS {live(TABLE_RAW.name)}"
-            )
+            register_partition(cur, source, clean)
             yield cur
 
     def _execute_partitioned(

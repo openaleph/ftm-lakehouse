@@ -5,19 +5,39 @@ A run writes ``statements.csv``, ``entities.ftm.json``, every
 entities, then ``index.json`` registering them.
 """
 
+import hashlib
 import json
 
+import pytest
 from anystore.io import smart_stream_csv_models
 from ftmq.util import make_entity
 from rigour.mime.types import CSV, FTM, JSON
 
+from ftm_lakehouse.catalog import ensure_dataset
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.model.file import Document
 from ftm_lakehouse.operation.export import ExportJob, ExportOperation
+from ftm_lakehouse.operation.export import settings as export_settings
 from ftm_lakehouse.repository import ArchiveRepository, EntityRepository
 from tests.shared import JANE, JOHN
 
 DATASET = "export_test"
+
+
+@pytest.fixture(params=(1, 3), autouse=True)
+def workers(request, monkeypatch) -> int:
+    """Run the whole contract suite on the serial *and* the parallel path.
+
+    Everything an export promises has to hold either way – the artifacts, the
+    freshness tags, the counts, the truncation of a stale file by an empty
+    sweep. `1` is the in-process path verbatim; `3` fans the ``(shard,
+    bucket)`` pairs out to worker processes and assembles their parts.
+    """
+    # the settings instance the operation module reads, patched directly:
+    # `ftm_lakehouse.operation` exports an `export` *function* that shadows
+    # the submodule, so it cannot be reached by attribute access
+    monkeypatch.setattr(export_settings, "workers", request.param)
+    return int(request.param)
 
 
 def setup_entities(repo: EntityRepository) -> None:
