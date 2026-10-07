@@ -31,7 +31,7 @@ from anystore.util import join_uri, mask_uri
 from ftm_lakehouse.core.api import ensure_api_uri
 from ftm_lakehouse.core.config import load_config
 from ftm_lakehouse.core.conventions import path
-from ftm_lakehouse.model.dataset import DatasetModel, get_model_class
+from ftm_lakehouse.model.dataset import DatasetModel
 from ftm_lakehouse.repository import factories
 from ftm_lakehouse.repository.base import dataset_uri, ensure_zfs
 
@@ -43,10 +43,10 @@ def _dataset_store(name: str, uri: Uri | None = None) -> Store:
 
 
 def _load_model(store: Store, name: str, **data: Any) -> DatasetModel:
-    """Merge ``config.yml`` with ``data`` into the registered model class."""
+    """Merge ``config.yml`` with ``data`` into a `DatasetModel`."""
     data["name"] = name
     data.pop("storage", None)
-    return get_model_class()(**load_config(store, **data))
+    return DatasetModel(**load_config(store, **data))
 
 
 def dataset_exists(name: str, uri: Uri | None = None) -> bool:
@@ -72,7 +72,7 @@ def get_dataset_index(name: str, uri: Uri | None = None) -> DatasetModel:
     written by the ``index`` export operation.
     """
     versions = factories.get_versions(name, uri)
-    index = versions.get(path.INDEX, model=get_model_class(), raise_on_nonexist=False)
+    index = versions.get(path.INDEX, model=DatasetModel, raise_on_nonexist=False)
     if index is not None:
         return index
     return get_dataset_model(name, uri)

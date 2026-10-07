@@ -26,7 +26,7 @@ from ftm_lakehouse.catalog import (
 )
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.lake import get_lakehouse
-from ftm_lakehouse.model.dataset import DatasetModel, get_model_class
+from ftm_lakehouse.model.dataset import DatasetModel
 from ftm_lakehouse.repository.base import DatasetRef
 from ftm_lakehouse.repository.base import dataset_uri as repo_dataset_uri
 
@@ -122,8 +122,7 @@ def write_config(name: str, uri: str, config: str) -> DatasetModel:
     Returns:
         The updated dataset model.
     """
-    model = get_model_class()
-    data = model.from_yaml_uri(config, name=name).model_dump(
+    data = DatasetModel.from_yaml_uri(config, name=name).model_dump(
         exclude={"name", "uri"}, exclude_unset=True
     )
     return update_dataset(name, uri, **data)

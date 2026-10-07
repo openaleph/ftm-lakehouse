@@ -26,7 +26,6 @@ from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from importlib import import_module
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Callable, Iterator
@@ -43,7 +42,6 @@ from ftm_lakehouse.helpers.shards import entity_shard
 from ftm_lakehouse.logic.entities.aggregate import EntityPayload, aggregate_unsafe
 from ftm_lakehouse.logic.entities.stats import StatsCollector
 from ftm_lakehouse.logic.parquet import worker_duckdb_config
-from ftm_lakehouse.model.dataset import DatasetModel, get_model_class, set_model_class
 from ftm_lakehouse.model.job import DatasetJobModel
 from ftm_lakehouse.model.statement import statement_csv_header
 from ftm_lakehouse.operation.base import DatasetJobOperation
@@ -83,7 +81,6 @@ class ExportTask:
     clean: bool
     duckdb_config: dict[str, str]
     pending: dict[str, frozenset[str]]
-    model_class: str | None
 
 
 @dataclass
@@ -95,53 +92,6 @@ class ExportPart:
     seen: dict[str, frozenset[str]]
     stats: StatsCollector
     took: timedelta
-
-
-def _model_class_path() -> str | None:
-    """The dotted path of the registered `DatasetModel` subclass, if any.
-
-    ``None`` when the default is in use, so the common case ships nothing.
-
-    Raises:
-        RuntimeError: The registered class is not importable by path – a
-            class defined inside a function is how the docs and the tests
-            demonstrate `set_model_class`, and a worker could not resolve it.
-            Without this check it would surface as a ``BrokenProcessPool``.
-    """
-    cls = get_model_class()
-    if cls is DatasetModel:
-        return None
-    dotted = f"{cls.__module__}.{cls.__qualname__}"
-    module, _, name = dotted.rpartition(".")
-    try:
-        resolved = getattr(import_module(module), name)
-    except (ImportError, AttributeError):
-        resolved = None
-    if resolved is not cls:
-        raise RuntimeError(
-            f"Registered dataset model `{dotted}` is not importable, so a "
-            "worker process cannot register it. Define it at module level, or "
-            "export with `LAKEHOUSE_WORKERS=1`."
-        )
-    return dotted
-
-
-def init_worker(model_class: str | None) -> None:
-    """Re-register the parent's `DatasetModel` subclass in a fresh interpreter.
-
-    ``set_model_class`` is a process-wide global and a spawned worker is a
-    fresh import, so without this a worker parses ``config.yml`` into the base
-    `DatasetModel` – which drops unknown keys silently rather than failing, so
-    the divergence would reach the published artifacts unannounced.
-
-    Args:
-        model_class: Dotted path of the class to register, or ``None`` when
-            the parent is using the default.
-    """
-    if model_class is None:
-        return
-    module, _, name = model_class.rpartition(".")
-    set_model_class(getattr(import_module(module), name))
 
 
 def export_partition(task: ExportTask) -> ExportPart:
@@ -309,7 +259,6 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
         store = self.entities._statements
         sources = store.sweep_sources()
         config = worker_duckdb_config(workers)
-        model_class = _model_class_path()
         counts: Counter[str] = Counter()
         with TemporaryDirectory(prefix="ftm-lakehouse-export-") as tmp:
             # the parent writes its own part – the documents csv and the DEL
@@ -321,7 +270,7 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
             with (
                 session,
                 SyncProgressBar("Exporting statements", store.num_rows) as bar,
-                self._export_runner(workers, model_class) as run,
+                self._export_runner(workers) as run,
             ):
                 pending = self._pending_by_shard(session)
                 tasks = [
@@ -337,7 +286,6 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
                         clean=clean,
                         duckdb_config=config,
                         pending=pending.get(shard, {}),
-                        model_class=model_class,
                     )
                     for part, ((shard, bucket), source, clean) in zip(parts, sources)
                 ]
@@ -419,25 +367,17 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
 
     @staticmethod
     @contextmanager
-    def _export_runner(
-        workers: int, model_class: str | None
-    ) -> Iterator[Callable[..., Iterator[Any]]]:
+    def _export_runner(workers: int) -> Iterator[Callable[..., Iterator[Any]]]:
         """An ordered ``map`` over ``workers`` processes.
 
         Spawned rather than forked: the parent holds a ``DeltaTable`` with its
         own threads, a journal connection and a live progress-bar thread, none
-        of which survive a fork intact. A spawned worker is a fresh import, so
-        `init_worker` re-registers the dataset model class the parent was
-        using. Pending pairs are cancelled when the run fails, instead of
-        sweeping partitions whose parts nobody will assemble.
+        of which survive a fork intact. Pending pairs are cancelled when the
+        run fails, instead of sweeping partitions whose parts nobody will
+        assemble.
         """
         context = multiprocessing.get_context("spawn")
-        pool = ProcessPoolExecutor(
-            workers,
-            mp_context=context,
-            initializer=init_worker,
-            initargs=(model_class,),
-        )
+        pool = ProcessPoolExecutor(workers, mp_context=context)
         try:
             yield pool.map
         finally:

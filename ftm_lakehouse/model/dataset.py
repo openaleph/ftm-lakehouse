@@ -1,4 +1,4 @@
-"""Dataset metadata model + the process-wide model-class hook."""
+"""Dataset metadata model."""
 
 from string import Template
 
@@ -43,42 +43,3 @@ class DatasetModel(Dataset):
             return Template(settings.public_url_prefix).safe_substitute(
                 dataset=self.name
             )
-
-
-_model_class: type[DatasetModel] = DatasetModel
-
-
-def set_model_class(model_class: type[DatasetModel]) -> None:
-    """Register a custom [`DatasetModel`][DatasetModel] subclass process-wide.
-
-    Every config read – repository construction, ``get_dataset_model``,
-    ``update_dataset``, the index export – constructs models via
-    `get_model_class`, so downstream applications extend the dataset
-    config schema with one call at process start:
-
-    ```python
-    import ftm_lakehouse
-
-    class MyModel(ftm_lakehouse.DatasetModel):
-        my_field: str | None = None
-
-    ftm_lakehouse.set_model_class(MyModel)
-    ```
-
-    Call this **before** any repository or config access – repositories
-    snapshot their model at construction and are LRU-cached, so a later
-    switch requires ``repository.factories.clear_caches()``.
-
-    Args:
-        model_class: The [`DatasetModel`][DatasetModel] subclass to use.
-    """
-    global _model_class
-    _model_class = model_class
-
-
-def get_model_class() -> type[DatasetModel]:
-    """The registered [`DatasetModel`][DatasetModel] class.
-
-    See [`set_model_class`][set_model_class].
-    """
-    return _model_class

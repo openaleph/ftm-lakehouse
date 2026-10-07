@@ -12,7 +12,7 @@ from ftm_lakehouse.lake import (
     get_lakehouse,
     update_dataset,
 )
-from ftm_lakehouse.model.dataset import DatasetModel, set_model_class
+from ftm_lakehouse.model.dataset import DatasetModel
 
 __version__ = "0.8.5"
 
@@ -27,6 +27,5 @@ __all__ = [
     "get_documents",
     "get_entities",
     "get_lakehouse",
-    "set_model_class",
     "update_dataset",
 ]

@@ -430,24 +430,3 @@ catalog = get_lakehouse()
 for name in catalog.list_datasets():
     print(name, get_entities(name).stats())
 ```
-
-## Custom Dataset Models
-
-Downstream applications can extend the dataset config schema by registering a
-[`DatasetModel`](../reference/model.md) subclass process-wide – every config
-read (repository construction, `get_dataset_model`, the index export)
-constructs through it:
-
-```python
-import ftm_lakehouse
-
-class MyModel(ftm_lakehouse.DatasetModel):
-    user_id: int = 0
-
-ftm_lakehouse.set_model_class(MyModel)
-ftm_lakehouse.update_dataset("my_dataset", user_id=17)
-assert ftm_lakehouse.get_dataset_model("my_dataset").user_id == 17
-```
-
-Call `set_model_class()` at process start, before any repository or config
-access.

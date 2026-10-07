@@ -227,8 +227,6 @@ archive = get_archive("my_data")                         # ArchiveRepository
 
 **Multi-dataset concerns** go through the slim `Catalog` (`get_lakehouse()`): `list_datasets()`, `dataset_uri(name)`. The API server keeps one as `app.state.lake`.
 
-**Custom dataset models**: register a `DatasetModel` subclass process-wide via `set_model_class()` – every config read constructs through it.
-
 See [Lake Reference](reference/lake.md) for API details.
 
 ## Core
@@ -276,7 +274,7 @@ ftm_lakehouse/
 ├── exceptions.py
 │
 ├── model/                   # Layer 1: Pure data structures
-│   ├── dataset.py           # DatasetModel + set_model_class hook
+│   ├── dataset.py           # DatasetModel - dataset metadata / config
 │   ├── file.py              # File metadata model
 │   ├── job.py               # Job models
 │   └── statement.py         # JOURNAL/SHARDED_SCHEMA, LakehouseStatement

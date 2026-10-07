@@ -10,7 +10,7 @@ from ftm_lakehouse.core.api import LakehouseApiMixin, ensure_api_uri, get_api
 from ftm_lakehouse.core.config import load_config
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.core.zfs import ensure_zfs_dataset
-from ftm_lakehouse.model.dataset import get_model_class
+from ftm_lakehouse.model.dataset import DatasetModel
 from ftm_lakehouse.storage.tags import TagStore
 from ftm_lakehouse.storage.versions import VersionStore
 from ftm_lakehouse.util import validate_dataset_name
@@ -93,7 +93,7 @@ class DatasetHandle(LakehouseApiMixin):
         self._store_uri = ensure_api_uri(uri)
         self._store = get_store(self._store_uri, serialization_mode="raw")
         ensure_zfs(self.dataset, uri)
-        self._model = get_model_class()(**load_config(self._store, name=self.dataset))
+        self._model = DatasetModel(**load_config(self._store, name=self.dataset))
         self.log = get_logger(
             f"{self.dataset}.{self.__class__.__name__}",
             dataset=self.dataset,
