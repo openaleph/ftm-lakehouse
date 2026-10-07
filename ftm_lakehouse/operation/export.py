@@ -57,6 +57,7 @@ class ExportTask:
     make_diff: bool
     parts: str
     shard: str
+    bucket: str
     source: str
     clean: bool
     duckdb_config: dict[str, str]
@@ -169,7 +170,7 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
             with (
                 session,
                 SyncProgressBar("Exporting statements", store.num_rows) as bar,
-                process_map(workers) as run,
+                process_map(workers, ordered=False) as run,
             ):
                 pending = self._pending_by_shard(session)
                 tasks = [
@@ -181,6 +182,7 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
                         make_diff=self.job.make_diff,
                         parts=part,
                         shard=shard,
+                        bucket=bucket,
                         source=source,
                         clean=clean,
                         duckdb_config=worker_duckdb_config(workers),
@@ -188,16 +190,25 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
                     )
                     for part, ((shard, bucket), source, clean) in zip(parts, sources)
                 ]
-                for task, part in zip(tasks, run(export_partition, tasks)):
+                by_parts = {task.parts: task for task in tasks}
+                done: dict[str, ExportPart] = {}
+                for part in run(export_partition, tasks):
+                    task = by_parts[part.parts]
+                    done[part.parts] = part
+                    statements = part.counts.get("statements", 0)
                     counts.update(part.counts)
-                    session.adopt(part.parts, part.seen, part.stats)
-                    bar.advance(part.counts.get("statements", 0))
+                    bar.advance(statements)
                     self.log.info(
-                        f"Swept pair `{task.shard}`.",
+                        f"Swept pair `{task.shard}/{task.bucket}`.",
                         took=part.took,
                         shard=task.shard,
-                        statements=part.counts.get("statements", 0),
+                        bucket=task.bucket,
+                        statements=statements,
                     )
+                # in snapshot order, not as finished: the documents csv is
+                # written from the staged parts in the order they are adopted
+                for part in (done[p] for p in parts):
+                    session.adopt(part.parts, part.seen, part.stats)
             # after the session closed: its own writers' codec trailers are
             # written, so every part is a complete frame
             header = self._write_header(tmp, counts.get("statements", 0))

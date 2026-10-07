@@ -98,7 +98,7 @@ def test_repository_entities(repo):
     # Pagination + ordering hold end to end
     assert len(list(repo.query(Query()[:2]))) == 2
     assert len(list(repo.query(Query()[:1]))) == 1
-    ordered = [e.first("name") for e in repo.query(Query().order_by("name"))]
+    ordered = [e.first("name") for e in repo.query(Query().order_by(P("name")))]
     assert ordered == sorted(ordered)
     sliced = list(repo.query_statements(Query()[:1]))
     assert len({s.entity_id for s in sliced}) == 1
@@ -309,7 +309,7 @@ def test_repository_entities_query_slice_multi_shard(tmp_path):
     assert len(list(repo.query(Query()[:3]))) == 3
     stmts = list(repo.query_statements(Query()[:3]))
     assert len({s.entity_id for s in stmts}) == 3
-    names = [e.first("name") for e in repo.query(Query().order_by("name"))]
+    names = [e.first("name") for e in repo.query(Query().order_by(P("name")))]
     assert names == sorted(names)
     assert len(names) == 8
 
