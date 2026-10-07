@@ -12,7 +12,7 @@ CAPTION_PROPS: frozenset[PropRef] = frozenset(
 
 Spread this into a projection to keep captions intact while still projecting:
 
-    Query(*Q_DOCUMENTS).select(P("contentHash"), *CAPTION_PROPS)
+    Query(M(schemata="Document")).select(P("contentHash"), *CAPTION_PROPS)
 """
 
 FOLDER_SCHEMATA: frozenset[str] = frozenset(

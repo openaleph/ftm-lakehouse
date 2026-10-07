@@ -144,12 +144,8 @@ def _sharded_table(name: str) -> TableClause:
 # with tombstones filtered.
 TABLE = _sharded_table(nks.STATEMENT_TABLE)
 
-# Raw view name (``"statement_raw"``) – registered alongside ``TABLE``
-# on the same LakeStore connection and surfaces the underlying Delta
-# rows unchanged. Targeted by paths that need tombstones and per-row
-# physical layout visible: `build_merge_sql` (grace-period
-# tombstone retention) and raw-source ``get_entity_ids`` queries (diff
-# consumers emit DEL ops).
+# Raw view name (``"statement_raw"``): every physical row, tombstones and
+# duplicates included – what `build_merge_sql` and the DEL candidate scan read.
 TABLE_RAW = _sharded_table(f"{nks.STATEMENT_TABLE}_raw")
 
 

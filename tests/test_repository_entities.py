@@ -262,7 +262,7 @@ def test_repository_entities_export_diff_delete(tmp_path, settle):
     repo.delete_entity("jane")
     repo.flush()
     settle(repo)
-    assert list(repo.deleted_ids(since)) == ["jane"]
+    assert [c.id for c in repo.deleted_candidates(since)] == ["jane"]
 
     # Incremental diff should contain a DEL for jane
     _export(tmp_path)

@@ -122,7 +122,7 @@ def test_storage_parquet_execute_partitioned_multiple_partitions(tmp_path):
     ]
     _flush(store, [_pack(s) for s in stmts])
 
-    assert set(store.get_entity_ids()) == {"jane", "acme-job"}
+    assert {s.entity_id for s in store.query_statements()} == {"jane", "acme-job"}
 
 
 def test_storage_parquet_append_keeps_duplicates(tmp_path):

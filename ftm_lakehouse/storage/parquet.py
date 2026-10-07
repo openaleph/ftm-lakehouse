@@ -313,7 +313,7 @@ def sweep_partition(
 
 @cache
 def make_source(table: str, shards: int) -> SqlSource:
-    """Create `SqlSource` (live or raw) with configured shards"""
+    """The `SqlSource` reads compile against, pruning by ``shards``."""
     config = {
         "id_column": "entity_id",
         "prune": {**PRUNE, "shard": make_prune_by_shard(shards)},
@@ -492,10 +492,6 @@ class ParquetStore:
     @cached_property
     def source(self) -> SqlSource:
         return make_source(TABLE, self.shards)
-
-    @cached_property
-    def source_raw(self) -> SqlSource:
-        return make_source(TABLE_RAW, self.shards)
 
     def _compile_query(self, q: Query | None = None) -> Select:
         """Compile ``q`` to a statements ``Select`` against the live view.
@@ -1121,7 +1117,6 @@ class ParquetStore:
         self.shards = shards
         # the cached sources prune by the shard count they were built with
         self.__dict__.pop("source", None)
-        self.__dict__.pop("source_raw", None)
         self.log.info("Re-shard complete.", shards=shards)
 
     def _rewrite_shards(self, shards: int) -> None:
@@ -1280,18 +1275,6 @@ class ParquetStore:
         """
         root, pairs = self._snapshot_pairs()
         return [(key, *pair_source(root, pairs[key])) for key in sorted(pairs)]
-
-    def get_entity_ids(
-        self, q: Query | None = None, *, source: SqlSource | None = None
-    ) -> Iterator[str]:
-        """Get entity IDs for given query. Use ``self.source_raw`` to
-        target physical storage without tombstones merged"""
-        source = source or self.source
-        sql = Sql(q or Query(), source=source).canonical_ids
-        prune = self._prune_values(q, source)
-        for reader in self._execute_partitioned(sql, prune=prune):
-            for batch in reader:
-                yield from batch["entity_id"].to_pylist()
 
     def deleted_candidates(self, since: datetime) -> Iterator[DeleteCandidate]:
         """Every entity carrying a tombstone at or after ``since``.

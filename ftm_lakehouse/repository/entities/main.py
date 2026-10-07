@@ -11,7 +11,6 @@ from anystore.types import Uri
 from anystore.util import Took, mask_uri
 from followthemoney import EntityProxy, Statement, StatementEntity
 from followthemoney.statement import StatementDict
-from ftmq import C
 from ftmq.io import smart_read_proxies
 from ftmq.model.stats import DatasetStats
 from ftmq.query import M, Query
@@ -475,16 +474,6 @@ class EntityRepository(DatasetHandle):
     def version(self) -> int | None:
         """Current version of the main Delta table."""
         return self._statements.version
-
-    @no_api
-    def deleted_ids(self, since: datetime) -> Iterator[str]:
-        """Entity ids with statements tombstoned since the given timestamp.
-
-        Reads `ParquetStore.source_raw`, since the live view hides exactly
-        the rows this asks about
-        """
-        q = Query(C(deleted_at__gte=since))
-        return self._statements.get_entity_ids(q, source=self._statements.source_raw)
 
     @no_api
     def deleted_candidates(self, since: datetime) -> Iterator[DeleteCandidate]:

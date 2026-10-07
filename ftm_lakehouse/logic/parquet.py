@@ -11,7 +11,7 @@ query over one partition's files
 written back with DuckDB's ``COPY`` ([`merge_copy_options`][merge_copy_options])
 – physical compaction, never a precondition for reading. ``statement_raw``
 exposes every underlying row, tombstones and duplicates included, for the
-paths that need them (``merge``, ``get_entity_ids`` over the raw source).
+paths that need them (``merge``, the export's DEL candidates).
 See `_dedupe_sql` for the two-branch fragment semantics.
 """
 

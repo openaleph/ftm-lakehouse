@@ -286,8 +286,8 @@ def test_repository_document_export_diff_delete(tmp_path, fixtures_path, settle)
 
     Every diff series picks its DEL candidates out of one shared raw scan
     (`ExportSession.load_pending`), so the documents series has to do its own
-    narrowing in python: schema and content hash, the half of ``Q_DOCUMENTS``
-    a tombstoned entity can still be judged by. A tombstoned ``Company`` must
+    narrowing in python: schema and content hash, which a tombstoned entity
+    can still be judged by. A tombstoned ``Company`` must
     not land in the documents diff – it was never a row in it.
     """
     archive = ArchiveRepository("test", tmp_path)

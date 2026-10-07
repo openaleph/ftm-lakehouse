@@ -425,13 +425,9 @@ class DocumentsArtifact(DiffableArtifact):
 
     @staticmethod
     def is_document_schema(schema: str | None) -> bool:
-        """Whether ``schema`` is one the documents export carries.
-
-        The schema half of ``Q_DOCUMENTS``: a ``Document`` descendant that is
-        not a bare ``Folder`` (those are the path scaffolding, not files).
-        Split out so the live path (`is_document`, off an entity dict) and the
-        delete path (`DocumentsRun.claims`, off the schemata its tombstoned
-        rows carry) share one spelling of it.
+        """Whether ``schema`` is one the documents export carries: a
+        ``Document`` descendant that is not a bare ``Folder``. Shared by the
+        live path (`is_document`) and the delete path (`DocumentsRun.claims`).
         """
         if not schema:
             return False
@@ -456,11 +452,8 @@ class DocumentsArtifact(DiffableArtifact):
 
     @staticmethod
     def is_document(data: SDict) -> bool:
-        """Whether an entity dict belongs in the documents export.
-
-        The in-Python spelling of ``Q_DOCUMENTS``: a schema the export carries
-        (`is_document_schema`) that actually has a content hash to point at.
-        """
+        """Whether an entity dict belongs in the documents export: a schema
+        it carries (`is_document_schema`) with a content hash to point at."""
         if not DocumentsArtifact.is_document_schema(data.get("schema")):
             return False
         return bool(data.get("properties", {}).get("contentHash"))
