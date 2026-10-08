@@ -60,13 +60,13 @@ class OptimizeOperation(DatasetJobOperation[OptimizeJob]):
         ([`ParquetStore.needs_merge`][ftm_lakehouse.storage.parquet.ParquetStore.needs_merge]),
         and that is the only thing an optimize has to do.
         """
-        return not self.entities.needs_merge
+        return not self.entities.statements.needs_merge
 
     def handle(self, run: JobRun[OptimizeJob], force: bool = False, **kwargs) -> None:
         self.entities.merge(force)
         run.job.done += 1
         run.save()
-        self.entities.vacuum(retention_hours=run.job.retention_hours)
+        self.entities.statements.vacuum(retention_hours=run.job.retention_hours)
         run.job.done += 1
 
 

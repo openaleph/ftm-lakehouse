@@ -33,7 +33,7 @@ def test_factories_identity_across_paths(tmp_path, monkeypatch):
     assert repo is get_entities("ident", Path(str(tmp_path)) / "ident")
 
     # one ParquetStore (and so one LakeStore / DuckDB connection) per dataset
-    assert get_entities("ident", uri)._statements is repo._statements
+    assert get_entities("ident", uri).statements is repo.statements
 
 
 def test_factories_shared_cache_kinds_and_clear(tmp_path, monkeypatch):

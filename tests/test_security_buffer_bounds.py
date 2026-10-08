@@ -89,7 +89,7 @@ def _stub_append(repo, captured: list[pa.Table]) -> None:
     def _append(batch: pa.Table) -> None:
         captured.append(batch)
 
-    repo._statements.append = _append  # type: ignore[method-assign]
+    repo.statements.append = _append  # type: ignore[method-assign]
 
 
 def test_flush_table_packs_the_whole_buffer() -> None:

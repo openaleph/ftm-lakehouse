@@ -189,11 +189,11 @@ def test_export_fresh_across_merge_stale_after_write(tmp_path):
         return repo._tags.is_latest(path.EXPORTS_STATEMENTS, [tag.STATEMENTS_UPDATED])
 
     make_op(tmp_path).run()
-    assert repo.needs_merge  # the export did not merge for itself
+    assert repo.statements.needs_merge  # the export did not merge for itself
     assert is_fresh()
 
     repo.merge()
-    assert not repo.needs_merge
+    assert not repo.statements.needs_merge
     assert is_fresh()  # same content, other files
 
     setup_entities(repo)

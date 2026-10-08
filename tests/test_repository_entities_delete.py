@@ -278,7 +278,7 @@ def test_delete_then_merge_cleans_main_table(monkeypatch, tmp_path):
     repo.merge()
 
     # Main table should no longer contain jane's rows
-    dt = repo._statements.deltatable
+    dt = repo.statements.deltatable
     raw = dt.to_pyarrow_table()
     entity_ids = set(raw.column("entity_id").to_pylist())
     assert "jane" not in entity_ids
@@ -298,7 +298,7 @@ def test_deleted_at_appended_after_flush(tmp_path):
     repo.delete_entity("jane")
     repo.flush()
 
-    dt = repo._statements.deltatable
+    dt = repo.statements.deltatable
     raw = dt.to_pyarrow_table()
     deleted_rows = [r for r in raw.to_pylist() if r.get("deleted_at") is not None]
     assert deleted_rows
@@ -367,11 +367,11 @@ def test_delete_origin_blocked_by_maintenance_lock(tmp_path, monkeypatch):
         writer.add_entity(EntityProxy.from_dict(JANE))
     repo.flush()
 
-    repo._statements._store.touch(path.LOCK)
+    repo.statements._store.touch(path.LOCK)
     with pytest.raises(RuntimeError, match="Already locked"):
         repo.delete_origin("a")
 
-    assert repo._statements.unlock() is True
+    assert repo.statements.unlock() is True
     assert {e.id for e in repo.query()} == {"jane"}
 
 

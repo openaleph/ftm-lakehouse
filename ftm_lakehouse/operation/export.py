@@ -148,10 +148,10 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
             Counts per artifact and per diff op.
         """
         workers = max(settings.workers, 1)
-        store = self.entities._statements
+        store = self.entities.statements
         counts: Counter[str] = Counter()
         with (
-            self.entities.merge_lock(),
+            store.merge_lock(),
             TemporaryDirectory(prefix="ftm-lakehouse-export-") as tmp,
         ):
             # no diff asked for is no version: no diff window, no state recorded
@@ -161,7 +161,7 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
             session = ExportSession(
                 self.artifacts.runs(now, f"{tmp}/parent"),
                 version,
-                self.entities.deleted_candidates,
+                store.deleted_candidates,
             )
             parts = [f"{tmp}/{s.key[0]}-{s.key[1]}" for s in sources]
             streamed = list(self.artifacts.streamed())
@@ -287,7 +287,7 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
     def handle(self, run: JobRun[ExportJob], *args: Any, **kwargs: Any) -> None:
         """The sweep, then every artifact's freshness tag – none if it crashed –
         then ``index.json``, also for an empty store."""
-        if self.entities.exists:
+        if self.entities.statements.exists:
             started = utc_now()
             result = self.export(started)
             for artifact in self.artifacts.streamed():

@@ -24,12 +24,12 @@ def migrate_parquet_add_role(ref: DatasetRef) -> None:
     """Add the ``role`` column to a statement store that predates it.
 
     Metadata-only schema evolution
-    ([`evolve_schema`][ftm_lakehouse.repository.EntityRepository.evolve_schema]):
+    ([`evolve_schema`][ftm_lakehouse.storage.parquet.ParquetStore.evolve_schema]):
     the older rows read back ``role IS NULL``, which is the "no role" case, so
     row identity is what it was before the column existed and no re-merge is
     owed.
     """
-    get_entities(*ref).evolve_schema()
+    get_entities(*ref).statements.evolve_schema()
 
 
 def migrate_parquet_table_properties(ref: DatasetRef) -> None:
@@ -37,12 +37,12 @@ def migrate_parquet_table_properties(ref: DatasetRef) -> None:
     properties.
 
     Sets [`TABLE_CONFIGURATION`][ftm_lakehouse.logic.parquet.TABLE_CONFIGURATION]
-    ([`configure_table`][ftm_lakehouse.repository.EntityRepository.configure_table]),
+    ([`configure_table`][ftm_lakehouse.storage.parquet.ParquetStore.configure_table]),
     writes a checkpoint without the expired ``remove`` actions and deletes the
     log past the new retention – on a store merged many times over, most of
     ``_delta_log``.
     """
-    get_entities(*ref).configure_table()
+    get_entities(*ref).statements.configure_table()
 
 
 MIGRATIONS: tuple[Migration, ...] = (

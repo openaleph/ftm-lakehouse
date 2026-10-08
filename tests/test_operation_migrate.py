@@ -47,7 +47,7 @@ def _write_pre_role_store(tmp_path) -> None:
 
 
 def _columns(repo: EntityRepository) -> set[str]:
-    return {f.name for f in repo._statements.deltatable.schema().to_arrow()}
+    return {f.name for f in repo.statements.deltatable.schema().to_arrow()}
 
 
 def test_operation_migrate(tmp_path):
@@ -57,7 +57,7 @@ def test_operation_migrate(tmp_path):
     _write_pre_role_store(tmp_path)
     repo = EntityRepository(dataset=DATASET, uri=tmp_path)
     assert "role" not in _columns(repo)
-    files_before = set(repo._statements.deltatable.file_uris())
+    files_before = set(repo.statements.deltatable.file_uris())
 
     op = MigrateOperation(job=MigrateJob.make(dataset=DATASET), uri=tmp_path)
     assert op.get_target() == tag.OP_MIGRATE
@@ -68,12 +68,12 @@ def test_operation_migrate(tmp_path):
     assert (tmp_path / f"tags/lakehouse/{tag.OP_MIGRATE}").exists()
     for migration in ("migrate_parquet_add_role", "migrate_parquet_table_properties"):
         assert (tmp_path / f"tags/lakehouse/{tag.migration(migration)}").exists()
-    config = repo._statements.deltatable.metadata().configuration
+    config = repo.statements.deltatable.metadata().configuration
     assert {k: config.get(k) for k in TABLE_CONFIGURATION} == TABLE_CONFIGURATION
 
     # metadata-only: the column is there, the parquet files are untouched
     assert "role" in _columns(repo)
-    assert set(repo._statements.deltatable.file_uris()) == files_before
+    assert set(repo.statements.deltatable.file_uris()) == files_before
 
     # the pre-role row reads back as role-less ...
     statements = list(repo.query_statements())
@@ -140,7 +140,7 @@ def test_merge_partition_predating_a_column(tmp_path):
     NULL, as the store reads it."""
     _write_pre_role_store(tmp_path)
     repo = EntityRepository(dataset=DATASET, uri=tmp_path)
-    repo.evolve_schema()
-    repo._statements.merge(force=True)
+    repo.statements.evolve_schema()
+    repo.statements.merge(force=True)
     statements = list(repo.query_statements())
     assert [(s.entity_id, s.role) for s in statements] == [("entity-1", None)]

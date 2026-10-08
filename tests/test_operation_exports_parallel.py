@@ -105,7 +105,7 @@ def test_export_parallel_matches_serial(tmp_path):
     """
     uri = _setup(tmp_path, 1)
     assert (
-        len(get_entities(DATASET, uri)._statements.sweep_sources()) > 1
+        len(get_entities(DATASET, uri).statements.sweep_sources()) > 1
     ), "the dataset must span several pairs or the fan-out proves nothing"
 
     one = export(DATASET, uri, make_diff=False)
@@ -152,7 +152,7 @@ def test_export_parallel_merged_store(tmp_path):
     )
 
     repo.merge()
-    sources = repo._statements.sweep_sources()
+    sources = repo.statements.sweep_sources()
     partitions = [partition for source in sources for partition in source.partitions]
     assert all(partition.presorted for partition in partitions)
     assert any(len(source.partitions) > 1 for source in sources)
@@ -256,7 +256,7 @@ def test_export_parallel_multi_frame(tmp_path, algorithm):
     uri = _setup(tmp_path, 1, compression=algorithm)
     artifacts = get_artifacts(DATASET, uri)
     assert artifacts.statements.compression == algorithm
-    assert len(get_entities(DATASET, uri)._statements.sweep_sources()) > 1
+    assert len(get_entities(DATASET, uri).statements.sweep_sources()) > 1
 
     export(DATASET, uri, make_diff=False)
 

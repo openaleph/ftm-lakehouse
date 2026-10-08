@@ -262,7 +262,7 @@ def test_repository_entities_export_diff_delete(tmp_path, settle):
     repo.delete_entity("jane")
     repo.flush()
     settle(repo)
-    assert [c.id for c in repo.deleted_candidates(since)] == ["jane"]
+    assert [c.id for c in repo.statements.deleted_candidates(since)] == ["jane"]
 
     # Incremental diff should contain a DEL for jane
     _export(tmp_path)
@@ -447,14 +447,14 @@ def test_repository_entities_export_diff_on_unmerged_store(tmp_path):
     with repo.writer() as writer:
         writer.add_entity(make_entity(JANE))
     repo.flush()
-    assert repo._statements.needs_merge
+    assert repo.statements.needs_merge
     _export(tmp_path)  # the first run only records where the series starts
 
     with repo.writer() as writer:
         writer.add_entity(make_entity(JANE))  # a duplicate, not a change
         writer.add_entity(make_entity(JOHN))
     repo.flush()
-    assert repo._statements.needs_merge
+    assert repo.statements.needs_merge
     _export(tmp_path)
 
     diff_files = sorted(
@@ -462,7 +462,7 @@ def test_repository_entities_export_diff_on_unmerged_store(tmp_path):
     )
     ops = [json.loads(line) for line in open(diff_files[-1])]
     assert [(o["op"], o["entity"]["id"]) for o in ops] == [("ADD", "john")]
-    assert repo._statements.needs_merge
+    assert repo.statements.needs_merge
 
 
 def test_export_no_diff_keeps_the_diff_watermark(tmp_path, settle):

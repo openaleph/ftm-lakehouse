@@ -36,7 +36,7 @@ def _fill(repo: EntityRepository, origins: tuple[str, ...] = ("a", "b")) -> None
 
 
 def _shards_on_disk(repo: EntityRepository) -> set[str]:
-    return {s for s, _, _ in repo._statements._partitions()[1]}
+    return {s for s, _, _ in repo.statements._partitions()[1]}
 
 
 def test_operation_shard(tmp_path):
@@ -65,7 +65,7 @@ def test_operation_shard(tmp_path):
     assert _shards_on_disk(repo) == {
         entity_shard(f"entity-{i}", 8) for i in range(ENTITIES)
     }
-    for _, bucket, origin in repo._statements._partitions()[1]:
+    for _, bucket, origin in repo.statements._partitions()[1]:
         assert bucket == "thing"
         assert origin in ("a", "b")
 
@@ -129,14 +129,14 @@ def test_operation_shard_keeps_unmerged_rows(tmp_path):
             )
         repo.flush()
     # un-merged: physical rows exceed what the reconciled read returns
-    raw = repo._statements.num_rows
+    raw = repo.statements.num_rows
     assert raw > len(list(repo.query_statements()))
 
     ShardOperation(job=ShardJob.make(dataset=DATASET, shards=8), uri=tmp_path).run()
     resharded = EntityRepository(dataset=DATASET, uri=tmp_path)
     # a re-shard moves rows, it does not drop any
-    assert resharded._statements.num_rows == raw
-    assert resharded.needs_merge
+    assert resharded.statements.num_rows == raw
+    assert resharded.statements.needs_merge
 
     OptimizeOperation(job=OptimizeJob.make(dataset=DATASET), uri=tmp_path).run(
         force=True
@@ -149,7 +149,7 @@ def test_operation_shard_keeps_unmerged_rows(tmp_path):
 def test_operation_shard_empty_store(tmp_path):
     """A dataset with no statements yet only gets its config written."""
     repo = EntityRepository(dataset=DATASET, uri=tmp_path)
-    assert not repo.exists
+    assert not repo.statements.exists
 
     ShardOperation(job=ShardJob.make(dataset=DATASET, shards=8), uri=tmp_path).run()
     assert get_dataset_model(DATASET, tmp_path).shards == 8

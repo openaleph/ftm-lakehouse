@@ -287,18 +287,18 @@ def test_repository_document_export_diff(tmp_path, fixtures_path, settle):
     archive = ArchiveRepository("test", tmp_path)
     entities = EntityRepository("test", tmp_path)
 
-    assert entities._statements.version is None
+    assert entities.statements.version is None
 
     # Create multiple flushes to simulate real usage where table is at v > 0
     # before first diff export
     _archive_with_entities(archive, entities, fixtures_path / "src" / "utf.txt")
     entities.flush()
     # version 0 is the empty create commit (ParquetStore._ensure_table)
-    assert entities._statements.version == 1
+    assert entities.statements.version == 1
 
     _archive_with_entities(archive, entities, fixtures_path / "src" / "companies.csv")
     entities.flush()
-    assert entities._statements.version == 2
+    assert entities.statements.version == 2
 
     settle(entities)
     _export(tmp_path)

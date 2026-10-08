@@ -227,7 +227,7 @@ def test_deleted_candidates_see_tombstones(local_repo):
 
     # the live view hides jane; the raw scan behind the DEL candidates does not
     assert not list(repo.query(Query(M(entity_id="jane"))))
-    candidates = {c.id: c for c in repo.deleted_candidates(before)}
+    candidates = {c.id: c for c in repo.statements.deleted_candidates(before)}
     assert set(candidates) == {"jane"}
     assert candidates["jane"].schemata == {"Person"}
 
