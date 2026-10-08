@@ -74,6 +74,7 @@ class ExportKind(StrEnum):
     statements = "statements"
     entities = "entities"
     documents = "documents"
+    parents = "parents"
     statistics = "statistics"
     index = "index"  # type: ignore[assignment]  # shadows str.index, fine for enums
 
@@ -403,7 +404,7 @@ class DocumentsArtifact(DiffableArtifact):
     @staticmethod
     def is_parent_schema(schema: str | None) -> bool:
         """Whether an entity of ``schema`` can be a document's parent – the folder
-        paths are built from these (`DocumentsRun.resolve`)."""
+        paths are built from these (`ParentsRun.resolve`)."""
         return schema in FOLDER_SCHEMATA
 
     @staticmethod
@@ -416,7 +417,7 @@ class DocumentsArtifact(DiffableArtifact):
 
     def make_document(self, data: SDict, public_prefix: str | None = None) -> Document:
         """The row an entity dict contributes, ``path`` unset – stamped in once the
-        folder tree is known (`DocumentsRun.finish`).
+        folder tree is known (`ParentsRun.finish`).
 
         Args:
             data: Entity dict, as `EntityPayload.to_dict` returns.
@@ -440,6 +441,18 @@ class DocumentsArtifact(DiffableArtifact):
 
     def run(self, now: datetime, parts: str) -> "DocumentsRun":
         return DocumentsRun(self, now, parts)
+
+
+class ParentsArtifact(Artifact):
+    """Every folder a document can sit in, with its path – the folder tree the
+    documents export resolves."""
+
+    base = path.EXPORTS_PARENTS
+    kind = ExportKind.parents
+    fieldnames = ["id", "name", "path"]
+
+    def run(self, now: datetime, parts: str) -> "ParentsRun":
+        return ParentsRun(self, now, parts)
 
 
 class StatisticsArtifact(VersionedArtifact):
@@ -594,37 +607,10 @@ class EntitiesRun(DiffableRun):
 
 
 class DocumentsRun(DiffableRun):
-    """Writes one origin scope of ``documents.csv`` and its diff series.
-
-    Two-phase: a document's path is the chain of its ancestors' names, which
-    come past in no order. `consume` stages each row with its ``parent`` ids,
-    plus a name row for every possible parent; `finish` builds the folder tree
-    from the staged rows and writes the csv.
-    """
+    """One origin scope of ``documents.csv`` and its diff series – its rows
+    staged and written by the `ParentsRun` every scope shares."""
 
     artifact: DocumentsArtifact
-
-    def __init__(self, artifact: DocumentsArtifact, now: datetime, parts: str) -> None:
-        super().__init__(artifact, now, parts)
-        self.public_prefix = artifact.dataset._model.get_public_prefix()
-        self.staged = self.staged_part(parts)
-        self.staging = Writer(self.staged)
-        # the workers' staged files, adopted by the parent before it resolves
-        self.staged_parts: list[str] = []
-
-    def staged_part(self, parts: str) -> str:
-        """Where this scope's rows are staged, inside ``parts``."""
-        return f"{self.artifact.part(parts)}.staged.json"
-
-    def _staged_rows(self) -> Iterator[SDict]:
-        """Every staged row – the adopted parts, then this run's own."""
-        for staged in (*self.staged_parts, self.staged):
-            if Path(staged).exists():
-                yield from smart_stream_json(staged)
-
-    def prepare(self, version: int | None) -> None:
-        super().prepare(version)
-        self.staging.open()
 
     def claims(self, candidate: DeleteCandidate) -> bool:
         """Only tombstoned documents of this origin scope."""
@@ -636,87 +622,144 @@ class DocumentsRun(DiffableRun):
             DocumentsArtifact.is_document_schema(s) for s in candidate.schemata
         )
 
-    def consume(self, payload: EntityPayload) -> None:
-        """Stage this entity: a ``doc`` row if it is a document of this scope, a
-        ``folder`` name if it can be a parent – of any scope, so paths resolve
-        across origins."""
-        data = payload.to_dict()
-        staged: SDict = {}
-        if self.artifact.is_parent_schema(data.get("schema")):
-            staged["folder"] = get_filename(data)
-        in_scope = not self.artifact.origin or self.artifact.origin in payload.origins
-        if in_scope and self.artifact.is_document(data):
-            document = self.artifact.make_document(data, self.public_prefix)
-            staged["doc"] = document.model_dump(by_alias=True, mode="json")
-            self.counts["total"] += 1
-            if self.diff is not None:
-                # here, not in `finish`: `op_for` claims the id off `pending`
-                op = self.op_for(payload)
-                if op is not None:
-                    staged["op"] = str(op)
-                    self.counts[op.lower()] += 1
-        if not staged:
-            return
-        staged["id"] = data["id"]
-        staged["parents"] = data.get("properties", {}).get("parent", [])
-        self.staging.write(staged)
+    def in_scope(self, payload: EntityPayload) -> bool:
+        return not self.artifact.origin or self.artifact.origin in payload.origins
 
-    def resolve(self) -> tuple[dict[str, str], int]:
-        """The folder paths, built from the staged ``folder`` rows, and the
-        number of staged documents."""
-        tree = FolderTree()
-        documents = 0
-        log.info("Resolving folder paths ...", artifact=self.name)
-        with Took() as t:
-            for staged in self._staged_rows():
-                if folder := staged.get("folder"):
-                    tree.put(staged["id"], folder, staged["parents"])
-                documents += "doc" in staged
-            paths = tree.paths()
-        log.info(
-            "Resolved folder paths.",
-            artifact=self.name,
-            folders=len(paths),
-            documents=documents,
-            took=t.took,
-        )
-        return paths, documents
-
-    def finish(self) -> None:
-        """Write the staged documents – one row per resolvable parent, one
-        unpathed row otherwise – then the DELs."""
-        self.staging.close()
-        paths, documents = self.resolve()
-        written = 0
-        with Took() as t, SyncProgressBar(f"Writing {self.name}", documents) as bar:
-            for staged in self._staged_rows():
-                document = staged.get("doc")
-                if document is None:
-                    continue
-                rows = [
-                    {**document, "path": paths[parent]}
-                    for parent in staged["parents"]
-                    if parent in paths
-                ] or [cast(SDict, document)]
-                for row in rows:
-                    self.writer.write(row)
-                op = staged.get("op")
-                if op is not None and self.diff is not None:
-                    for row in rows:
-                        self.diff.write({"op": op, **row})
-                written += 1
-                if not written % PROGRESS_STEP:
-                    bar.advance(PROGRESS_STEP)
-            bar.advance(written % PROGRESS_STEP)
-        log.info(f"Wrote `{self.name}`.", documents=written, took=t.took)
-        super().finish()
+    def write(self, rows: list[SDict], op: str | None) -> None:
+        """One document's rows, and its diff rows under ``op``."""
+        for row in rows:
+            self.writer.write(row)
+        if op is not None and self.diff is not None:
+            for row in rows:
+                self.diff.write({"op": op, **row})
 
     def write_delete(self, entity_id: str) -> None:
         cast(Writer, self.diff).write({"op": str(DiffOp.DEL), "id": entity_id})
 
+
+class ParentsRun(ArtifactRun):
+    """Writes ``parents.csv`` – and every documents scope, from the same staging.
+
+    A document's path is the chain of its ancestors' names, which come past in
+    no order: `consume` stages each folder's name once and each document once,
+    with the scopes it is in and its diff op in each; `finish` resolves one
+    folder tree, writes it out and writes every scope from one read of the
+    staged documents – ahead of the scopes' own `finish`, their DELs.
+    """
+
+    artifact: ParentsArtifact
+
+    def __init__(self, artifact: ParentsArtifact, now: datetime, parts: str) -> None:
+        super().__init__(artifact, now, parts)
+        self.writer = artifact.writer(parts)
+        # the documents scopes, wired up by `ArtifactsRepository.runs`
+        self.scopes: dict[str, DocumentsRun] = {}
+        self.documents_artifact = DocumentsArtifact(artifact.dataset)
+        self.public_prefix = artifact.dataset._model.get_public_prefix()
+        self.folders = Writer(self.folders_part(parts))
+        self.documents = Writer(self.documents_part(parts))
+        # the workers' part directories, adopted before `finish`
+        self.staged_parts: list[str] = []
+        self.rows = 0  # documents to write across the scopes, for the bar
+
+    @staticmethod
+    def folders_part(parts: str) -> str:
+        return f"{parts}/folders.staged.json"
+
+    @staticmethod
+    def documents_part(parts: str) -> str:
+        return f"{parts}/documents.staged.json"
+
+    def _staged(self, part: Callable[[str], str]) -> Iterator[SDict]:
+        """One kind of staged row – the adopted parts', then this run's own."""
+        for parts in (*self.staged_parts, self.parts):
+            if Path(part(parts)).exists():
+                yield from smart_stream_json(part(parts))
+
+    def prepare(self, version: int | None) -> None:
+        self.folders.open()
+        self.documents.open()
+
+    def adopt(self, parts: str, counts: dict[str, int]) -> None:
+        """Take a worker's staged rows, and its scopes' document counts."""
+        self.staged_parts.append(parts)
+        self.rows += sum(counts.get(name, 0) for name in self.scopes)
+
+    def consume(self, payload: EntityPayload) -> None:
+        """Stage a folder name for anything that can be a parent – of any scope,
+        so paths resolve across origins – and a document row for a document in
+        any scope."""
+        data = payload.to_dict()
+        parents = data.get("properties", {}).get("parent", [])
+        if DocumentsArtifact.is_parent_schema(data.get("schema")):
+            self.folders.write(
+                {"id": data["id"], "folder": get_filename(data), "parents": parents}
+            )
+        if not DocumentsArtifact.is_document(data):
+            return
+        scopes: dict[str, str | None] = {}
+        for run in self.scopes.values():
+            if run.in_scope(payload):
+                op = run.op_for(payload)  # claims the id off `pending`
+                run.counts["total"] += 1
+                if op is not None:
+                    run.counts[op.lower()] += 1
+                scopes[run.name] = str(op) if op is not None else None
+        if scopes:
+            document = self.documents_artifact.make_document(data, self.public_prefix)
+            self.documents.write(
+                {
+                    "doc": document.model_dump(by_alias=True, mode="json"),
+                    "parents": parents,
+                    "scopes": scopes,
+                }
+            )
+
+    def resolve(self) -> FolderTree:
+        """One folder tree over the staged folder rows, resolved."""
+        log.info("Resolving folder paths ...")
+        tree = FolderTree()
+        with Took() as t:
+            for staged in self._staged(self.folders_part):
+                tree.put(staged["id"], staged["folder"], staged["parents"])
+            tree.paths()
+        log.info("Resolved folder paths.", folders=len(tree), took=t.took)
+        return tree
+
+    def finish(self) -> None:
+        """Write the folders, then every scope's documents – one row per
+        resolvable parent, one unpathed row otherwise."""
+        self.folders.close()
+        self.documents.close()
+        tree = self.resolve()
+        for folder, name, path_ in tree.folders():
+            self.writer.write({"id": folder, "name": name, "path": path_})
+        self.counts["total"] = len(tree)
+        paths = tree.paths()
+        written: Counter[str] = Counter()
+        step = 0
+        with Took() as t, SyncProgressBar("Writing documents", self.rows) as bar:
+            for staged in self._staged(self.documents_part):
+                document = staged["doc"]
+                rows = [
+                    {**document, "path": paths[parent]}
+                    for parent in staged["parents"]
+                    if parent in paths
+                ] or [document]
+                for name, op in staged["scopes"].items():
+                    self.scopes[name].write(rows, op)
+                    written[name] += 1
+                step += len(staged["scopes"])
+                if step >= PROGRESS_STEP:
+                    bar.advance(step)
+                    step = 0
+            bar.advance(step)
+        log.info("Wrote the documents.", took=t.took, **written)
+
     def close(self) -> None:
-        super().close()
-        self.staging.close()
+        self.writer.close()
+        self.folders.close()
+        self.documents.close()
 
 
 class StatisticsRun(ArtifactRun):
@@ -776,14 +819,15 @@ class ExportSession:
         parts: str,
         seen: dict[str, frozenset[str]],
         stats: StatsCollector,
+        counts: dict[str, int],
     ) -> None:
         """Fold a worker's part back in: the DEL candidates it met alive (per
-        run name), its staged documents rows and its statistics."""
+        run name), its staged documents and its statistics."""
         for run in self.runs:
             if isinstance(run, DiffableRun):
                 run.pending -= seen.get(run.name, frozenset())
-            if isinstance(run, DocumentsRun):
-                run.staged_parts.append(run.staged_part(parts))
+            if isinstance(run, ParentsRun):
+                run.adopt(parts, counts)
             if isinstance(run, StatisticsRun):
                 run.collector.merge(stats)
 
@@ -875,6 +919,10 @@ class ArtifactsRepository(DatasetHandle):
         return DocumentsArtifact(self)
 
     @property
+    def parents(self) -> ParentsArtifact:
+        return ParentsArtifact(self)
+
+    @property
     def statistics(self) -> StatisticsArtifact:
         return StatisticsArtifact(self)
 
@@ -887,6 +935,7 @@ class ArtifactsRepository(DatasetHandle):
         documents scope per `DOCUMENT_ORIGINS`."""
         yield self.statements
         yield self.entities
+        yield self.parents  # ahead of the documents scopes – see `runs`
         for origin in DOCUMENT_ORIGINS:
             yield self.documents[origin]
         yield self.statistics
@@ -898,7 +947,13 @@ class ArtifactsRepository(DatasetHandle):
             now: When the export started – diff files are named after it.
             parts: Directory the runs write their parts into.
         """
-        return tuple(a.run(now, parts) for a in self.streamed())
+        runs = tuple(a.run(now, parts) for a in self.streamed())
+        # it stages and writes the documents scopes too – it comes first in
+        # `streamed`, so it writes their rows before they write their DELs
+        for run in runs:
+            if isinstance(run, ParentsRun):
+                run.scopes = {r.name: r for r in runs if isinstance(r, DocumentsRun)}
+        return runs
 
     def resources(self) -> Iterator[DataResource]:
         """Describe every written streamed artifact for ``index.json``."""

@@ -29,6 +29,7 @@ lakehouse/
     ├── exports/
     │   ├── statements.csv[.gz|.zst]  # Statements export
     │   ├── statistics.json           # Entity counts, facets
+    │   ├── parents.csv[.gz|.zst]     # Folders documents sit in, with their paths
     │   ├── documents.csv[.gz|.zst]   # Document metadata
     │   └── documents.{origin}.csv[..] # Document metadata, one origin only
     │
@@ -49,13 +50,13 @@ Operations use tags to track freshness and skip unnecessary work – `is_latest(
 | `statements/last_updated` | Flush / append, `delete_origin` | The store's content moved – the clock every export, statistic and diff depends on. A merge rewrites files, not content, so it leaves it alone |
 | `operations/optimize/last_run` | `optimize`, on completion | Stamped for the record; `optimize` decides freshness from the store's dirty partitions, not from this tag |
 | `archive/last_updated` | File archive | New file was archived |
-| `exports/statements.csv`, `entities.ftm.json`, `exports/documents.csv`, `exports/documents.{origin}.csv`, `exports/statistics.json`, `index.json` | Export operations | Export target keys double as their freshness tags. A run stamps every artifact it writes – the published record of when each one was last produced, and what `download-archive` keys its own freshness on |
+| `exports/statements.csv`, `entities.ftm.json`, `exports/parents.csv`, `exports/documents.csv`, `exports/documents.{origin}.csv`, `exports/statistics.json`, `index.json` | Export operations | Export target keys double as their freshness tags. A run stamps every artifact it writes – the published record of when each one was last produced, and what `download-archive` keys its own freshness on |
 | `operations/export/last_run` | `export` | The export ran |
 | `operations/crawl/last_run` | Crawl operation | Last crawl execution |
 
 ## Compression suffixes
 
-When a dataset configures `compression` (`gz` / `zst` in `config.yml`), the streaming export artifacts carry the codec suffix – `entities.ftm.json.zst`, `exports/statements.csv.zst`, `exports/documents.csv.zst` – and `index.json` advertises the resulting names and urls. `index.json` and `statistics.json` themselves are always plain JSON.
+When a dataset configures `compression` (`gz` / `zst` in `config.yml`), the streaming export artifacts carry the codec suffix – `entities.ftm.json.zst`, `exports/statements.csv.zst`, `exports/parents.csv.zst`, `exports/documents.csv.zst` – and `index.json` advertises the resulting names and urls. `index.json` and `statistics.json` themselves are always plain JSON.
 
 Diff *directories* stay codec-free (`diffs/exports/documents.csv/`), because they double as the freshness tag and diff-state key; only the files inside them carry the suffix (`{timestamp}.diff.csv.zst`).
 

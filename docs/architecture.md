@@ -357,7 +357,8 @@ flowchart TD
     C --> |"export()"| E[entities.ftm.json]
     C --> |"export()"| F[statistics.json]
     C --> |"export()"| H[documents.csv]
-    D & E & F & H --> |"registered by the same run"| G[index.json]
+    C --> |"export()"| P[parents.csv]
+    D & E & F & H & P --> |"registered by the same run"| G[index.json]
 
     C -.-> T2[statements/last_updated]
     D -.-> T3[exports/statements]

@@ -228,7 +228,7 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
                     # in snapshot order, not as finished: the documents csv is
                     # written from the staged parts in the order they are adopted
                     for part in (done[p] for p in parts):
-                        session.adopt(part.parts, part.seen, part.stats)
+                        session.adopt(part.parts, part.seen, part.stats, part.counts)
                     self.log.info(
                         "Swept every pair, writing the documents ...",
                         pairs=len(sources),

@@ -25,7 +25,7 @@ Batch file ingestion from a source location.
 
 ## ExportOperation
 
-One operation for every export: `exports/statements.csv`, `entities.ftm.json`, `exports/documents.csv` and `exports/documents.crawl.csv` (crawled files only), each with its diff series, and `exports/statistics.json` – all from a **single pass** over the statement store – then `index.json`, which registers them.
+One operation for every export: `exports/statements.csv`, `entities.ftm.json`, `exports/documents.csv` and `exports/documents.crawl.csv` (crawled files only), each with its diff series, `exports/parents.csv` (every folder a document can sit in, with its path) and `exports/statistics.json` – all from a **single pass** over the statement store – then `index.json`, which registers them.
 
 The sweep runs per `(shard, bucket)` pair, in `LAKEHOUSE_WORKERS` processes, into *parts* of every artifact, each appended as encoded to a temporary file beside its artifact as soon as its pair finishes, and moved into place once every pair is in – so a compressed artifact is a multi-frame zstd or multi-member gzip file. The stdlib file classes (`GzipFile`, `ZstdFile`, …), and so every reader here, read it as one; `zlib.decompress(blob, 31)` returns only the first member. A crashed export leaves the previous artifacts intact.
 

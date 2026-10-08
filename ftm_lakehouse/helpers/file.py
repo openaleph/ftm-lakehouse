@@ -1,6 +1,6 @@
 from functools import cache, lru_cache
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 from anystore.util import guess_mimetype, make_data_checksum
 from followthemoney import Schema, StatementEntity, model
@@ -184,10 +184,9 @@ class FolderTree:
     ancestors' names, and nothing orders a stream so that they arrive first –
     so whoever fills it has to finish before it answers.
 
-    Filled by the export sweep out of its own staged document rows
-    ([`DocumentsRun.resolve`][ftm_lakehouse.repository.artifacts.DocumentsRun.resolve]),
-    which is the only thing that needs folder paths – they exist to be
-    written into ``documents.csv``.
+    Filled by the export sweep out of its staged folder rows
+    (``ParentsRun.resolve``), the only thing that needs folder paths –
+    they exist to be written into ``documents.csv``.
 
     Example:
         ```python
@@ -224,8 +223,34 @@ class FolderTree:
             Mapping of folder id to complete path (e.g. ``"root/sub/folder"``).
         """
         if self._paths is None:
-            self._paths = {folder: self._path(folder) for folder in self._folders}
+            paths: dict[str, str] = {}
+            for folder in self._folders:
+                # climb until a resolved ancestor or a root, then resolve the
+                # climbed chain top-down off that – each folder walked once
+                chain: list[str] = []
+                seen: set[str] = set()
+                current: str | None = folder
+                while current and current in self._folders and current not in paths:
+                    if current in seen:  # a cycle: each of its folders on its own
+                        paths.update({node: self._path(node) for node in chain})
+                        break
+                    seen.add(current)
+                    chain.append(current)
+                    current = self._folders[current][1]
+                else:
+                    prefix = paths.get(current) if current else None
+                    for node in reversed(chain):
+                        name = self._folders[node][0]
+                        prefix = name if prefix is None else f"{prefix}/{name}"
+                        paths[node] = prefix
+            self._paths = paths
         return self._paths
+
+    def folders(self) -> Iterator[tuple[str, str, str]]:
+        """Every registered folder as ``(id, name, path)``."""
+        paths = self.paths()
+        for folder, (name, _) in self._folders.items():
+            yield folder, name, paths[folder]
 
     def _path(self, folder: str) -> str:
         """Walk one folder up its parent chain into a path."""

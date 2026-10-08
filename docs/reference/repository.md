@@ -70,7 +70,7 @@ Document metadata assembled from archived files and their entities.
 
 ## ArtifactsRepository
 
-The export artifacts one dataset produces – `statements.csv`, `entities.ftm.json`, `documents.csv` (one per origin scope), `statistics.json`, `index.json` – and the diff series that ride alongside the streamed ones.
+The export artifacts one dataset produces – `statements.csv`, `entities.ftm.json`, `documents.csv` (one per origin scope), `parents.csv`, `statistics.json`, `index.json` – and the diff series that ride alongside the streamed ones.
 
 ```python
 from ftm_lakehouse.repository import get_artifacts

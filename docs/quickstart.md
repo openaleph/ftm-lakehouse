@@ -34,7 +34,7 @@ ftm-lakehouse -d my_dataset crawl /path/to/documents
 cat entities.ftm.json | ftm-lakehouse -d my_dataset entities import
 
 # Update the dataset: flush the journal, optimize the store and build all
-# exports (statements.csv, entities.ftm.json, documents.csv, statistics, index) – all on by default
+# exports (statements.csv, entities.ftm.json, documents.csv, parents.csv, statistics, index) – all on by default
 ftm-lakehouse -d my_dataset make
 
 # Stream entities back out

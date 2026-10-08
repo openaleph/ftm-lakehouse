@@ -1,3 +1,5 @@
+import csv
+
 from anystore.io import smart_stream_csv_models
 from anystore.io.read import smart_stream_csv
 from followthemoney import Statement
@@ -8,6 +10,7 @@ from ftm_lakehouse.model.file import Document
 from ftm_lakehouse.operation.export import ExportJob, ExportOperation
 from ftm_lakehouse.repository import (
     ArchiveRepository,
+    ArtifactsRepository,
     DocumentRepository,
     EntityRepository,
 )
@@ -102,7 +105,7 @@ def test_repository_document_export_csv_paths(tmp_path, fixtures_path):
 
     Nothing queries the folder tree before the sweep opens – the folders come
     past as entities like any other, so the rows are staged and stamped once
-    the tree is complete (`DocumentsRun.finish`). A file in two folders is
+    the tree is complete (`ParentsRun.finish`). A file in two folders is
     still two rows.
     """
     archive = ArchiveRepository("test", tmp_path)
@@ -176,6 +179,50 @@ def test_repository_document_export_csv_document_parent(tmp_path):
     assert {d.name: d.path for d in repo.stream()} == {
         "inbox.eml": None,
         "doc.pdf": "inbox.eml",
+    }
+
+
+def test_repository_document_export_parents(tmp_path):
+    """``parents.csv`` is the folder tree the documents' paths come from – every
+    entity a document can sit in, with its own path."""
+    entities = EntityRepository("test", tmp_path)
+    with entities.writer() as writer:
+        for data in (
+            {
+                "id": "mail",
+                "schema": "Email",
+                "properties": {"fileName": ["inbox.eml"]},
+            },
+            {"id": "root", "schema": "Folder", "properties": {"fileName": ["root"]}},
+            {
+                "id": "sub",
+                "schema": "Folder",
+                "properties": {"fileName": ["sub"], "parent": ["root"]},
+            },
+            {
+                "id": "doc",
+                "schema": "Pages",
+                "properties": {
+                    "fileName": ["doc.pdf"],
+                    "contentHash": ["b" * 64],
+                    "parent": ["sub"],
+                },
+            },
+        ):
+            writer.add_entity(make_entity(data))
+    entities.flush()
+
+    _export(tmp_path)
+
+    with ArtifactsRepository("test", tmp_path).parents.reader("r") as fh:
+        rows = list(csv.DictReader(fh))
+    assert sorted(rows, key=lambda row: row["id"]) == [
+        {"id": "mail", "name": "inbox.eml", "path": "inbox.eml"},
+        {"id": "root", "name": "root", "path": "root"},
+        {"id": "sub", "name": "sub", "path": "root/sub"},
+    ]
+    assert {d.name: d.path for d in DocumentRepository("test", tmp_path).stream()} == {
+        "doc.pdf": "root/sub"
     }
 
 
@@ -423,7 +470,7 @@ def test_repository_document_export_diff_origin(tmp_path, fixtures_path, settle)
 def test_repository_document_export_csv_multi_parent(tmp_path):
     """A file in two folders is two rows, an unresolvable parent is dropped.
 
-    The expansion the second phase applies (`DocumentsRun.finish`): one row
+    The expansion the second phase applies (`ParentsRun.finish`): one row
     per parent that resolves, and nothing at all for one that does not – as
     long as another does, else the file keeps its one unpathed row.
     """
