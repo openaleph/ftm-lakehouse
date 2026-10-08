@@ -19,7 +19,7 @@ class ApiJournalWriter(BaseJournalWriter["ApiJournalStore"]):
 
 
 class ApiJournalStore(LakehouseApiMixin, BaseJournalStore[ApiJournalWriter]):
-    """Client side of a remote journal – writes, counts, clears; the server flushes.
+    """Client side of a remote journal – it writes; the server flushes.
 
     The mixin comes first so its ``_is_api`` wins over the base's default.
     """
@@ -32,16 +32,6 @@ class ApiJournalStore(LakehouseApiMixin, BaseJournalStore[ApiJournalWriter]):
 
     def _make_url(self, endpoint: str) -> str:
         return self._api.make_url(f"{self.dataset}/_api/journal/{endpoint}")
-
-    def count(self) -> int:
-        url = self._make_url("count")
-        res = self._api.make_request(url)
-        return int(res.text)
-
-    def clear(self) -> int:
-        url = self._make_url("clear")
-        res = self._api.make_request(url, "DELETE")
-        return int(res.text)
 
     def close(self) -> None:
         self._api.client.close()

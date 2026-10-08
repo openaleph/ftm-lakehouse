@@ -153,8 +153,9 @@ class EntityRepository(DatasetHandle):
     def merge(self, force: bool = False) -> None:
         """Flush, then [`merge`][ParquetStore.merge] the parquet store – ``force``
         rewrites clean partitions too."""
+        store = self.statements  # raises in api mode, ahead of the flush
         self.flush()
-        self.statements.merge(force)
+        store.merge(force)
 
     def shard(self, shards: int) -> None:
         """Flush, then [`shard`][ParquetStore.shard] the parquet store – the

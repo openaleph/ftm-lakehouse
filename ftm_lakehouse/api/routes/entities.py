@@ -19,13 +19,6 @@ def entities_flush(entities: Entities) -> PlainTextResponse:
     return PlainTextResponse(str(count))
 
 
-@router.post("/{dataset}/_api/entities/merge")
-def entities_merge(entities: Entities, force: bool = False) -> PlainTextResponse:
-    """Collapse duplicates and reap expired tombstones from parquet store."""
-    entities.merge(force)
-    return PlainTextResponse("ok")
-
-
 @router.post("/{dataset}/_api/entities/query")
 def entities_query(entities: Entities, body: QueryBody) -> StreamingResponse:
     """Query entities from parquet store, streamed as NDJSON."""

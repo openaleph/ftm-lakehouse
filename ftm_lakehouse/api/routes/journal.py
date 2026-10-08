@@ -29,15 +29,3 @@ async def journal_bulk(journal: Journal, request: Request) -> PlainTextResponse:
     except KeyError as exc:  # a column the statement schema requires
         raise ValueError(f"Missing statement column: {exc}")
     return PlainTextResponse(str(count))
-
-
-@router.get("/{dataset}/_api/journal/count")
-def journal_count(journal: Journal) -> PlainTextResponse:
-    """Get the number of rows in the journal."""
-    return PlainTextResponse(str(journal.count()))
-
-
-@router.delete("/{dataset}/_api/journal/clear")
-def journal_clear(journal: Journal) -> PlainTextResponse:
-    """Delete all rows from the journal without flushing."""
-    return PlainTextResponse(str(journal.clear()))
