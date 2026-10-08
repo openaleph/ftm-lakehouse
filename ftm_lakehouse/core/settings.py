@@ -11,7 +11,7 @@ from ftm_lakehouse.util import parse_byte_size
 
 CHECKSUM_ALGORITHM = "sha256"  # never change this! ;)
 
-__version__ = "0.8.5"
+__version__ = "0.9.0"
 
 SECRETS_DIR = Path("/run/secrets")
 """Docker secrets mount"""
