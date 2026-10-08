@@ -19,10 +19,10 @@ class EntityData(TypedDict):
     referents: set[str]
     origins: set[str]
     roles: set[str]
-    first_seens: set[str]
-    last_seens: set[str]
-    last_changes: set[str]
     properties: defaultdict
+    first_seen: str | None
+    last_seen: str | None
+    last_change: str | None
     min_first_seen: str | None
     max_first_seen: str | None
 
@@ -82,10 +82,10 @@ class EntityPayload:
             referents=set(),
             origins=set(),
             roles=set(),
-            first_seens=set(),
-            last_seens=set(),
-            last_changes=set(),
             properties=defaultdict(set),
+            first_seen=None,
+            last_seen=None,
+            last_change=None,
             min_first_seen=None,
             max_first_seen=None,
         )
@@ -97,9 +97,9 @@ class EntityPayload:
         roles = data["roles"]
         referents = data["referents"]
         properties = data["properties"]
-        first_seens = data["first_seens"]
-        last_seens = data["last_seens"]
-        last_changes = data["last_changes"]
+        earliest: str | None = None
+        latest: str | None = None
+        last_change: str | None = None
         min_first_seen: str | None = None
         max_first_seen: str | None = None
         entity = self.id
@@ -133,15 +133,21 @@ class EntityPayload:
             if s["prop"] == BASE_ID:
                 # last_change = max of BASE_ID statement first_seen values
                 if first_seen is not None:
-                    last_changes.add(first_seen)
+                    if last_change is None or first_seen > last_change:
+                        last_change = first_seen
             else:
                 properties[s["prop"]].add(s["value"])
                 # non-id statements only, as `StatementEntity.to_context_dict`
                 if first_seen is not None:
-                    first_seens.add(first_seen)
+                    if earliest is None or first_seen < earliest:
+                        earliest = first_seen
                 if last_seen is not None:
-                    last_seens.add(last_seen)
+                    if latest is None or last_seen > latest:
+                        latest = last_seen
 
+        data["first_seen"] = earliest
+        data["last_seen"] = latest
+        data["last_change"] = last_change
         data["min_first_seen"] = min_first_seen
         data["max_first_seen"] = max_first_seen
         return data
@@ -191,12 +197,12 @@ class EntityPayload:
             data["origin"] = sorted(compiled["origins"])
         if compiled["roles"]:
             data["role"] = sorted(compiled["roles"])
-        if compiled["first_seens"]:
-            data["first_seen"] = min(compiled["first_seens"])
-        if compiled["last_seens"]:
-            data["last_seen"] = max(compiled["last_seens"])
-        if compiled["last_changes"]:
-            data["last_change"] = max(compiled["last_changes"])
+        if compiled["first_seen"] is not None:
+            data["first_seen"] = compiled["first_seen"]
+        if compiled["last_seen"] is not None:
+            data["last_seen"] = compiled["last_seen"]
+        if compiled["last_change"] is not None:
+            data["last_change"] = compiled["last_change"]
 
         return data
 
