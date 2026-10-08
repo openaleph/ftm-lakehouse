@@ -17,6 +17,7 @@ from sqlalchemy.pool import NullPool
 
 from ftm_lakehouse.api.routes.journal import router
 from ftm_lakehouse.core.api import get_api
+from ftm_lakehouse.exceptions import ImproperlyConfigured
 from ftm_lakehouse.lake import get_lakehouse
 from ftm_lakehouse.model.statement import (
     JOURNAL_SCHEMA,
@@ -766,6 +767,13 @@ def _ingest_into_missing_table(conn, batch) -> None:
     with conn.cursor() as cur:
         cur.adbc_ingest("journal_no_such_table", batch, mode="append")
     conn.commit()
+
+
+def test_storage_journal_postgres_without_adbc_fails_on_creation(monkeypatch):
+    """No `postgres` extra fails the store up front, not its first writer."""
+    monkeypatch.setattr(journal_sql, "adbc_pg", None)
+    with pytest.raises(ImproperlyConfigured):
+        sql_journal(DATASET, "postgresql://nobody@127.0.0.1:1/none")
 
 
 @pytest.mark.skipif(not PSQL_URI, reason="needs PYTEST_POSTGRESQL_URI")

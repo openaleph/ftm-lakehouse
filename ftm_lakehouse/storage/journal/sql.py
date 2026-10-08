@@ -404,8 +404,6 @@ def _ping_on_checkout(conn: Any, record: Any, proxy: Any) -> None:
 
 def _adbc_connect(uri: str) -> Any:
     """Dial one ADBC connection – the pools' creator, bound to a uri."""
-    if adbc_pg is None:
-        raise ERR_NO_ADBC
     return adbc_pg.connect(uri)
 
 
@@ -421,11 +419,14 @@ class PostgresJournalStore(SqlJournalStore):
 
     lock_timeout = ROTATE_LOCK_TIMEOUT
 
+    def __init__(self, dataset: str, uri: str | None = None) -> None:
+        if adbc_pg is None:  # before the engine touches the server
+            raise ERR_NO_ADBC
+        super().__init__(dataset, uri)
+
     @cached_property
     def adbc_uri(self) -> str:
         """The journal uri as a libpq connection string for ADBC."""
-        if adbc_pg is None:
-            raise ERR_NO_ADBC
         url = make_url(self.uri).set(drivername="postgresql")
         return url.render_as_string(hide_password=False)
 

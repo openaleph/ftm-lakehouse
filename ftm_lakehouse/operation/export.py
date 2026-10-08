@@ -139,7 +139,7 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
         Returns:
             Counts per artifact and per diff op.
         """
-        workers = max(settings.workers, 1)
+        workers = settings.workers
         store = self.entities.statements
         counts: Counter[str] = Counter()
         with (

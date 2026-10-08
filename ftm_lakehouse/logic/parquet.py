@@ -34,10 +34,6 @@ MERGED_PREFIX = "merged-"
 """Basename prefix of `merge` output. A partition whose files all carry it is
 clean (read without the dedupe); a ``part-*`` file makes it dirty."""
 
-FALLBACK_MEMORY_LIMIT = "8GB"
-"""Memory budget when ``LAKEHOUSE_DUCKDB_MEMORY_LIMIT`` is no byte size
-(e.g. ``80%``)."""
-
 MERGE_COMMIT_BATCH = 64
 """Merged partitions per Delta commit – one commit each bloats the log."""
 
@@ -91,16 +87,12 @@ def worker_duckdb_config(workers: int) -> dict[str, str]:
     """[`duckdb_config`][duckdb_config] for one of ``workers`` processes, one call
     per task.
 
-    Memory limit and threads are split between the workers. A limit that is no
-    byte size falls back to `FALLBACK_MEMORY_LIMIT`.
+    Memory limit and threads are split between the workers.
     """
     config = duckdb_config()
-    try:
-        budget = parse_byte_size(config["memory_limit"])
-    except ValueError:
-        budget = parse_byte_size(FALLBACK_MEMORY_LIMIT)
-    config["memory_limit"] = f"{budget // max(workers, 1)}B"
-    config["threads"] = str(max((os.cpu_count() or 1) // max(workers, 1), 1))
+    budget = parse_byte_size(config["memory_limit"])
+    config["memory_limit"] = f"{budget // workers}B"
+    config["threads"] = str(max((os.cpu_count() or 1) // workers, 1))
     return config
 
 

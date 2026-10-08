@@ -61,7 +61,6 @@ from ftm_lakehouse.logic.parquet import (
     build_merge_sql,
     build_shard_sql,
     dedupe_rows_sql,
-    delta_scan_sql,
     duckdb_config,
     live_rows_sql,
     live_view_sql,
@@ -428,18 +427,11 @@ class ParquetStore:
 
     def _statement_data(self, q: Query | None = None) -> Iterator[StatementDict]:
         """Statement dicts for ``q``, entity-contiguous – per ``(shard, bucket)``
-        pair, or one ``delta_scan`` query when sorted or sliced."""
+        pair, or over all pairs at once when sorted or sliced."""
         sql = (q or Query()).compile(self.source)
         prune = self._prune_values(q, self.source)
-        if q is not None and (q.sort is not None or q.slice is not None):
-            root, pairs = self._pairs()
-            if not root:
-                return
-            keys = self._pruned_keys(pairs, prune)
-            clean = all(c for key in keys for _, _, c in pairs[key])
-            sources: Iterable[tuple[str, bool]] = [(delta_scan_sql(root), clean)]
-        else:
-            sources = self._scoped_sources(prune)
+        whole = q is not None and (q.sort is not None or q.slice is not None)
+        sources = self._scoped_sources(prune, whole)
         yield from cast(Iterator[StatementDict], self._rows(sql, sources))
 
     def query(self, q: Query | None = None) -> StatementEntities:
@@ -674,7 +666,7 @@ class ParquetStore:
         if not self.exists:
             return
         grace_cutoff = utc_now() - timedelta(days=self.settings.grace_period_days)
-        workers = max(self.settings.workers, 1)
+        workers = self.settings.workers
         merged = skipped = 0
         with self.merge_lock():
             root, partitions = self._partitions()
@@ -923,16 +915,17 @@ class ParquetStore:
         ]
 
     def _scoped_sources(
-        self, prune: dict[str, set[str]] | None = None
+        self, prune: dict[str, set[str]] | None = None, whole: bool = False
     ) -> Iterator[tuple[str, bool]]:
         """One ``(relation, clean)`` per ``(shard, bucket)`` pair ``prune`` leaves in.
 
         A read pruned to shards puts all its pairs into one relation – an id
-        names its shard but not its bucket.
+        names its shard but not its bucket – and so does a ``whole`` one, which
+        sorts or slices across pairs.
         """
         root, pairs = self._pairs()
         keys = self._pruned_keys(pairs, prune)
-        if prune and "shard" in prune:
+        if whole or (prune and "shard" in prune):
             if keys:
                 yield pair_source(root, [s for key in keys for s in pairs[key]])
             return

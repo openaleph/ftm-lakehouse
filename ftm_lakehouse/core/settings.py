@@ -4,8 +4,10 @@ from tempfile import gettempdir
 from anystore.exceptions import DoesNotExist
 from anystore.io import smart_read
 from anystore.settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import SettingsConfigDict
+
+from ftm_lakehouse.util import parse_byte_size
 
 CHECKSUM_ALGORITHM = "sha256"  # never change this! ;)
 
@@ -48,13 +50,14 @@ class Settings(BaseSettings):
     maintenance unlock``."""
 
     duckdb_memory_limit: str = "8GB"
+    """DuckDB's memory budget as a byte size (``8GB``, ``512MiB``) – it is split
+    between the workers, so a share of RAM such as ``80%`` is rejected."""
 
-    workers: int = 1
+    workers: int = Field(default=1, ge=1)
     """Processes ``merge`` and the export sweep fan their partitions out to
     (``LAKEHOUSE_WORKERS``); ``1`` runs in-process. `duckdb_memory_limit` and
     the CPU threads are split between them. A sweep uses at most one worker per
-    ``(shard, bucket)`` pair, and an export needs about its own size of free
-    space under ``TMPDIR`` for its parts."""
+    ``(shard, bucket)`` pair."""
 
     duckdb_temp_directory: str | None = Field(
         default_factory=lambda: str(Path(gettempdir()) / "duckdb")
@@ -65,6 +68,12 @@ class Settings(BaseSettings):
     duckdb_extension_directory: str | None = None
 
     public_url_prefix: str | None = None
+
+    @field_validator("duckdb_memory_limit")
+    @classmethod
+    def _byte_size(cls, value: str) -> str:
+        parse_byte_size(value)
+        return value
 
     @property
     def api_mode(self) -> bool:

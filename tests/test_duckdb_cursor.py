@@ -15,11 +15,12 @@ from tempfile import gettempdir
 
 import duckdb
 import pyarrow as pa
+import pytest
 from followthemoney import Statement
 from ftmq.store.lake import pack_statement
 
 from ftm_lakehouse.core.settings import Settings
-from ftm_lakehouse.logic.parquet import duckdb_config
+from ftm_lakehouse.logic.parquet import duckdb_config, worker_duckdb_config
 from ftm_lakehouse.model.statement import JOURNAL_SCHEMA
 from ftm_lakehouse.storage.parquet import ParquetStore
 from tests.duck import make_duckdb
@@ -111,6 +112,25 @@ def test_make_duckdb_applies_memory_limit(monkeypatch) -> None:
     (limit,) = con.execute("SELECT current_setting('memory_limit')").fetchone()
     # DuckDB normalises to IEC units, so "256MB" comes back as "244.1 MiB".
     assert "MiB" in limit or "MB" in limit
+
+
+@pytest.mark.parametrize("limit", ["80%", "max", ""])
+def test_settings_reject_memory_limit_share(monkeypatch, limit) -> None:
+    """The limit is split between workers, so it must be a byte size."""
+    monkeypatch.setenv("LAKEHOUSE_DUCKDB_MEMORY_LIMIT", limit)
+    with pytest.raises(ValueError):
+        Settings()
+
+
+def test_settings_reject_no_workers(monkeypatch) -> None:
+    monkeypatch.setenv("LAKEHOUSE_WORKERS", "0")
+    with pytest.raises(ValueError):
+        Settings()
+
+
+def test_worker_duckdb_config_splits_memory_limit(monkeypatch) -> None:
+    monkeypatch.setenv("LAKEHOUSE_DUCKDB_MEMORY_LIMIT", "1GiB")
+    assert worker_duckdb_config(4)["memory_limit"] == f"{2**28}B"
 
 
 def test_make_duckdb_applies_temp_directory(monkeypatch, tmp_path) -> None:
