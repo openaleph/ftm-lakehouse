@@ -30,14 +30,17 @@ from ftm_lakehouse.model.job import DatasetJobModel
 from ftm_lakehouse.model.statement import statement_csv_header
 from ftm_lakehouse.operation.base import DatasetJobOperation
 from ftm_lakehouse.repository.artifacts import (
+    Artifact,
+    Assembly,
     DiffableArtifact,
     ExportKind,
     ExportSession,
     StatisticsRun,
+    VersionedArtifact,
 )
 from ftm_lakehouse.repository.factories import get_artifacts
 from ftm_lakehouse.repository.job import JobRun
-from ftm_lakehouse.storage.parquet import partition_cursor, sweep_partition
+from ftm_lakehouse.storage.parquet import SweepSource, sweep_pair
 from ftm_lakehouse.util import process_map
 
 __all__ = ["ExportJob", "ExportKind", "ExportOperation"]
@@ -58,8 +61,7 @@ class ExportTask:
     parts: str
     shard: str
     bucket: str
-    source: str
-    clean: bool
+    source: SweepSource
     duckdb_config: dict[str, str]
     pending: dict[str, frozenset[str]]
 
@@ -97,10 +99,7 @@ def export_partition(task: ExportTask) -> ExportPart:
                 "wb",
                 compression=statements.compression,
             ) as csv:
-                with partition_cursor(
-                    task.source, task.clean, task.duckdb_config
-                ) as cur:
-                    rows = sweep_partition(cur, csv)
+                with sweep_pair(task.source, task.duckdb_config, csv) as rows:
                     for payload in aggregate_unsafe(rows, task.dataset):
                         session.consume(payload)
         finally:
@@ -140,9 +139,11 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
         """Write every streamed artifact from one pass over the entities.
 
         Each ``(shard, bucket)`` pair is swept into parts of every artifact, in
-        ``LAKEHOUSE_WORKERS`` processes, and the parts are concatenated. Held
-        under the merge lock, so an ``optimize`` cannot vacuum the snapshot's
-        files.
+        ``LAKEHOUSE_WORKERS`` processes, and each part is appended to its
+        artifact as the pair finishes (`Assembly`) – beside the artifact, which
+        is replaced once every pair has made it in, and left as it was if one
+        fails. Held under the merge lock, so an ``optimize`` cannot vacuum the
+        snapshot's files.
 
         Args:
             now: When the run started – diff files are named after it.
@@ -166,67 +167,94 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
                 self.job.make_diff,
                 self.entities.deleted_candidates,
             )
-            parts = [f"{tmp}/{shard}-{bucket}" for (shard, bucket), *_ in sources]
+            parts = [f"{tmp}/{s.key[0]}-{s.key[1]}" for s in sources]
             # the bar's throughput: the bytes each pair read
-            sizes = {part: size for part, (*_, size) in zip(parts, sources)}
-            with (
-                session,
-                SyncProgressBar("Exporting statements", store.num_rows) as bar,
-                process_map(workers, ordered=False) as run,
-            ):
-                pending = self._pending_by_shard(session)
-                tasks = [
-                    ExportTask(
-                        dataset=self.dataset,
-                        uri=str(self.uri),
-                        now=now,
-                        version=version,
-                        make_diff=self.job.make_diff,
-                        parts=part,
-                        shard=shard,
-                        bucket=bucket,
-                        source=source,
-                        clean=clean,
-                        duckdb_config=worker_duckdb_config(workers),
-                        pending=pending.get(shard, {}),
-                    )
-                    for part, ((shard, bucket), source, clean, _) in zip(parts, sources)
-                ]
-                by_parts = {task.parts: task for task in tasks}
-                done: dict[str, ExportPart] = {}
-                for part in run(export_partition, tasks):
-                    task = by_parts[part.parts]
-                    done[part.parts] = part
-                    statements = part.counts.get("statements", 0)
-                    counts.update(part.counts)
-                    bar.advance(statements, size=sizes[part.parts])
-                    self.log.info(
-                        f"Swept pair `{task.shard}/{task.bucket}`.",
-                        took=part.took,
-                        shard=task.shard,
-                        bucket=task.bucket,
-                        statements=statements,
-                    )
-                # in snapshot order, not as finished: the documents csv is
-                # written from the staged parts in the order they are adopted
-                for part in (done[p] for p in parts):
-                    session.adopt(part.parts, part.seen, part.stats)
-            # after the session closed: its own writers' codec trailers are
-            # written, so every part is a complete frame
-            header = self._write_header(tmp, counts.get("statements", 0))
+            sizes = {part: s.size for part, s in zip(parts, sources)}
+            files = [
+                (artifact, artifact.assembly())
+                for artifact in self.artifacts.streamed()
+                if not isinstance(artifact, VersionedArtifact)
+            ]
+            diffs = [
+                (artifact, artifact.diff_assembly(now))
+                for artifact, _ in files
+                if isinstance(artifact, DiffableArtifact)
+            ]
+            assemblies = [assembly for _, assembly in (*files, *diffs)]
+            try:
+                with (
+                    session,
+                    SyncProgressBar("Exporting...", len(sources)) as bar,
+                    process_map(workers, ordered=False) as run,
+                ):
+                    pending = self._pending_by_shard(session)
+                    tasks = [
+                        ExportTask(
+                            dataset=self.dataset,
+                            uri=str(self.uri),
+                            now=now,
+                            version=version,
+                            make_diff=self.job.make_diff,
+                            parts=part,
+                            shard=source.key[0],
+                            bucket=source.key[1],
+                            source=source,
+                            duckdb_config=worker_duckdb_config(workers),
+                            pending=pending.get(source.key[0], {}),
+                        )
+                        for part, source in zip(parts, sources)
+                    ]
+                    by_parts = {task.parts: task for task in tasks}
+                    done: dict[str, ExportPart] = {}
+                    headed = False
+                    for part in run(export_partition, tasks):
+                        task = by_parts[part.parts]
+                        done[part.parts] = part
+                        statements = part.counts.get("statements", 0)
+                        counts.update(part.counts)
+                        if statements and not headed:
+                            # ahead of the first row, so an empty csv stays empty
+                            self._append(self._write_header(tmp), files, diffs)
+                            headed = True
+                        self._append(part.parts, files, diffs)
+                        bar.advance(size=sizes[part.parts])
+                        self.log.info(
+                            f"Processed `{task.shard}/{task.bucket}`.",
+                            took=part.took,
+                            shard=task.shard,
+                            bucket=task.bucket,
+                            statements=statements,
+                        )
+                    # in snapshot order, not as finished: the documents csv is
+                    # written from the staged parts in the order they are adopted
+                    for part in (done[p] for p in parts):
+                        session.adopt(part.parts, part.seen, part.stats)
+                # after the session closed: its own writers' codec trailers are
+                # written, so its part is a complete frame
+                self._append(f"{tmp}/parent", files, diffs)
+                for assembly in assemblies:
+                    assembly.commit()
+            except BaseException:
+                for assembly in assemblies:
+                    assembly.abort()
+                raise
             counts.update(session.result())
-            for artifact in self.artifacts.streamed():
-                artifact.assemble([*header, *parts, f"{tmp}/parent"])
-            for artifact in self.artifacts.streamed():
-                if isinstance(artifact, DiffableArtifact):
-                    artifact.assemble_diff(now, [*parts, f"{tmp}/parent"])
         return dict(counts)
 
-    def _write_header(self, tmp: str, statements: int) -> list[str]:
-        """The ``statements.csv`` header as the first part – none for an empty
-        sweep, so an empty export's csv stays empty."""
-        if not statements:
-            return []
+    @staticmethod
+    def _append(
+        parts: str,
+        files: list[tuple[Artifact, Assembly]],
+        diffs: list[tuple[DiffableArtifact, Assembly]],
+    ) -> None:
+        """Append every part in the ``parts`` directory to its file."""
+        for artifact, assembly in files:
+            assembly.append(artifact.part(parts))
+        for diffable, assembly in diffs:
+            assembly.append(diffable.diff_part(parts))
+
+    def _write_header(self, tmp: str) -> str:
+        """The ``statements.csv`` header as a part directory of its own."""
         artifact = self.artifacts.statements
         part = f"{tmp}/header"
         Path(part).mkdir(parents=True, exist_ok=True)
@@ -234,7 +262,7 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
             artifact.part(part), "wb", compression=artifact.compression
         ) as fh:
             fh.write(statement_csv_header())
-        return [part]
+        return part
 
     def _pending_by_shard(
         self, session: ExportSession

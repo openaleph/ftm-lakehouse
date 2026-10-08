@@ -9,6 +9,7 @@ pins that they produce the same thing, plus a ``DEL``, which no pair can see.
 import hashlib
 import json
 from importlib import import_module
+from pathlib import Path
 
 import orjson
 import pytest
@@ -132,6 +133,64 @@ def test_export_parallel_matches_serial(tmp_path):
     assert _stats(uri) == serial_stats
     assert serial_stats["entity_count"] == 60
     assert _rows(uri, path.EXPORTS_DOCUMENTS) == serial_documents
+
+
+def test_export_parallel_merged_store(tmp_path):
+    """Unmerged, every partition is sorted on its own; merged, read in file
+    order – both merged on ``entity_id``, writing the same artifacts."""
+    uri = _setup(tmp_path, 3)
+    repo = get_entities(DATASET, uri)
+    with repo.writer(origin="extra") as writer:  # a second origin, same entities
+        for data in ENTITIES[::3]:
+            writer.add_entity(make_entity({**data, "properties": {"alias": ["A"]}}))
+    repo.flush()
+    sorted_ = export(DATASET, uri, make_diff=False)
+    csv, entities, stats = (
+        _rows(uri, path.EXPORTS_STATEMENTS),
+        _entities_digest(uri),
+        _stats(uri),
+    )
+
+    repo.merge()
+    sources = repo._statements.sweep_sources()
+    partitions = [partition for source in sources for partition in source.partitions]
+    assert all(partition.presorted for partition in partitions)
+    assert any(len(source.partitions) > 1 for source in sources)
+    merged = export(DATASET, uri, make_diff=False, force=True)
+
+    assert merged.result == sorted_.result
+    assert _rows(uri, path.EXPORTS_STATEMENTS) == csv
+    assert _entities_digest(uri) == entities
+    assert _stats(uri) == stats
+
+
+def test_export_failed_pair_keeps_previous_artifacts(tmp_path, monkeypatch):
+    """Pairs are appended beside the artifacts as they finish; a pair that fails
+    drops them, and the previous export stays as it was."""
+    uri = _setup(tmp_path, 1)
+    export(DATASET, uri, make_diff=False)
+    root = Path(uri)
+    artifacts = [*(root / "exports").glob("*"), *root.glob("entities.ftm.json*")]
+    before = {file: file.read_bytes() for file in artifacts}
+    assert len(before) > 3
+
+    swept = []
+    sweep = export_module.export_partition
+
+    def fail_second(task):
+        swept.append(task)
+        if len(swept) == 2:
+            raise RuntimeError("pair failed")
+        return sweep(task)
+
+    monkeypatch.setattr(export_module, "export_partition", fail_second)
+    clear_caches()
+    with pytest.raises(RuntimeError, match="pair failed"):
+        export(DATASET, uri, make_diff=False, force=True)
+
+    assert not list(root.rglob("*.tmp"))
+    for file, data in before.items():
+        assert file.read_bytes() == data, file
 
 
 def test_export_parallel_spill_directory_per_pair(tmp_path, monkeypatch):

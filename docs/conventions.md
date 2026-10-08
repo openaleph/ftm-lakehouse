@@ -27,7 +27,7 @@ lakehouse/
     ├── entities.ftm.json[.gz|.zst]   # Aggregated entities export
     │
     ├── exports/
-    │   ├── statements.csv[.gz|.zst]  # Sorted statements export
+    │   ├── statements.csv[.gz|.zst]  # Statements export
     │   ├── statistics.json           # Entity counts, facets
     │   ├── documents.csv[.gz|.zst]   # Document metadata
     │   └── documents.{origin}.csv[..] # Document metadata, one origin only

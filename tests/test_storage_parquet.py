@@ -335,11 +335,13 @@ def test_storage_parquet_sweep_header(tmp_path):
     store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
     _flush(store, _origin_rows("a"))
 
-    _, source, clean, _ = store.sweep_sources()[0]
+    source = store.sweep_sources()[0]
     out = io.BytesIO()
+    with storage_parquet.sweep_pair(source, {}, out) as rows:
+        list(rows)
     sql = str(statement_csv_select().compile(compile_kwargs={"literal_binds": True}))
-    with storage_parquet.partition_cursor(source, clean, {}) as cur:
-        list(storage_parquet.sweep_partition(cur, out))
+    partition = source.partitions[0]
+    with storage_parquet.partition_cursor(partition.relation, False, {}) as cur:
         schema = cur.execute(sql).to_arrow_reader().schema
     body = out.getvalue()
     assert body and not body.startswith(statement_csv_header())
@@ -367,9 +369,9 @@ def test_storage_parquet_partition_cursor_no_progress_bar(tmp_path):
     turns it off."""
     store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
     _flush(store, _origin_rows("a"))
-    _, source, clean, _ = store.sweep_sources()[0]
+    partition = store.sweep_sources()[0].partitions[0]
     out = subprocess.run(
-        [sys.executable, "-c", PROGRESS_BAR, source, str(clean)],
+        [sys.executable, "-c", PROGRESS_BAR, partition.relation, str(partition.clean)],
         capture_output=True,
         text=True,
         check=True,
@@ -387,9 +389,9 @@ def test_storage_parquet_sweep_sources_cover_every_row(tmp_path):
 
     assert len(sources) > 1, "a sharded store must have several pairs to fan out"
     per_pair = []
-    for _, source, clean, _ in sources:
-        with storage_parquet.partition_cursor(source, clean, {}) as cur:
-            per_pair.append(list(storage_parquet.sweep_partition(cur, io.BytesIO())))
+    for source in sources:
+        with storage_parquet.sweep_pair(source, {}, io.BytesIO()) as rows:
+            per_pair.append(list(rows))
     # same rows as a query, and every entity in exactly one pair
     swept = sorted(r["id"] for rows in per_pair for r in rows)
     assert swept == sorted(s.id for s in store.query_statements())
@@ -398,7 +400,46 @@ def test_storage_parquet_sweep_sources_cover_every_row(tmp_path):
     # and every file's bytes, for the bar's throughput
     _, partitions = store._partitions()
     files = sum(size for fs, _ in partitions.values() for _, size in fs)
-    assert sum(size for *_, size in sources) == files > 0
+    assert sum(source.size for source in sources) == files > 0
+
+
+def _swept(source: storage_parquet.SweepSource) -> list[dict]:
+    with storage_parquet.sweep_pair(source, {}, io.BytesIO()) as rows:
+        return list(rows)
+
+
+def test_storage_parquet_sweep(tmp_path, monkeypatch):
+    """Every partition of a pair is read on its own and the rows merged in
+    entity order – a merged one in file order, any other sorted through the
+    dedupe – giving the rows the store reads, whatever mix a pair holds."""
+    monkeypatch.setattr(storage_parquet, "SWEEP_BATCH_SIZE", 7)  # cut entities
+    store = ParquetStore(tmp_path, DATASET, shards=2)
+    for origin, entities in (("a", 60), ("b", 60), ("c", 15)):
+        _flush(store, _origin_rows(origin, entities))
+    tombstone = _pack(
+        make_statement("e0", "name", "Name 0"),
+        deleted_at=datetime(2024, 1, 2, tzinfo=timezone.utc),
+    )
+    _flush(store, [{**tombstone, "origin": "a"}])
+
+    def check(presorted: set[bool]) -> None:
+        sources = store.sweep_sources()
+        assert {p.presorted for s in sources for p in s.partitions} == presorted
+        assert all(len(source.partitions) == 3 for source in sources)
+        swept = []
+        for source in sources:
+            rows = _swept(source)
+            ids = [row["entity_id"] for row in rows]
+            assert ids == sorted(ids)
+            swept.extend(rows)
+        expected = [(s.id, s.origin) for s in store.query_statements()]
+        assert sorted((r["id"], r["origin"]) for r in swept) == sorted(expected)
+
+    check({False})  # duplicates and a tombstone, deduped per partition
+    store.merge()
+    check({True})  # one sorted file each
+    _flush(store, _origin_rows("a", 1))
+    check({True, False})
 
 
 def test_storage_parquet_merge_workers(tmp_path, monkeypatch):

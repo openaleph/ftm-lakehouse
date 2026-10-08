@@ -1,12 +1,14 @@
 import multiprocessing
 import re
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from functools import lru_cache
-from typing import Any, Callable, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator, TypeVar, cast
 
 from banal import ensure_list
 from followthemoney.dataset.util import dataset_name_check
+
+T = TypeVar("T")
 
 RESERVED_DATASET_NAMES = frozenset({"catalog", "default"})
 
@@ -252,3 +254,27 @@ def process_map(
         yield pool.map if ordered else unordered
     finally:
         pool.shutdown(cancel_futures=True)
+
+
+_DONE = object()
+
+
+@contextmanager
+def prefetch(items: Iterable[T]) -> Iterator[Iterator[T]]:
+    """``items`` read one ahead on a thread, so producing the next overlaps
+    consuming this one – for producers that release the GIL, like a DuckDB
+    Arrow reader.
+
+    Leaving the context waits for the read in flight, so the producer can be
+    closed right after, consumed or not.
+    """
+    source = iter(items)
+    with ThreadPoolExecutor(1) as pool:
+
+        def ahead() -> Iterator[T]:
+            future = pool.submit(next, source, _DONE)
+            while (item := future.result()) is not _DONE:
+                future = pool.submit(next, source, _DONE)
+                yield cast(T, item)
+
+        yield ahead()

@@ -7,6 +7,7 @@ writers, diff window, counters – is on its `ArtifactRun`.
 """
 
 import csv
+import os
 from collections import Counter
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
@@ -19,7 +20,6 @@ from typing import (
     Callable,
     ClassVar,
     Generator,
-    Iterable,
     Iterator,
     Self,
     cast,
@@ -31,7 +31,8 @@ from anystore.io.write import Formats
 from anystore.logging import get_logger
 from anystore.logic.compress import CompressKind
 from anystore.model.base import BaseModel
-from anystore.types import SDict
+from anystore.store import Store
+from anystore.types import SDict, Uri
 from anystore.util import Took, join_uri
 from followthemoney import model
 from followthemoney.dataset import DataResource
@@ -97,6 +98,65 @@ def make_envelope(data: SDict, op: DiffOp | str = DiffOp.ADD) -> SDict:
     Ref. https://www.opensanctions.org/docs/bulk/delta/
     """
     return {"op": str(op), "entity": data}
+
+
+def _move(store: Store, source: Uri, target: Uri) -> None:
+    """Move ``source`` over ``target`` – anystore has no move; fsspec's renames
+    on a local store (atomic within one filesystem) and copies and deletes
+    elsewhere."""
+    store._fs.mv(store._keys.to_fs_key(source), store._keys.to_fs_key(target))
+
+
+class Assembly:
+    """One artifact file put together from a run's parts – their encoded bytes
+    copied as they are, a multi-frame stream the codec reads back as one file.
+
+    Each part is appended to a temporary key beside the file as it arrives and
+    then deleted, so a run's parts never pile up; `commit` moves the whole into
+    place, `abort` drops it. A reader never sees a half-written file, and a run
+    that fails leaves the previous one as it was.
+
+    Args:
+        store: The dataset's store.
+        key: The file's key.
+        empty: Writes what the file is when no part came (to the key it is
+            given); ``None`` for a file that then does not exist.
+    """
+
+    def __init__(
+        self, store: Store, key: Uri, empty: Callable[[str], None] | None = None
+    ) -> None:
+        self.store = store
+        self.key = key
+        self.tmp = f"{key}.tmp"
+        self.empty = empty
+        self._stack = ExitStack()
+        self._out: IO[bytes] | None = None
+
+    def append(self, part: str) -> None:
+        """Copy ``part`` in, if it was written, and delete it."""
+        if not Path(part).exists():
+            return
+        if self._out is None:
+            self._out = self._stack.enter_context(self.store.open(self.tmp, "wb"))
+        with smart_open(part, "rb") as fh:
+            copyfileobj(fh, self._out)
+        os.remove(part)
+
+    def commit(self) -> None:
+        """Move the file into place – what an empty one is if no part came, or
+        nothing at all for a lazy file."""
+        self._stack.close()
+        if self._out is None:
+            if self.empty is None:
+                return
+            self.empty(self.tmp)
+        _move(self.store, self.tmp, self.key)
+
+    def abort(self) -> None:
+        """Drop whatever was appended."""
+        self._stack.close()
+        self.store.delete(self.tmp, ignore_errors=True)
 
 
 class Artifact:
@@ -169,49 +229,33 @@ class Artifact:
         """Where this artifact's part of a run is written, inside ``parts``."""
         return f"{parts}/{self.name}"
 
-    def writer(self, parts: str | None = None) -> Writer:
-        """A writer for the artifact itself, or – lazily – for its part of a run
-        (`part`), so a part nobody wrote to is skipped by `assemble`."""
+    def writer(self, parts: str | None = None, key: str | None = None) -> Writer:
+        """A writer for the artifact itself (at ``key``, its own by default), or –
+        lazily – for its part of a run (`part`), so a part nobody wrote to is not
+        appended."""
         return Writer(
-            self.part(parts) if parts else self.dataset._store.to_uri(self.key),
+            (
+                self.part(parts)
+                if parts
+                else self.dataset._store.to_uri(key or self.key)
+            ),
             output_format=self.format,
             compression=self.compression,
             fieldnames=self.fieldnames,
             lazy=parts is not None,
         )
 
-    def assemble(self, parts: Iterable[str]) -> int:
-        """Write this artifact from a run's parts, their encoded bytes copied
-        as they are – a multi-frame stream the codec reads back as one file.
+    def assembly(self) -> "Assembly":
+        """This artifact's file, put together from a run's parts – eager: a run
+        that wrote nothing still replaces a stale one with an empty artifact."""
+        return Assembly(self.dataset._store, self.key, self._write_empty)
 
-        Eager: a run that wrote nothing still truncates a stale artifact.
-
-        Args:
-            parts: The run's part directories, in output order.
-
-        Returns:
-            How many parts had been written.
-        """
-        return self._concat(self.key, (self.part(d) for d in parts), lazy=False)
-
-    def _concat(self, key: StoreKey, parts: Iterable[str], lazy: bool) -> int:
-        """Copy already-encoded parts into ``key`` (`assemble`)."""
-        found = [part for part in parts if Path(part).exists()]
-        if lazy and not found:
-            return 0
-        if not found:
-            # nothing was written: leave what an empty artifact *is* – the
-            # header of a table whose columns are known, an empty file
-            # otherwise – truncating a stale one either way
-            writer = self.writer()
-            writer.open()
-            writer.close()
-            return 0
-        with self.dataset._store.open(key, "wb") as out:
-            for part in found:
-                with smart_open(part, "rb") as fh:
-                    copyfileobj(fh, out)
-        return len(found)
+    def _write_empty(self, key: str) -> None:
+        """What an artifact nobody wrote to is – the header of a table whose
+        columns are known, an empty file otherwise."""
+        writer = self.writer(key=key)
+        writer.open()
+        writer.close()
 
     @contextmanager
     def reader(self, mode: str = "rb") -> Generator[IO[Any], None, None]:
@@ -291,14 +335,10 @@ class DiffableArtifact(Artifact):
             lazy=True,
         )
 
-    def assemble_diff(self, ts: datetime, parts: Iterable[str]) -> int:
-        """Write this run's diff file from the parts, like `assemble` – but lazily:
-        a window without changes leaves no file."""
-        return self._concat(
-            self.series(ts) + self.compression,
-            (self.diff_part(d) for d in parts),
-            lazy=True,
-        )
+    def diff_assembly(self, ts: datetime) -> "Assembly":
+        """This run's diff file, put together from the parts like `assembly` –
+        but lazy: a window without changes leaves no file."""
+        return Assembly(self.dataset._store, self.series(ts) + self.compression)
 
 
 class VersionedArtifact(Artifact):
@@ -306,10 +346,6 @@ class VersionedArtifact(Artifact):
 
     mime_type = JSON
     compressed = False
-
-    def assemble(self, parts: Iterable[str]) -> int:
-        """Nothing to assemble – written whole through `VersionStore`."""
-        return 0
 
     def write(self, obj: BaseModel) -> None:
         """Write the model and stamp the freshness tag."""
