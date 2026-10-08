@@ -14,18 +14,12 @@ MAX_LRU = 10_000
 
 
 def make_file_id(path: str, checksum: str) -> str:
-    """
-    Compute a file id based on (relative) path and its checksum. This is used
-    for Document Entity ids.
-    """
+    """The Document entity id for a (relative) path and its checksum."""
     return f"file-{make_data_checksum((path, checksum), algorithm=CHECKSUM_ALGORITHM)}"
 
 
 def make_folder_id(name: str, parent_id: str | None = None) -> str:
-    """
-    Compute a folder id based on its name and optional parent folder id. This is
-    used for Folder Entity ids.
-    """
+    """The Folder entity id for a name and optional parent folder id."""
     key = name
     if parent_id:
         key = (parent_id, name)
@@ -36,17 +30,14 @@ def make_folder_id(name: str, parent_id: str | None = None) -> str:
 def make_folder(
     name: str, parent_id: str | None = None, dataset: str | None = None
 ) -> StatementEntity:
-    """
-    Create a Folder Entity
-    """
+    """Create a Folder entity."""
     folder = make_entity(
         {"id": make_folder_id(name, parent_id), "schema": model["Folder"]},
         StatementEntity,
         dataset,
     )
-    # FIXME we don't want to clean the name here as leading/trailing WS
-    # unfortunately is a valid folder name on some systems. No idea if this will
-    # haunt us back later.
+    # FIXME not cleaned: leading/trailing whitespace is a valid folder name on
+    # some systems
     folder.add("fileName", name, cleaned=True)
     folder.add("parent", parent_id)
     return folder
@@ -76,19 +67,8 @@ MIME_SCHEMAS = {
 
 @lru_cache(MAX_LRU)
 def normalize_mime(mimetype: str) -> str:
-    """`rigour.mime.normalize_mimetype`, memoised.
-
-    Normalizing costs ~30µs, and the export sweep asks per document – for a
-    handful of distinct mime types over a whole dataset. Memoising it is the
-    difference between a documents export bounded by this call and one that
-    is not.
-
-    Args:
-        mimetype: Any mime type spelling.
-
-    Returns:
-        The normalized mime type, `rigour.mime.types.DEFAULT` if it is not one.
-    """
+    """`rigour.mime.normalize_mimetype`, memoised – the export sweep calls it
+    per document, over a handful of distinct types."""
     return normalize_mimetype(mimetype)
 
 
@@ -99,40 +79,20 @@ def _guess_suffix_mime(suffix: str) -> str:
 
 
 def guess_mime(name: str) -> str:
-    """Guess a mime type off a file name, memoised on its extension.
-
-    `anystore.util.guess_mimetype` is extension-based but costs per call, and
-    file names are near-unique while their extensions are not – so the cache is
-    keyed on the extension rather than the name. The last *two* suffixes make
-    the key, which is what ``mimetypes`` itself looks at: the type suffix plus
-    a possible encoding one (``.tar.gz``).
-
-    Args:
-        name: A file name (`get_filename`), not a path.
-
-    Returns:
-        The normalized mime type, `rigour.mime.types.DEFAULT` if the name
-        does not name one.
-    """
+    """Guess a mime type off a file name, memoised on its last two suffixes
+    (type plus encoding, ``.tar.gz``) – names are near-unique, extensions not."""
     return _guess_suffix_mime("".join(Path(name).suffixes[-2:]))
 
 
 @cache
 def mime_to_schema(mimetype: str) -> Schema:
-    """
-    Map a mimetype to a
+    """Map a (normalized) mime type to a
     [FollowTheMoney](https://followthemoney.tech/explorer/schemata/Document/)
     File schema.
 
     Examples:
         >>> mime_to_schema("application/pdf")
         "Pages"
-
-    Args:
-        mimetype: The mimetype (will be normalized using `rigour.mime`)
-
-    Returns:
-        The schema name as string
     """
     mimetype = normalize_mime(mimetype)
     for mtypes, schema in MIME_SCHEMAS.items():
@@ -143,13 +103,8 @@ def mime_to_schema(mimetype: str) -> Schema:
 
 
 def pick_mime(mimetypes: Iterable[str], default: str | None = None) -> str:
-    """
-    Pick a mime type from given input. Useful to sort out
-    application/ocet-stream if there is some other available.
-
-    Normalizes through `normalize_mime`, so a caller in a per-row loop pays
-    the real normalization once per distinct spelling.
-    """
+    """Pick the first specific (normalized) mime type over
+    ``application/octet-stream``, else ``default``."""
     for mime in mimetypes:
         mime = normalize_mime(mime)
         if mime != types.DEFAULT:
@@ -160,15 +115,8 @@ def pick_mime(mimetypes: Iterable[str], default: str | None = None) -> str:
 
 
 def get_filename(d: dict[str, Any]) -> str:
-    """Pick the file name of an entity dict: its ``fileName``, else its caption.
-
-    Args:
-        d: Entity dict, as ``EntityProxy.to_dict`` (and all descendants)
-            returns.
-
-    Returns:
-        The file name, caption, or the schema string when the entity has neither.
-    """
+    """An entity dict's file name: its first ``fileName``, else its caption,
+    else its schema."""
     file_names = d.get("properties", {}).get("fileName", [])
     if file_names:
         return str(file_names[0])
@@ -178,15 +126,8 @@ def get_filename(d: dict[str, Any]) -> str:
 class FolderTree:
     """Folder ids to the paths a document's ``parent`` resolves against.
 
-    A plain accumulator: [`put`][FolderTree.put] takes one folder's name and
-    parents, [`paths`][FolderTree.paths] walks every chain once the last one
-    is in. Resolution cannot happen per folder – a path is the chain of its
-    ancestors' names, and nothing orders a stream so that they arrive first –
-    so whoever fills it has to finish before it answers.
-
-    Filled by the export sweep out of its staged folder rows
-    (``ParentsRun.resolve``), the only thing that needs folder paths –
-    they exist to be written into ``documents.csv``.
+    An accumulator: `put` every folder, then `paths` resolves every chain – a
+    path needs all its ancestors, which a stream delivers in no order.
 
     Example:
         ```python
@@ -205,23 +146,13 @@ class FolderTree:
         return len(self._folders)
 
     def put(self, folder: str, name: str, parents: Iterable[str] | None = None) -> None:
-        """Register one folder under the name it appears in a path as.
-
-        Args:
-            folder: The folder's entity id.
-            name: Its name (`get_filename`) – one segment of a path.
-            parents: Its own parents. A path is one chain, so a folder living
-                in several places takes the first, as a document does.
-        """
+        """Register a folder id with its path segment ``name``; of several
+        ``parents`` only the first counts, as for a document."""
         self._folders[folder] = (name, next(iter(parents or ()), None))
         self._paths = None
 
     def paths(self) -> dict[str, str]:
-        """Every registered folder resolved to its path, memoised.
-
-        Returns:
-            Mapping of folder id to complete path (e.g. ``"root/sub/folder"``).
-        """
+        """Every registered folder id resolved to its path, memoised."""
         if self._paths is None:
             paths: dict[str, str] = {}
             for folder in self._folders:

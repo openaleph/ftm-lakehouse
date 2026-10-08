@@ -21,7 +21,7 @@ def entities_flush(entities: Entities) -> PlainTextResponse:
 
 @router.post("/{dataset}/_api/entities/merge")
 def entities_merge(entities: Entities, force: bool = False) -> PlainTextResponse:
-    """Collapse duplicates and reap expired tombstones from parquet store"""
+    """Collapse duplicates and reap expired tombstones from parquet store."""
     entities.merge(force)
     return PlainTextResponse("ok")
 
@@ -29,11 +29,9 @@ def entities_merge(entities: Entities, force: bool = False) -> PlainTextResponse
 @router.post("/{dataset}/_api/entities/query")
 def entities_query(entities: Entities, body: QueryBody) -> StreamingResponse:
     """Query entities from parquet store, streamed as NDJSON."""
-    # Parse (and thereby validate) the query BEFORE streaming starts – an
-    # invalid body must 400, not break the stream after 200 + headers.
+    # parse and flush before the stream starts: a bad body or a failing flush
+    # must fail the request, not cut a 200 response short
     query = body.to_query()
-    # ahead of the stream too: a failing flush must fail the request, not cut
-    # a 200 response short
     if body.flush_first:
         entities.flush()
 
@@ -82,13 +80,12 @@ def entities_version(entities: Entities) -> PlainTextResponse:
 @router.post("/{dataset}/_api/entities/statements/query")
 def statements_query(entities: Entities, body: QueryBody) -> StreamingResponse:
     """Query statements from parquet store, streamed as NDJSON."""
-    # Parse (and thereby validate) the query BEFORE streaming starts.
+    # before the stream starts, as in `entities_query`
     query = body.to_query()
     if body.flush_first:
         entities.flush()
 
     def generate():
-        # the rows a local `query_statements_data` yields, as they are
         for row in entities.query_statements_data(query):
             yield orjson.dumps(row, option=orjson.OPT_APPEND_NEWLINE)
 

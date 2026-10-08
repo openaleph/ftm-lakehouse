@@ -1,10 +1,8 @@
 """DuckDB SQL builders for the statement store.
 
-All dedupe / fragment-supersession / grace logic is `_dedupe_sql`: a read over a
-partition holding files a merge did not write runs it
-([`dedupe_rows_sql`][dedupe_rows_sql]), a merged partition is a plain scan
-([`live_rows_sql`][live_rows_sql]), and a merge runs it over one partition's
-files ([`build_merge_sql`][build_merge_sql]).
+All dedupe / fragment-supersession / grace logic is `_dedupe_sql`, run by reads
+over dirty partitions (`dedupe_rows_sql`) and by merges (`build_merge_sql`); a
+merged partition reads as a plain scan (`live_rows_sql`).
 """
 
 import os
@@ -26,24 +24,22 @@ from ftm_lakehouse.model.statement import PA_TS, SHARDED_SCHEMA, TABLE_RAW
 from ftm_lakehouse.util import parse_byte_size, validate_origin
 
 SWEEP_BATCH_SIZE = 50_000
-"""Rows per Arrow batch when a read materialises them as Python dicts –
-DuckDB's default of 1M would hold a million dicts at once."""
+"""Rows per Arrow batch when a read materialises Python dicts (DuckDB's 1M
+default is a million dicts at once)."""
 
-SHARD_MIN_FILE_SIZE = 32 * 1_048_576  # 32 MB
+SHARD_MIN_FILE_SIZE = 32 * 1_048_576
 """Floor for `shard_target_file_size`, so a re-shard does not explode the file count."""
 
 MERGED_PREFIX = "merged-"
-"""Basename prefix of the files `ParquetStore.merge` writes. A partition whose
-files all carry it is canonical and read without the dedupe; any other file
-(``part-*`` from appends and re-shards) makes it dirty."""
+"""Basename prefix of `merge` output. A partition whose files all carry it is
+clean (read without the dedupe); a ``part-*`` file makes it dirty."""
 
 FALLBACK_MEMORY_LIMIT = "8GB"
-"""Per-worker budget when ``LAKEHOUSE_DUCKDB_MEMORY_LIMIT`` is no byte size
+"""Memory budget when ``LAKEHOUSE_DUCKDB_MEMORY_LIMIT`` is no byte size
 (e.g. ``80%``)."""
 
 MERGE_COMMIT_BATCH = 64
-"""Merged partitions per Delta commit – a commit per partition made the log
-and its checkpoints the bottleneck of a merge."""
+"""Merged partitions per Delta commit – one commit each bloats the log."""
 
 LARGE_BUCKETS = (BUCKET_DOCUMENT, BUCKET_PAGE)
 """Buckets holding full-text values – ftmq's ``WRITER_LARGE`` profile."""
@@ -52,11 +48,8 @@ TABLE_CONFIGURATION = {
     "delta.logRetentionDuration": "interval 1 days",
     "delta.deletedFileRetentionDuration": "interval 1 hours",
 }
-"""Delta table properties the store is created with (and migrated to).
-
-Both bound the log every reader replays: ``remove`` actions leave checkpoints
-after an hour (``vacuum`` runs at zero retention anyway), superseded log
-entries go after a day (nothing time-travels)."""
+"""Delta table properties the store is created with (and migrated to), bounding
+the log every reader replays – nothing time-travels."""
 
 _DUCKDB_TYPES = {pa.string(): "VARCHAR", pa.bool_(): "BOOLEAN", PA_TS: "TIMESTAMPTZ"}
 """DuckDB type per `SHARDED_SCHEMA` arrow type."""
@@ -68,21 +61,18 @@ _FILE_COLUMNS = "SELECT {} WHERE false".format(
         if f.name not in ("shard", "bucket", "origin")
     )
 )
-"""Empty, fully typed row set unioned by name with a partition's files, so a
-column they predate reads as ``NULL``."""
+"""Empty typed row set unioned with a partition's files, so a column they predate
+reads as ``NULL``."""
 
 
 def duckdb_config() -> dict[str, str]:
     """DuckDB config from the lakehouse settings – memory limit, spill and
     extension directories.
 
-    One call per DuckDB instance: each call spills into its own subdirectory of
-    ``LAKEHOUSE_DUCKDB_TEMP_DIRECTORY`` – instances number their spill files
-    alike, so two sharing a directory overwrite each other's blocks. DuckDB
-    creates the subdirectory on its first spill and removes it on close.
-
-    No ``TimeZone``: as a connect-time option it makes DuckDB install ``icu``,
-    which fails offline; the session is pinned to UTC after connecting instead.
+    Call once per DuckDB instance: each call gets its own spill subdirectory,
+    as instances sharing one overwrite each other's spill files. No
+    ``TimeZone`` – at connect time it installs ``icu`` (fails offline); sessions
+    pin UTC after connecting.
     """
     settings = Settings()
     config: dict[str, str] = {"memory_limit": settings.duckdb_memory_limit}
@@ -98,12 +88,11 @@ def duckdb_config() -> dict[str, str]:
 
 
 def worker_duckdb_config(workers: int) -> dict[str, str]:
-    """[`duckdb_config`][duckdb_config] for one of ``workers`` processes – one
-    call per task, as each task connects its own instance.
+    """[`duckdb_config`][duckdb_config] for one of ``workers`` processes, one call
+    per task.
 
-    Memory limit and threads are split between them, so the limit stays the
-    ceiling for the whole operation. A limit that is no byte size falls back
-    to `FALLBACK_MEMORY_LIMIT`.
+    Memory limit and threads are split between the workers. A limit that is no
+    byte size falls back to `FALLBACK_MEMORY_LIMIT`.
     """
     config = duckdb_config()
     try:
@@ -121,8 +110,7 @@ def _string_literal(value: str) -> str:
 
 
 def delta_scan_sql(table_uri: str) -> str:
-    """``delta_scan('<uri>')``, the uri quote-escaped – ``delta_scan`` takes no
-    prepared parameters."""
+    """``delta_scan('<uri>')``, the uri quote-escaped (no prepared parameters)."""
     return f"delta_scan('{_string_literal(table_uri)}')"
 
 
@@ -133,8 +121,8 @@ def raw_view_sql(dt: DeltaTable) -> str:
 
 
 NONFRAGMENT_KEY = ("shard", "bucket", "origin", "entity_id", "id", "role")
-"""Row identity of a non-fragment statement. ``entity_id`` is implied by ``id``
-but lets an ``entity_id = ?`` filter push below the window."""
+"""Row identity of a non-fragment statement. ``entity_id`` is redundant with
+``id`` but lets an ``entity_id`` filter push below the window."""
 
 FRAGMENT_GROUP = ("shard", "bucket", "origin", "entity_id", "prop", "fragment", "role")
 """Supersession group of a fragment statement – the latest emission survives."""
@@ -147,23 +135,17 @@ def _dedupe_sql(
     order_by: str = "",
     select: str = "*",
 ) -> str:
-    """The dedupe query – reads over a dirty partition and
-    [`build_merge_sql`][build_merge_sql] alike.
+    """The dedupe query, shared by dirty-partition reads and `build_merge_sql`.
 
-    Rows split on ``fragment`` before any window runs:
+    - ``fragment = ''``: one row per `NONFRAGMENT_KEY`, latest ``last_seen``
+      winning, ``deleted_at`` breaking the tie (a tombstone's ``last_seen`` is
+      at least that of the row it shadows).
+    - ``fragment != ''``: per `FRAGMENT_GROUP` the latest emission survives,
+      one row per ``id``.
 
-    - ``fragment = ''``: one row per `NONFRAGMENT_KEY`, the latest ``last_seen``
-      winning. A tombstone's ``last_seen`` is bumped at write time to at least
-      that of the row it shadows; ``deleted_at`` breaks the tie.
-    - ``fragment != ''``: per `FRAGMENT_GROUP` only the latest emission
-      survives – all of its rows, one per ``id``.
-
-    ``origin`` and ``role`` are in every key: the same content from two origins
-    or two roles stays two rows (NULL roles group together). ``first_seen``
-    folds to its minimum per ``id`` and ``role`` – never across a fragment
-    group, whose rows are different values – so a re-import does not read as a
-    change to the export diff. ``tombstone`` filters the union, ``select`` and
-    ``order_by`` shape it.
+    NULL roles group together. ``first_seen`` folds to its minimum per ``id``
+    and ``role`` (never across a fragment group), so a re-import is no diff
+    change. ``tombstone`` filters the union.
     """
 
     key, group = ", ".join(NONFRAGMENT_KEY), ", ".join(FRAGMENT_GROUP)
@@ -206,15 +188,13 @@ WHERE {tombstone}
 
 def live_view_sql(dt: DeltaTable) -> str:
     """SELECT body for the connection-level ``statement`` view over
-    ``delta_scan`` (``stats()``, raw SQL) – always reconciling, having no
-    partition to ask whether it is clean."""
+    ``delta_scan`` (``stats()``, raw SQL) – always the dedupe."""
     return dedupe_rows_sql(delta_scan_sql(dt.table_uri))
 
 
 def live_rows_sql(source: str) -> str:
-    """Live rows of a **clean** ``source`` – merge output is canonical, so a
-    filtered scan. ``canonical_id`` is synthesised from ``entity_id`` for
-    ftmq's query layer (one dataset, no entity resolution)."""
+    """Live rows of a **clean** ``source`` – a filtered scan. ``canonical_id`` is
+    ``entity_id``, for ftmq's query layer."""
     return f"SELECT *, entity_id AS canonical_id FROM {source} WHERE deleted_at IS NULL"
 
 
@@ -233,9 +213,8 @@ def build_merge_sql(
     source: str = TABLE_RAW.name,
     select: str = "*",
 ) -> str:
-    """`_dedupe_sql` collapsing one partition for a merge – over the raw rows,
-    so tombstones within grace survive to keep shadowing, ordered by the file
-    sort key.
+    """`_dedupe_sql` collapsing one partition for a merge, ordered by the file
+    sort key. Tombstones within grace survive to keep shadowing.
 
     Args:
         shard: The partition's shard.
@@ -269,12 +248,12 @@ def read_parquet_sql(files: Iterable[str]) -> str:
 def partition_source_sql(
     files: Iterable[str], shard: str, bucket: str, origin: str
 ) -> str:
-    """One partition's files as a `SHARDED_SCHEMA` relation – what reads and
-    merges use instead of ``delta_scan``, which replays the log per query.
+    """One partition's files as a `SHARDED_SCHEMA` relation, read without
+    ``delta_scan``.
 
-    The partition columns come in as constants, a column the files predate
-    reads as ``NULL`` (`_FILE_COLUMNS`), and ``fragment`` is coalesced to its
-    ``''`` sentinel. ``origin`` is validated before interpolation.
+    Partition columns come in as constants, columns the files predate read as
+    ``NULL`` and ``fragment`` is coalesced to ``''``. ``origin`` is validated
+    before interpolation.
     """
     origin = validate_origin(origin)
     constants = {"shard": shard, "bucket": bucket, "origin": origin}
@@ -296,9 +275,8 @@ def partition_source_sql(
 
 def merge_copy_options(bucket: str) -> str:
     """DuckDB ``COPY`` options for a merged ``bucket`` file: zstd level 3,
-    10k-row groups for the full-text buckets and 100k otherwise (ftmq's 1M
-    keeps the encoding on one core). ``RETURN_STATS`` yields what the Delta
-    ``add`` action needs."""
+    10k-row groups for the full-text buckets, 100k otherwise. ``RETURN_STATS``
+    yields what the Delta ``add`` action needs."""
     rows = 10_000 if bucket in LARGE_BUCKETS else 100_000
     return (
         "FORMAT parquet, COMPRESSION zstd, COMPRESSION_LEVEL 3, "
@@ -323,8 +301,8 @@ def build_shard_sql(
 ) -> str:
     """One partition's raw rows with ``shard`` recomputed for ``shards`` shards.
 
-    Unordered and un-deduped: a re-shard moves rows, the follow-up merge sorts.
-    ``origin`` is validated before interpolation.
+    Unordered and un-deduped – the follow-up merge does both. ``origin`` is
+    validated before interpolation.
     """
     origin = validate_origin(origin)
     return (
@@ -335,9 +313,8 @@ def build_shard_sql(
 
 
 def shard_target_file_size(shards: int) -> int:
-    """Delta ``target_file_size`` for a re-shard: a writer per target shard is
-    open at once, so `TARGET_SIZE` is divided by the shard count to bound
-    memory – never below `SHARD_MIN_FILE_SIZE`."""
+    """Delta ``target_file_size`` for a re-shard: `TARGET_SIZE` split across the
+    shards (a writer each is open at once), at least `SHARD_MIN_FILE_SIZE`."""
     return max(TARGET_SIZE // max(shards, 1), SHARD_MIN_FILE_SIZE)
 
 

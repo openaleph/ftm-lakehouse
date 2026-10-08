@@ -17,12 +17,7 @@ from ftm_lakehouse.util import validate_dataset_name
 
 
 class DatasetRef(NamedTuple):
-    """A dataset address – the ``(name, uri)`` pair everything resolves from.
-
-    Unpacks like a plain tuple (``name, uri = ref``); repositories are
-    resolved from it via the factories. The rich per-dataset object is
-    `DatasetHandle`.
-    """
+    """A dataset address – the ``(name, uri)`` pair; unpacks like a tuple."""
 
     name: str
     uri: str
@@ -31,16 +26,9 @@ class DatasetRef(NamedTuple):
 def dataset_uri(dataset: str, uri: Uri | None = None) -> str:
     """Canonical URI for a dataset – same location, same string, same cache key.
 
-    Validates ``dataset`` first
-    (`validate_dataset_name`) – every repository
-    factory and operation resolves through here, so no caller-supplied name
+    Validates ``dataset`` first (`ValueError`), so no caller-supplied name
     reaches path construction unchecked. ``None`` derives
-    ``{LAKEHOUSE_URI}/{dataset}`` exactly like
-    [`get_lakehouse`][ftm_lakehouse.lake.get_lakehouse] does for the catalog; explicit
-    values (str or ``Path``) are normalized via ``ensure_uri``.
-
-    Raises:
-        ValueError: If ``dataset`` is not a valid dataset name.
+    ``{LAKEHOUSE_URI}/{dataset}``.
     """
     validate_dataset_name(dataset)
     if uri is not None:
@@ -51,18 +39,10 @@ def dataset_uri(dataset: str, uri: Uri | None = None) -> str:
 
 @cache
 def ensure_zfs(dataset: str, uri: Uri) -> None:
-    """Provision the dataset's tuned ZFS datasets for its storage location.
+    """Provision the dataset's tuned ZFS datasets – via ``_api/ensure`` for http uris.
 
-    Resolves the store and api client from ``uri`` (both cached upstream, so
-    this is free for callers that hold them anyway). No-op unless the store
-    is local and ``LAKEHOUSE_ON_ZFS`` is set; for http uris the remote
-    ``_api/ensure`` endpoint is triggered instead. ``ensure_zfs_dataset``
-    itself is cached per ``(pool, dataset)``, so this fires actual ``zfs``
-    commands once per process. Runs at repository construction and on
-    catalog config writes.
-
-    Raises:
-        RuntimeError: When ZFS mode is on but no pool is configured.
+    No-op unless the store is local and ``LAKEHOUSE_ON_ZFS`` is set (then
+    `RuntimeError` without a pool). Cached – fires once per process.
     """
     store = get_store(ensure_api_uri(uri), serialization_mode="raw")
     api = get_api(uri)
@@ -71,20 +51,13 @@ def ensure_zfs(dataset: str, uri: Uri) -> None:
         if settings.zfs_pool is None:
             raise RuntimeError("Configure LAKEHOUSE_ZFS_POOL for zfs integration!")
         ensure_zfs_dataset(settings.zfs_pool, dataset)
-    elif api is not None:  # trigger api
+    elif api is not None:
         api.ensure()
 
 
 class DatasetHandle(LakehouseApiMixin):
-    """Dataset-addressed handle base: identity, config snapshot, store, tags,
-    versions and the api client.
-
-    Combines no storage itself – the repositories layer their storage
-    combinations on top, and
-    [`DatasetJobOperation`][ftm_lakehouse.operation.base.DatasetJobOperation]
-    adds the job lifecycle. Anything that addresses one dataset subclasses
-    this.
-    """
+    """Base for anything addressing one dataset: identity, config snapshot,
+    store, tags, versions and the api client – no storage of its own."""
 
     def __init__(self, dataset: str, uri: Uri) -> None:
         super().__init__(uri)

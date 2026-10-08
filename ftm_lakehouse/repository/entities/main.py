@@ -1,4 +1,4 @@
-"""EntityRepository - entity/statement operations using JournalStore + ParquetStore."""
+"""EntityRepository – entity/statement operations over JournalStore + ParquetStore."""
 
 from datetime import datetime
 from functools import cached_property
@@ -63,8 +63,7 @@ class EntityRepository(DatasetHandle):
 
     @cached_property
     def statements(self) -> ParquetStore:
-        """The dataset's parquet store, built lazily – local only: in api mode
-        there is none, and asking for it raises."""
+        """The dataset's parquet store, built lazily; raises in api mode."""
         if self._is_api:
             raise RuntimeError(
                 f"`{type(self).__name__}.statements` is not available in API mode"
@@ -133,8 +132,8 @@ class EntityRepository(DatasetHandle):
 
     def write_batches(self, tables: Iterable[pa.Table]) -> int:
         """Append `JOURNAL_SCHEMA` tables to parquet – the write loop of the
-        journal drain and both bulk imports. Each table is durable before the
-        next is asked for; bigger tables mean fewer files.
+        journal drain and the bulk imports. Each table is durable before the
+        next is pulled.
 
         Args:
             tables: Stream of packed statement tables.

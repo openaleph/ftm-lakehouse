@@ -1,4 +1,4 @@
-"""MakeOperation - full workflow: flush journal + all exports."""
+"""The make workflow: flush the journal, then export."""
 
 from ftm_lakehouse.core.conventions import tag
 from ftm_lakehouse.model.job import DatasetJobModel
@@ -14,17 +14,15 @@ class MakeJob(DatasetJobModel):
 class MakeOperation(DatasetJobOperation[MakeJob]):
     """Flush the journal and run the export.
 
-    Never merges: reads reconcile un-merged rows, so the exports are correct
-    on any store. Merging is
-    [`OptimizeOperation`][ftm_lakehouse.operation.maintenance.OptimizeOperation]'s
-    business – the ``make`` CLI runs it first by default, as an optimisation.
+    Never merges – reads reconcile un-merged rows; the ``make`` CLI runs
+    [`OptimizeOperation`][ftm_lakehouse.operation.maintenance.OptimizeOperation]
+    first by default.
     """
 
     target = tag.OP_MAKE
     dependencies = [tag.STATEMENTS_UPDATED]
-    """The content clock. [`prepare`][MakeOperation.prepare] runs ahead of the
-    freshness check, so rows still in the journal cannot hide from a run –
-    they are drained first, and a drain that lands rows moves this tag."""
+    """The content clock – [`prepare`][MakeOperation.prepare] drains the journal
+    ahead of the freshness check, so buffered rows move it first."""
 
     def prepare(self) -> None:
         """Drain the journal – a ``LIMIT 1`` probe when it is empty."""

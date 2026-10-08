@@ -1,9 +1,8 @@
 """The export artifacts of a dataset – one class per artifact.
 
-`Artifact.tag` is the codec-free key (freshness tag, diff series name),
-`Artifact.key` carries the dataset's codec and is what exists on disk. An
-`Artifact` is stateless; everything that lives only while an export runs – open
-writers, diff window, counters – is on its `ArtifactRun`.
+`Artifact.tag` is codec-free (freshness tag, diff series name), `Artifact.key`
+carries the dataset codec (what is on disk). Artifacts are stateless; per-run
+state lives on their `ArtifactRun`.
 """
 
 import csv
@@ -52,8 +51,8 @@ from ftm_lakehouse.repository.base import DatasetHandle
 from ftm_lakehouse.util import validate_origin
 
 DOCUMENT_FIELDNAMES = list(Document.model_fields)
-"""Column order of the documents csv, fixed up front – a ``DEL`` row landing
-first would otherwise cap the header at ``op`` and ``id``."""
+"""Fixed documents csv columns – a ``DEL`` row landing first would otherwise
+cap the header at ``op`` and ``id``."""
 
 log = get_logger(__name__)
 
@@ -97,34 +96,24 @@ class DiffOp(StrEnum):
 
 
 def make_envelope(data: SDict, op: DiffOp | str = DiffOp.ADD) -> SDict:
-    """Create a diff action envelope for an entity payload.
-
-    Ref. https://www.opensanctions.org/docs/bulk/delta/
-    """
+    """Wrap an entity payload in a diff envelope (OpenSanctions delta format)."""
     return {"op": str(op), "entity": data}
 
 
 def _move(store: Store, source: Uri, target: Uri) -> None:
-    """Move ``source`` over ``target`` – anystore has no move; fsspec's renames
-    on a local store (atomic within one filesystem) and copies and deletes
-    elsewhere."""
+    """Move ``source`` over ``target`` via fsspec (anystore has no move) – an
+    atomic rename locally, copy and delete elsewhere."""
     store._fs.mv(store._keys.to_fs_key(source), store._keys.to_fs_key(target))
 
 
 class Assembly:
-    """One artifact file put together from a run's parts – their encoded bytes
-    copied as they are, a multi-frame stream the codec reads back as one file.
+    """One artifact file assembled from a run's encoded parts, copied as they
+    are – a multi-frame stream the codec reads back as one file.
 
-    Each part is appended to a temporary key beside the file as it arrives and
-    then deleted, so a run's parts never pile up; `commit` moves the whole into
-    place, `abort` drops it. A reader never sees a half-written file, and a run
-    that fails leaves the previous one as it was.
-
-    Args:
-        store: The dataset's store.
-        key: The file's key.
-        empty: Writes what the file is when no part came (to the key it is
-            given); ``None`` for a file that then does not exist.
+    Parts are appended to ``{key}.tmp`` and deleted as they arrive; `commit`
+    moves the file into place, `abort` drops it, so a failed run leaves the
+    previous file intact. ``empty`` writes the file when no part came; with
+    ``None`` there is then no file.
     """
 
     def __init__(
@@ -148,8 +137,8 @@ class Assembly:
         os.remove(part)
 
     def commit(self) -> None:
-        """Move the file into place – what an empty one is if no part came, or
-        nothing at all for a lazy file."""
+        """Move the file into place – an empty one if no part came, or none
+        for a lazy file."""
         self._stack.close()
         if self._out is None:
             if self.empty is None:
@@ -234,9 +223,8 @@ class Artifact:
         return f"{parts}/{self.name}"
 
     def writer(self, parts: str | None = None, key: str | None = None) -> Writer:
-        """A writer for the artifact itself (at ``key``, its own by default), or –
-        lazily – for its part of a run (`part`), so a part nobody wrote to is not
-        appended."""
+        """A writer for the artifact (at ``key``, its own by default), or for its
+        part of a run – lazy, so an unwritten part is never appended."""
         return Writer(
             (
                 self.part(parts)
@@ -250,13 +238,12 @@ class Artifact:
         )
 
     def assembly(self) -> "Assembly":
-        """This artifact's file, put together from a run's parts – eager: a run
-        that wrote nothing still replaces a stale one with an empty artifact."""
+        """This artifact's file, assembled from a run's parts – eager: a run that
+        wrote nothing still replaces a stale file with an empty one."""
         return Assembly(self.dataset._store, self.key, self._write_empty)
 
     def _write_empty(self, key: str) -> None:
-        """What an artifact nobody wrote to is – the header of a table whose
-        columns are known, an empty file otherwise."""
+        """Write an empty artifact – just the header when the columns are known."""
         writer = self.writer(key=key)
         writer.open()
         writer.close()
@@ -340,8 +327,8 @@ class DiffableArtifact(Artifact):
         )
 
     def diff_assembly(self, ts: datetime) -> "Assembly":
-        """This run's diff file, put together from the parts like `assembly` –
-        but lazy: a window without changes leaves no file."""
+        """This run's diff file, assembled like `assembly` – but lazy: a window
+        without changes leaves no file."""
         return Assembly(self.dataset._store, self.series(ts) + self.compression)
 
 
@@ -378,8 +365,7 @@ class EntitiesArtifact(DiffableArtifact):
 
 
 class DocumentsArtifact(DiffableArtifact):
-    """Document metadata and its diff series, scoped per origin – which entities
-    belong in it and the row each contributes."""
+    """Document metadata and its diff series, scoped per origin."""
 
     base = path.EXPORTS_DOCUMENTS
     kind = ExportKind.documents
@@ -388,10 +374,8 @@ class DocumentsArtifact(DiffableArtifact):
 
     @staticmethod
     def is_document_schema(schema: str | None) -> bool:
-        """Whether ``schema`` is one the documents export carries: a
-        ``Document`` descendant that is not a bare ``Folder``. Shared by the
-        live path (`is_document`) and the delete path (`DocumentsRun.claims`).
-        """
+        """Whether the documents export carries ``schema``: a ``Document``
+        descendant other than ``Folder`` – shared by the live and delete paths."""
         if not schema:
             return False
         schema_ = model.get(str(schema))
@@ -403,21 +387,20 @@ class DocumentsArtifact(DiffableArtifact):
 
     @staticmethod
     def is_parent_schema(schema: str | None) -> bool:
-        """Whether an entity of ``schema`` can be a document's parent – the folder
-        paths are built from these (`ParentsRun.resolve`)."""
+        """Whether an entity of ``schema`` can be a document's parent folder."""
         return schema in FOLDER_SCHEMATA
 
     @staticmethod
     def is_document(data: SDict) -> bool:
-        """Whether an entity dict belongs in the documents export: a schema
-        it carries (`is_document_schema`) with a content hash to point at."""
+        """Whether an entity dict belongs in the documents export: a document
+        schema (`is_document_schema`) with a content hash."""
         if not DocumentsArtifact.is_document_schema(data.get("schema")):
             return False
         return bool(data.get("properties", {}).get("contentHash"))
 
     def make_document(self, data: SDict, public_prefix: str | None = None) -> Document:
-        """The row an entity dict contributes, ``path`` unset – stamped in once the
-        folder tree is known (`ParentsRun.finish`).
+        """The row an entity dict contributes, ``path`` unset until the folder
+        tree is known.
 
         Args:
             data: Entity dict, as `EntityPayload.to_dict` returns.
@@ -444,8 +427,7 @@ class DocumentsArtifact(DiffableArtifact):
 
 
 class ParentsArtifact(Artifact):
-    """Every folder a document can sit in, with its path – the folder tree the
-    documents export resolves."""
+    """Every folder a document can sit in, with its path."""
 
     base = path.EXPORTS_PARENTS
     kind = ExportKind.parents
@@ -466,8 +448,7 @@ class StatisticsArtifact(VersionedArtifact):
 
 
 class IndexArtifact(VersionedArtifact):
-    """The dataset index – the config with resources and statistics, so it is
-    written after the others."""
+    """The dataset index – config, resources and statistics, so written last."""
 
     base = path.INDEX
     kind = ExportKind.index
@@ -480,7 +461,6 @@ class ArtifactRun:
     def __init__(self, artifact: Artifact, now: datetime, parts: str) -> None:
         self.artifact = artifact
         self.now = now
-        # every writer this run opens points at a part of the artifact
         self.parts = parts
         self.counts: Counter[str] = Counter()
 
@@ -510,9 +490,9 @@ class ArtifactRun:
 class DiffableRun(ArtifactRun):
     """A run that also writes a diff series.
 
-    Additions show in the entities' folded ``first_seen``; deletions do not
-    come past at all, so the tombstoned ids are loaded up front (`pending`),
-    claimed as the sweep meets them alive, and the rest become ``DEL``.
+    Additions show in the folded ``first_seen``; deletions never come past, so
+    tombstoned ids are loaded up front (`pending`), claimed as the sweep meets
+    them alive, and the rest become ``DEL``.
     """
 
     artifact: DiffableArtifact
@@ -578,8 +558,7 @@ class DiffableRun(ArtifactRun):
             self.counts[DiffOp.DEL.lower()] += 1
 
     def commit(self, version: int | None) -> None:
-        """Record the state the next diff is taken against – also when this one
-        found no changes."""
+        """Record the state the next diff is taken against, changes or not."""
         if version is not None:
             self.artifact.set_state(self.now, version)
 
@@ -607,8 +586,8 @@ class EntitiesRun(DiffableRun):
 
 
 class DocumentsRun(DiffableRun):
-    """One origin scope of ``documents.csv`` and its diff series – its rows
-    staged and written by the `ParentsRun` every scope shares."""
+    """One origin scope of ``documents.csv`` and its diff series – its rows are
+    staged and written by the shared `ParentsRun`."""
 
     artifact: DocumentsArtifact
 
@@ -638,13 +617,12 @@ class DocumentsRun(DiffableRun):
 
 
 class ParentsRun(ArtifactRun):
-    """Writes ``parents.csv`` – and every documents scope, from the same staging.
+    """Writes ``parents.csv`` and every documents scope, from one staging.
 
-    A document's path is the chain of its ancestors' names, which come past in
-    no order: `consume` stages each folder's name once and each document once,
-    with the scopes it is in and its diff op in each; `finish` resolves one
-    folder tree, writes it out and writes every scope from one read of the
-    staged documents – ahead of the scopes' own `finish`, their DELs.
+    A path is the chain of a document's ancestors, which arrive in no order:
+    `consume` stages folders and documents (with each scope's diff op),
+    `finish` resolves one folder tree and writes every scope – ahead of the
+    scopes' own `finish`, their DELs.
     """
 
     artifact: ParentsArtifact
@@ -686,9 +664,8 @@ class ParentsRun(ArtifactRun):
         self.rows += sum(counts.get(name, 0) for name in self.scopes)
 
     def consume(self, payload: EntityPayload) -> None:
-        """Stage a folder name for anything that can be a parent – of any scope,
-        so paths resolve across origins – and a document row for a document in
-        any scope."""
+        """Stage every potential parent – whatever its scope, so paths resolve
+        across origins – and every document in some scope."""
         data = payload.to_dict()
         parents = data.get("properties", {}).get("parent", [])
         if DocumentsArtifact.is_parent_schema(data.get("schema")):
@@ -800,11 +777,8 @@ class ExportSession:
         self.counts: Counter[str] = Counter()
 
     def prepare(self) -> None:
-        """Resolve every diff window and open the staging files.
-
-        A worker calls this directly and never finishes or commits: `finish`
-        is work over the whole store and `commit` writes tags – the parent's.
-        """
+        """Resolve every diff window and open the staging files – all a worker
+        calls; `finish` and `commit` are the parent's."""
         for run in self.runs:
             run.prepare(self.version)
 
@@ -821,8 +795,8 @@ class ExportSession:
         stats: StatsCollector,
         counts: dict[str, int],
     ) -> None:
-        """Fold a worker's part back in: the DEL candidates it met alive (per
-        run name), its staged documents and its statistics."""
+        """Fold a worker's part back in: the DEL candidates it met alive, its
+        staged documents and its statistics."""
         for run in self.runs:
             if isinstance(run, DiffableRun):
                 run.pending -= seen.get(run.name, frozenset())
@@ -838,7 +812,7 @@ class ExportSession:
 
     def load_pending(self) -> None:
         """Fill every active series' `pending` from one scan at the earliest
-        window – each series claims its own (`DiffableRun.claims`)."""
+        window – each series claims its own."""
         active = [r for r in self.diffable if r.since is not None]
         if not active or self.candidates is None:
             return
@@ -931,7 +905,7 @@ class ArtifactsRepository(DatasetHandle):
         return IndexArtifact(self)
 
     def streamed(self) -> Iterator[Artifact]:
-        """Every artifact the sweep writes – all but ``index.json`` – with a
+        """Every artifact the sweep writes – all but ``index.json`` – with one
         documents scope per `DOCUMENT_ORIGINS`."""
         yield self.statements
         yield self.entities
@@ -948,8 +922,8 @@ class ArtifactsRepository(DatasetHandle):
             parts: Directory the runs write their parts into.
         """
         runs = tuple(a.run(now, parts) for a in self.streamed())
-        # it stages and writes the documents scopes too – it comes first in
-        # `streamed`, so it writes their rows before they write their DELs
+        # the parents run writes the documents scopes' rows – first in
+        # `streamed`, so ahead of their DELs
         for run in runs:
             if isinstance(run, ParentsRun):
                 run.scopes = {r.name: r for r in runs if isinstance(r, DocumentsRun)}

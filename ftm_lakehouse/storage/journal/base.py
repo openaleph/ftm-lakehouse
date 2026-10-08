@@ -1,4 +1,4 @@
-"""JournalStore - SQL or http api statement buffer for write-ahead logging."""
+"""Journal store base – write-ahead statement buffer (SQL or http api)."""
 
 from typing import Generator, Generic, Self, TypeAlias, TypeVar
 
@@ -14,34 +14,20 @@ settings = Settings()
 WRITE_BATCH_SIZE = 10_000
 
 RecordBatches: TypeAlias = Generator[pa.RecordBatch, None, None]
-"""What a reader hands over, on its way into a table."""
+"""Record batches a segment reader yields."""
 
 StatementTables: TypeAlias = Generator[pa.Table, None, None]
-"""Stream of journal rows in the producer statement schema.
-
-The journal buffers exactly the rows producers pack
-(`JOURNAL_SCHEMA`), so a flush moves
-Arrow tables from one store to the other. ``pa.Table`` because that is what
-every end of the pipe already speaks – ``statements_to_arrow``,
-``ParquetStore.append``, ``adbc_ingest``, `BaseJournalWriter.add_batch`
-– so nothing has to be taken apart and put back together on the way.
-"""
+"""Stream of journal rows as `JOURNAL_SCHEMA` tables – what a flush moves."""
 
 
 S = TypeVar("S", bound="BaseJournalStore")
 
 
 class BaseJournalWriter(EntityBuffer, Generic[S]):
-    """
-    Bulk writer for the journal.
+    """Bulk journal writer – get one via `BaseJournalStore.writer`.
 
-    Not intended for direct use - use JournalStore.writer() instead.
-
-    `add_statement` and `add_entity` buffer through
-    `EntityBuffer` – which re-keys statement ids and collapses
-    re-emissions within the batch – and insert every
-    `WRITE_BATCH_SIZE` rows. `add_batch` writes an
-    already-packed arrow table straight through.
+    `add_statement` / `add_entity` buffer through `EntityBuffer` and insert
+    every `WRITE_BATCH_SIZE` rows; `add_batch` writes a packed table through.
     """
 
     def __init__(
@@ -57,12 +43,8 @@ class BaseJournalWriter(EntityBuffer, Generic[S]):
     def _insert_if_full(self) -> None:
         """Insert once the buffer holds a full batch.
 
-        Called after a whole added item, never mid-entity:
-        `EntityBuffer.add_entity` buffers through
-        `EntityBuffer._add`, so this hook cannot fire between an
-        entity's properties and the ``BASE_ID`` checksum row that closes it
-        – inserts commit per batch, and a half entity flushed to parquet
-        would survive merge.
+        Only called after a whole item, so an entity is never split from its
+        ``BASE_ID`` checksum row – a half entity in parquet would survive merge.
         """
         if self._buffer_size >= WRITE_BATCH_SIZE:
             self.flush()
@@ -77,22 +59,10 @@ class BaseJournalWriter(EntityBuffer, Generic[S]):
         self._insert_if_full()
 
     def add_batch(self, batch: pa.Table) -> None:
-        """Insert an already-packed Arrow table as-is – no repacking.
+        """Insert an already-packed Arrow table as-is – the api bulk route's path.
 
-        Fast path for the api bulk route: the sending writer produced these
-        rows through this same class, so statement ids are already re-keyed
-        and every column is in place. Nothing about the dataset's layout is
-        taken from the client – there is no shard key to take, and the one
-        that ends up in parquet is derived at
-        [`append`][ftm_lakehouse.storage.parquet.ParquetStore.append].
-
-        Args:
-            batch: Rows carrying at least the `JOURNAL_SCHEMA` columns;
-                extra columns are dropped and types are cast to the schema.
-
-        Raises:
-            KeyError: If a `JOURNAL_SCHEMA` column is missing.
-            pyarrow.ArrowInvalid: If a column cannot be cast to its schema type.
+        Extra columns are dropped and types cast to `JOURNAL_SCHEMA`; a missing
+        column raises `KeyError`. No shard key is taken from the client.
         """
         if not batch.num_rows:
             return
@@ -101,21 +71,17 @@ class BaseJournalWriter(EntityBuffer, Generic[S]):
     def flush(self) -> None:
         """Insert the buffered statements.
 
-        The packed table's row count is the guard, not the buffer's – an
-        empty insert is a wasted round trip on postgres and the api, and
-        SQLAlchemy turns the sqlite one into ``INSERT ... DEFAULT VALUES``,
-        which the journal's ``NOT NULL`` columns reject.
+        Guarded on the packed table's rows: an empty sqlite insert becomes
+        ``INSERT ... DEFAULT VALUES``, which the ``NOT NULL`` columns reject.
         """
         batch = self.flush_table()
         if batch.num_rows:
             self._insert(batch)
 
     def rollback(self) -> None:
-        """Drop the buffered statements that have not been inserted yet.
+        """Drop the buffered statements not inserted yet.
 
-        Inserts commit per batch, so earlier batches of the same writer stay –
-        harmless in an append-only journal, where re-emissions accumulate and
-        ``merge`` collapses them.
+        Batches already inserted stay committed – ``merge`` collapses re-emissions.
         """
         self.flush_buffer()
 
@@ -127,9 +93,8 @@ class BaseJournalWriter(EntityBuffer, Generic[S]):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:  # noqa: ANN001
-        # the tail flush is where every writer under `WRITE_BATCH_SIZE` rows
-        # sends its data, so it failing is the common exit, not an edge – and
-        # its connection has to go back either way
+        # the tail flush is where most writers send their data – close even
+        # when it fails
         try:
             if exc_type is not None:
                 self.rollback()
@@ -143,16 +108,7 @@ W = TypeVar("W", bound=BaseJournalWriter)
 
 
 class BaseJournalStore(Generic[W]):
-    """
-    Journal for buffering statement writes.
-
-    The journal is designed as a write-ahead log - data is written
-    here first, then flushed to permanent parquet storage.
-
-    Args:
-        dataset: Dataset name (used for table name and filtering)
-        uri: http api url or SQLAlchemy database uri
-    """
+    """Write-ahead journal – statements land here first, then flush to parquet."""
 
     _writer_cls: type[W]
 
@@ -168,43 +124,22 @@ class BaseJournalStore(Generic[W]):
         self.uri = uri or settings.resolved_journal_uri
 
     def writer(self, origin: str | None = None, role: str | None = None) -> W:
-        """Get a bulk writer for adding rows.
-
-        Args:
-            origin: Origin tag for statements written through this writer.
-            role: Default role for statements written through this writer.
-        """
+        """Get a bulk writer; ``origin`` / ``role`` apply to what it writes."""
         return self._writer_cls(self, origin=origin, role=role)
 
     @no_api
     def flush_batches(self) -> StatementTables:
-        """Destructively iterate journal rows as Arrow batches.
+        """Destructively iterate journal rows as `JOURNAL_SCHEMA` tables.
 
-        Local-only: draining a remote journal into a local parquet store is
-        not a supported combination – the server that owns the journal owns
-        its flush, and ``ApiEntityRepository.flush()`` delegates the whole
-        thing there.
-
-        Rows are discarded only after the consumer has written them: the
-        implementation claims what is currently in the journal, hands it over
-        whole batch by whole batch, and drops each claimed segment once the
-        consumer comes back for more. A consumer that raises or abandons the
-        generator leaves the rest in place for the next call – no
-        transaction, and never a silent loss.
-
-        Yields:
-            ``pa.Table`` in `JOURNAL_SCHEMA`.
+        Rows are dropped only once the consumer comes back for more, so one that
+        raises or abandons the generator leaves them for the next call.
+        Local-only – in api mode the server flushes.
         """
         raise NotImplementedError
 
     @no_api
     def iterate_entity(self, entity_id: str) -> LakehouseStatements:
-        """Iterate the live (non-tombstone) journal statements of one entity.
-
-        Non-destructive read used by the delete paths, which need the rows
-        that are buffered but not yet in parquet. Not available on the api
-        journal.
-        """
+        """Iterate one entity's live (non-tombstone) journal rows – for deletes."""
         raise NotImplementedError
 
     def count(self) -> int:

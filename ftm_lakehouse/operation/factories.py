@@ -1,7 +1,4 @@
-"""Factory functions for creating and running operations on a dataset.
-
-These factories provide a convenient way to run operations without manually
-constructing Job and Operation instances.
+"""Run operations on a dataset without constructing job and operation instances.
 
 Example:
     ```python
@@ -42,21 +39,10 @@ def export(
     force: bool = False,
     make_diff: bool = True,
 ) -> ExportJob:
-    """
-    Run the export: every artifact from one sweep, then ``index.json``.
+    """Run the export: every artifact from one sweep, then ``index.json``.
 
-    Compression of the exported artifacts is the dataset's own
-    ``compression`` config value – there is deliberately no runtime
+    Compression is the dataset's ``compression`` config – deliberately no
     argument, so every writer and reader of a dataset agrees on the layout.
-
-    Args:
-        dataset: Name of the dataset to export from
-        uri: Dataset storage root override
-        force: Force export even if up-to-date
-        make_diff: Also export the delta diff files
-
-    Returns:
-        The completed job result
     """
     job = ExportJob.make(dataset=dataset, make_diff=make_diff)
     return ExportOperation(job, uri).run(force=force)
@@ -68,20 +54,7 @@ def optimize(
     retention_hours: int = 0,
     force: bool = False,
 ) -> OptimizeJob:
-    """
-    Optimize the statement store: merge every dirty partition into one
-    canonical file (collapse duplicates, reap tombstones), then delete the
-    files that replaced.
-
-    Args:
-        dataset: Name of the dataset to optimize
-        uri: Dataset storage root override
-        retention_hours: Vacuum retains obsolete files newer than this
-        force: Run regardless of freshness state
-
-    Returns:
-        The completed job result
-    """
+    """Optimize the statement store: merge every dirty partition, then vacuum."""
     job = OptimizeJob.make(
         dataset=dataset,
         retention_hours=retention_hours,
@@ -95,25 +68,11 @@ def shard(
     uri: Uri | None = None,
     force: bool = False,
 ) -> ShardJob:
-    """
-    Change the dataset's shard count: rewrite the statement store onto
-    ``shards`` entity-hash shards, then record the count in ``config.yml``.
+    """Rewrite the statement store onto ``shards`` shards, then record the
+    count in ``config.yml``.
 
-    A full rewrite of the store – the shard count is otherwise fixed at
-    creation. Drains the journal first and leaves every partition marked
-    dirty, so run ``optimize`` afterwards. Run with writers stopped: the
-    write fence covers parquet appends, not journal writes.
-
-    Args:
-        dataset: Name of the dataset to re-shard
-        shards: Target shard count (``0`` / ``1`` = a single shard)
-        uri: Dataset storage root override
-        force: Re-shard even when the dataset is already configured for
-            ``shards`` – the way to repair a config that was changed
-            without a rewrite
-
-    Returns:
-        The completed job result
+    Run with writers stopped (journal writes are not fenced) and ``optimize``
+    afterwards; ``force`` repairs a config changed without a rewrite.
     """
     job = ShardJob.make(dataset=dataset, shards=shards)
     return ShardOperation(job, uri).run(force=force)
@@ -124,38 +83,14 @@ def migrate(
     uri: Uri | None = None,
     force: bool = False,
 ) -> MigrateJob:
-    """
-    Apply the storage-layout migrations this dataset has not seen yet.
-
-    Each migration is stamped with its own tag on completion, so this is a
-    cheap no-op on an up-to-date dataset. See
-    ``ftm_lakehouse.operation.migrations`` for the registry.
-
-    Args:
-        dataset: Name of the dataset to migrate
-        uri: Dataset storage root override
-        force: Re-run every registered migration, applied or not – they are
-            idempotent
-
-    Returns:
-        The completed job result
-    """
+    """Apply the storage-layout migrations this dataset has not seen yet;
+    ``force`` re-runs all of them (they are idempotent)."""
     job = MigrateJob.make(dataset=dataset)
     return MigrateOperation(job, uri).run(force=force)
 
 
 def make(dataset: str, uri: Uri | None = None, force: bool = False) -> MakeJob:
-    """
-    Run the full make workflow: flush journal and generate all exports.
-
-    Args:
-        dataset: Name of the dataset to process
-        uri: Dataset storage root override
-        force: Force all operations even if up-to-date
-
-    Returns:
-        The completed job result
-    """
+    """Run the make workflow: flush the journal, then export."""
     job = MakeJob.make(dataset=dataset)
     return MakeOperation(job, uri).run(force=force)
 
@@ -163,14 +98,7 @@ def make(dataset: str, uri: Uri | None = None, force: bool = False) -> MakeJob:
 def download_archive(
     dataset: str, target: Uri, uri: Uri | None = None
 ) -> DownloadArchiveJob:
-    """
-    Download (export) the archive files to a target, rewriting to original
-    relative paths.
-
-    Args:
-        dataset: Name of the dataset to process
-        target: The uri to the target (local or remote)
-        uri: Dataset storage root override
-    """
+    """Download the archive files to ``target`` under their original
+    relative paths."""
     job = DownloadArchiveJob.make(dataset=dataset, target=target)
     return DownloadArchiveOperation(job, uri).run()

@@ -1,8 +1,4 @@
-"""Entity aggregation and assembly logic.
-
-This module provides functions for processing and assembling FollowTheMoney
-entities from statement streams.
-"""
+"""Assemble FollowTheMoney entities from statement streams."""
 
 from collections import defaultdict
 from typing import Any, Iterator, TypedDict
@@ -16,7 +12,7 @@ from ftm_lakehouse.helpers.schema import merge_schema
 
 
 class EntityData(TypedDict):
-    """All data needed to compile a proper EntityDict"""
+    """The folded statement data an entity dict is compiled from."""
 
     schemata: set[str]
     datasets: set[str]
@@ -32,11 +28,8 @@ class EntityData(TypedDict):
 
 
 class EntityPayload:
-    """Lightweight entity accumulator that works on raw statement dicts.
-
-    Mirrors StatementEntity.from_statements() + to_dict() behavior but
-    bypasses all FtM object construction for speed.
-    """
+    """Entity accumulator over raw statement dicts – mirrors
+    ``StatementEntity.from_statements(...).to_dict()`` without FtM objects."""
 
     __slots__ = (
         "id",
@@ -70,24 +63,16 @@ class EntityPayload:
 
     @property
     def min_first_seen(self) -> str | None:
-        """Earliest ``first_seen`` across **all** statements, ``id`` rows included.
-
-        The diff's ADD/MOD discriminator: when this is at or after a diff's
-        ``since``, every statement the entity has is new, so the entity itself
-        is new. Deliberately not the ``first_seen`` of
-        [`to_dict`][EntityPayload.to_dict], which folds non-``id`` statements
-        only – an entity that existed as a bare id and just gained its first
-        properties would read as brand new there.
-        """
+        """Earliest ``first_seen`` across all statements, ``id`` rows included –
+        the diff's ADD/MOD discriminator. Not ``to_dict()["first_seen"]``, which
+        skips ``id`` rows: a bare-id entity that just gained properties would
+        read as new."""
         return self.compiled["min_first_seen"]
 
     @property
     def max_first_seen(self) -> str | None:
-        """Latest ``first_seen`` across **all** statements, ``id`` rows included.
-
-        The diff's change predicate: when this is at or after a diff's
-        ``since``, the entity gained at least one statement in the window.
-        """
+        """Latest ``first_seen`` across all statements, ``id`` rows included –
+        the diff's change predicate."""
         return self.compiled["max_first_seen"]
 
     def _build(self) -> EntityData:
@@ -119,7 +104,6 @@ class EntityPayload:
         max_first_seen: str | None = None
         entity = self.id
 
-        # collect statements
         for s in self.statements:
             schemata.add(s["schema"])
             datasets.add(s["dataset"])
@@ -139,8 +123,7 @@ class EntityPayload:
             first_seen = datetime_iso(s.get("first_seen"))
             last_seen = datetime_iso(s.get("last_seen"))
 
-            # the diff bounds span every statement, `id` rows included – a
-            # bare-id entity that just gained properties predates the window
+            # the diff bounds span every statement, `id` rows included
             if first_seen is not None:
                 if min_first_seen is None or first_seen < min_first_seen:
                     min_first_seen = first_seen
@@ -153,8 +136,7 @@ class EntityPayload:
                     last_changes.add(first_seen)
             else:
                 properties[s["prop"]].add(s["value"])
-                # first_seen/last_seen only from non-id statements
-                # (matches StatementEntity.to_context_dict which excludes BASE_ID)
+                # non-id statements only, as `StatementEntity.to_context_dict`
                 if first_seen is not None:
                     first_seens.add(first_seen)
                 if last_seen is not None:
@@ -226,12 +208,10 @@ class EntityPayload:
 def aggregate_unsafe(
     data: Iterator[StatementDict], dataset: str | None = None
 ) -> Iterator[EntityPayload]:
-    """
-    Aggregate statement dicts (e.g. from DuckDB rows) to entity payloads.
+    """Aggregate statement dicts (e.g. DuckDB rows) into entity payloads.
 
-    Completely circumvents the dict -> Statement -> StatementEntity -> dict
-    Python path, but therefore has no validation checks. Input must be sorted
-    by entity_id.
+    Skips FtM object construction, and with it all validation. Input must be
+    sorted by ``entity_id``.
     """
     current: EntityPayload | None = None
     for statement in data:

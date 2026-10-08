@@ -22,17 +22,11 @@ from ftm_lakehouse.repository.job import JobRepository, JobRun
 
 
 class DatasetJobOperation(DatasetHandle, Generic[DJ]):
-    """
-    A (long-running) operation for a specific dataset that updates tags and
-    checks dependencies for freshness to be able to skip this operation. The job
-    result is stored after successful run.
+    """A (long-running) dataset operation, skipped while its target tag is
+    newer than its dependencies; the job result is stored after a successful run.
 
-    Repositories are resolved through the LRU-cached factories, so an
-    operation shares its repository instances with every other path that
-    addresses the same dataset.
-
-    Subclasses can either set class attributes `target` and `dependencies`,
-    or override `get_target()` and `get_dependencies()` for dynamic values.
+    Repositories come from the LRU-cached factories. Subclasses set `target` and
+    `dependencies`, or override `get_target()` / `get_dependencies()`.
     """
 
     target: str = ""  # tag that gets touched after successful run
@@ -75,27 +69,18 @@ class DatasetJobOperation(DatasetHandle, Generic[DJ]):
         raise NotImplementedError
 
     def prepare(self) -> None:
-        """Bring the dataset into the state `handle` reads from.
+        """Bring the dataset into the state `handle` reads from – no-op by default.
 
-        Runs *before* the freshness check and before the target tag's window
-        opens, which is what makes it usable at all: `Tags.touch` stamps
-        the target with the timestamp it *entered*, so preparation that writes
-        a dependency tag from inside the window would mark the result stale the
-        moment it is written. Ahead of the window, the timestamps stay honest –
-        prepare moves the dependency, then the target is stamped after it.
-
-        No-op by default;
-        [`ExportOperation`][ftm_lakehouse.operation.export.ExportOperation] drains the
-        journal here, so an export covers the rows that were still buffered.
+        Runs before the freshness check and outside the target's window:
+        `Tags.touch` stamps the target with its *entry* time, so a dependency
+        moved inside the window would mark the result stale at once.
+        [`ExportOperation`][ftm_lakehouse.operation.export.ExportOperation]
+        drains the journal here.
         """
 
     def is_fresh(self) -> bool:
-        """Whether the target is newer than every dependency – nothing to do.
-
-        Tag-pair comparison by default. Override where the question is not a
-        pair of timestamps (``OptimizeOperation`` asks the statement store
-        directly).
-        """
+        """Whether the target tag is newer than every dependency – nothing to
+        do. Override where freshness is not a pair of timestamps."""
         target = self.get_target()
         dependencies = self.get_dependencies()
         if not (target and dependencies):
@@ -119,7 +104,7 @@ class DatasetJobOperation(DatasetHandle, Generic[DJ]):
                 self.job.stop()
                 return self.job
 
-        # Execute: Store target tag and job result on successful context leave
+        # target tag and job result are stored on a clean exit
         with self.jobs.run(self.job) as run, self._tags.touch(target) as now:
             self.job.log.info(
                 f"Start `{target}` ...",
@@ -139,9 +124,8 @@ class DatasetJobOperation(DatasetHandle, Generic[DJ]):
         return run.job
 
     def run(self, force: bool | None = False, *args, **kwargs) -> DJ:
-        """Execute the handle function, force to run it regardless of freshness
-        dependencies. In api mode the whole job is delegated to the remote
-        operations endpoint (`_api_run`)."""
+        """Run the operation unless fresh (``force`` runs it anyway); in api mode
+        the job is delegated to the server's operations endpoint."""
         if self._is_api:
             return self._api_run(force, *args, **kwargs)
         return self._run_local(force, *args, **kwargs)

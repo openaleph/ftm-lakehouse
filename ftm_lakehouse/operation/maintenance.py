@@ -1,24 +1,4 @@
-"""Statement-store maintenance: optimize, re-shard and migrate.
-
-[`OptimizeOperation`][OptimizeOperation] runs the two Delta Lake maintenance steps in
-order – the use case is always both together:
-
-1. merge – rewrite every dirty partition into one canonical file: collapse
-   duplicates, fold ``first_seen``, reap tombstones past the grace period
-2. vacuum – delete the files a merge replaced from disk
-
-Reads reconcile un-merged rows, so this is an optimisation – a merged
-partition is a plain scan – and the disk reclaim; run it after large write
-batches.
-
-[`ShardOperation`][ShardOperation] is the rarer one: it changes the dataset's shard
-count, which means rewriting every partition and then recording the new
-count in ``config.yml``.
-
-[`MigrateOperation`][MigrateOperation] applies the storage-layout migrations a
-dataset has not seen yet – the registry is
-``ftm_lakehouse.operation.migrations``.
-"""
+"""Statement-store maintenance: optimize (merge + vacuum), re-shard, migrate."""
 
 from typing import Any
 
@@ -42,24 +22,18 @@ class OptimizeJob(DatasetJobModel):
 class OptimizeOperation(DatasetJobOperation[OptimizeJob]):
     """Optimize the parquet statement store: merge, then vacuum.
 
-    For each dirty ``(shard, bucket, origin)`` partition: keep the most-recent
-    row per statement id, fold ``first_seen`` down to the minimum, drop
-    tombstones older than the grace period – one file per partition – then
-    delete the files that replaced. Each step is held under the dataset write
-    fence.
+    Merge rewrites each dirty ``(shard, bucket, origin)`` partition into one
+    file – latest row per statement id, ``first_seen`` folded to the minimum,
+    tombstones past the grace period dropped; vacuum deletes the replaced files.
     """
 
     target = tag.OP_OPTIMIZE
     dependencies: list[str] = []
 
     def is_fresh(self) -> bool:
-        """Ask the statement store whether any partition is dirty.
-
-        Not a tag pair: the store knows from its own file list which
-        partitions hold rows a merge has not rewritten
+        """Whether no partition is dirty – asked of the store
         ([`ParquetStore.needs_merge`][ftm_lakehouse.storage.parquet.ParquetStore.needs_merge]),
-        and that is the only thing an optimize has to do.
-        """
+        not a tag pair."""
         return not self.entities.statements.needs_merge
 
     def handle(self, run: JobRun[OptimizeJob], force: bool = False, **kwargs) -> None:
@@ -72,52 +46,25 @@ class OptimizeOperation(DatasetJobOperation[OptimizeJob]):
 
 class ShardJob(DatasetJobModel):
     shards: int = Field(ge=0)
-    """Target number of entity-id hash shards. ``0`` / ``1`` means a single
-    shard; the value is bounded below because it becomes a partition key."""
+    """Target entity-id hash shard count; ``0`` / ``1`` means a single shard."""
 
 
 class ShardOperation(DatasetJobOperation[ShardJob]):
     """Change the dataset's shard count: rewrite the store, then the config.
 
-    The shard count is otherwise fixed at creation – every reader and
-    writer resolves it from ``config.yml`` – so growing it is a full
-    rewrite of the statement store. The typical trigger is a dataset that
-    outgrew its layout: one shard means one partition per
-    ``(bucket, origin)``, and queries that have to scan it whole get
-    slow.
-
-    Two steps, in this order:
-
-    1. `shard`
-       drains the journal and rewrites every ``(bucket, origin)`` group
-       into the new shard partitions, streamed, one atomic Delta commit
-       per group.
-    2. the new count is written to ``config.yml`` (versioned like every
-       other config write) and the repository factory caches are
-       invalidated, so repositories fetched afterwards resolve the new
-       layout.
-
-    The config write goes last on purpose: it is what declares the layout
-    to every other process, so it must not run ahead of the data. A run
-    that dies in between leaves the config on the old count and is
-    repaired by running it again – the rewrite recomputes each shard from
-    ``entity_id`` alone, so it is idempotent.
-
-    The rewrite is neither sorted nor deduped, which leaves every
-    partition dirty – reads reconcile it; run ``optimize`` afterwards to get
-    plain-scan reads and the file sort order back.
+    The rewrite drains the journal and moves every ``(bucket, origin)`` group
+    into the new shard partitions (one atomic Delta commit per group); then the
+    count is written to ``config.yml`` and the factory caches are cleared. The
+    config goes last – it declares the layout to every other process – so a run
+    that dies in between is repaired by running it again (the rewrite is
+    idempotent). Every partition comes out dirty: run ``optimize`` afterwards.
     """
 
     target = tag.OP_SHARD
 
     def is_fresh(self) -> bool:
-        """Whether the dataset is already configured for the target count.
-
-        Not a tag pair: what a re-shard changes is the configured layout,
-        so the config *is* the freshness state. Consequently a config
-        edited by hand to a count the store was never rewritten for reads
-        as fresh – ``force`` is the way out of that.
-        """
+        """Whether the config already names the target count – not a tag pair,
+        so a hand-edited config reads as fresh; ``force`` overrides."""
         return self._model.shards == self.job.shards
 
     def handle(self, run: JobRun[ShardJob], **kwargs: Any) -> None:
@@ -138,13 +85,10 @@ class MigrateJob(DatasetJobModel):
 class MigrateOperation(DatasetJobOperation[MigrateJob]):
     """Apply the storage-layout migrations this dataset has not seen yet.
 
-    Runs the functions registered in ``ftm_lakehouse.operation.migrations`` in
-    registry order, stamping each with
-    [`tag.migration`][ftm_lakehouse.core.conventions.tag.migration] on
-    completion. Per-migration tags rather than one version number: a run that
-    dies halfway keeps what it finished and the next one picks up at the first
-    untagged migration. ``force`` re-runs the whole registry – migrations are
-    idempotent.
+    Runs ``ftm_lakehouse.operation.migrations.MIGRATIONS`` in order, stamping
+    [`tag.migration`][ftm_lakehouse.core.conventions.tag.migration] per
+    migration, so a run that dies halfway resumes at the first untagged one.
+    ``force`` re-runs all – migrations are idempotent.
     """
 
     target = tag.OP_MIGRATE
@@ -157,11 +101,7 @@ class MigrateOperation(DatasetJobOperation[MigrateJob]):
         )
 
     def is_fresh(self) -> bool:
-        """Whether every registered migration has run against this dataset.
-
-        Not a tag pair: a migration is done or not, and no dependency's
-        timestamp can make an applied one stale again.
-        """
+        """Whether every registered migration has run – not a tag pair."""
         return not self.outstanding
 
     def handle(

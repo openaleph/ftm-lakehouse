@@ -18,7 +18,7 @@ from ftm_lakehouse.storage.journal.sql import (
 
 @cache
 def get_journal(dataset: str, uri: str | None = None) -> BaseJournalStore:
-    """Create journal store: ApiJournalStore for HTTP URIs, SqlJournalStore otherwise."""
+    """The dataset's journal: `ApiJournalStore` in api mode, else `sql_journal`."""
     settings = Settings()
     uri = uri or settings.resolved_journal_uri
     if settings.api_mode:

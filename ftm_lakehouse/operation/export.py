@@ -1,11 +1,6 @@
-"""The export: every artifact that is a function of the entity stream –
-``statements.csv``, ``entities.ftm.json``, ``documents.csv`` per origin scope,
-``statistics.json`` and their diff series – from one sweep over the statement
-store, then ``index.json``.
-
-What an artifact is and how it is written belongs to
-[`ArtifactsRepository`][ftm_lakehouse.repository.artifacts.ArtifactsRepository];
-this operation drives the stream through them.
+"""The export: every artifact that is a function of the entity stream, from one
+sweep over the statement store, then ``index.json``. The artifacts themselves
+are declared in `ftm_lakehouse.repository.artifacts`.
 """
 
 from collections import Counter
@@ -76,9 +71,8 @@ class ExportPart:
 def export_partition(task: ExportTask) -> ExportPart:
     """Sweep one ``(shard, bucket)`` pair into one part of every artifact.
 
-    Prepares and closes its session but never finishes or commits it – that is
-    work over the whole store, and the parent's. Silent: a spawned worker has no
-    logging setup, so ``took`` travels back in the `ExportPart`.
+    Never finishes or commits the session – that is the parent's. Logs nothing
+    (a spawned worker has no logging setup), so ``took`` travels back instead.
     """
     with Took() as t:
         artifacts = get_artifacts(task.dataset, task.uri)
@@ -134,12 +128,10 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
     def export(self, now: datetime) -> dict[str, int]:
         """Write every streamed artifact from one pass over the entities.
 
-        Each ``(shard, bucket)`` pair is swept into parts of every artifact, in
-        ``LAKEHOUSE_WORKERS`` processes, and each part is appended to its
-        artifact as the pair finishes (`Assembly`) – beside the artifact, which
-        is replaced once every pair has made it in, and left as it was if one
-        fails. Held under the merge lock, so an ``optimize`` cannot vacuum the
-        snapshot's files.
+        Each ``(shard, bucket)`` pair is swept into parts of every artifact in
+        ``LAKEHOUSE_WORKERS`` processes; an artifact is replaced only once every
+        pair is in, so a failed run leaves the previous one intact. Held under
+        the merge lock, so an ``optimize`` cannot vacuum the snapshot's files.
 
         Args:
             now: When the run started – diff files are named after it.
@@ -263,9 +255,8 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
     def _pending_by_shard(
         self, session: ExportSession
     ) -> dict[str, dict[str, frozenset[str]]]:
-        """Each diff series' DEL candidates per shard – not per pair: an id names
-        its shard but not its bucket, and its live rows may sit in another
-        bucket than its tombstones."""
+        """Each diff series' DEL candidates per shard – not per pair: an id
+        names its shard but not its bucket."""
         shards = self.entities.shards
         out: dict[str, dict[str, set[str]]] = {}
         for run in session.diffable:
