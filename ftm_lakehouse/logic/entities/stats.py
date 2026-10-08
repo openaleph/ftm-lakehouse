@@ -113,11 +113,12 @@ class StatsCollector:
     def export(self) -> DatasetStats:
         """The folded statistics; ``entity_count`` is every entity seen, not the
         sum of the group totals."""
+        # sorted: equal counts keep this order, whichever part merged first
         return compile_stats(
-            things=self.schemata["things"].items(),
-            intervals=self.schemata["intervals"].items(),
-            things_countries=self.countries["things"].items(),
-            intervals_countries=self.countries["intervals"].items(),
+            things=sorted(self.schemata["things"].items()),
+            intervals=sorted(self.schemata["intervals"].items()),
+            things_countries=sorted(self.countries["things"].items()),
+            intervals_countries=sorted(self.countries["intervals"].items()),
             date_range=(self.start, self.end),
             entity_count=self.entities,
         )

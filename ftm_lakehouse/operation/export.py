@@ -198,11 +198,9 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
                     # largest first, so no big pair starts last and holds up the end
                     tasks.sort(key=lambda task: task.source.size, reverse=True)
                     by_parts = {task.parts: task for task in tasks}
-                    done: dict[str, ExportPart] = {}
                     headed = False
                     for part in run(export_partition, tasks):
                         shard, bucket = by_parts[part.parts].source.key
-                        done[part.parts] = part
                         statements = part.counts.get("statements", 0)
                         counts.update(part.counts)
                         if statements and not headed:
@@ -210,6 +208,7 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
                             append(self._write_header(tmp))
                             headed = True
                         append(part.parts)
+                        session.adopt(part.parts, part.seen, part.stats, part.counts)
                         # the bar's throughput: the bytes each pair read
                         bar.advance(size=by_parts[part.parts].source.size)
                         self.log.info(
@@ -219,10 +218,6 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
                             bucket=bucket,
                             statements=statements,
                         )
-                    # in snapshot order, not as finished: the documents csv is
-                    # written from the staged parts in the order they are adopted
-                    for part in (done[p] for p in parts):
-                        session.adopt(part.parts, part.seen, part.stats, part.counts)
                     self.log.info(
                         "Swept every pair, writing the documents ...",
                         pairs=len(sources),
