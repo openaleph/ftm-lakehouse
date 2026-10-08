@@ -1,19 +1,19 @@
 # logic
 
-The logic module contains pure, stateless transformation functions with no infrastructure dependencies. Functions here take inputs and produce outputs without side effects.
+Pure transformations, with no storage or infrastructure dependencies.
 
 ## Entity Aggregation
 
-Aggregate a stream of statement dicts into FollowTheMoney entity dicts:
+Fold a stream of statement dicts into entities, without building FtM objects:
 
 ```python
 from ftm_lakehouse.logic.entities import aggregate_unsafe
 
 for entity in aggregate_unsafe(statement_dicts, "my_dataset"):
-    print(f"{entity['id']}: {entity['caption']}")
+    print(f"{entity.id}: {entity.to_dict()['caption']}")
 ```
 
-`aggregate_unsafe` assumes the input is pre-sorted by `entity_id` – the parquet store guarantees this for its queries.
+The input must be contiguous per `entity_id`, as the parquet store's reads are.
 
 ::: ftm_lakehouse.logic.entities.aggregate.aggregate_unsafe
     options:
@@ -22,7 +22,7 @@ for entity in aggregate_unsafe(statement_dicts, "my_dataset"):
 
 ## Parquet helpers
 
-The DuckDB SQL `ParquetStore` runs: the `statement` views a read picks between – a plain scan (`live_rows_sql`) over merged partitions, the dedupe query (`dedupe_rows_sql`) otherwise – and the merge and re-shard rewrites, which read a partition's files directly (`partition_source_sql`) instead of going through Delta.
+The DuckDB SQL behind `ParquetStore`. Reads, merges and re-shards name a partition's files directly (`partition_source_sql`); a read's `statement` view is a plain scan over merged partitions (`live_rows_sql`) and the dedupe query otherwise (`dedupe_rows_sql`). `raw_view_sql` / `live_view_sql` are the `delta_scan` views of the connection-level `LakeStore` behind `stats()` and `statements sql`.
 
 ::: ftm_lakehouse.logic.parquet.duckdb_config
     options:

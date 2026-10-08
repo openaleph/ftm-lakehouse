@@ -1,6 +1,6 @@
 # Configuration
 
-`ftm-lakehouse` can be configured via environment variables or YAML configuration files.
+`ftm-lakehouse` is configured via environment variables and a per-dataset `config.yml`.
 
 ## Environment Variables
 
@@ -8,40 +8,42 @@
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `LAKEHOUSE_URI` | Base path to lakehouse storage | `./data` |
-| `LAKEHOUSE_JOURNAL_URI` | SQLAlchemy URI for statement journal | `sqlite:///:memory:` |
-| `LAKEHOUSE_GRACE_PERIOD_DAYS` | Default tombstone grace period used by `maintenance optimize` (rows with `deleted_at` older than this are physically dropped in the merge step) | `30` |
-| `LAKEHOUSE_MAX_BUFFER_ROWS` | Hard cap on rows held in an in-memory `EntityBuffer` before a flush is required. Bulk-import paths that hit the cap raise `BufferFullError` and the caller flushes + retries. | `1_000_000` |
-| `LAKEHOUSE_JOURNAL_DRAIN_ROWS` | Rows per Arrow table a journal flush hands to the parquet store. Raising it produces fewer, bigger files for the next `merge`. | `1_000_000` |
-| `LAKEHOUSE_JOURNAL_POOL_SIZE` | Postgres journal connections kept warm between writers. ADBC ships no pool of its own and a cold connection costs ~60ms, which the journal would pay per writer; a checkout is ~0.3ms including the liveness ping that keeps a connection the server has since dropped (`idle_session_timeout`, a pgbouncer reap, a failover, a restart) from reaching a writer. This bounds only what is kept *idle* – writers beyond it open their own connection rather than queueing, so peak connections follow write concurrency either way. The pool is keyed on the journal uri and shared by every dataset in the process, so idle connections stay at this many per worker however many datasets it writes to: multiply by the worker count to size against postgres `max_connections`. Set to `0` to pool nothing. | `5` |
-| `LAKEHOUSE_LOCK_MAX_RETRIES` | Retry bound for every wait on a dataset lock: acquiring the exclusive maintenance lock (`.LOCK`) or the merge lock (`.LOCK-MERGE`, held by `merge` and by an export sweep), and an append backing off while `.LOCK` is held. Retry `n` sleeps `n` + jitter seconds, so the total wait is roughly `N²/2` seconds; the default gives up after about a minute with a `RuntimeError` instead of waiting forever. Stale locks from crashed writers need a manual `ftm-lakehouse maintenance unlock`. | `10` |
-| `LAKEHOUSE_DUCKDB_MEMORY_LIMIT` | Per-DuckDB-connection RAM ceiling. Queries exceeding it spill to disk rather than growing toward all available RAM. A byte size (e.g. `8GB`, `512MiB`) – a share of RAM such as `80%` fails at startup, since the limit is split between the workers when `LAKEHOUSE_WORKERS` is above `1` – see [Sizing parallel workers](#sizing-parallel-workers). | `8GB` |
-| `LAKEHOUSE_WORKERS` | Processes the parallel maintenance paths fan their partitions out to: `maintenance optimize`'s merge (`(shard, bucket, origin)` partitions) and the export sweep (`(shard, bucket)` pairs). `1` (the minimum) runs in-process. An export appends each pair's parts to its artifacts as the pair finishes, so `TMPDIR` holds the parts of the pairs in flight. `LAKEHOUSE_DUCKDB_MEMORY_LIMIT` and the CPU threads are split between the workers: the share has to cover the heaviest partition, and each worker's memory peaks above it – see [Sizing parallel workers](#sizing-parallel-workers). A sweep cannot use more workers than the dataset has pairs (`shards` × the buckets it holds, at most five), and each worker runs a full dedupe or sort over its partition – so size this against RAM and `LAKEHOUSE_DUCKDB_TEMP_DIRECTORY` space rather than core count. Workers are *spawned*, so the child re-imports the main module: the CLI is safe (its console-script wrapper carries the `if __name__ == "__main__":` guard setuptools generates), but a bare script calling `merge` or `export` with more than one worker needs its own, or every worker re-runs the script – and a script piped into `python` on stdin cannot be used at all, since a worker has no importable `__main__` to re-import. | `1` |
-| `LAKEHOUSE_DUCKDB_TEMP_DIRECTORY` | Spill-to-disk path for queries that overflow `LAKEHOUSE_DUCKDB_MEMORY_LIMIT` – each DuckDB instance (every merge or export worker among them) spills into its own subdirectory, removed on close; a killed process leaves its subdirectory behind | Defaults under the OS temp directory. Point at a fast, capacity-controlled volume for heavy workloads. Set to a real volume if a container uses `/tmp` as `tmpfs` to avoid RAM spilling. Set empty to use default. | `{OS temp dir}/duckdb` |
-| `LAKEHOUSE_DUCKDB_EXTENSION_DIRECTORY` | Directory DuckDB loads its extensions from (and auto-installs into when one is missing). Unset = `$HOME/.duckdb/extensions`, which fails in containers running without a writable `HOME` (`Failed to create directory "/.duckdb"`). The shipped Docker image pre-installs the `delta` extension at build time and sets this to `/opt/duckdb/extensions`, so runtime needs neither a writable `HOME` nor network access. | (unset) |
-| `LAKEHOUSE_ON_ZFS` | Enable ZFS dataset creation for local storage | `false` |
-| `LAKEHOUSE_ZFS_POOL` | ZFS dataset path for the lakehouse root (e.g. `zpools/tank/lakehouse`). Transport / agent settings (`ZFS_SOCKET`, `ZFS_OWNER`, ...) belong to the [zfs-agent](https://github.com/dataresearchcenter/zfs-agent) package -- see [ZFS Integration](zfs.md) | (required when `ON_ZFS` is enabled) |
-| `LAKEHOUSE_API_KEY` / `LAKEHOUSE_API_SECRET` | Client-side auth headers attached to outgoing lakehouse-API requests (authenticate through the reverse proxy in front of the API server) | (unset) |
-| `LAKEHOUSE_PUBLIC_URL_PREFIX` | Public URL prefix for blob URLs (supports a `${dataset}` placeholder) | (unset) |
-| `LOG_LEVEL` | Logging level (DEBUG, INFO, WARNING, ERROR) | `INFO` |
+| `LAKEHOUSE_URI` | Base path or URI of the lakehouse storage | `data` |
+| `LAKEHOUSE_JOURNAL_URI` | SQLAlchemy URI of the statement journal – see [Journal Database](#journal-database) | `sqlite:///:memory:` |
+| `LAKEHOUSE_GRACE_PERIOD_DAYS` | Days a tombstone (`deleted_at`) is kept before the merge of `maintenance optimize` drops it and the rows it shadows | `30` |
+| `LAKEHOUSE_MAX_BUFFER_ROWS` | Row cap of an in-memory `EntityBuffer`. Bulk imports that hit it raise `BufferFullError`; the caller flushes and retries. | `1_000_000` |
+| `LAKEHOUSE_JOURNAL_DRAIN_ROWS` | Rows per Arrow table a journal flush hands to the parquet store – one parquet file per partition the table spans. Higher means fewer, bigger files; lower it if a flush runs out of memory, as each table is held whole while it is written. | `1_000_000` |
+| `LAKEHOUSE_JOURNAL_POOL_SIZE` | Postgres journal connections kept idle between writers, one pool per journal uri and process, shared by all datasets. Writers beyond it open their own connection rather than queue. Multiply by the process count to size against postgres `max_connections`; `0` pools nothing. | `5` |
+| `LAKEHOUSE_LOCK_MAX_RETRIES` | Retry bound for every wait on a dataset lock – acquiring `.LOCK` or `.LOCK-MERGE`, and appends backing off while `.LOCK` is held. The total wait is about `N²/2` seconds (a minute at the default), then `RuntimeError`. A lock left by a crashed process needs `ftm-lakehouse maintenance unlock`. | `10` |
+| `LAKEHOUSE_DUCKDB_MEMORY_LIMIT` | DuckDB's memory budget; queries beyond it spill to disk. A byte size (`8GB`, `512MiB`) – a share such as `80%` fails at startup, since the limit is split between the workers – see [Sizing parallel workers](#sizing-parallel-workers). | `8GB` |
+| `LAKEHOUSE_WORKERS` | Processes the merge of `maintenance optimize` and the export sweep spread their partitions over; `1` (the minimum) runs in-process. The memory limit and CPU threads are split between them – see [Sizing parallel workers](#sizing-parallel-workers). An export uses at most one worker per `(shard, bucket)` pair (`shards` × at most five buckets), and `TMPDIR` holds the parts of the pairs in flight. | `1` |
+| `LAKEHOUSE_DUCKDB_TEMP_DIRECTORY` | Where DuckDB spills queries that outgrow the memory limit, each DuckDB instance into its own subdirectory, removed on close (a killed process leaves it behind). Point it at a fast volume with room – not a `tmpfs` `/tmp`, which spills into RAM. Empty uses DuckDB's own default, `.tmp` in the working directory. | `{OS temp dir}/duckdb` |
+| `LAKEHOUSE_DUCKDB_EXTENSION_DIRECTORY` | Where DuckDB loads (and auto-installs) extensions. Unset means `$HOME/.duckdb/extensions`, which fails without a writable `HOME`. The Docker image pre-installs `delta` into `/opt/duckdb/extensions` and sets this. | (unset) |
+| `LAKEHOUSE_ON_ZFS` | Create tuned ZFS datasets for new datasets – see [ZFS Integration](zfs.md) | `false` |
+| `LAKEHOUSE_ZFS_POOL` | ZFS dataset path new datasets are created under (e.g. `zpools/tank/lakehouse`). Transport settings (`ZFS_SOCKET`, `ZFS_OWNER`, …) belong to the [zfs-agent](https://github.com/dataresearchcenter/zfs-agent) package. | (required with `LAKEHOUSE_ON_ZFS`) |
+| `LAKEHOUSE_API_KEY` / `LAKEHOUSE_API_SECRET` | Sent as `X-Api-Key` / `X-Api-Secret` on a client's lakehouse-API requests, for the reverse proxy in front of the server to check | (unset) |
+| `LAKEHOUSE_PUBLIC_URL_PREFIX` | Public URL prefix for blob URLs, `${dataset}` substituted. A dataset's own `public_url_prefix` takes precedence. | (unset) |
+| `LOG_LEVEL` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) | `INFO` |
 | `DEBUG` | Enable debug mode | `false` |
 
-There is deliberately **no environment setting for the shard count**: it is per-dataset configuration (`shards` in `config.yml`, default `0` = single shard). Placement is enforced on write – `ParquetStore.append` derives each row's shard from its `entity_id` against the count the store resolved – so a process with a different environment can't mis-shard an existing dataset. Huge datasets should configure `8` or more at creation; changing it later means rewriting every partition with `maintenance shard` – see [Sharding](../architecture.md#sharding-why-and-how-many-shards).
+There is no environment setting for the shard count: `shards` is per-dataset configuration in `config.yml` (default `0`, a single shard), set at creation – `8` or more for huge datasets. Changing it later rewrites every partition (`maintenance shard`) – see [Sharding](../architecture.md#sharding-why-and-how-many-shards).
 
 ### Sizing parallel workers
 
-Each worker's DuckDB gets `LAKEHOUSE_DUCKDB_MEMORY_LIMIT / LAKEHOUSE_WORKERS` – in a merge and in the export sweep alike. Two rules follow:
+Each worker's DuckDB gets `LAKEHOUSE_DUCKDB_MEMORY_LIMIT / LAKEHOUSE_WORKERS`, in a merge and in the export sweep alike. Two rules follow:
 
-- **The share has to cover the heaviest partition.** Sorts and windows spill to disk, but the full-text values of the `document` and `page` buckets are held in memory while they are read and written, so a share that is too small fails the partition with DuckDB's `Out of Memory Error` rather than spilling. The defaults fail this way on full-text partitions: `8GB` split 8 ways is 1GB a worker. A merge needs a few times a partition's *uncompressed* size, and full text compresses well, so the size on disk understates it.
-- **RAM has to fit `workers × (share + ~2GB)`, plus the ARC on ZFS.** A worker's peak memory exceeds its share by DuckDB's allocations outside the limit and the worker's own Python process – about 1–2GB. When the sum does not fit, the kernel kills a worker and the merge stops with `BrokenProcessPool`; the partitions that finished are committed, so a rerun picks up the rest.
+- **The share has to cover the heaviest partition.** Sorts and windows spill, but the full-text values of the `document` and `page` buckets are held in memory, so a share that is too small fails the partition with DuckDB's `Out of Memory Error`. The defaults fail this way on full-text partitions: `8GB` split 8 ways is 1GB a worker. A merge needs a few times a partition's *uncompressed* size, which its size on disk understates.
+- **RAM has to fit `workers × (share + ~2GB)`, plus the ARC on ZFS.** A worker peaks 1–2GB above its share (DuckDB allocations outside the limit, its Python process). When the sum does not fit, the kernel kills a worker and the merge stops with `BrokenProcessPool`; finished partitions are committed, so a rerun picks up the rest.
 
-When the share is too small, lower `LAKEHOUSE_WORKERS` rather than the share: fewer workers with enough memory finish, more workers with too little do not. For reference, a 140GB (zstd) store of ~500 partitions merges at 80–120MB/s with `LAKEHOUSE_WORKERS=8` and `LAKEHOUSE_DUCKDB_MEMORY_LIMIT=128GB` on 48 cores and 256GB RAM.
+When the share is too small, lower `LAKEHOUSE_WORKERS` rather than the share. For reference, a 140GB (zstd) store of ~500 partitions merges at 80–120MB/s with `LAKEHOUSE_WORKERS=8` and `LAKEHOUSE_DUCKDB_MEMORY_LIMIT=128GB` on 48 cores and 256GB RAM.
 
-The largest partitions by size on disk – after a `vacuum`, as files the log no longer references count too:
+The largest partitions on disk (after a `vacuum`, since unreferenced files count too):
 
 ```bash
 du -sh "$LAKEHOUSE_URI/<dataset>/statements"/shard=*/bucket=*/origin=* | sort -h | tail
 ```
+
+Workers are spawned processes that re-import the main module. The CLI is safe; a script calling `merge` or `export` with more than one worker needs an `if __name__ == "__main__":` guard, and cannot be piped into `python` on stdin.
 
 ### Basic Usage
 
@@ -60,7 +62,7 @@ export LAKEHOUSE_JOURNAL_URI=postgresql://user:pass@localhost/journal
 
 ## Dataset Configuration
 
-Each dataset can have its own `config.yml` file that follows the [ftmq.model.Dataset](https://github.com/dataresearchcenter/ftmq/blob/main/ftmq/model/dataset.py) specification:
+Each dataset has its own `config.yml`, following the [ftmq.model.Dataset](https://github.com/dataresearchcenter/ftmq/blob/main/ftmq/model/dataset.py) specification:
 
 ```yaml
 name: my_dataset  # also known as "foreign_id"
@@ -107,7 +109,7 @@ export AWS_ENDPOINT_URL=https://minlake.example.com
 
 ### Google Cloud Storage
 
-Requires extra install: `pip install gcsfs`
+Requires the `gcs` extra: `pip install "ftm-lakehouse[gcs]"`
 
 ```bash
 export LAKEHOUSE_URI=gs://bucket-name/prefix
@@ -116,7 +118,7 @@ export GOOGLE_APPLICATION_CREDENTIALS=/path/to/credentials.json
 
 ### Azure Blob Storage
 
-Requires extra install: `pip install adlfs`
+Requires the `azure` extra: `pip install "ftm-lakehouse[azure]"`
 
 ```bash
 export LAKEHOUSE_URI=az://container-name/prefix
@@ -151,7 +153,7 @@ export AZURE_STORAGE_CLIENT_SECRET=your_client_secret
 
 ## Journal Database
 
-The statement journal buffers writes before flushing to Delta Lake storage. For production use, configure a persistent database:
+The statement journal buffers writes until they are flushed into the parquet store. Use a persistent database in production.
 
 ### SQLite (File-based)
 
@@ -160,6 +162,8 @@ export LAKEHOUSE_JOURNAL_URI=sqlite:///path/to/journal.db
 ```
 
 ### PostgreSQL
+
+Requires the `postgres` extra (`pip install "ftm-lakehouse[postgres]"`); without it, creating the journal fails.
 
 ```bash
 export LAKEHOUSE_JOURNAL_URI=postgresql://user:password@host:5432/database
@@ -176,8 +180,6 @@ export LAKEHOUSE_JOURNAL_URI=sqlite:///:memory:
 
 ## Python Configuration
 
-You can also configure programmatically:
-
 ```python
 from ftm_lakehouse import get_entities, get_lakehouse
 
@@ -190,7 +192,7 @@ entities = get_entities("my_dataset", lake.dataset_uri("my_dataset"))
 
 ## Multi-Dataset Configuration
 
-A lakehouse can contain multiple datasets, each with different configurations:
+A lakehouse holds multiple datasets, each with its own configuration:
 
 ```
 lakehouse/
@@ -216,6 +218,4 @@ storage:
 
 ## Catalog
 
-The catalog is the storage root itself – any directory under the lakehouse uri
-that contains a `config.yml` is a dataset. `get_lakehouse().list_datasets()`
-enumerates them; there is no catalog-level configuration file.
+The catalog is the storage root itself – any directory under the lakehouse uri that contains a `config.yml` is a dataset. `get_lakehouse().list_datasets()` enumerates them; there is no catalog-level configuration file.

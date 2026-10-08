@@ -1,10 +1,10 @@
 # Conventions
 
-`ftm-lakehouse` is convention-driven: the path layout, artifact names and freshness tags are stable contracts – third-party tools can populate or consume a lakehouse by following them, without going through this library.
+The path layout, artifact names and freshness tags are stable contracts: third-party tools can populate or consume a lakehouse by following them, without this library.
 
 ## Storage Layout
 
-On-disk (or cloud storage) layout of a lakehouse storage root:
+Layout of a lakehouse storage root, local or remote:
 
 ```
 lakehouse/
@@ -33,36 +33,35 @@ lakehouse/
     │   ├── documents.csv[.gz|.zst]   # Document metadata
     │   └── documents.{origin}.csv[..] # Document metadata, one origin only
     │
-    ├── diffs/                    # Timestamped delta diff exports
+    ├── diffs/                    # Timestamped diff exports
     ├── versions/                 # Versioned snapshots (config, index, ...)
     │   └── YYYY/MM/{timestamp}/
-    ├── tags/{tenant}/            # Freshness tags (workflow state)
+    ├── tags/{tenant}/            # Freshness tags (default tenant: lakehouse)
     └── jobs/
         └── runs/{job_type}/{timestamp}.json
 ```
 
 ## Freshness Tags
 
-Operations use tags to track freshness and skip unnecessary work – `is_latest(key, dependencies)` returns `True` when `key` is newer than all its dependencies:
+Operations skip work their tags say is fresh: `is_latest(key, dependencies)` is `True` when `key` is newer than all its dependencies.
 
 | Tag | Set by | Meaning |
 |-----|--------|---------|
-| `statements/last_updated` | Flush / append, `delete_origin` | The store's content moved – the clock every export, statistic and diff depends on. A merge rewrites files, not content, so it leaves it alone |
-| `operations/optimize/last_run` | `optimize`, on completion | Stamped for the record; `optimize` decides freshness from the store's dirty partitions, not from this tag |
-| `archive/last_updated` | File archive | New file was archived |
-| `exports/statements.csv`, `entities.ftm.json`, `exports/parents.csv`, `exports/documents.csv`, `exports/documents.{origin}.csv`, `exports/statistics.json`, `index.json` | Export operations | Export target keys double as their freshness tags. A run stamps every artifact it writes – the published record of when each one was last produced, and what `download-archive` keys its own freshness on |
-| `operations/export/last_run` | `export` | The export ran |
-| `operations/crawl/last_run` | Crawl operation | Last crawl execution |
+| `statements/last_updated` | Flush / append, `delete_origin` | The store's content moved – what exports, statistics and diffs depend on. A merge rewrites files, not content, and leaves it alone |
+| `archive/last_updated` | Archiving a file | A file was archived |
+| `exports/statements.csv`, `entities.ftm.json`, `exports/parents.csv`, `exports/documents.csv`, `exports/documents.{origin}.csv`, `exports/statistics.json`, `index.json` | `export` | Each artifact's key is its tag, stamped when a run wrote it. `archive download` (`DownloadArchiveOperation`) depends on `exports/documents.csv` |
+| `operations/{name}/last_run` | `crawl`, `make`, `export`, `optimize`, `shard`, `migrate`, `download_archive` | When the operation last completed. `optimize` decides freshness from the store's dirty partitions, not from its tag |
+| `migrations/{function}` | `maintenance migrate` | One per applied migration |
 
 ## Compression suffixes
 
-When a dataset configures `compression` (`gz` / `zst` in `config.yml`), the streaming export artifacts carry the codec suffix – `entities.ftm.json.zst`, `exports/statements.csv.zst`, `exports/parents.csv.zst`, `exports/documents.csv.zst` – and `index.json` advertises the resulting names and urls. `index.json` and `statistics.json` themselves are always plain JSON.
+With `compression` set in `config.yml` (`gz` / `zst`), the streamed artifacts carry the codec suffix – `entities.ftm.json.zst`, `exports/statements.csv.zst`, `exports/parents.csv.zst`, `exports/documents.csv.zst` – and `index.json` lists those names and urls. `index.json` and `statistics.json` are always plain JSON.
 
-Diff *directories* stay codec-free (`diffs/exports/documents.csv/`), because they double as the freshness tag and diff-state key; only the files inside them carry the suffix (`{timestamp}.diff.csv.zst`).
+Diff directories stay codec-free (`diffs/exports/documents.csv/`) – they are named after the tag; only the files in them carry the suffix (`{timestamp}.diff.csv.zst`).
 
 ## Path conventions
 
-All path construction goes through `ftm_lakehouse.core.conventions.path` – rendered here so the constants stay in sync with the code:
+Every path is built through `ftm_lakehouse.core.conventions.path`:
 
 ::: ftm_lakehouse.core.conventions.path
     options:

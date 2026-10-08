@@ -25,11 +25,11 @@ Batch file ingestion from a source location.
 
 ## ExportOperation
 
-One operation for every export: `exports/statements.csv`, `entities.ftm.json`, `exports/documents.csv` and `exports/documents.crawl.csv` (crawled files only), each with its diff series, `exports/parents.csv` (every folder a document can sit in, with its path) and `exports/statistics.json` – all from a **single pass** over the statement store – then `index.json`, which registers them.
+One pass over the statement store writes every export: `exports/statements.csv`, `entities.ftm.json`, `exports/documents.csv` and `exports/documents.crawl.csv` (crawled files only) with their diff series, `exports/parents.csv` (every folder a document can sit in, with its path) and `exports/statistics.json`. Then `index.json` registers them.
 
-The sweep runs per `(shard, bucket)` pair, in `LAKEHOUSE_WORKERS` processes, into *parts* of every artifact, each appended as encoded to a temporary file beside its artifact as soon as its pair finishes, and moved into place once every pair is in – so a compressed artifact is a multi-frame zstd or multi-member gzip file. The stdlib file classes (`GzipFile`, `ZstdFile`, …), and so every reader here, read it as one; `zlib.decompress(blob, 31)` returns only the first member. A crashed export leaves the previous artifacts intact.
+The `(shard, bucket)` pairs are swept in `LAKEHOUSE_WORKERS` processes. Each finished pair's encoded parts are appended to a temporary file beside its artifact, which is moved into place once every pair is in – a crashed export leaves the previous artifacts intact. A compressed artifact is therefore a multi-frame zstd or multi-member gzip file: `GzipFile` / `ZstdFile` read it whole, `zlib.decompress(blob, 31)` only its first member.
 
-Diff entries follow the [OpenSanctions delta format](https://www.opensanctions.org/docs/bulk/delta/): `ADD` (every statement new), `MOD` (predates the window, changed in it), `DEL` (gone). `ADD` and `MOD` carry the entity whole.
+The entities diff follows the [OpenSanctions delta format](https://www.opensanctions.org/docs/bulk/delta/): `ADD` (every statement new), `MOD` (predates the window, changed in it), `DEL` (gone); `ADD` and `MOD` carry the whole entity. A documents diff is the csv with a leading `op` column.
 
 ::: ftm_lakehouse.operation.export.ExportKind
     options:
@@ -53,7 +53,7 @@ Diff entries follow the [OpenSanctions delta format](https://www.opensanctions.o
 
 ## OptimizeOperation
 
-Optimize the parquet statement store in one pass: merge (rewrite every dirty partition into one canonical file – collapse duplicates, fold `first_seen` to the min, `last_seen` to the max, drop tombstones older than the grace cutoff per `LAKEHOUSE_GRACE_PERIOD_DAYS`) and vacuum (delete the files that replaced). Reads reconcile un-merged rows, so this is an optimisation, not a precondition. `merge` holds the merge lock (`.LOCK-MERGE`), which appends do not wait for, so ingest flows through it; `vacuum` takes the exclusive fence (`.LOCK`) as well.
+`merge` rewrites every dirty partition into one file – duplicates collapsed, `first_seen` folded to the min and `last_seen` to the max, tombstones older than `LAKEHOUSE_GRACE_PERIOD_DAYS` dropped – then `vacuum` deletes the replaced files. Reads reconcile un-merged rows, so this is an optimisation, not a precondition. `merge` holds only the merge lock (`.LOCK-MERGE`), so appends keep flowing; `vacuum` takes the exclusive `.LOCK` as well.
 
 ::: ftm_lakehouse.operation.maintenance.OptimizeJob
     options:
@@ -67,7 +67,7 @@ Optimize the parquet statement store in one pass: merge (rewrite every dirty par
 
 ## ShardOperation
 
-Change the dataset's shard count after the fact: drain the journal, rewrite every `(bucket, origin)` group into the new shard partitions (streamed, one atomic Delta commit per group), then record the new count in `config.yml`. Neither dedupes nor sorts – it moves rows – so every rewritten partition comes out dirty and wants an `optimize` afterwards. Run it with writers stopped: the maintenance fence covers parquet appends, not journal writes, and a flush landing between the rewrite and the config write still resolves the old count.
+Change a dataset's shard count: drain the journal, rewrite each `(bucket, origin)` group onto the new shards (streamed, one Delta commit per group), then record the count in `config.yml`. Rows are moved, not deduped, so every partition comes out dirty – run `optimize` afterwards. Run it with writers stopped: `.LOCK` holds off parquet appends, not journal writes, and a flush between the rewrite and the config write would still use the old count.
 
 ::: ftm_lakehouse.operation.maintenance.ShardJob
     options:
@@ -81,7 +81,7 @@ Change the dataset's shard count after the fact: drain the journal, rewrite ever
 
 ## MigrateOperation
 
-Apply the storage-layout migrations a dataset has not seen yet – the functions registered in `ftm_lakehouse.operation.migrations`, run in registry order and stamped with a `migrations/<function name>` tag each, so the function name is the migration id. Migrations are forward-only (no down-migration, no compatibility shim in the read path) and idempotent: `force` re-runs the whole registry, and a run that dies halfway resumes at the first untagged migration.
+Apply the migrations registered in `ftm_lakehouse.operation.migrations` that a dataset has not seen, oldest first, stamping a `migrations/<function name>` tag for each – the function name is the migration id. Migrations are forward-only and idempotent: a run that dies resumes at the first untagged one, and `force` re-runs them all.
 
 ::: ftm_lakehouse.operation.maintenance.MigrateJob
     options:
@@ -95,7 +95,7 @@ Apply the storage-layout migrations a dataset has not seen yet – the functions
 
 ## MakeOperation
 
-Full workflow: flush journal + all exports.
+Flush the journal, then export. The `make` CLI runs `optimize` in between by default.
 
 ::: ftm_lakehouse.operation.make.MakeJob
     options:

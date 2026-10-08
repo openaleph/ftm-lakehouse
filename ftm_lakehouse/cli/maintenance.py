@@ -53,8 +53,9 @@ def cli_make(
     exports: Annotated[
         Optional[bool],
         typer.Option(
-            help="Write the exports – statements, entities, documents, their "
-            "diffs, the statistics and the index. `--no-exports` flushes only."
+            help="Write the exports – statements, entities, documents, parents, "
+            "their diffs, the statistics and the index. `--no-exports` flushes "
+            "only."
         ),
     ] = True,
     optimize: Annotated[
@@ -102,9 +103,9 @@ def cli_make(
 @cli.command("export")
 def cli_export(force: OPT_FORCE = False):
     """Export the dataset: ``statements.csv``, ``entities.ftm.json``,
-    ``documents.csv`` (per origin scope) and ``statistics.json`` from a single
-    pass over the entities, with their diffs, then ``index.json`` registering
-    what they wrote."""
+    ``documents.csv`` (per origin scope), ``parents.csv`` and ``statistics.json``
+    from a single pass over the entities, with their diffs, then ``index.json``
+    registering what they wrote."""
     with DatasetContext() as (name, uri):
         res = op.export(name, uri, force=bool(force))
         console.print(res)

@@ -219,10 +219,10 @@ EXPORTS_STATEMENTS = EXPORTS / "statements.csv"
 """complete statements export – codec-free"""
 
 EXPORTS_DOCUMENTS = EXPORTS / "documents.csv"
+"""documents metadata export – codec-free, unscoped"""
 
 EXPORTS_PARENTS = EXPORTS / "parents.csv"
 """every folder a document can sit in, with its path – codec-free"""
-"""documents metadata export – codec-free, unscoped"""
 
 
 DIFFS = StoreKey("diffs")

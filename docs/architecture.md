@@ -1,10 +1,6 @@
 # Architecture
 
-This document describes the layered architecture of `ftm-lakehouse`.
-
-## Overview
-
-The codebase follows a strict layered architecture with clear separation of concerns – see [Module Layout](#module-layout) for the full tree.
+`ftm-lakehouse` is built in strict layers – see [Module Layout](#module-layout) for the full tree.
 
 ## Dependency Rules
 
@@ -45,175 +41,100 @@ flowchart TD
     STORE --> CORE
 ```
 
+Below the layers, `util.py` holds dependency-light primitives importable from anywhere, and `helpers/` the FtM-domain building blocks, which never import `model/` or higher.
+
 ## Layer 1: Model
 
-Pure data structures with no dependencies. Pydantic models and lightweight typed primitives.
-
-```
-model/
-  file.py        # File, Files - archived file metadata
-  job.py         # JobModel, DatasetJobModel - job execution tracking
-  dataset.py     # DatasetModel - dataset metadata / config
-  statement.py   # JOURNAL_SCHEMA / SHARDED_SCHEMA (pyarrow) +
-                 # TABLE (SQLAlchemy) +
-                 # LakehouseStatement (LakeStatement + deleted_at)
-                 # + statements_to_arrow – schema for the parquet
-                 # statement store and shared currency between buffer
-                 # and writer.
-```
-
-**Principles:**
+Pure data structures: Pydantic models, the Arrow schemas of the statement store (`JOURNAL_SCHEMA`, `SHARDED_SCHEMA`) and `LakehouseStatement` – ftmq's `LakeStatement` plus `deleted_at` and `role`.
 
 - No behavior beyond validation
 - No storage awareness
-- No external dependencies (except pydantic, pyarrow, sqlalchemy, anystore.model)
+- No external dependencies except pydantic, pyarrow, sqlalchemy and `anystore.model`
 
-See [Model Reference](reference/model.md) for API details.
+See [Model Reference](reference/model.md).
 
 ## Layer 2: Storage
 
-Single-purpose storage interfaces. Each store does ONE thing.
+Single-purpose stores, each doing one thing: the `ParquetStore` (Delta Lake statement store), the SQL journal (write-ahead log), the `TagStore` (freshness) and the `VersionStore` (timestamped snapshots). Blobs, file metadata and text are plain `anystore.Store` instances (`get_store()`) used by the repositories.
 
-```
-storage/
-  parquet.py         # ParquetStore - Delta Lake statement store
-                     #   .append (sorted per-shard write)
-                     #   .merge (per-partition dedup + tombstone reap)
-                     #   .vacuum (delete obsolete files)
-  journal/
-    base.py          # BaseJournalStore
-                     # .flush_batches()  – rotates the journal, yields
-                     #                     Arrow batches, drops each segment
-                     #                     once the consumer wrote it
-    sql.py           # SqlJournalStore (sqlite / psql)
-    api.py           # ApiJournalStore (HTTP forwarding)
-  tags.py            # TagStore – key-value freshness tracking
-  versions.py        # VersionStore – timestamped snapshots
-```
+- Each store is independent and operates on a single storage URI
+- No business logic
 
-Blob, file metadata, and text storage are handled directly by repositories using `anystore.Store` instances via `get_store()`, eliminating a layer of indirection.
+See [Storage Reference](reference/storage.md).
 
 ### Sharded append-only pattern
 
 The parquet statement store is partitioned by `(shard, bucket, origin)`:
 
-- `shard` – `hash(entity_id) % shards` (the dataset's configured shard count), hex-padded. Derived in `ParquetStore.append` and nowhere else; producers hand over rows without it
-- `bucket` – coarse FtM schema group (thing / interval / document / page / pages / mention)
+- `shard` – `hash(entity_id) % shards` (the dataset's configured count), hex-padded
+- `bucket` – coarse FtM schema group (thing / interval / document / page / mention)
 - `origin` – caller-supplied source tag
 
-Each row carries `first_seen`, `last_seen`, `fragment`, `role`, and `deleted_at` directly in the parquet schema (no separate translog). Reads reconcile: a read over a partition holding files `merge` did not write runs the dedupe query, while a partition made of merge output alone – canonical by construction – is a plain `WHERE deleted_at IS NULL` scan whose filters (`schema` / `prop` / `entity_id`) push straight through to DuckDB's per-file statistics; `entity_id` sits in the dedupe windows' keys, so an id lookup pushes below them too.
+Each row carries `first_seen`, `last_seen`, `fragment`, `role` and `deleted_at` in the parquet schema. Writes are **append-only**: `append` derives each row's `shard` from its `entity_id` and writes one unsorted file per partition the batch spans; duplicates and tombstones land as additional rows. Producers hand over rows without a shard key (`JOURNAL_SCHEMA`), so the partition always follows the count of the store that writes it.
 
-Writes are **append-only**: `append` derives each row's `shard` from its `entity_id`, then writes one parquet file per `(shard, bucket, origin)` partition the batch spans. It deliberately does not sort – nothing reads in physical order, and `merge` rewrites every partition an append touched anyway. Duplicates and tombstones land as additional rows.
+**Reads are correct on any store; `merge` is compaction.** Dedupe, fragment supersession, `first_seen`/`last_seen` folding and tombstone hiding are one DuckDB query, `_dedupe_sql`, which a read runs over a dirty partition and `merge` runs to rewrite it. A read therefore returns the same rows before and after a merge; the merge changes the cost (a partition of merge output alone is a plain `deleted_at IS NULL` scan whose filters push down to file statistics) and the disk (tombstones past grace and the rows they shadow go). The query routes every row into one of two branches on `fragment` (empty-string sentinel, never NULL):
 
-Deriving the partition key at the last moment is what keeps the layout honest. Rows reach `append` in `JOURNAL_SCHEMA`, which has no `shard` column at all: a journalled row routinely outlives the process that wrote it, so a shard key packed at write time could encode a count that is no longer configured. Because the key is a function of `entity_id` and the *writing store's* count, a producer that resolved a stale config can no longer mis-route a partition – at worst it hands over a batch spanning several shards, which costs extra files that the next `merge` rewrites into one per partition.
+- **non-fragment** (`fragment = ''`): latest `last_seen` per statement `id` wins. Scoped per partition, so the same statement under two origins is kept once per origin.
+- **fragment-bearing** (`fragment != ''`): supersession per `(origin, entity_id, prop, fragment, role)` group – every row tied at the group's latest `last_seen` survives, older emissions go. See [Fragment Supersession](usage/entities.md#fragment-supersession).
 
-**Reads are correct on any store; `merge` is compaction.** Dedupe, fragment supersession, `first_seen`/`last_seen` folding and tombstone hiding happen in one DuckDB query, `_dedupe_sql`, which a read runs over a dirty partition and `merge` runs to rewrite it – so the rows a read returns are the same before and after a merge, and what a merge changes is the cost (a clean partition is a plain scan) and the disk (tombstones past grace and the rows they shadow are gone). The query routes every row into one of two isolated branches on the `fragment` column (empty-string sentinel, never NULL):
+`role` – who asserted a statement, against `origin`'s where – is in the window key of both branches: two roles asserting identical content keep two rows, one role re-asserting collapses. NULL roles dedupe against each other. `first_seen` folds per `(id, role)`, so a role's first assertion keeps its own date for diffs. See [The Role Field](usage/entities.md#the-role-field).
 
-- **non-fragment** (`fragment = ''`, the default): content-addressed dedup – latest `last_seen` per statement `id` wins; distinct ids never interact. Scoped per `(shard, bucket, origin)` partition, so the *same* statement observed under two origins is kept once per origin (merge cannot cross origin partitions).
-- **fragment-bearing** (`fragment != ''`): supersession per `(origin, entity_id, prop, fragment, role)` group – every row tied at the group's max `last_seen` survives (the latest emission, multi-valued props included), older emissions go. See [Fragment Supersession](usage/entities.md#fragment-supersession) for semantics and the producer contract.
-
-`role` – who asserted the statement, as opposed to `origin`'s where – sits in the window key of both branches, making it the fourth row-identity dimension after `id` / `origin` / `fragment`: two roles asserting identical content survive as two rows (full provenance) while one role re-asserting collapses. It is nullable, and DuckDB groups NULLs together in a `PARTITION BY`, so role-less rows dedupe against each other. `first_seen` folds per `(id, role)` rather than per `id`, so a role's first assertion of content an older role already wrote keeps its own date and stays visible to `first_seen`-based diffs. See [The Role Field](usage/entities.md#the-role-field).
-
-The async `optimize` operation runs the two storage primitives in order. `merge` holds the merge lock (`.LOCK-MERGE`), which the export sweep holds too – so an optimize never vacuums files a running sweep still reads – but which appends do not wait for: a merge removes exactly the files it read and an append only adds, Delta commits both, and a read reconciles the result, so ingest flows through an hours-long merge. The in-place rewrites (re-shard, `delete_origin`, schema changes, `vacuum`) take the exclusive `.LOCK` as well, and appends back off while it is held. Delta's optimistic concurrency serializes concurrent append commits:
+The async `optimize` operation runs two storage primitives:
 
 | Step | Cost | What it does |
 |------|------|--------------|
-| `merge()` | expensive | Per-partition rewrite: keep latest row per `(id, role)` (`ROW_NUMBER`) / latest emission per fragment group, fold `first_seen` to min, drop tombstones past grace |
-| `vacuum()` | cheap | Delta `VACUUM` – delete files no longer referenced in the Delta log |
+| `merge()` | expensive | Per-partition rewrite: latest row per `(id, role)` / latest emission per fragment group, `first_seen` folded to min, tombstones past grace dropped |
+| `vacuum()` | cheap | Delta `VACUUM` – delete files the log no longer references |
 
-`merge` reads the Delta log once per run: it loads one snapshot, hands each dirty partition's files from it to DuckDB (`read_parquet` over exactly those files, no `delta_scan`), writes the merged files with DuckDB's `COPY`, and commits the results in batches of 64 partitions – one transaction of `add` and `remove` actions each; a run that fails still commits the partitions that finished, so the next one picks up the rest. Replaying the log per partition is what made merges slow on large stores: every `delta_scan` and every `write_deltalake` replays the latest checkpoint, which lists every live file of the table. The dedupe query is the one reads use over a dirty partition, so a merge and a read can never disagree about what the rows mean. A run that committed anything ends with a Delta checkpoint: Delta writes one only every hundredth commit, and until then every load replays the previous one – which still lists every file the merge removed. Partitions can merge in parallel processes (`LAKEHOUSE_WORKERS`) – they are independent, a worker writes files and commits nothing, and it replays no log either, since the parent hands it the partition's files. The windows and the sort spill past each worker's share of `LAKEHOUSE_DUCKDB_MEMORY_LIMIT`, full-text values do not – the share has to cover the heaviest partition (see [Sizing parallel workers](deployment/configuration.md#sizing-parallel-workers)); a partition too large to merge in acceptable time wants more shards.
+`merge` takes the merge lock (`.LOCK-MERGE`), which the export sweep takes too, so an optimize never vacuums files a running sweep reads. Appends don't wait for it – a merge removes exactly the files it read, an append only adds – so ingest flows through a long merge. The in-place rewrites (re-shard, `delete_origin`, schema changes, `vacuum`) take the exclusive `.LOCK`, and appends back off while it is held.
 
-The store's Delta table is created with `delta.deletedFileRetentionDuration = 1 hour` and `delta.logRetentionDuration = 1 day` (the `migrate_parquet_table_properties` migration applies them to older stores). The Delta defaults – a week of `remove` actions in every checkpoint, 30 days of superseded checkpoints on disk – let the log of a frequently merged store outgrow the data it describes.
+A merge loads one Delta snapshot, reads each dirty partition's files with `read_parquet`, writes one merged file with DuckDB's `COPY` and commits in batches of 64 partitions; a failed run keeps the batches it committed, and the next run picks up the rest. A run that committed anything ends with a Delta checkpoint, so the next load doesn't replay the removed files. Partitions merge in parallel processes (`LAKEHOUSE_WORKERS`), each worker getting its partition's files from the parent. Each worker's share of `LAKEHOUSE_DUCKDB_MEMORY_LIMIT` has to cover the heaviest partition – see [Sizing parallel workers](deployment/configuration.md#sizing-parallel-workers); a partition too large to merge in acceptable time wants more shards.
+
+The Delta table is created with `delta.deletedFileRetentionDuration = 1 hour` and `delta.logRetentionDuration = 1 day` (the `migrate_parquet_table_properties` migration sets them on older stores) – with the Delta defaults the log of a frequently merged store outgrows its data.
 
 #### Sharding – why, and how many shards
 
-The `shard` partition key is the unit that keeps per-partition working sets bounded, independent of total dataset size. Everything expensive in the lakehouse operates one `(shard, bucket)` partition at a time:
+Everything expensive runs one `(shard, bucket)` pair at a time, so the shard count bounds the working set:
 
-- **Writes:** producers hand over whole batches without a partition key and `append` derives each row's shard, writing one file per `(shard, bucket, origin)` partition the batch spans. Bigger batches therefore cost fewer files, not more.
-- **Reads:** statement queries iterate `(shard, bucket)` partitions in Python, each over that pair's files; the live view is a plain scan, so filters push to file statistics and a full-store `ORDER BY entity_id` stays bounded to one partition. Single-entity lookups hash the entity id and scan just its own shard, in one query. The files come from a Delta snapshot each process keeps and advances incrementally (appends write through the same one), so a read never replays the log – `delta_scan` replayed it per query. A sorted or sliced query reads every pair it can touch in one query over the same files; global aggregates (`count`, statistics) still use `delta_scan`.
-- **Optimize:** the merge rewrite materializes one partition at a time (per worker) – its memory and rewrite cost scale with the largest partition, not the whole table.
+- **Writes:** `append` writes one file per `(shard, bucket, origin)` partition a batch spans – bigger batches cost fewer files.
+- **Reads:** statement queries run per pair over that pair's files, taken from a Delta snapshot each process keeps and advances incrementally, so a read never replays the log. A lookup by entity id reads only its own shard. A sorted or sliced query reads every pair it can touch in one query; `stats()` and the raw-SQL CLI use `delta_scan` views.
+- **Optimize and export:** a worker holds one partition (merge) or one pair (export sweep) at a time, so memory scales with the largest partition, not the table.
 
-Sharding is a trade-off, not a free win: every shard multiplies the partition count (`shard × bucket × origin`), which means more small parquet files, more Delta log metadata, and more per-partition query iterations. For small and medium datasets that overhead costs more than the bounded working sets gain.
-
-That's why the **default is `0`** – a single shard (`shard <= 1` collapses to one `"0"` partition). The default is hardcoded, deliberately not an environment setting: the shard count is per-dataset configuration, recorded in the dataset's `config.yml` at creation (e.g. `ensure_dataset("big_leak", shards=8)`), and every reader and writer resolves it from there. Placement is enforced rather than trusted: `ParquetStore.append` derives each row's shard from its `entity_id` against the count *it* resolved, so a producer holding a stale config cannot mis-shard an existing dataset. Don't configure shards unless the dataset is huge: from roughly tens of millions of statements upward, set `shards: 8` (or more, scaling with entity count) so merge rewrites stay bounded. Size it for the data you expect, not the data you have on day one: the shard count is fixed for as long as the store stands, and changing it means rewriting every partition. When a dataset does outgrow its layout, `ftm-lakehouse -d <dataset> maintenance shard --shards 8` (the `ShardOperation`) is that rewrite – see [Re-sharding](#re-sharding-an-existing-dataset).
+Every shard multiplies the partition count (`shard × bucket × origin`) – more small files, more log metadata, more per-pair queries – which costs small and medium datasets more than it saves. The **default is `0`**, a single shard `"0"` (`shards <= 1`). The count is per-dataset config, recorded in `config.yml` at creation (`ensure_dataset("big_leak", shards=8)`), not an environment setting. From roughly tens of millions of statements, configure `8` or more, sized for the data you expect: changing it later rewrites every partition – see [Re-sharding](#re-sharding-an-existing-dataset).
 
 #### Re-sharding an existing dataset
 
-`ShardOperation` (`ftm-lakehouse -d <dataset> maintenance shard --shards <n>`, or `operation.shard(dataset, shards)`) changes the count after the fact. It drains the journal, then rewrites the statement store onto the new layout and records the new count in `config.yml` – in that order, since the config is what every other process resolves the layout from.
+`ShardOperation` (`ftm-lakehouse -d <dataset> maintenance shard --shards <n>`, or `operation.shard(dataset, shards)`) drains the journal, rewrites the statement store onto the new count and then records it in `config.yml` – the config last, since every other process resolves the layout from it.
 
-`bucket` and `origin` are invariant under a re-shard – only `shard` moves – so the rewrite runs one `write_deltalake` per `(bucket, origin)` group: every source partition of the group streams through a single chained Arrow reader (`SELECT *` with the `shard` column recomputed from `entity_id` in DuckDB), and the group's partitions are replaced wholesale in one atomic commit. Nothing is materialized in Python. Like `merge`, the re-shard reads the Delta log once: source partitions are read from one snapshot's file lists (`read_parquet`, no `delta_scan` per partition) and every group write goes through that same table handle.
+Only `shard` moves, so the rewrite runs one streamed `write_deltalake` per `(bucket, origin)` group, replacing the group's partitions in one commit, read from one snapshot. Rows are neither deduped nor sorted, so every partition comes out dirty: run `optimize` afterwards. Re-running is safe – a row's target shard depends only on its `entity_id` and the count.
 
-Deliberately **not** a merge: rows are neither deduped nor sorted on the way through, because the trigger is a store whose partitions have grown too big to query well, not one whose content is wrong. Every rewritten partition therefore comes out dirty (delta-rs names its files `part-*`), so reads reconcile it; run `optimize` afterwards to get plain-scan reads and the file sort order back. Re-running a re-shard is safe: each row's target shard is a function of its `entity_id` and the target count alone, so a run interrupted between group commits is repaired by running it again.
+Caveats:
 
-Two caveats. The write fence holds off parquet appends but not journal writes, so statements journalled under the old count and flushed after the rewrite land in the wrong partition – **run it with writers stopped**. And the operation skips when `config.yml` already names the target count, so a config edited by hand to a count the store was never rewritten for needs `--force`.
-
-**Principles:**
-
-- Each store is independent – no cross-store awareness
-- Operates on a single storage URI
-- Returns/accepts model objects
-- No business logic
-
-See [Storage Reference](reference/storage.md) for API details.
+- `.LOCK` holds off parquet appends but not journal writes: rows flushed under the old count after the rewrite land in the wrong partition – **run it with writers stopped**.
+- The operation skips when `config.yml` already names the target count; a config edited by hand to a count the store was never rewritten for needs `--force`.
 
 ## Layer 3: Repository
 
-Domain-specific combinations of multiple stores. Each repository owns ONE domain concept.
+Domain-specific combinations of stores, one domain concept each: `EntityRepository` (journal + parquet store; `ApiEntityRepository` in api mode), `ArchiveRepository` (content-addressed files), `DocumentRepository` (the documents csv), `ArtifactsRepository` (export artifacts and their diff series) and `JobRepository`. All are resolved through the cached factories in `repository/factories.py`.
 
-```
-repository/
-  base.py        # DatasetHandle - dataset-addressed handle base
-  archive.py     # ArchiveRepository - blobs, file metadata, text (via get_store)
-  entities.py    # EntityRepository - uses JournalStore + ParquetStore
-  documents.py   # DocumentRepository - compiled document metadata CSV + diffs
-  job.py         # JobRepository - job tracking (via get_store)
-  factories.py   # Cached factory functions (get_archive, get_entities, etc.)
-```
+- No cross-domain awareness (`ArchiveRepository` doesn't know about statements)
+- May use `get_store()` directly for simple storage
+- Freshness through the `TagStore`
 
-**Principles:**
-
-- Combines stores for a single domain concept
-- May use `get_store()` directly for simple storage needs (blobs, metadata JSON)
-- No cross-domain awareness (ArchiveRepository doesn't know about statements)
-- Provides domain-specific operations
-- Uses TagStore for freshness tracking
-
-See [Repository Reference](reference/repository.md) for API details.
+See [Repository Reference](reference/repository.md).
 
 ## Layer 4: Operation
 
-Multi-step workflows that coordinate across repositories. This is where "action chains" are made explicit.
+Multi-step workflows across repositories: `ExportOperation`, `CrawlOperation`, `OptimizeOperation`, `ShardOperation`, `MigrateOperation`, `MakeOperation`, `DownloadArchiveOperation`.
 
-```
-operation/
-  base.py          # DatasetJobOperation - base class with freshness checks
-  export.py        # ExportOperation - every export from one entity sweep
-  crawl.py         # CrawlOperation - source → files → entities
-  maintenance.py   # OptimizeOperation - merge + vacuum in one pass
-  make.py          # MakeOperation - flush + export
-  download.py      # DownloadArchiveOperation
-```
+- Each declares a `target` tag and the `dependencies` it is fresh against; `DatasetJobOperation` skips a run whose target is newer than its dependencies
+- Each run is recorded as a job
 
-**Principles:**
-
-- Operations are internal (not exposed to clients directly)
-- Make multi-step processes explicit
-- Handle freshness checks via `@skip_if_latest` decorator or `ensure_flush()`
-- May span multiple repositories
-- Create job run records for tracking
-
-See [Operation Reference](reference/operation.md) for API details.
+See [Operation Reference](reference/operation.md).
 
 ## Layer 5: Public API
 
-The public interface that clients use – repositories are the dataset handle, resolved through the LRU-cached factories:
-
-```
-lake.py          # get_lakehouse(), repository shortcuts (re-exports)
-catalog.py       # config.yml lifecycle functions + slim Catalog
-```
-
-**Day-to-day access** goes through the repository factories – every path addressing the same dataset shares one cached instance:
+Repositories are the dataset handle – every path addressing a dataset shares one cached instance:
 
 ```python
 from ftm_lakehouse import ensure_dataset, get_entities, get_archive
@@ -223,46 +144,21 @@ entities = get_entities("my_data")                       # EntityRepository
 archive = get_archive("my_data")                         # ArchiveRepository
 ```
 
-**Config lifecycle** lives in module functions: `ensure_dataset()` (get-or-create), `update_dataset()` (merge-write + versioned snapshot; invalidates the factory caches so newly fetched repositories see the fresh config), `get_dataset_model()` (fresh read), `get_dataset_index()`, `dataset_exists()`. Repositories snapshot their model (`shards`, `compression`) at construction – layout-affecting config must be set at creation.
+**Config lifecycle** is module functions in `catalog.py`: `ensure_dataset()` (get-or-create), `update_dataset()` (merge-write plus versioned snapshot; clears the factory caches), `get_dataset_model()`, `get_dataset_index()`, `dataset_exists()`. Repositories snapshot `shards` and `compression` at construction, so layout-affecting config must be set at creation.
 
-**Multi-dataset concerns** go through the slim `Catalog` (`get_lakehouse()`): `list_datasets()`, `dataset_uri(name)`. The API server keeps one as `app.state.lake`.
+**Multi-dataset concerns** go through the slim `Catalog` (`get_lakehouse()`): `list_datasets()`, `dataset_uri(name)`.
 
-See [Lake Reference](reference/lake.md) for API details.
+See [Lake Reference](reference/lake.md).
 
 ## Core
 
-Cross-cutting concerns used by all layers.
-
-```
-core/
-  settings.py           # Configuration from environment (Settings, ApiSettings)
-  config.py             # Config loading utilities (load_config)
-  conventions/
-    path.py             # Path patterns (archive/, exports/, etc.)
-    tag.py              # Tag keys (statements/last_updated, exports/statements, etc.)
-```
-
-**Principles:**
-
-- No business logic
-- Pure utilities and configuration
-- Can be used by any layer
-
-**Additional Modules:**
-```
-helpers/                # Domain-specific utilities
-  file.py               # File handling (mime_to_schema, etc.)
-  statements.py         # Statement pack/unpack for journal
-  serialization.py      # Model serialization utilities
-```
+Cross-cutting configuration and utilities, used by every layer, with no business logic: settings, config loading, path and tag conventions, the outgoing api client, Arrow IPC framing and ZFS tuning.
 
 ## Usage Examples
 
-For detailed usage examples, see:
-
-- [Quickstart](quickstart.md) - Getting started guide
-- [Working with Entities](usage/entities.md) - Entity/statement operations
-- [Working with Files](usage/archive.md) - File archive operations
+- [Quickstart](quickstart.md)
+- [Working with Entities](usage/entities.md)
+- [Working with Files](usage/archive.md)
 
 ## Module Layout
 
@@ -270,74 +166,79 @@ For detailed usage examples, see:
 ftm_lakehouse/
 ├── lake.py                  # get_lakehouse(), repository shortcuts
 ├── catalog.py               # config lifecycle fns + slim Catalog
-├── util.py                  # dependency-light primitives (validation, checksums)
+├── util.py                  # dependency-light primitives (validation, checksums, process_map)
 ├── exceptions.py
 │
 ├── model/                   # Layer 1: Pure data structures
-│   ├── dataset.py           # DatasetModel - dataset metadata / config
-│   ├── file.py              # File metadata model
+│   ├── dataset.py           # DatasetModel – dataset metadata / config
+│   ├── file.py              # File metadata
 │   ├── job.py               # Job models
-│   └── statement.py         # JOURNAL/SHARDED_SCHEMA, LakehouseStatement
+│   └── statement.py         # JOURNAL / SHARDED_SCHEMA, LakehouseStatement, statements_to_arrow
 │
 ├── storage/                 # Layer 2: Single-purpose storage interfaces
-│   ├── journal/             # SQL write-ahead log (sql.py, api.py, base.py)
-│   ├── parquet.py           # ParquetStore (Delta Lake, write fence, merge)
+│   ├── journal/             # SQL write-ahead log (base.py, sql.py, api.py)
+│   ├── parquet.py           # ParquetStore (Delta Lake: append, merge, vacuum, shard, sweep)
 │   ├── tags.py              # TagStore (freshness)
 │   └── versions.py          # VersionStore (config / index snapshots)
 │
 ├── repository/              # Layer 3: Domain-specific storage combinations
 │   ├── base.py              # DatasetHandle, dataset_uri(), ensure_zfs()
-│   ├── factories.py         # LRU-cached single instantiation path
-│   ├── entities/            # EntityRepository (main.py) + API delegate (api.py)
-│   ├── archive.py           # ArchiveRepository (content-addressed files)
+│   ├── factories.py         # cached single instantiation path
+│   ├── entities/            # EntityRepository (main.py), ApiEntityRepository (api.py)
+│   ├── archive.py           # ArchiveRepository
 │   ├── documents.py         # DocumentRepository
-│   ├── artifacts.py         # Export artifacts, their writers and diff series
+│   ├── artifacts.py         # export artifacts, their writers and diff series
 │   └── job.py               # JobRepository
 │
 ├── operation/               # Layer 4: Multi-step workflow operations
-│   ├── base.py              # DatasetJobOperation (freshness targets / deps)
-│   ├── factories.py         # export(), optimize(), make(), crawl(), ...
+│   ├── base.py              # DatasetJobOperation (freshness target / dependencies)
+│   ├── factories.py         # export(), optimize(), shard(), migrate(), make(), ...
 │   ├── export.py            # ExportOperation (one sweep, every artifact)
-│   ├── maintenance.py       # OptimizeOperation
-│   ├── make.py              # MakeOperation (full workflow)
+│   ├── maintenance.py       # OptimizeOperation, ShardOperation, MigrateOperation
+│   ├── migrations.py        # registered store migrations
+│   ├── make.py              # MakeOperation (flush + export)
 │   ├── crawl.py             # CrawlOperation
 │   └── download.py          # DownloadArchiveOperation
 │
-├── logic/                   # Pure business logic (no storage deps)
-│   ├── entities/            # aggregate.py, buffer.py, explode.py
-│   ├── parquet.py           # DuckDB view / merge SQL builders
+├── logic/                   # Business logic, no storage
+│   ├── entities/            # aggregate.py, buffer.py, explode.py, stats.py
+│   ├── parquet.py           # DuckDB view / merge / shard SQL builders
+│   └── path.py              # path primitives for the conventions
 │
 ├── helpers/                 # FtM-domain building blocks
-│   ├── statements.py        # Statement wire format, BASE_ID stub
-│   ├── file.py              # File → entity construction
-│   └── serialization.py
+│   ├── file.py              # file → entity construction, FolderTree
+│   ├── schema.py            # schema introspection
+│   ├── shards.py            # entity_shard
+│   ├── statements.py        # statement row identity, BASE_ID stub
+│   └── serialization.py     # model (de)serialization
 │
 ├── api/                     # FastAPI REST API
-│   ├── main.py              # App factory, blob mounting
+│   ├── main.py              # app factory, blob mounting
 │   ├── dependencies.py      # DatasetName / Entities / Shards / Journal deps
-│   └── routes/              # entities.py, journal.py, operations.py
+│   └── routes/              # entities.py, journal.py, operations.py, ensure.py
 │
 ├── cli/                     # Typer CLI (sub-typer groups)
-│   ├── __init__.py          # Main app, contexts, ls / datasets / configure
-│   ├── io.py                # Shared bulk-import loop
+│   ├── __init__.py          # main app, contexts, ls / datasets / configure
+│   ├── io.py                # shared bulk-import loops
 │   ├── entities.py          # entities iterate / stream / import
 │   ├── statements.py        # statements iterate / stream / import / sql
-│   ├── archive.py           # archive get / ls / download
-│   ├── maintenance.py       # make, export, maintenance flush / optimize / unlock
-│   ├── crawl.py             # crawl (top level)
-│   └── zfs.py               # zfs init (agent lives in the zfs-agent package)
+│   ├── archive.py           # archive get / head / ls / download
+│   ├── maintenance.py       # make, export, maintenance flush / optimize / shard / migrate / unlock
+│   ├── crawl.py             # crawl
+│   └── zfs.py               # zfs init
 │
 └── core/                    # Cross-cutting concerns
     ├── settings.py          # LAKEHOUSE_* env configuration
     ├── config.py            # config.yml loading
-    ├── api.py               # API-mode delegation mixin
+    ├── api.py               # outgoing lakehouse-api client, no_api guard
+    ├── arrow.py             # Arrow IPC framing for the api wire
     ├── conventions/         # path.py, tag.py
-    └── zfs.py               # ZFS tuning + zfs-agent package caller
+    └── zfs.py               # ZFS tuning + zfs-agent caller
 ```
 
 ## Storage Layout & Tags
 
-The on-disk layout of a dataset and the freshness-tag vocabulary are documented in [Conventions](conventions.md).
+The on-disk layout of a dataset and the freshness tags are documented in [Conventions](conventions.md).
 
 ## Dependency Chain
 
@@ -361,23 +262,24 @@ flowchart TD
     D & E & F & H & P --> |"registered by the same run"| G[index.json]
 
     C -.-> T2[statements/last_updated]
-    D -.-> T3[exports/statements]
-    E -.-> T4[exports/entities_json]
-    F -.-> T5[exports/statistics]
-    H -.-> T6[exports/documents]
+    D -.-> T3[exports/statements.csv]
+    E -.-> T4[entities.ftm.json]
+    F -.-> T5[exports/statistics.json]
+    H -.-> T6[exports/documents.csv]
+    P -.-> T7[exports/parents.csv]
 
     classDef tag fill:#f9f,stroke:#333,stroke-width:1px
     classDef storage fill:#69b,stroke:#333,stroke-width:2px,color:#fff
-    class T0,T2,T3,T4,T5,T6 tag
+    class T0,T2,T3,T4,T5,T6,T7 tag
     class B,C,AR storage
 ```
 
 ## Key Principles
 
-1. **Each storage does ONE thing** - no cross-storage awareness
-2. **Repositories combine storages** - for ONE domain concept
-3. **Operations are explicit workflows** - no hidden side effects
-4. **Freshness is explicit** - checked in operations, not decorators
-5. **Public API is simple** - delegates to repositories/operations
-6. **`__init__.py` exports only** - no logic in init files
-7. **Strict layer dependencies** - upper layers depend on lower layers only
+1. **Each store does one thing** – no cross-store awareness
+2. **Repositories combine stores** – for one domain concept
+3. **Operations are explicit workflows** – no hidden side effects
+4. **Freshness is explicit** – targets and dependencies on the operation, not decorators
+5. **The public API is simple** – it delegates to repositories and operations
+6. **`__init__.py` exports only** – no logic in init files
+7. **Strict layer dependencies** – upper layers depend on lower layers only
