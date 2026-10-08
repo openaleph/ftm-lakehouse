@@ -203,6 +203,8 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
                         )
                         for part, source in zip(parts, sources)
                     ]
+                    # largest first, so no big pair starts last and holds up the end
+                    tasks.sort(key=lambda task: task.source.size, reverse=True)
                     by_parts = {task.parts: task for task in tasks}
                     done: dict[str, ExportPart] = {}
                     headed = False

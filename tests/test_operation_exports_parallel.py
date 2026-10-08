@@ -8,6 +8,7 @@ pins that they produce the same thing, plus a ``DEL``, which no pair can see.
 
 import hashlib
 import json
+from contextlib import contextmanager
 from importlib import import_module
 from pathlib import Path
 
@@ -133,6 +134,29 @@ def test_export_parallel_matches_serial(tmp_path):
     assert _stats(uri) == serial_stats
     assert serial_stats["entity_count"] == 60
     assert _rows(uri, path.EXPORTS_DOCUMENTS) == serial_documents
+
+
+def test_export_parallel_largest_pairs_first(tmp_path, monkeypatch):
+    """Pairs go to the workers largest first – none of the big ones starts last."""
+    uri = _setup(tmp_path, 3)
+    submitted: list[int] = []
+    process_map = export_module.process_map
+
+    @contextmanager
+    def recording(workers, ordered=True):
+        with process_map(1) as run:
+
+            def record(fn, tasks):
+                tasks = list(tasks)
+                submitted.extend(task.source.size for task in tasks)
+                return run(fn, tasks)
+
+            yield record
+
+    monkeypatch.setattr(export_module, "process_map", recording)
+    export(DATASET, uri, make_diff=False)
+    assert len(set(submitted)) > 1, "pairs of one size prove nothing"
+    assert submitted == sorted(submitted, reverse=True)
 
 
 def test_export_parallel_merged_store(tmp_path):
