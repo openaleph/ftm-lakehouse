@@ -190,7 +190,7 @@ class EntityPayload:
         for prop_name in schema.caption:
             values = properties.get(prop_name)
             if values:
-                caption = next(iter(values))
+                caption = min(values)
                 break
         if caption is None:
             caption = schema.label
@@ -199,15 +199,16 @@ class EntityPayload:
             "id": self.id,
             "caption": caption,
             "schema": schema.name,
-            "properties": {k: list(v) for k, v in properties.items()},
-            "referents": list(compiled["referents"]),
-            "datasets": list(compiled["datasets"]),
+            # sorted: the statements of an entity come in no fixed order
+            "properties": {k: sorted(v) for k, v in sorted(properties.items())},
+            "referents": sorted(compiled["referents"]),
+            "datasets": sorted(compiled["datasets"]),
         }
 
         if compiled["origins"]:
-            data["origin"] = list(compiled["origins"])
+            data["origin"] = sorted(compiled["origins"])
         if compiled["roles"]:
-            data["role"] = list(compiled["roles"])
+            data["role"] = sorted(compiled["roles"])
         if compiled["first_seens"]:
             data["first_seen"] = min(compiled["first_seens"])
         if compiled["last_seens"]:

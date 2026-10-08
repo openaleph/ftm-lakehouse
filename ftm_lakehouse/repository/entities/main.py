@@ -1,5 +1,6 @@
 """EntityRepository - entity/statement operations using JournalStore + ParquetStore."""
 
+from datetime import datetime
 from functools import cached_property
 from typing import Iterable, Iterator, cast
 
@@ -170,8 +171,16 @@ class EntityRepository(DatasetHandle):
         self.shards = shards
 
     def query_statements_data(self, q: Query | None = None) -> Iterator[StatementDict]:
-        """[`query_statements`][EntityRepository.query_statements] as plain dicts."""
-        yield from self.statements._statement_data(q)
+        """[`query_statements`][EntityRepository.query_statements] as plain dicts –
+        the stored columns, timestamps as ISO strings, as the api sends them."""
+        for row in self.statements._statement_data(q):
+            yield cast(
+                StatementDict,
+                {
+                    k: v.isoformat() if isinstance(v, datetime) else v
+                    for k, v in row.items()
+                },
+            )
 
     def query(
         self, q: Query | None = None, *, flush_first: bool = False
