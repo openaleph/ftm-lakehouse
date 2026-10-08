@@ -21,6 +21,7 @@ def _export(tmp_path, make_diff: bool = True) -> None:
 
 
 from ftm_lakehouse.repository.factories import get_artifacts, get_entities
+from ftm_lakehouse.storage.journal.api import ApiJournalStore
 from tests.conftest import make_docker_repo, make_test_api
 from tests.shared import BOB, JANE, JANE_FIRSTNAME, JOHN
 
@@ -61,14 +62,16 @@ def test_repository_entities(repo):
     # Query returns entities (flushes journal first)
     # before flush:
     assert not repo._tags.exists(tag.STATEMENTS_UPDATED)
-    assert repo._journal.count() > 0
+    # a remote journal (docker) has no count over the api
+    remote = isinstance(repo._journal, ApiJournalStore)
+    assert remote or repo._journal.count() > 0
     assert repo.stats().entity_count == 0
 
     # This auto flushes the journal:
     entities = list(repo.query(flush_first=True))
     # after flush:
     assert len(entities) == 2
-    assert repo._journal.count() == 0
+    assert remote or repo._journal.count() == 0
     assert repo.stats().entity_count == 2
     # Tag should be set after flush (triggered by query)
     assert repo._tags.exists(tag.STATEMENTS_UPDATED)
