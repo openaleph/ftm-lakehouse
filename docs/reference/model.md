@@ -18,9 +18,9 @@ Pure data structures with no dependencies. Pydantic models for serialization.
 
 ## Statement Schema
 
-Two schemas, one column apart. `JOURNAL_SCHEMA` is the producer schema – what every write path packs, what the journal table (`journal_table`) physically stores, and what the api wire format carries. `SHARDED_SCHEMA` prepends the `shard` partition key and is what parquet holds; `ParquetStore.append` derives that column from `entity_id`, so no producer carries a shard key of its own and none can route a row against a shard count other than the store's.
+Two schemas, one column apart. `JOURNAL_SCHEMA` is what every write path packs, the journal table (`journal_table`) stores and the api wire carries. `SHARDED_SCHEMA` adds the `shard` partition key and is what parquet holds – `ParquetStore.append` derives it from `entity_id`.
 
-`LakehouseStatement` is the statement the write path passes around – ftmq's `LakeStatement` plus `deleted_at`, the tombstone marker. It deliberately carries no `shard`: a statement is content plus provenance, and where it lands is the store's call. `statements_to_arrow` is the one packer both statement write paths use: ftmq's `statements_to_table` packs the statement columns columnwise, this adds `deleted_at`, drops `canonical_id`, and applies the shared rules (`first_seen` / `last_seen` default, tombstone `last_seen` bump) as vectorized fills.
+`LakehouseStatement` is ftmq's `LakeStatement` plus the two columns the lakehouse adds: `deleted_at` (the tombstone marker) and `role` (who asserted the statement). `statements_to_arrow` packs statements into a `JOURNAL_SCHEMA` table for both write paths and applies their shared fill rules.
 
 ::: ftm_lakehouse.model.statement.LakehouseStatement
     options:

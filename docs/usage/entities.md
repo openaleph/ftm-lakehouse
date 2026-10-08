@@ -1,17 +1,17 @@
 # Working with Entities
 
-The entities repository is the primary way to work with [FollowTheMoney](https://followthemoney.tech) data in `ftm-lakehouse`. It provides a unified API for reading, writing, and querying entities.
+The entities repository is the main way to read, write and query [FollowTheMoney](https://followthemoney.tech) data in `ftm-lakehouse`.
 
 ## Overview
 
-Entities in `ftm-lakehouse` are stored as **statements** – granular property-level records. This design enables:
+Entities are stored as **statements** – one record per property value. That gives:
 
-- **Versioning**: Track changes over time via `first_seen` / `last_seen`
-- **Provenance**: Know where each piece of data came from (`origin`, `role`, `original_value`, and other metadata from the [Statement model](https://followthemoney.tech/docs/statements/))
-- **Incremental updates**: Add new data without reprocessing everything
-- **Simple identity**: entities are keyed on `entity_id`; this is a single-dataset store with no cross-source resolution, so `canonical_id` is not persisted (it always equals `entity_id`)
+- **Versioning**: `first_seen` / `last_seen` per statement
+- **Provenance**: `origin`, `role`, `original_value` and the rest of the [Statement model](https://followthemoney.tech/docs/statements/)
+- **Incremental updates**: new data is appended, nothing is reprocessed
+- **Simple identity**: entities are keyed on `entity_id`. A dataset has no cross-source resolution, so `canonical_id` is not stored (it always equals `entity_id`)
 
-The underlying storage is a single Delta Lake table per dataset, partitioned by `(shard, bucket, origin)` – see [Sharded append-only pattern](../architecture.md#sharded-append-only-pattern) for the partition keys, write fence and merge semantics. Writes are **append-only**; reads reconcile duplicates, superseded fragments and tombstones at read time, and the async `optimize` operation compacts them physically.
+Each dataset is one Delta Lake table, partitioned by `(shard, bucket, origin)` – see [Sharded append-only pattern](../architecture.md#sharded-append-only-pattern). Writes are append-only. Reads reconcile duplicates, superseded fragments and tombstones, and the `optimize` operation compacts them on disk.
 
 ## Quick Start
 
@@ -37,17 +37,20 @@ for entity in entities.query():
     process(entity)
 ```
 
-The `EntityRepository` handle is resolved through an LRU-cached factory – every path addressing the same dataset (library, CLI, operations, API server) shares one instance.
+`get_entities` returns one cached `EntityRepository` per dataset, shared by the library, CLI, operations and API server.
 
 ## Writing Entities
+
+Writes go to the journal and become readable once flushed into parquet.
 
 ### Single Entity
 
 ```python
-from ftm_lakehouse import ensure_dataset
 from followthemoney import model
+from ftm_lakehouse import ensure_dataset, get_entities
 
-dataset = ensure_dataset("my_dataset")
+ensure_dataset("my_dataset")
+entities = get_entities("my_dataset")
 
 entity = model.make_entity("Person")
 entity.id = "jane-doe"
@@ -59,15 +62,13 @@ entities.add(entity, origin="manual")
 
 ### Bulk Writing (through the journal)
 
-For interactive ingestion that wants the journal's crash-safety guarantees:
-
 ```python
 with entities.writer(origin="bulk_import") as writer:
     for entity in source_entities:
         writer.add_entity(entity)
 ```
 
-Writes buffer in a SQL journal – an append-only table carrying the same columns as the parquet store. Call `entities.flush()` to drain it into parquet:
+The writer inserts into the journal in batches – an append-only SQL table with the parquet store's columns. If the block raises, it drops what it has not inserted yet; batches already inserted stay. `flush()` drains the journal into parquet:
 
 ```python
 count = entities.flush()
@@ -76,7 +77,7 @@ print(f"Flushed {count} statements")
 
 ### Bulk Import (bypassing the journal)
 
-For one-shot loads where journal write-amplification is wasteful (millions of entities from an exported file), stream through an in-memory buffer and write directly to parquet:
+For one-shot loads, such as millions of entities from an exported file, skip the journal and write to parquet through an in-memory buffer:
 
 ```python
 from datetime import datetime, timezone
@@ -96,14 +97,16 @@ if buffer:
     repo.write_batches([buffer.flush_table(now)])
 ```
 
-The `EntityBuffer` keys statements by `(id, origin, fragment)`; `buffer.flush_table()` drains it as one packed Arrow table, and `repo.write_batches` appends it as one parquet file per `(shard, bucket, origin)` triple it spans. The buffer never sees a shard count – `shard` is not a packed column, and `ParquetStore.append` derives the stored key from `entity_id` – so nothing here can place a row against the wrong count.
+`EntityBuffer` collapses repeated statements per `(id, origin, fragment, role)`. `flush_table()` empties it as one Arrow table, and `write_batches` appends that as one parquet file per `(shard, bucket, origin)` partition it spans. Adding past `LAKEHOUSE_MAX_BUFFER_ROWS` raises `BufferFullError`, so flush before that.
 
-The CLI command `ftm-lakehouse entities import` does exactly this.
+`ftm-lakehouse entities import` runs this loop.
 
 ## Reading Entities
 
 !!! note "Reads reconcile – `optimize` is an optimisation"
-    Statement reads collapse duplicates, apply fragment supersession and hide tombstoned rows at read time (see [Deduplication](#deduplication)), so `query`, exports and statistics are correct between a write and the next `optimize`. A merged partition is read as a plain scan, so run `optimize` on a schedule for speed and disk, not for correctness.
+    Reads collapse duplicates, apply fragment supersession and hide tombstones (see [Deduplication](#deduplication)), so `query`, exports and statistics are correct before the next `optimize`. Run `optimize` on a schedule for read speed and disk space.
+
+Reads see the parquet store, not the journal – pass `flush_first=True` to `get` / `query` to drain the journal first.
 
 ### Get by ID
 
@@ -115,38 +118,37 @@ if entity:
 
 ### Query with Filters
 
-Filters are expressed as an [ftmq `Query`](https://docs.investigraph.dev/lib/ftmq/query) – built from filter nodes (`M` for statement meta fields like `origin` / `entity_id` / `schema`, `P` for entity properties):
+Filters are an [ftmq `Query`](https://docs.investigraph.dev/lib/ftmq/query) built from filter nodes: `M` for meta fields (`entity_id`, `schema`, …), `P` for entity properties and `C` for storage columns such as `origin` and `role`:
 
 ```python
-from ftmq.query import M, Query
+from ftmq.query import C, M, Query
 
-for entity in entities.query(Query(M(origin="import"))):
+for entity in entities.query(Query(C(origin="import"))):
     print(entity.id)
 
 ids = ["jane-doe", "john-smith"]
 for entity in entities.query(Query(M(entity_id__in=ids))):
     print(entity.caption)
 
-# By schema – the (shard, bucket) partition prunes are derived from the
-# query (schema → bucket, entity_id → shard)
+# schema and entity_id filters also skip the partitions that cannot match
 for entity in entities.query(Query(M(schema="Person"))):
     print(entity.schema.name)
 ```
 
-### Stream from Exported File
+`query_statements` takes the same `Query` and yields the statements (`LakehouseStatement`) instead of entities.
 
-For full-dataset iteration, streaming from the pre-exported JSON file is typically faster than running an aggregating query against the parquet store:
+### Stream from Exported File
 
 ```python
 for entity in entities.stream():
     process(entity)
 ```
 
-`stream()` reads from `entities.ftm.json`. Use `query()` to read the live statement store; `iterate()` on the CLI does the same.
+`stream()` reads the last export, `entities.ftm.json`. For a full pass that is faster than aggregating the statement store, but only as fresh as the export. On the CLI, `entities stream` reads the export and `entities iterate` the live store.
 
 ## The Origin Field
 
-`origin` is part of the partition key (alongside `shard` and `bucket`) and tracks where data came from. Useful for filtering, auditing, and partition-scoped re-runs:
+`origin` records where data came from. It is a partition key, so filters on it are cheap:
 
 ```python
 with entities.writer(origin="source_a") as writer:
@@ -157,13 +159,15 @@ with entities.writer(origin="source_b") as writer:
     for entity in source_b_entities:
         writer.add_entity(entity)
 
-for entity in entities.query(Query(M(origin="source_a"))):
+for entity in entities.query(Query(C(origin="source_a"))):
     print(entity.id)
 ```
 
+`entities.delete_origin("source_a")` drops an origin physically – stop its writers first.
+
 ## The Role Field
 
-Where `origin` records *where* data came from, `role` records *who* asserted it – an identifier a submitting application supplies for the user, service account or other actor behind a write:
+`role` records *who* asserted a statement – an id the submitting application supplies for the user, service account or other actor behind a write:
 
 ```python
 with entities.writer(origin="webui", role="user:42") as writer:
@@ -174,11 +178,11 @@ with entities.writer(origin="webui", role="user:42") as writer:
     writer.add_statement(stmt, role="user:7")
 ```
 
-`role` is optional – `None` (the default) means "no role", stored as NULL. It is not part of the statement `id`: identical content produces the same content-addressed id whoever asserts it.
+`role` is optional; `None` is stored as NULL. It is not part of the statement `id`, so identical content gets the same id whoever asserts it.
 
 ### Roles are row identity, not a last-writer-wins field
 
-`role` joins `origin` and `fragment` as the store's row identity, so **two roles asserting identical content survive as two rows** rather than the later one overwriting the earlier:
+Like `origin` and `fragment`, `role` is part of a row's identity, so **two roles asserting identical content keep two rows**:
 
 ```python
 with entities.writer(role="user:42") as writer:
@@ -186,21 +190,20 @@ with entities.writer(role="user:42") as writer:
 with entities.writer(role="user:7") as writer:
     writer.add_statement(stmt)  # same content
 
-entities.flush()
 entities.merge()
-# two rows, one per role - full provenance of who asserted what
+# two rows, one per role
 ```
 
-One role re-asserting the same content still collapses to one row, and that row keeps its original `first_seen`. A role's *first* assertion of content another role already wrote is a new row with its own `first_seen`, so diff exports (which detect change on `first_seen`) surface it.
+One role re-asserting the same content still collapses to one row, which keeps its original `first_seen`. A role's first assertion of content another role already wrote is a new row with its own `first_seen`, so diff exports report it.
 
-Row multiplication is provenance only. The assembled entity is unchanged – its properties still hold one value per distinct value, whoever asserted it:
+The assembled entity is unchanged – a property holds each distinct value once:
 
 ```python
 entity = entities.get("acme")
 assert entity.get("name") == ["Acme Inc"]  # not duplicated per role
 ```
 
-Because it is an ordinary storage column, filtering needs no special support – use the `C` (context / column) family:
+Filter with the `C` family:
 
 ```python
 from ftmq.query import C, Query
@@ -209,11 +212,11 @@ for entity in entities.query(Query(C(role="user:42"))):
     print(entity.id)
 ```
 
-Like `C(origin=...)`, this selects *entities* that have a matching statement, not individual rows.
+Like `C(origin=...)`, this selects the *entities* with a matching statement, not single rows.
 
 ### Deletes are per row
 
-`delete_entity` reads the live rows and writes one matching tombstone each, so it deletes what *every* role asserted – deleting the entity means deleting the entity. To remove only one role's assertion, read that row back and tombstone it alone:
+`delete_entity` tombstones every live row of the entity, whatever its role. To remove one role's assertion only, read the row back and tombstone it:
 
 ```python
 target = next(
@@ -223,13 +226,13 @@ target = next(
 entities.delete_statement(target)  # the read-back statement carries its role
 ```
 
-A tombstone that dropped the role would land in a different merge group and shadow nothing – which is why `delete_statement` takes a `role=` override for hand-built plain statements, mirroring `fragment=`.
+For a hand-built `Statement`, pass `role=` (and `fragment=`) to `delete_statement` – a tombstone with the wrong role shadows nothing.
 
 ### Round-tripping
 
-`statements.csv` carries a `role` column, so a statement-level export/import keeps every role exactly. `entities.ftm.json` aggregates an entity's rows into one payload, so its `role` context key is a *list* – and on re-import a single role is recovered while multiple roles are ambiguous and fall back to the import default, exactly as `origin` behaves. Use the statement export when per-row role provenance has to survive a round-trip.
+`statements.csv` has a `role` column, so a statement export and re-import keeps every role. `entities.ftm.json` holds one payload per entity with `role` as a list: on re-import a single role is recovered, while several are ambiguous and fall back to the import default, as with `origin`. Use the statement export when per-row roles must survive.
 
-On the CLI, `--role` supplies the default for input that carries none; a payload's own `role` wins. There is deliberately no `--override-role`: roles arrive inside submissions rather than from the command line.
+On the CLI, `--role` is the default for input that carries none; a payload's own `role` wins. There is no `--override-role`.
 
 ```bash
 ftm-lakehouse -d my_dataset entities import --role user:42 -i entities.ftm.json
@@ -237,9 +240,9 @@ ftm-lakehouse -d my_dataset entities import --role user:42 -i entities.ftm.json
 
 ## Fragment Supersession
 
-Every statement is written in one of two modes, decided by the producer per statement. The default is **non-fragment**: content-addressed dedup, where each statement `id` lives or dies on its own `last_seen` and distinct ids never interact – everything described in this document so far.
+A statement is written in one of two modes. By default (**non-fragment**) dedup is content-addressed: each statement `id` lives on its own `last_seen`, and distinct ids never interact.
 
-Passing a `fragment` switches a statement into **supersession** mode (the same capability as the original [followthemoney-store](https://github.com/alephdata/followthemoney-store) `fragment` column): a later emission of the same `(entity_id, prop, fragment)` triple completely replaces the older emission for that triple, even though the changed values produce different content-addressed statement ids.
+With a `fragment`, a statement is in **supersession** mode, like the `fragment` column of [followthemoney-store](https://github.com/alephdata/followthemoney-store): a later emission for the same `(entity_id, prop, fragment)` replaces the older one, even though changed values have different statement ids.
 
 ```python
 with entities.writer(origin="csv_import") as writer:
@@ -249,25 +252,27 @@ with entities.writer(origin="csv_import") as writer:
 with entities.writer(origin="csv_import") as writer:
     writer.add_entity(updated_company, fragment="row42")
 
-# after flush, only the updated values are visible – the first emission
-# is superseded, not accumulated
+# after flush, only the updated values are visible
 ```
 
-The typical use is one fragment per source row in a CSV-style ingest (or per document in a crawler): re-processing the source replaces what that row previously said about the entity instead of accumulating stale values forever. `add_statement` accepts the same parameter for statement-level producers.
+Typical use is one fragment per source row in a CSV ingest, or per document in a crawler, so re-processing a source replaces what that row said instead of accumulating stale values. `add_statement` takes the same parameter.
 
 ### Semantics
 
-- **Scope is per `(entity_id, prop, fragment)`**, not per fragment as a whole. If the first emission had `name`, `address` and `country` and the re-emission only has `name` and `address`, the old `country` value survives – no newer row exists in its group. If you want whole-fragment replacement, emit explicit tombstones for the dropped props: statements read back from the store are `ftmq.store.lake.LakeStatement`s carrying their own fragment, so `delete_statement(stmt)` shadows the right group; the `fragment=` override is only needed for hand-built plain statements.
-- **Multi-valued props survive together.** All rows of one emission share a `last_seen`, so all values of the latest emission are kept (ties at the group maximum), and all values of older emissions go.
-- **The two modes are isolated.** A non-fragment row never supersedes a fragment row or vice versa, even with identical content. The same statement can legitimately exist under multiple fragments (and additionally without one) – `fragment` is part of the stored row identity, but not part of the statement `id`.
-- **Origins are isolated too.** The same fragment written under two different origins forms two independent supersession groups, matching the `(shard, bucket, origin)` partition scope of `merge`. **Roles isolate the same way** – two roles writing one fragment supersede independently.
-- **Tombstones participate.** A tombstone written with the fragment supersedes its group like any emission; the group disappears from queries immediately and is physically reaped once the tombstone passes the grace period. `delete_entity` handles this automatically – it reads each live row's fragment and writes fragment-matched tombstones.
+- **Scope is per `(entity_id, prop, fragment)`**, not the whole fragment. If the first emission had `name`, `address` and `country` and the re-emission only `name` and `address`, the old `country` stays. For whole-fragment replacement, tombstone the dropped props: a statement read back from the store carries its fragment, so `delete_statement(stmt)` hits the right group; pass `fragment=` only for hand-built statements.
+- **Multi-valued props survive together.** All rows of one emission share a `last_seen`, so all values of the latest emission are kept and all values of older ones go.
+- **The two modes are isolated.** A non-fragment row never supersedes a fragment row or vice versa, even with identical content. `fragment` is part of the row identity but not of the statement `id`, so the same statement can exist under several fragments and without one.
+- **Origins and roles are isolated too.** The same fragment under two origins, or written by two roles, forms independent groups.
+- **Tombstones participate.** A tombstone with the fragment supersedes its group like any emission: the group disappears from reads at once and is removed from disk once the tombstone passes the grace period. `delete_entity` writes fragment-matched tombstones itself.
 
 ### Producer contract
 
-All rows of one logical fragment emission **must share the same `last_seen` timestamp** – supersession keeps every row tied at the group's maximum, so jitter within an emission would keep only the very latest row and break multi-valued props. `add_entity` pins one timestamp per fragment emission (from the entity's `last_seen` / `last_change`, falling back to a single `now`); non-fragment emissions keep each statement's own `last_seen` (faithful provenance on store round-trips) and only fall back to the pinned value when unset. Statement-level producers assign one timestamp per batch themselves:
+All rows of one fragment emission **must share one `last_seen`** – supersession keeps the rows tied at the group's latest `last_seen`, so jitter within an emission would keep only the latest row. `add_entity` pins one timestamp per fragment emission (the entity's `last_seen` / `last_change`, else one `now`). Non-fragment statements keep their own `last_seen` and fall back to the pinned value only when unset. Statement-level producers set one timestamp per emission themselves:
 
 ```python
+from datetime import datetime, timezone
+from followthemoney import Statement
+
 ts = datetime.now(timezone.utc).isoformat()
 with entities.writer(origin="import") as writer:
     for prop, value in row_values:
@@ -277,33 +282,30 @@ with entities.writer(origin="import") as writer:
         )
 ```
 
-Note that the FtM statement model truncates `last_seen` to **second granularity**: two emissions of the same fragment within the same second tie, and both survive. Distinct emissions need distinct timestamps – re-processing loops faster than once per second should carry producer-assigned timestamps.
+Distinct emissions need distinct timestamps: two emissions of one fragment with the same `last_seen` tie, and both survive.
 
-In storage, "no fragment" is the empty string, never NULL; the SDK translates `fragment=None` to `''` at the boundary.
+"No fragment" is stored as the empty string, never NULL; `fragment=None` becomes `''`.
 
 ## Deleting Entities
 
-Deletes are tombstones routed through the journal (or `EntityBuffer` for the bulk path). They land in parquet as rows with `deleted_at` set. The read collapses the live + tombstone pair and hides the tombstone, so a deleted entity disappears from `query()` as soon as the tombstone is flushed (`stream()` reads the last export). `merge` removes both rows physically once the tombstone passes the grace period.
+Deletes are tombstones – rows with `deleted_at` set, written through the journal (or `EntityBuffer` on the bulk path). A deleted entity disappears from `query()` once the tombstone is flushed; `stream()` shows it until the next export. `merge` removes the tombstone and the rows it shadows once the tombstone is older than the grace period.
 
 ### Delete an Entity
 
 ```python
 count = entities.delete_entity("jane-doe")
 print(f"Wrote {count} tombstones")
-
 entities.flush()
-entities.merge()  # collapse live+tombstone → tombstone survives until grace
 ```
+
+`origin=` limits the delete to one origin's statements.
 
 ### Delete a Single Statement
 
 ```python
-stmts = list(entities.query_statements())
-target = stmts[0]
-
+target = next(entities.query_statements())
 entities.delete_statement(target)
 entities.flush()
-entities.merge()
 ```
 
 ### Re-adding After Delete
@@ -311,33 +313,30 @@ entities.merge()
 ```python
 entities.delete_entity("jane-doe")
 entities.flush()
-entities.merge()  # set LAKEHOUSE_GRACE_PERIOD_DAYS=0 to drop tombstones immediately
 
 entities.add(updated_jane, origin="correction")
 entities.flush()
 # jane-doe is alive again with the new data
 ```
 
+A re-added statement is newer than its tombstone, so it wins with or without a merge in between.
+
 ## Deduplication
 
-**On write**: identical statements collapse only inside one writer batch, where the in-memory buffer keys rows by `(id, origin, fragment, role)`. The journal itself is append-only and keyless – re-emissions accumulate as rows.
-
-**Across flushes**: re-flushing the same statement appends a new parquet row. The duplicates only collapse when `merge` runs. `merge` keeps the row with the latest `last_seen` per statement id and role (per supersession group for fragment rows) and folds `first_seen` to the minimum across the group.
+Nothing collapses on write, except inside one writer batch, where the buffer keys rows by `(id, origin, fragment, role)`. The journal is append-only, so re-flushing a statement appends another parquet row. Reads collapse them, and `merge` does so on disk: it keeps the row with the latest `last_seen` per statement `id` and role (per supersession group for fragment rows) and folds `first_seen` to the earliest.
 
 ```python
 entities.add(entity)
 entities.flush()   # one row in parquet
 entities.add(entity)
-entities.flush()   # two rows now; same statement.id
+entities.flush()   # two rows, one statement id – reads return one
 
-entities.merge()   # back to one row, last_seen=now, first_seen=original
+entities.merge()   # one row: last_seen=now, first_seen=original
 ```
-
-There is no write-time collapse: duplicates land as rows and the read collapses them. `merge` (via `optimize`) makes that physical – run it on a schedule for read speed and disk; the results are the same either way.
 
 ## Maintenance
 
-Independent async operations on the parquet statement store, serialised by the dataset's [locks](../architecture.md#sharded-append-only-pattern): `merge` holds the merge lock, which appends do not wait for, so ingest flows through it; the in-place rewrites hold the exclusive fence as well.
+Operations on the statement store, serialised by the dataset's [locks](../architecture.md#sharded-append-only-pattern): ingest keeps flowing through a merge, while the in-place rewrites (re-shard, `delete_origin`, `vacuum`) make appends wait. On a schedule, run merge and vacuum together as `optimize` – `ftm-lakehouse -d my_dataset maintenance optimize` or `ftm_lakehouse.operation.optimize("my_dataset")`.
 
 ### Flush (journal → parquet)
 
@@ -345,7 +344,7 @@ Independent async operations on the parquet statement store, serialised by the d
 count = entities.flush()
 ```
 
-Claims the journal by rotating it away, then streams the rotated segment into parquet as Arrow batches. Journal rows carry no `shard` column – `append` derives it from `entity_id` against the dataset's current shard count, so a row journalled before a config change still lands where readers look for it – and the segment streams out unordered, so a batch becomes one parquet file per `(shard, bucket, origin)` partition it spans. Writers keep going against the fresh journal table throughout. No dedup happens here – duplicates and tombstones land as new rows for `merge` to collapse later.
+Rotates the journal away and streams it into parquet; writers continue into a fresh journal table meanwhile. Nothing is deduplicated here. A concurrent flush makes this one a no-op, so `0` does not mean the journal is empty.
 
 From the CLI, per dataset or across the whole catalog:
 
@@ -356,31 +355,31 @@ ftm-lakehouse maintenance flush --all
 
 ### Merge (expensive)
 
-Per-partition rewrite that collapses duplicates, folds `first_seen` to the min across each group, and drops tombstones whose `deleted_at` is older than the grace cutoff. Non-fragment rows dedupe per statement `id` (`ROW_NUMBER OVER (PARTITION BY id ORDER BY last_seen DESC) = 1`); fragment rows keep the latest emission per `(entity_id, prop, fragment)` group.
+Flushes, then rewrites each dirty partition: collapses duplicates and superseded fragment emissions, folds `first_seen` to the earliest and drops tombstones older than the grace period, with the rows they shadow. `force=True` rewrites clean partitions too.
 
 ```python
 entities.merge()
 ```
 
-Grace comes from `LAKEHOUSE_GRACE_PERIOD_DAYS` (default 30 days); set it to `0` to drop all tombstones immediately.
+The grace period is `LAKEHOUSE_GRACE_PERIOD_DAYS` (default 30); `0` drops tombstones at once.
 
 ### Vacuum
 
-Deletes the obsolete parquet files that `merge` replaced in the Delta log.
+Deletes the parquet files that `merge` replaced:
 
 ```python
 entities.statements.vacuum()
-entities.statements.vacuum(retention_hours=24)
+entities.statements.vacuum(retention_hours=24)  # keep files replaced in the last day
 ```
 
 ## Complete Example
 
 ```python
-from ftm_lakehouse import ensure_dataset
-from followthemoney import model
+from followthemoney import EntityProxy, model
+from ftm_lakehouse import ensure_dataset, get_entities
 
 
-def create_person(name: str, nationality: str) -> model.EntityProxy:
+def create_person(name: str, nationality: str) -> EntityProxy:
     entity = model.make_entity("Person")
     entity.make_id(name)
     entity.add("name", name)
@@ -389,7 +388,8 @@ def create_person(name: str, nationality: str) -> model.EntityProxy:
 
 
 def main():
-    dataset = ensure_dataset("people_dataset")
+    ensure_dataset("people_dataset")
+    entities = get_entities("people_dataset")
 
     people = [
         create_person("Jane Doe", "us"),

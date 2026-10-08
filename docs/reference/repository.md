@@ -22,10 +22,10 @@ archive.stream(checksum)
 
 ## EntityRepository
 
-Entity/statement operations combining JournalStore and ParquetStore.
+A dataset's entities and statements: writes go through the journal, reads and maintenance to the parquet store.
 
 ```python
-from ftmq.query import M, Query
+from ftmq.query import C, Query
 
 from ftm_lakehouse import get_entities
 
@@ -33,7 +33,7 @@ entities = get_entities("my_dataset")
 entities.add(entity, origin="import")
 entities.writer(origin="import")
 entities.flush()
-entities.query(Query(M(origin="import")))
+entities.query(Query(C(origin="import")))
 ```
 
 ::: ftm_lakehouse.repository.EntityRepository
@@ -43,10 +43,10 @@ entities.query(Query(M(origin="import")))
 
 ## JobRepository
 
-Job tracking and status. Job runs are stored per job class – resolve the
-repository through the factory:
+Job runs and their status, stored per job class – resolve the repository through the factory:
 
 ```python
+from ftm_lakehouse.operation.crawl import CrawlJob
 from ftm_lakehouse.repository.factories import get_jobs
 
 jobs = get_jobs("my_dataset", CrawlJob)
@@ -61,7 +61,7 @@ jobs.get(run_id)
 
 ## DocumentRepository
 
-Document metadata assembled from archived files and their entities.
+The read side of the exported document metadata (`documents.csv`, per origin scope).
 
 ::: ftm_lakehouse.repository.DocumentRepository
     options:
@@ -70,7 +70,7 @@ Document metadata assembled from archived files and their entities.
 
 ## ArtifactsRepository
 
-The export artifacts one dataset produces – `statements.csv`, `entities.ftm.json`, `documents.csv` (one per origin scope), `parents.csv`, `statistics.json`, `index.json` – and the diff series that ride alongside the streamed ones.
+The export artifacts of one dataset – `statements.csv`, `entities.ftm.json`, `documents.csv` (one per origin scope), `parents.csv`, `statistics.json`, `index.json` – and the diff series of the diffable ones.
 
 ```python
 from ftm_lakehouse.repository import get_artifacts
@@ -85,7 +85,7 @@ artifacts.documents["crawl"].key
         heading_level: 3
         show_root_heading: true
 
-An artifact is a stateless declaration bound to a dataset; everything true only while an export runs – the open writer, the diff window, the counts – lives on its run, driven by `ExportSession` as one loop.
+An artifact is a stateless declaration bound to a dataset; what is true only during an export – open writers, the diff window, counts – lives on its run, which `ExportSession` drives.
 
 ::: ftm_lakehouse.repository.artifacts.Artifact
     options:

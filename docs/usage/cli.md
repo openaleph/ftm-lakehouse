@@ -1,6 +1,6 @@
 # CLI Reference
 
-`ftm-lakehouse` provides a [Typer](https://typer.tiangolo.com/)-based command-line interface organised into sub-command groups.
+`ftm-lakehouse` is a [Typer](https://typer.tiangolo.com/) CLI organised into sub-command groups.
 
 ```
 ftm-lakehouse [OPTIONS] <group> <command> [ARGS]
@@ -11,12 +11,12 @@ ftm-lakehouse [OPTIONS] <group> <command> [ARGS]
 | `archive` | Content-addressed file storage |
 | `entities` | Read and write FtM entities |
 | `statements` | Read and write raw FtM statements |
-| `maintenance` | Storage maintenance (flush, optimize, unlock) |
+| `maintenance` | Storage maintenance (flush, optimize, shard, migrate, unlock) |
 | `zfs` | ZFS dataset management |
 
-Top-level (no group), as frequently-used shortcuts: `ls` (dataset names), `datasets` (metadata), `configure` (write dataset configuration), `make` (build/update a dataset), `export` (produce every export artifact), `crawl` (ingest documents into the archive).
+Top-level commands: `ls` (dataset names), `datasets` (metadata), `configure` (write dataset configuration), `make` (build or update a dataset), `export` (write every export artifact), `crawl` (ingest documents into the archive).
 
-Environment variables configure storage locations and behavior – see the [configuration reference](../deployment/configuration.md).
+Environment variables configure storage and behaviour – see the [configuration reference](../deployment/configuration.md).
 
 ## Examples
 
@@ -35,8 +35,7 @@ ftm-lakehouse -d my_dataset crawl /path/to/documents
 # Bulk-load a pre-built entities.ftm.json (skips the journal)
 cat entities.ftm.json | ftm-lakehouse -d my_dataset entities import
 
-# ... several times faster for trusted input (same statement ids and
-# namespace stripping as the safe path, no FtM object construction):
+# Several times faster for trusted input – same statements, no FtM validation
 cat entities.ftm.json | ftm-lakehouse -d my_dataset entities import --unsafe
 
 # Flush the journal, optimize the store and build all exports – the default
@@ -49,51 +48,48 @@ ftm-lakehouse -d my_dataset export
 ftm-lakehouse -d my_dataset maintenance flush
 ftm-lakehouse maintenance flush --all
 
-# Maintenance – async, run on a schedule in production. Merges duplicates per
-# (shard, bucket, origin) partition, drops tombstones older than
-# LAKEHOUSE_GRACE_PERIOD_DAYS, bin-packs small files, removes obsolete ones –
-# always in one pass, held under the dataset write fence.
+# Compact the store, on a schedule in production: merge each dirty
+# (shard, bucket, origin) partition into one file, drop tombstones older than
+# LAKEHOUSE_GRACE_PERIOD_DAYS, then vacuum the replaced files
 ftm-lakehouse -d my_dataset maintenance optimize
 
-# Change the shard count of an existing dataset: rewrites every partition,
-# then records the new count in config.yml. Run with writers stopped, and
-# follow up with `maintenance optimize`.
+# Change the shard count of an existing dataset – rewrites every partition.
+# Run with writers stopped, then `maintenance optimize`
 ftm-lakehouse -d my_dataset maintenance shard --shards 8
 
-# Bring a store written by an older version up to the current layout. No-op on
-# an up-to-date dataset; `--all` sweeps the catalog (what the docker entrypoint
-# runs). Run with writers stopped.
+# Bring a store written by an older version up to date; `--all` sweeps the
+# catalog (the docker entrypoint runs it). Run with writers stopped
 ftm-lakehouse -d my_dataset maintenance migrate
 ftm-lakehouse maintenance migrate --all
 ```
 
 ### `configure`
 
-`ftm-lakehouse -d <dataset> configure -c <config.yml>` writes dataset configuration and nothing else – no flush, no exports. The yaml follows the [dataset configuration](../deployment/configuration.md#dataset-configuration) schema; only the keys it actually contains are written, so a partial file leaves everything else (notably `shards`) untouched. `name` and `uri` are taken from `-d` / the catalog and ignored if present in the file. Each write keeps a versioned snapshot.
+`ftm-lakehouse -d <dataset> configure -c <config.yml>` writes dataset configuration and nothing else. The yaml follows the [dataset configuration](../deployment/configuration.md#dataset-configuration) schema. Only the keys in the file are written, so a partial file leaves the rest (notably `shards`) untouched; `name` and `uri` come from `-d` / the catalog. Each write keeps a versioned snapshot.
 
-Layout-affecting settings (`shards`) belong in the config *before* a dataset is written to. Setting a different value on a store that already holds rows splits it: rows written from then on are placed under the new count, the rows already there keep their old partitions, and reads prune by the new count – so an `entity_id`-filtered query silently misses whichever half didn't move. `maintenance shard --shards <n>` is the operation that moves them – see [Re-sharding](../architecture.md#re-sharding-an-existing-dataset).
+Set `shards` before the dataset is written to. Changing it on a store that holds rows leaves the existing rows under the old count while reads prune by the new one, so `entity_id` lookups miss them. Use `maintenance shard --shards <n>` instead – see [Re-sharding](../architecture.md#re-sharding-an-existing-dataset).
 
 ### `make`
 
-`make` is the whole pipeline in one command; every stage is on by default and can be switched off:
+`make` runs the whole pipeline; every stage is on by default:
 
 | Flag | Default | Effect |
 |------|---------|--------|
 | `-c <config.yml>` | – | Same merge-write as `configure`, before anything else |
 | `--flush` / `--no-flush` | on | Flush outstanding journal statements into the parquet store |
-| `--exports` / `--no-exports` | on | Write every export artifact – statements, entities, documents, their diffs, the statistics and the index. `--no-exports` flushes only |
-| `--optimize` / `--no-optimize` | on | Run the [optimize](entities.md#maintenance) pass (merge + vacuum) before exporting (only applies with `--exports`). Reads reconcile un-merged rows, so exports are correct either way – an optimized store exports faster and reclaims disk |
+| `--exports` / `--no-exports` | on | Write every export artifact – statements, entities, documents, parents, their diffs, the statistics and the index. `--no-exports` flushes only |
+| `--optimize` / `--no-optimize` | on | Run [optimize](entities.md#maintenance) (merge + vacuum) before exporting; only with `--exports`. Exports are correct either way – an optimized store exports faster and takes less disk |
 | `--force-optimize` | off | Optimize even when no partition is dirty |
-| `--force-exports` | off | Re-compute the exports pipeline even when the tags say it is fresh |
+| `--force-exports` | off | Export even when the tags say the exports are fresh |
 
 ### `maintenance flush`
 
-`ftm-lakehouse -d <dataset> maintenance flush` drains outstanding journal statements into the parquet store and prints how many landed. It is the same drain `make` runs as its first stage, on its own – no optimize, no exports; duplicates and tombstones stay as physical rows, which reads reconcile, until the next [optimize](entities.md#maintenance).
+`ftm-lakehouse -d <dataset> maintenance flush` drains the journal into the parquet store and prints how many statements landed – the first stage of `make`, on its own.
 
-`--all` sweeps every dataset in the catalog instead, printing a count per dataset plus the total. It addresses the whole catalog, so combining it with `-d` is an error rather than a silent override. Datasets with an empty journal are a cheap no-op – the drain probes for rows before it rotates anything – which makes `ftm-lakehouse maintenance flush --all` a reasonable cron entry for a lakehouse whose writers leave data in the journal. It fails fast: the first dataset that errors aborts the sweep.
+`--all` drains every dataset in the catalog, printing a count per dataset and the total; it can't be combined with `-d`. An empty journal is a cheap no-op, so `ftm-lakehouse maintenance flush --all` works as a cron entry. The first dataset that fails aborts the sweep.
 
 ## Commands
 
-The following reference is generated from the CLI itself at docs build time:
+Generated from the CLI at docs build time:
 
 {{ cli_docs() }}

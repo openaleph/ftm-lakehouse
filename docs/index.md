@@ -10,41 +10,30 @@
 
 # ftm-lakehouse
 
-`ftm-lakehouse` provides a _data standard_ and _archive storage_ for leaked data, private and public document collections and structured [FollowTheMoney](https://followthemoney.tech) data. The concepts and implementations are originally inspired by [mmmeta](https://github.com/simonwoerpel/mmmeta), [Aleph's servicelayer archive](https://github.com/alephdata/servicelayer) and [OpenSanctions](https://opensanctions.org) work on dataset catalog metadata.
+`ftm-lakehouse` provides a _data standard_ and _archive storage_ for leaked data, private and public document collections and structured [FollowTheMoney](https://followthemoney.tech) data.
 
-`ftm-lakehouse` acts as a multi-tenant storage and retrieval mechanism for structured entity data, documents and their metadata. It can be used by _tenants_ to produce and/or consume data such as [investigraph](https://docs.investigraph.dev), [memorious](https://docs.investigraph.dev/lib/memorious/) and the full suites of various search and analysis platforms, such as [_OpenALeph_](https://openaleph.org), [_ICIJ Datashare_](https://datashare.icij.org/) or [_Liquid Investigations_](https://github.com/liquidinvestigations/)
+It is a multi-tenant storage and retrieval layer for entity data, documents and their metadata. _Tenants_ produce and consume it – for example [investigraph](https://docs.investigraph.dev), [memorious](https://docs.investigraph.dev/lib/memorious/), and platforms such as [_OpenAleph_](https://openaleph.org), [_ICIJ Datashare_](https://datashare.icij.org/) or [_Liquid Investigations_](https://github.com/liquidinvestigations/).
 
 [What is a lakehouse?](https://www.databricks.com/blog/2020/01/30/what-is-a-data-lakehouse.html)
 
 ## Open formats
 
-Given the convention-based file structure and the use of [parquet](https://parquet.apache.org/) files, the storage layer can be populated and consumed by other 3rd-party tools which makes it free and easy to integrate `ftm-lakehouse` into other analytics systems or data platforms.
-
-As well the complete data lakehouse is stored in the file-like storage backend, including change history and versions. It doesn't rely on any other running services (like a database) and therefore maintenance, scalability and data consistency is ensured. (For runtime, a sql database is needed for task management and a write ahead journal).
+The file layout follows documented [conventions](conventions.md) and the statements are [parquet](https://parquet.apache.org/), so third-party tools can populate and consume a lakehouse directly. Data, change history and versions all live in the storage backend; reading needs no running service. Writers use a SQL write-ahead journal (sqlite, or postgres in production).
 
 ## Core Components
 
-`ftm-lakehouse` organizes data around two main components:
-
 ### Entities
 
-The **entities** interface is the primary way to work with [FollowTheMoney](https://followthemoney.tech) data. It provides:
+The **entities** interface is the primary way to work with [FollowTheMoney](https://followthemoney.tech) data:
 
-- **Writing entities** to a buffered journal for efficient batch processing
-- **Querying entities** from a [Delta Lake-based](https://delta-io.github.io/delta-rs/) statement store
-- **Exporting** to various formats (JSON, CSV, statistics)
+- **Write** entities through a buffered journal
+- **Query** them from a [Delta Lake](https://delta-io.github.io/delta-rs/) statement store
+- **Export** them as JSON, CSV and statistics
 
-!!! info
-    See below for the **archive** layer that stores source files. As per the FollowTheMoney spec and logic, files are converted into _entities_ as well and therefore part of the Entity store as well.
-
-Entities are stored as _[statements](https://followthemoney.tech/docs/statements/)_ - granular property-level records that enable versioning, provenance tracking, and incremental updates.
-
-A statement represents a single fact: one property value for one entity from one source. Each statement contains an `entity_id`, `schema` (entity type), `prop` (property name), `value`, and `dataset` identifier. This decomposition allows tracking where each piece of information originated - which source file, processing step, or import batch contributed a specific value. This is a single-dataset store with no in-store entity resolution, so entities are keyed on `entity_id` and `canonical_id` is not persisted (it always equals `entity_id`).
-
-This statement-based storage model makes it possible to merge data from multiple sources while preserving full provenance, perform incremental updates without reprocessing entire datasets, and use standard file-based tools (sorting, filtering) rather than requiring database infrastructure.
+Entities are stored as _[statements](https://followthemoney.tech/docs/statements/)_: one property value of one entity from one source (`entity_id`, `schema`, `prop`, `value`, `dataset`, plus provenance such as `origin`). That keeps the provenance of every value, and lets sources merge and update incrementally. A lakehouse dataset does no entity resolution, so `canonical_id` is not stored – it always equals `entity_id`.
 
 ```python
-from ftmq.query import M, Query
+from ftmq.query import C, Query
 
 from ftm_lakehouse import ensure_dataset, get_entities
 
@@ -60,22 +49,16 @@ entities.flush()
 # Read back
 entity = entities.get("entity-id-123")
 
-# Live query of the parquet store
-for entity in entities.query(Query(M(origin="crawl"))):
+# Query the parquet store
+for entity in entities.query(Query(C(origin="crawl"))):
     process(entity)
 ```
 
-The parquet statement store is partitioned by `(shard, bucket, origin)` and written append-only on the hot path. Reads reconcile the redundancy; two async maintenance ops collapse it physically – `merge` (per-partition dedup + tombstone reaping, one file per partition) and `vacuum` (drop the replaced files) – coordinated by a dataset-wide write fence.
+The statement store is partitioned by `(shard, bucket, origin)` and written append-only. Reads reconcile duplicates and tombstones; `optimize` compacts them – see [Maintenance](usage/entities.md#maintenance).
 
 ### Archive
 
-The **archive** interface manages source documents and files:
-
-- **Store files** with content-addressable storage (SHA256 checksums)
-- **Retrieve files** by checksum or iterate through all files
-- **Track metadata** including MIME types, sizes, and custom properties
-
-Files are automatically deduplicated across the archive.
+The **archive** interface manages source files, content-addressed by SHA256 checksum, so identical files are stored once. Files become FollowTheMoney entities as well.
 
 ```python
 from ftm_lakehouse import get_archive
@@ -98,16 +81,18 @@ Requires Python 3.12 or later.
 pip install ftm-lakehouse
 ```
 
-Remote storage backends are optional extras – install the one matching your archive/lake URI:
+Optional extras:
 
 ```bash
-pip install "ftm-lakehouse[s3]"     # S3-compatible object storage (s3fs)
-pip install "ftm-lakehouse[gcs]"    # Google Cloud Storage (gcsfs)
-pip install "ftm-lakehouse[azure]"  # Azure Blob Storage (adlfs)
-pip install "ftm-lakehouse[http]"   # HTTP(S)-backed api stores (aiohttp)
+pip install "ftm-lakehouse[postgres]"  # postgres journal (ADBC + psycopg)
+pip install "ftm-lakehouse[api]"       # the lakehouse API server
+pip install "ftm-lakehouse[s3]"        # S3-compatible object storage (s3fs)
+pip install "ftm-lakehouse[gcs]"       # Google Cloud Storage (gcsfs)
+pip install "ftm-lakehouse[azure]"     # Azure Blob Storage (adlfs)
+pip install "ftm-lakehouse[http]"      # HTTP(S)-backed api stores (aiohttp)
 ```
 
-Extras combine, e.g. `pip install "ftm-lakehouse[s3,gcs]"`.
+Extras combine, e.g. `pip install "ftm-lakehouse[s3,postgres]"`.
 
 ## Quickstart
 

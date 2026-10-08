@@ -8,18 +8,18 @@ Requires Python 3.12 or later.
 pip install ftm-lakehouse
 ```
 
-Remote storage backends (S3 / GCS / Azure / HTTP) are optional extras – see the [install notes](index.md#installation).
+Remote storage backends, the postgres journal and the API server are optional extras – see the [install notes](index.md#installation).
 
 ## Basic Concepts
 
 `ftm-lakehouse` organizes data into **datasets**. Each dataset contains:
 
-- **Entities**: Structured [FollowTheMoney](https://followthemoney.tech) data – [read more](./usage/entities.md)
-- **Archive**: Source documents and files – [read more](./usage/archive.md)
+- **Entities**: structured [FollowTheMoney](https://followthemoney.tech) data – [read more](./usage/entities.md)
+- **Archive**: source documents and files – [read more](./usage/archive.md)
 
 ## Using the CLI
 
-The fastest way to a working dataset – point `LAKEHOUSE_URI` at a storage location and address datasets with `-d`:
+Point `LAKEHOUSE_URI` at a storage location and address datasets with `-d`:
 
 ```bash
 export LAKEHOUSE_URI=./data
@@ -33,14 +33,13 @@ ftm-lakehouse -d my_dataset crawl /path/to/documents
 # Bulk-import FtM entities (bypasses the journal, writes directly to parquet)
 cat entities.ftm.json | ftm-lakehouse -d my_dataset entities import
 
-# Update the dataset: flush the journal, optimize the store and build all
-# exports (statements.csv, entities.ftm.json, documents.csv, parents.csv, statistics, index) – all on by default
+# Flush the journal, optimize the store and write every export
 ftm-lakehouse -d my_dataset make
 
 # Stream entities back out
 ftm-lakehouse -d my_dataset entities stream
 
-# Maintenance – compact the store; reads are correct without it, faster with it
+# Compact the store – reads are correct without it, faster with it
 ftm-lakehouse -d my_dataset maintenance optimize
 ```
 
@@ -59,7 +58,7 @@ ensure_dataset("my_dataset", title="My Dataset")
 
 ### Working with Entities
 
-Repositories are the dataset handle – one per concern, addressed by name:
+Repositories are the dataset handle, one per concern, addressed by name:
 
 ```python
 from ftm_lakehouse import ensure_dataset, get_entities
@@ -101,16 +100,15 @@ with archive.open(file.checksum) as fh:
     content = fh.read()
 ```
 
-### Bulk Operations
+### Bulk Writing
 
-For large imports, use bulk writers:
+For many entities, use a writer:
 
 ```python
 from ftm_lakehouse import get_entities
 
 entities = get_entities("my_dataset")
 
-# Write many entities efficiently
 with entities.writer(origin="bulk_import") as writer:
     for entity in large_entity_source():
         writer.add_entity(entity)
@@ -122,13 +120,13 @@ entities.flush()
 ### Query Entities
 
 ```python
-from ftmq.query import M, Query
+from ftmq.query import C, Query
 
-# Query with filters
-for entity in entities.query(Query(M(origin="import"))):
+# Entities with a statement from this origin
+for entity in entities.query(Query(C(origin="import"))):
     print(entity.caption)
 
-# Stream from exported JSON
+# Stream the exported entities.ftm.json
 for entity in entities.stream():
     print(entity.caption)
 ```
@@ -147,7 +145,7 @@ export AWS_ACCESS_KEY_ID=...
 export AWS_SECRET_ACCESS_KEY=...
 ```
 
-For persistent journal storage (recommended for production):
+The journal defaults to in-memory sqlite. In production, use postgres (needs the `postgres` extra):
 
 ```bash
 export LAKEHOUSE_JOURNAL_URI=postgresql://user:pass@localhost/journal
@@ -157,7 +155,7 @@ Full settings reference: [Configuration](./deployment/configuration.md).
 
 ## Next Steps
 
-- [Working with Entities](./usage/entities.md) - Deep dive into entity operations
-- [Working with Files](./usage/archive.md) - Learn about the file archive
-- [CLI Reference](./usage/cli.md) - Complete CLI documentation
-- [Configuration](./deployment/configuration.md) - Advanced configuration options
+- [Working with Entities](./usage/entities.md)
+- [Working with Files](./usage/archive.md)
+- [CLI Reference](./usage/cli.md)
+- [Configuration](./deployment/configuration.md)

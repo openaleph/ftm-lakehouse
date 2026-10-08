@@ -39,7 +39,7 @@ class EntityRepository(DatasetHandle):
             writer.add_entity(entity)
         repo.flush()
 
-        for entity in repo.query(Query(M(origin="import"))):
+        for entity in repo.query(Query(C(origin="import"))):
             process(entity)
         ```
     """

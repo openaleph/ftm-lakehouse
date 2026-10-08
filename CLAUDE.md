@@ -185,7 +185,7 @@ Below the layers sit two utility tiers with a strict rule:
   - `repository.base.dataset_uri(name, uri)` canonicalizes AND validates the name – no caller-supplied name reaches path construction unchecked.
 - **Config lifecycle** (`catalog.py` module fns): `ensure_dataset` (get-or-create), `update_dataset` (merge-write + versioned snapshot; calls `factories.clear_caches()` so newly fetched repos see fresh config – held instances keep their snapshot), `get_dataset_model` (fresh read), `get_dataset_index`, `dataset_exists`. Repositories snapshot `_model` (shards, compression) at construction; layout-affecting config must be set at creation – `shards` is the one exception, changeable after the fact by `ShardOperation`, which rewrites the store *before* writing the new count.
 - **Catalog** (slim): `list_datasets()` + `dataset_uri(name)`; the API server keeps one as `app.state.lake`. There is no Dataset class – the former `Dataset`/`get_dataset` surface was removed pre-release.
-- **API app** (`api/main.py`): lakehouse routes live under `/{dataset}/_api/...`; blob storage is served by mounting the whole putfs Starlette app at `/` when the lake URI is a local path (its catch-all `/{key:path}` sits behind the `_api` routes), or anystore's `archive_router` for other backends. `ValueError` → 400, `DoesNotExist` → 404 via exception handlers.
+- **API app** (`api/main.py`): lakehouse routes live under `/{dataset}/_api/...`; blob storage is served by mounting the whole putfs Starlette app at `/` when the lake URI is a local path (its catch-all `/{key:path}` sits behind the `_api` routes); any other backend raises `RuntimeError`. `ValueError` → 400, `DoesNotExist` → 404 via exception handlers.
 
 ### Data Flow
 
@@ -221,7 +221,7 @@ Operations use tags to track freshness and skip unnecessary work:
 Each dataset's parquet store is partitioned by `(shard, bucket, origin)`:
 
 - `shard` = `hash(entity_id) % shards`, hex-padded. Per-dataset configuration (`shards` in `config.yml`, hardcoded default `0`; `shards <= 1` means a single shard `"0"`); there is deliberately no env override – every reader/writer resolves the count from the dataset's config (`DatasetHandle._model`). Derived in `ParquetStore.append` (`_with_shard`, hashing the *distinct* `entity_id`s via `dictionary_encode`) and nowhere else: every producer – journal drain, `EntityBuffer.flush_table`, the unsafe `RowBuffer`, the api bulk route – hands over rows with no shard key, so a partition is always picked against the count the writing store is configured for, never one a producer resolved earlier or elsewhere. Huge datasets should configure `8`+ at creation (`ensure_dataset(name, shards=8)`) – see `docs/architecture.md`. Fixed once the store is written; `ShardOperation` (`maintenance shard --shards n`) is the rewrite that changes it – one streamed `write_deltalake` per `(bucket, origin)` group (bucket/origin are invariant, only `shard` moves), config written last, no dedupe or sort so every partition comes out dirty for the next merge. Journal writes aren't fenced – run it with writers stopped: rows journalled during the rewrite carry no shard key, but a flush landing between the rewrite and the config write still resolves the old count.
-- `bucket` = coarse FtM schema group (`thing`, `interval`, `document`, `page`, `pages`, `mention`).
+- `bucket` = coarse FtM schema group (`thing`, `interval`, `document`, `page`, `mention`).
 - `origin` = caller-supplied source tag.
 
 ### ZFS Integration

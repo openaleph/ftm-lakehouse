@@ -1,38 +1,36 @@
 # REST API
 
-`ftm-lakehouse` ships a FastAPI app that exposes the storage layer, the journal, the entity / statement read+write paths, and dataset job execution over HTTP. It carries **no authentication, authorization, or rate-limiting logic** – those are deployment concerns and belong in front of the app, not inside it.
+`ftm-lakehouse` ships a FastAPI app (the `api` extra) exposing blob storage, the journal, entity / statement reads and writes, and dataset job execution over HTTP. It has **no authentication, authorization or rate limiting** – those belong in front of it.
 
-!!! info "Use reverse proxy in production"
+!!! info "Use a reverse proxy in production"
 
     ### File serving
 
-    Although the api exposes `HEAD` / `GET` endpoints, for production use it is recommended to use a static file server like nginx. One approach for that is currently researched and developed in [PutFS](https://putf.sh).
+    The api serves blobs (`HEAD` / `GET`), but production should serve files from a static file server like nginx – see [PutFS](https://putf.sh).
 
     ### Authentication
 
-    The API is intentionally unprotected at the application layer. Run it behind a reverse proxy (Caddy / nginx / Traefik / a sidecar service) that handles authentication, authorization, and rate-limiting before forwarding to the lakehouse.
-
-    [PutFS auth model](https://putf.sh/reference/auth/) is a good reference for how an operator can wire path-prefix + HTTP-method scoped tokens at the proxy layer.
+    Run the API behind a reverse proxy (Caddy / nginx / Traefik / a sidecar) that handles authentication, authorization and rate limiting. The [PutFS auth model](https://putf.sh/reference/auth/) shows how to scope tokens by path prefix and HTTP method at the proxy.
 
     ### Request timeouts
 
-    The API does not enforce a per-request wall-clock timeout. Configure ``proxy_read_timeout`` (nginx), ``timeouts`` (Caddy), or the equivalent in your proxy to bound how long a request can occupy a connection.
+    The API enforces no per-request timeout. Configure ``proxy_read_timeout`` (nginx), ``timeouts`` (Caddy) or the equivalent in your proxy.
 
     ### Request body size
 
-    The API does not cap request body size. Configure ``client_max_body_size`` (nginx), ``request_body`` (Caddy), or the equivalent in your proxy. Endpoints that semantically constrain content shape (e.g. ``entities/query`` capping ``in`` / ``not_in`` filter value lists) still validate after the body is parsed.
+    The API does not cap request body size. Configure ``client_max_body_size`` (nginx), ``request_body`` (Caddy) or the equivalent. Query bodies are still validated against the [limits below](#configuration).
 
 ## Running the API
 
 ```bash
-uvicorn ftm_lakehouse.api:app --reload  # disable --reload for production
+granian --interface asgi ftm_lakehouse.api:app
 ```
 
 The interactive API docs (ReDoc) are served at `/`.
 
 ## Routes
 
-All lakehouse-specific routes are scoped to a dataset and namespaced under `/{dataset}/_api/...`. The raw key-value storage layer (anystore's catch-all `GET /{key:path}` etc.) is mounted last for blob access but is out of scope for this API surface – see the [anystore docs](https://docs.investigraph.dev/lib/anystore/) for that contract.
+Lakehouse routes are scoped to a dataset under `/{dataset}/_api/...`. Blobs are served by the [PutFS](https://putf.sh) app mounted at `/` behind them; the api only serves a local-path lakehouse.
 
 ### Journal
 
@@ -40,7 +38,7 @@ All lakehouse-specific routes are scoped to a dataset and namespaced under `/{da
 |--------|------|-------------|
 | `POST` | `/{dataset}/_api/journal/bulk` | Write statement rows into the journal |
 
-The bulk endpoint carries an Arrow IPC stream (`application/vnd.apache.arrow.stream`) of the statement schema – the same batches the stores hold, so no repacking happens on either side of the hop. There is no flush endpoint: a journal is drained by the store that holds it, so a repository in api mode flushes through `/entities/flush` instead.
+The body is an Arrow IPC stream (`application/vnd.apache.arrow.stream`) of the statement schema. There is no flush route here: a repository in api mode flushes through `/entities/flush`.
 
 ### Entities
 
@@ -51,15 +49,17 @@ The bulk endpoint carries an Arrow IPC stream (`application/vnd.apache.arrow.str
 | `POST` | `/{dataset}/_api/entities/statements/query` | Query raw statements, streamed as NDJSON |
 | `GET` | `/{dataset}/_api/entities/stats` | Dataset statistics |
 | `GET` | `/{dataset}/_api/entities/statements/version` | Current Delta table version |
-| `DELETE` | `/{dataset}/_api/entities/{entity_id}` | Tombstone all statements for an entity |
+| `DELETE` | `/{dataset}/_api/entities/{entity_id}` | Tombstone all statements of an entity (`?origin=` narrows to one origin) |
+| `DELETE` | `/{dataset}/_api/entities/origins/{origin}` | Physically drop an origin's partitions |
 
 ### Operations
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/{dataset}/_api/operations` | Run a job operation on a dataset |
+| `POST` | `/{dataset}/_api/ensure` | Create the dataset's ZFS datasets when ZFS is configured (like every write) – call it before the first action on a dataset |
 
-The request body must be a serialized `DatasetJobModel` with a `name` field identifying the operation:
+The operations body is a serialized `DatasetJobModel` with a `name` field identifying the operation:
 
 ```json
 {
@@ -73,10 +73,10 @@ Available operations:
 | Job name | Description |
 |----------|-------------|
 | [`CrawlJob`](../reference/operation.md#ftm_lakehouse.operation.crawl.CrawlJob) | Batch file ingestion from a source URI |
-| [`OptimizeJob`](../reference/operation.md#ftm_lakehouse.operation.maintenance.OptimizeJob) | Merge duplicates / reap tombstones, bin-pack small files, delete obsolete files |
+| [`OptimizeJob`](../reference/operation.md#ftm_lakehouse.operation.maintenance.OptimizeJob) | Merge dirty partitions (dedupe, reap tombstones), then vacuum the replaced files |
 | [`ExportJob`](../reference/operation.md#ftm_lakehouse.operation.export.ExportJob) | Export every artifact from one sweep, then `index.json`. `make_diff` (default `true`) also writes the delta diff files |
 | [`DownloadArchiveJob`](../reference/operation.md#ftm_lakehouse.operation.download.DownloadArchiveJob) | Export archive files to original paths |
-| [`MakeJob`](../reference/operation.md#ftm_lakehouse.operation.make.MakeJob) | Full workflow: flush + all exports |
+| [`MakeJob`](../reference/operation.md#ftm_lakehouse.operation.make.MakeJob) | Flush the journal, then export (no merge) |
 
 Pass `?force=true` to skip freshness checks.
 
@@ -87,8 +87,9 @@ API-only settings use the `LAKEHOUSE_API_` prefix:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `LAKEHOUSE_API_TITLE` | OpenAPI title | `FollowTheMoney Data Lakehouse Api` |
-| `LAKEHOUSE_API_STATIC_HEADERS` | Extra headers added to every response | `{}` |
-| `LAKEHOUSE_API_QUERY_MAX_IN_VALUES` | Maximum length of an `*__in`/`*__not_in` list in a query body (caps the SQL `IN (…)` clause that DuckDB has to build). | `10_000` |
-| `LAKEHOUSE_API_QUERY_MAX_FILTER_KEYS` | Maximum number of filter leaves in a query body's filter tree. | `20` |
+| `LAKEHOUSE_API_DESCRIPTION` | OpenAPI description | contents of `./README.md` |
+| `LAKEHOUSE_API_CONTACT__NAME` / `__URL` / `__EMAIL` | OpenAPI contact | (unset) |
+| `LAKEHOUSE_API_QUERY_MAX_IN_VALUES` | Maximum values in one `in` / `not_in` filter of a query body | `10_000` |
+| `LAKEHOUSE_API_QUERY_MAX_FILTER_KEYS` | Maximum filter leaves in a query body | `20` |
 
-Storage URI, journal URI, shard count, etc. use the regular `LAKEHOUSE_` settings – see [Configuration](configuration.md).
+Storage URI, journal URI and the rest use the regular `LAKEHOUSE_` settings – see [Configuration](configuration.md).
