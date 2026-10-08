@@ -17,7 +17,9 @@ from ftm_lakehouse.repository.factories import (
     dataset_uri,
     get_archive,
     get_entities,
+    get_tags,
 )
+from ftm_lakehouse.storage.tags import TagStore
 
 
 def test_factories_identity_across_paths(tmp_path, monkeypatch):
@@ -31,7 +33,7 @@ def test_factories_identity_across_paths(tmp_path, monkeypatch):
     assert repo is get_entities("ident", Path(str(tmp_path)) / "ident")
 
     # one ParquetStore (and so one LakeStore / DuckDB connection) per dataset
-    assert get_entities("ident", uri)._statements is repo._statements
+    assert get_entities("ident", uri).statements is repo.statements
 
 
 def test_factories_shared_cache_kinds_and_clear(tmp_path, monkeypatch):
@@ -45,6 +47,16 @@ def test_factories_shared_cache_kinds_and_clear(tmp_path, monkeypatch):
 
     clear_caches()
     assert get_entities("ident") is not repo
+
+
+def test_factories_get_tags(tmp_path, monkeypatch):
+    """Public for downstream callers: a cached tag store per dataset and
+    tenant."""
+    monkeypatch.setenv("LAKEHOUSE_URI", str(tmp_path))
+    tags = get_tags("ident")
+    assert isinstance(tags, TagStore)
+    assert tags is get_tags("ident")
+    assert get_tags("ident", tenant="other") is not tags
 
 
 def test_factories_canonical_uri(tmp_path, monkeypatch):

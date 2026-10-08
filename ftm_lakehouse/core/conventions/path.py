@@ -216,9 +216,12 @@ EXPORTS_CYPHER = EXPORTS / "graph.cypher"
 """neo4j data export file path"""
 
 EXPORTS_STATEMENTS = EXPORTS / "statements.csv"
-"""complete sorted statements export – codec-free"""
+"""complete statements export – codec-free"""
 
 EXPORTS_DOCUMENTS = EXPORTS / "documents.csv"
+
+EXPORTS_PARENTS = EXPORTS / "parents.csv"
+"""every folder a document can sit in, with its path – codec-free"""
 """documents metadata export – codec-free, unscoped"""
 
 

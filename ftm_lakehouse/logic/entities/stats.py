@@ -21,8 +21,8 @@ def _typed_props(schema: str, prop_type: PropertyType) -> tuple[str, ...]:
 
 @cache
 def _date_props(schema: str) -> tuple[str, ...]:
-    """The properties of ``schema`` whose values bound the date coverage.
-    Exclude hidden props (currently only `processedAt`)"""
+    """The date properties of ``schema`` that bound the date coverage – hidden
+    ones (``processedAt``) excluded."""
     schema_ = model.get(schema)
     if schema_ is None:
         return ()
@@ -35,8 +35,8 @@ def _date_props(schema: str) -> tuple[str, ...]:
 
 @cache
 def _groups(schema: str) -> tuple[str, ...]:
-    """Which `DatasetStats` groups ``schema`` counts in. Some schemata (e.g.
-    Event) are both Thing and Interval, thus are counted twice."""
+    """The `DatasetStats` groups ``schema`` counts in – some (``Event``) are in
+    both."""
     return tuple(
         group
         for group, bucket in (("things", THINGS), ("intervals", INTERVALS))
@@ -45,8 +45,7 @@ def _groups(schema: str) -> tuple[str, ...]:
 
 
 class StatsCollector:
-    """Folds `DatasetStats` out of a stream of entity dicts. Avoids
-    `EntityProxy` for performance
+    """Folds `DatasetStats` out of a stream of entity dicts, without FtM objects.
 
     Example:
         ```python
@@ -71,12 +70,8 @@ class StatsCollector:
         self.end: str | None = None
 
     def collect(self, data: SDict) -> None:
-        """Take one entity dict, as `EntityPayload.to_dict` returns it.
-
-        Args:
-            data: The entity dict. An entity with no resolvable schema – what
-                the sweep skips anyway – is not counted.
-        """
+        """Count one entity dict (`EntityPayload.to_dict`); one without a schema
+        is skipped."""
         schema = data.get("schema")
         if not schema:
             return
@@ -104,23 +99,8 @@ class StatsCollector:
             self.countries[group].update(countries)
 
     def merge(self, other: "StatsCollector") -> None:
-        """Fold another collector's counts into this one.
-
-        Every field is a commutative accumulator, which is what lets a
-        partitioned sweep collect per partition and merge: ``entities`` and
-        the four ``Counter`` fields sum, ``start`` / ``end`` take the min / max of
-        the stored ISO strings. The result is what one collector that had seen
-        every entity would hold – ftmq's ``compile_stats`` was factored out
-        for exactly this ("so partitioned backends can compile per-partition
-        stats and merge them").
-
-        Sound only because an entity reaches exactly one collector: an entity
-        id is placed in one ``(shard, bucket)`` pair, which is the unit a
-        parallel sweep hands to a worker, so ``entities`` cannot double-count.
-
-        Args:
-            other: A collector over a disjoint set of entities.
-        """
+        """Fold in another collector's counts – sound only over disjoint entity
+        sets, which the ``(shard, bucket)`` pairs of a parallel sweep are."""
         self.entities += other.entities
         for group in self.schemata:
             self.schemata[group].update(other.schemata[group])
@@ -131,18 +111,14 @@ class StatsCollector:
             self.end = other.end
 
     def export(self) -> DatasetStats:
-        """The statistics this collector folded.
-
-        Returns:
-            `DatasetStats`, with ``entity_count`` the entities seen – not the
-            sum of the group totals, which leaves out the schemata that are
-            in neither group.
-        """
+        """The folded statistics; ``entity_count`` is every entity seen, not the
+        sum of the group totals."""
+        # sorted: equal counts keep this order, whichever part merged first
         return compile_stats(
-            things=self.schemata["things"].items(),
-            intervals=self.schemata["intervals"].items(),
-            things_countries=self.countries["things"].items(),
-            intervals_countries=self.countries["intervals"].items(),
+            things=sorted(self.schemata["things"].items()),
+            intervals=sorted(self.schemata["intervals"].items()),
+            things_countries=sorted(self.countries["things"].items()),
+            intervals_countries=sorted(self.countries["intervals"].items()),
             date_range=(self.start, self.end),
             entity_count=self.entities,
         )

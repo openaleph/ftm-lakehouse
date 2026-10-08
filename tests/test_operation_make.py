@@ -43,7 +43,7 @@ def test_operation_make_flushes_and_exports(tmp_path, monkeypatch):
     assert result.done == 1
     assert "merge" not in calls
     assert "flush" in calls
-    assert repo.needs_merge  # left for `optimize`
+    assert repo.statements.needs_merge  # left for `optimize`
     assert {e.id for e in repo.stream()} == {"jane", "john"}
 
 

@@ -19,37 +19,19 @@ _QUOTES = re.compile(r"['\"]")
 
 
 def single_string(value: Any) -> str | None:
-    """A single string from a scalar-or-sequence value that must have length=1,
-    else ``None``"""
+    """A single string from a scalar-or-sequence value of length 1, else
+    ``None``."""
     value = ensure_list(value)
     if len(value) == 1:
         return str(value[0])
 
 
 def safe_name(value: str, field: str = "name") -> str:
-    """Validate that ``value`` is safe to use as a single path component.
+    """Validate ``value`` as a single path component – for every caller-supplied
+    path, storage key or partition value.
 
-    Rejects empty strings, path traversal sequences (``..``), the current-
-    directory marker (``.``), path separators (``/`` and ``\\``), control
-    characters (including null and DEL), and anything longer than
-    `SAFE_NAME_MAX_LEN`.
-
-    Use this for every caller-supplied string that flows into a filesystem
-    path, storage key, or partition value. ``origin``, ``file_id``, bucket
-    sub-paths, etc. should all go through here.
-
-    Args:
-        value: The candidate string.
-        field: Human-readable field name, used to make error messages
-            informative.
-
-    Returns:
-        ``value`` unchanged if valid.
-
-    Raises:
-        ValueError: If ``value`` is empty, too long, equal to ``.`` or
-            ``..``, contains ``..`` as a substring, contains a path
-            separator, or contains a control character.
+    Rejects empty strings, ``.``, anything containing ``..``, ``/``, ``\\`` or
+    a control character, and anything longer than `SAFE_NAME_MAX_LEN`.
     """
     if not isinstance(value, str):
         raise ValueError(f"{field} must be a string, got {type(value).__name__}")
@@ -71,35 +53,11 @@ def safe_name(value: str, field: str = "name") -> str:
 
 @lru_cache(100_000)
 def validate_origin(origin: str) -> str:
-    """Validate an ``origin`` tag for safe use as a path / partition value.
+    """Validate a caller-supplied ``origin`` – it becomes archive paths,
+    partition values and SQL string literals.
 
-    ``origin`` is caller-supplied (journal rows, crawl callers, API
-    requests) and flows directly into archive file paths
-    ([`archive_txt`][ftm_lakehouse.core.conventions.path.archive_txt]) and parquet
-    partition prefixes
-    ([`statement_origin`][ftm_lakehouse.core.conventions.path.statement_origin]).
-    Without validation a traversal sequence in ``origin`` escapes the
-    archive subtree or writes a parquet partition outside
-    ``statements/``.
-
-    Built on `safe_name` (printable, no separators, no traversal) and
-    additionally rejects quote characters: an origin also reaches SQL as a
-    string literal – the ``origin = '...'`` predicate
-    [`ParquetStore.delete_origin`][ftm_lakehouse.storage.parquet.ParquetStore.delete_origin]
-    builds – where a quote closes the literal and widens the statement.
-    Escaping at each such site is one omission away from an injection, so
-    the character never enters the system. What remains covers every
-    conventional origin: ``default``, ``crawl``, ``mapping:abc123…``,
-    ``source-a``.
-
-    Args:
-        origin: The candidate origin tag.
-
-    Returns:
-        ``origin`` unchanged if valid.
-
-    Raises:
-        ValueError: As per `safe_name`, or if ``origin`` contains ``'`` or ``"``.
+    `safe_name`, plus no ``'`` / ``"``: a quote would close the literal
+    `ParquetStore.delete_origin` builds.
     """
     origin = safe_name(origin, "origin")
     if _QUOTES.search(origin):
@@ -108,21 +66,8 @@ def validate_origin(origin: str) -> str:
 
 
 def validate_checksum(ch: str) -> str:
-    """Validate that ``ch`` is a valid SHA256 hex digest.
-
-    Enforces exactly 64 lowercase hex characters (``[0-9a-f]``) so that
-    ``ch`` is safe to interpolate into archive paths without traversal
-    risk.
-
-    Args:
-        ch: The candidate checksum string.
-
-    Returns:
-        ``ch`` unchanged if valid.
-
-    Raises:
-        ValueError: If ``ch`` is not a 64-character lowercase hex string.
-    """
+    """Validate ``ch`` as a SHA256 digest – exactly 64 lowercase hex chars, so
+    it is safe in archive paths."""
     if not isinstance(ch, str) or not _CHECKSUM_RE.fullmatch(ch):
         raise ValueError(
             f"Invalid checksum: `{ch!r}` "
@@ -132,20 +77,11 @@ def validate_checksum(ch: str) -> str:
 
 
 def make_checksum_key(ch: str) -> str:
-    """Generate a path key for the given SHA256 checksum.
+    """The prefixed path key for a (validated) SHA256 checksum.
 
     Examples:
         >>> make_checksum_key("a7fdc3...")
         "a7/fd/c3/a7fdc3..."
-
-    Args:
-        ch: SHA256 Hex checksum (content_hash)
-
-    Returns:
-        The prefixed path
-
-    Raises:
-        ValueError: If the checksum is not a valid SHA256 hex digest
     """
     validate_checksum(ch)
     return "/".join((ch[:2], ch[2:4], ch[4:6], ch))
@@ -175,23 +111,9 @@ _BYTE_UNITS = {
 
 
 def parse_byte_size(value: str) -> int:
-    """Parse a human-readable byte size like ``64GB`` or ``512 MiB`` to bytes.
-
-    Accepts the DuckDB ``memory_limit`` notation – a number followed by an
-    optional unit, decimal (``KB`` / ``MB`` / ``GB`` / ``TB`` / ``PB``,
-    1000-based) or binary (``KiB`` / ``MiB`` / ..., 1024-based), case
-    insensitive. A bare number is bytes.
-
-    Args:
-        value: The size string, e.g. ``"8GB"``, ``"1.5 GiB"``, ``"1024"``.
-
-    Returns:
-        The size in bytes, rounded down to an integer.
-
-    Raises:
-        ValueError: If ``value`` is not a number-with-optional-unit
-            (notably DuckDB percentage limits like ``"80%"``).
-    """
+    """Parse a DuckDB ``memory_limit``-style size (``64GB``, ``512 MiB``) to
+    bytes – decimal or binary units, case insensitive, a bare number is bytes;
+    percentages (``80%``) raise ``ValueError``."""
     match = _BYTE_SIZE_RE.fullmatch(value.strip())
     if match is None:
         raise ValueError(f"Invalid byte size: `{value}`")
@@ -203,24 +125,8 @@ def parse_byte_size(value: str) -> int:
 
 
 def validate_dataset_name(name: str) -> str:
-    """Validate a dataset name against FollowTheMoney's naming rules and
-    the lakehouse's reserved-name list.
-
-    The same check is used at every external entry point (API, CLI,
-    [`Catalog`][ftm_lakehouse.Catalog]) so that a dataset name can be trusted as it flows
-    into path construction, SQL identifiers, and DuckDB queries downstream.
-
-    Args:
-        name: The candidate dataset name.
-
-    Returns:
-        ``name`` if valid.
-
-    Raises:
-        ValueError: If ``name`` is empty, fails ``dataset_name_check``
-            (lowercase alphanumeric / underscore only), or is reserved
-            (``catalog`` / ``default``).
-    """
+    """Validate a dataset name at every external entry point: FtM's naming
+    rules (lowercase alphanumeric / underscore), not ``catalog`` / ``default``."""
     if not name:
         raise ValueError("Dataset name must not be empty")
     if name in RESERVED_DATASET_NAMES:
@@ -230,15 +136,12 @@ def validate_dataset_name(name: str) -> str:
 
 
 @contextmanager
-def process_map(
-    workers: int, ordered: bool = True
-) -> Iterator[Callable[..., Iterator[Any]]]:
-    """A ``map`` over ``workers`` spawned processes – the builtin for one.
+def process_map(workers: int) -> Iterator[Callable[..., Iterator[Any]]]:
+    """A ``map`` over ``workers`` spawned processes yielding results as they
+    finish – the builtin for one.
 
-    Results come in input order, or with ``ordered=False`` as each finishes, so
-    one slow task holds back none of the others. Spawned, not forked: the parent
-    holds DuckDB and Delta threads a fork would copy mid-flight. Pending tasks
-    are cancelled when the caller fails.
+    Spawned, not forked: the parent holds DuckDB and Delta threads. Pending
+    tasks are cancelled when the caller fails.
     """
     if workers <= 1:
         yield map
@@ -251,7 +154,7 @@ def process_map(
             yield future.result()
 
     try:
-        yield pool.map if ordered else unordered
+        yield unordered
     finally:
         pool.shutdown(cancel_futures=True)
 
@@ -261,13 +164,9 @@ _DONE = object()
 
 @contextmanager
 def prefetch(items: Iterable[T]) -> Iterator[Iterator[T]]:
-    """``items`` read one ahead on a thread, so producing the next overlaps
-    consuming this one – for producers that release the GIL, like a DuckDB
-    Arrow reader.
-
-    Leaving the context waits for the read in flight, so the producer can be
-    closed right after, consumed or not.
-    """
+    """``items`` read one ahead on a thread – for producers that release the
+    GIL, like a DuckDB Arrow reader. Leaving the context waits for the read in
+    flight, so the producer can be closed right after."""
     source = iter(items)
     with ThreadPoolExecutor(1) as pool:
 

@@ -259,7 +259,7 @@ def cli_unlock():
         entities = get_entities(name, uri)
         if entities._is_api:
             raise RuntimeError("`maintenance unlock` is not available in API mode")
-        if entities.unlock():
+        if entities.statements.unlock():
             console.print("[green]Lock released.[/green]")
         else:
             console.print("[yellow]No lock held.[/yellow]")

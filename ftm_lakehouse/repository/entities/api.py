@@ -17,13 +17,10 @@ from ftm_lakehouse.util import validate_origin
 
 
 class ApiEntityRepository(EntityRepository):
-    """``EntityRepository`` against a remote lakehouse api.
+    """``EntityRepository`` against a remote lakehouse api – resolved by
+    `get_entities` for http uris.
 
-    Resolved by [`get_entities`][ftm_lakehouse.repository.factories.get_entities] for
-    http uris – the same construction-time pick ``get_journal`` does for the
-    journal. Overrides the api-capable methods with their http delegations
-    under the public names; everything ``@no_api`` stays guarded by the
-    inherited decorator.
+    Overrides the api-capable methods; everything ``@no_api`` stays guarded.
     """
 
     def __init__(self, dataset: str, uri: Uri) -> None:
@@ -41,10 +38,6 @@ class ApiEntityRepository(EntityRepository):
         url = self._make_url("flush")
         res = self._api.make_request(url, "POST")
         return int(res.text)
-
-    def merge(self, force: bool = False) -> None:
-        url = self._make_url("merge")
-        self._api.make_request(url, "POST", params={"force": force})
 
     def query(
         self,
@@ -85,8 +78,7 @@ class ApiEntityRepository(EntityRepository):
         return int(res.text)
 
     def delete_origin(self, origin: str) -> None:
-        # validate here too so a bad origin fails locally with the same
-        # `ValueError` the local repository raises, not as a remote 400
+        # fail locally with the local repository's `ValueError`, not a remote 400
         url = self._make_url(f"origins/{validate_origin(origin)}")
         self._api.make_request(url, "DELETE")
 

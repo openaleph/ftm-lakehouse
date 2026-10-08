@@ -65,7 +65,7 @@ def test_statement_roundtrip_timestamps_are_utc(tmp_path):
         writer.add_entity(make_entity(JANE))
     repo.flush()
 
-    for stmt in repo._statements.query_statements():
+    for stmt in repo.statements.query_statements():
         last_seen = stmt.last_seen
         if isinstance(last_seen, datetime):
             assert _is_utc(last_seen), last_seen

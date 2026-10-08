@@ -121,7 +121,7 @@ def cli_statements_sql(query: str):
         entities = get_entities(name, uri)
         if entities._is_api:
             raise RuntimeError("`statements sql` is not available in API mode")
-        store = entities._statements._lake
+        store = entities.statements._lake
         with store.cursor() as cur:
             # an unknown table name would otherwise resolve against this
             # module's globals

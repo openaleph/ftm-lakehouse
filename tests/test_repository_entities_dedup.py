@@ -20,7 +20,7 @@ from ftmq import M, Query
 
 from ftm_lakehouse.repository.entities import EntityRepository
 from ftm_lakehouse.repository.factories import get_entities
-from tests.conftest import make_docker_repo, make_test_api
+from tests.conftest import make_docker_repo, make_test_api, merge
 from tests.duck import make_duckdb
 from tests.shared import JANE, JOHN
 
@@ -205,7 +205,7 @@ def test_merge_collapses_appended_duplicates(repo):
     dup_flush = {s.id: s for s in repo.query_statements()}
     assert set(dup_flush) == set(pre_merge)
 
-    repo.merge()
+    merge(repo)
     assert _row_count(path) == rows1
     # Physical cleanup must not change the visible result.
     post_merge = {s.id: s for s in repo.query_statements()}
@@ -227,7 +227,7 @@ def test_deleted_candidates_see_tombstones(local_repo):
 
     # the live view hides jane; the raw scan behind the DEL candidates does not
     assert not list(repo.query(Query(M(entity_id="jane"))))
-    candidates = {c.id: c for c in repo.deleted_candidates(before)}
+    candidates = {c.id: c for c in repo.statements.deleted_candidates(before)}
     assert set(candidates) == {"jane"}
     assert candidates["jane"].schemata == {"Person"}
 

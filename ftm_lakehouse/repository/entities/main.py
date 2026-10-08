@@ -1,12 +1,10 @@
-"""EntityRepository - entity/statement operations using JournalStore + ParquetStore."""
+"""EntityRepository – entity/statement operations over JournalStore + ParquetStore."""
 
-from contextlib import contextmanager
 from datetime import datetime
 from functools import cached_property
-from typing import Generator, Iterable, Iterator, cast
+from typing import Iterable, Iterator, cast
 
 import pyarrow as pa
-from anystore.interface.lock import Lock
 from anystore.types import Uri
 from anystore.util import Took, mask_uri
 from followthemoney import EntityProxy, Statement, StatementEntity
@@ -17,9 +15,7 @@ from ftmq.query import M, Query
 from ftmq.types import StatementEntities, Statements, ValueEntities
 from rigour.time import utc_now
 
-from ftm_lakehouse.core.api import no_api
-from ftm_lakehouse.core.settings import Settings
-from ftm_lakehouse.model.statement import DeleteCandidate, LakehouseStatement
+from ftm_lakehouse.model.statement import LakehouseStatement
 from ftm_lakehouse.repository.artifacts import (
     EntitiesArtifact,
     StatementsArtifact,
@@ -29,8 +25,6 @@ from ftm_lakehouse.storage.journal import get_journal
 from ftm_lakehouse.storage.journal.base import BaseJournalWriter
 from ftm_lakehouse.storage.parquet import ParquetStore
 from ftm_lakehouse.util import validate_origin
-
-settings = Settings()
 
 
 class EntityRepository(DatasetHandle):
@@ -68,18 +62,17 @@ class EntityRepository(DatasetHandle):
         self.EXPORTS_STATEMENTS = StatementsArtifact(self).key
 
     @cached_property
-    def _statements(self) -> ParquetStore:
-        """Local parquet store, built lazily – api instances never get one."""
+    def statements(self) -> ParquetStore:
+        """The dataset's parquet store, built lazily; raises in api mode."""
         if self._is_api:
             raise RuntimeError(
-                f"`{type(self).__name__}._statements` is not available in API mode"
+                f"`{type(self).__name__}.statements` is not available in API mode"
             )
         return ParquetStore(self.uri, self.dataset, self.shards)
 
-    @contextmanager
     def writer(
         self, origin: str | None = None, role: str | None = None
-    ) -> Generator[BaseJournalWriter, None, None]:
+    ) -> BaseJournalWriter:
         """A bulk journal writer – inserts its tail on success, drops it on error.
 
         Example:
@@ -92,8 +85,7 @@ class EntityRepository(DatasetHandle):
             origin: Origin of the statements written through it.
             role: Who asserts them, for statements that carry no role.
         """
-        with self._journal.writer(origin, role) as writer:
-            yield writer
+        return self._journal.writer(origin, role)
 
     def add(
         self,
@@ -138,11 +130,10 @@ class EntityRepository(DatasetHandle):
             )
         return total
 
-    @no_api
     def write_batches(self, tables: Iterable[pa.Table]) -> int:
         """Append `JOURNAL_SCHEMA` tables to parquet – the write loop of the
-        journal drain and both bulk imports. Each table is durable before the
-        next is asked for; bigger tables mean fewer files.
+        journal drain and the bulk imports. Each table is durable before the
+        next is pulled.
 
         Args:
             tables: Stream of packed statement tables.
@@ -150,21 +141,22 @@ class EntityRepository(DatasetHandle):
         Returns:
             Number of rows written.
         """
+        store = self.statements  # raises in api mode, also for no tables
         total = 0
         for table in tables:
             if not table.num_rows:
                 continue
-            self._statements.append(table)
+            store.append(table)
             total += table.num_rows
         return total
 
     def merge(self, force: bool = False) -> None:
         """Flush, then [`merge`][ParquetStore.merge] the parquet store – ``force``
         rewrites clean partitions too."""
+        store = self.statements  # raises in api mode, ahead of the flush
         self.flush()
-        self._statements.merge(force)
+        store.merge(force)
 
-    @no_api
     def shard(self, shards: int) -> None:
         """Flush, then [`shard`][ParquetStore.shard] the parquet store – the
         storage half; [`ShardOperation`][ftm_lakehouse.operation.maintenance.ShardOperation]
@@ -173,51 +165,22 @@ class EntityRepository(DatasetHandle):
         Args:
             shards: Target shard count; ``<= 1`` means a single shard.
         """
+        store = self.statements  # raises in api mode, ahead of the flush
         self.flush()
-        self._statements.shard(shards)
+        store.shard(shards)
         self.shards = shards
 
-    @no_api
-    def vacuum(self, retention_hours: int = 0) -> None:
-        """Delete the parquet files the Delta log no longer references."""
-        self._statements.vacuum(retention_hours=retention_hours)
-
-    @no_api
-    def merge_lock(self) -> Lock:
-        """The store's [`merge_lock`][ParquetStore.merge_lock]."""
-        return self._statements.merge_lock()
-
-    @property
-    @no_api
-    def exists(self) -> bool:
-        """Whether the parquet store exists."""
-        return self._statements.exists
-
-    @property
-    @no_api
-    def needs_merge(self) -> bool:
-        """Whether an optimize has work ([`needs_merge`][ParquetStore.needs_merge])."""
-        return self._statements.needs_merge
-
     def query_statements_data(self, q: Query | None = None) -> Iterator[StatementDict]:
-        """[`query_statements`][EntityRepository.query_statements] as plain dicts."""
-        yield from self._statements._statement_data(q)
-
-    @no_api
-    def evolve_schema(self) -> list[str]:
-        """[`ParquetStore.evolve_schema`][ParquetStore.evolve_schema]."""
-        return self._statements.evolve_schema()
-
-    @no_api
-    def configure_table(self) -> dict[str, str]:
-        """[`ParquetStore.configure_table`][ParquetStore.configure_table]."""
-        return self._statements.configure_table()
-
-    @no_api
-    def unlock(self) -> bool:
-        """[`ParquetStore.unlock`][ParquetStore.unlock] – never while a writer
-        is running."""
-        return self._statements.unlock()
+        """[`query_statements`][EntityRepository.query_statements] as plain dicts –
+        the stored columns, timestamps as ISO strings, as the api sends them."""
+        for row in self.statements._statement_data(q):
+            yield cast(
+                StatementDict,
+                {
+                    k: v.isoformat() if isinstance(v, datetime) else v
+                    for k, v in row.items()
+                },
+            )
 
     def query(
         self, q: Query | None = None, *, flush_first: bool = False
@@ -230,7 +193,7 @@ class EntityRepository(DatasetHandle):
         """
         if flush_first:
             self.flush()
-        yield from self._statements.query(q)
+        yield from self.statements.query(q)
 
     def query_statements(
         self, q: Query | None = None, *, flush_first: bool = False
@@ -243,7 +206,7 @@ class EntityRepository(DatasetHandle):
         """
         if flush_first:
             self.flush()
-        yield from self._statements.query_statements(q)
+        yield from self.statements.query_statements(q)
 
     def get(self, entity_id: str, flush_first: bool = False) -> StatementEntity | None:
         """Get a single entity by ID."""
@@ -273,8 +236,6 @@ class EntityRepository(DatasetHandle):
         """
         now = utc_now()
         stmts = self._collect_entity_statements(entity_id)
-        if not stmts:
-            return 0
         if origin:
             stmts = [s for s in stmts if s.origin == origin]
         with self.writer() as w:
@@ -315,9 +276,8 @@ class EntityRepository(DatasetHandle):
         # validate before flushing – a bad origin must cost nothing
         origin = validate_origin(origin)
         self.flush()
-        self._statements.delete_origin(origin)
+        self.statements.delete_origin(origin)
 
-    @no_api
     def _collect_entity_statements(self, entity_id: str) -> list[LakehouseStatement]:
         """An entity's statements from parquet and journal, one per
         ``dedupe_key`` – the journal's win."""
@@ -337,14 +297,9 @@ class EntityRepository(DatasetHandle):
 
     def stats(self) -> DatasetStats:
         """Compute statistics from the parquet store."""
-        return self._statements.stats()
+        return self.statements.stats()
 
     @property
     def version(self) -> int | None:
         """Current version of the main Delta table."""
-        return self._statements.version
-
-    @no_api
-    def deleted_candidates(self, since: datetime) -> Iterator[DeleteCandidate]:
-        """[`ParquetStore.deleted_candidates`][ParquetStore.deleted_candidates]."""
-        return self._statements.deleted_candidates(since)
+        return self.statements.version

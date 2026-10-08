@@ -1,8 +1,4 @@
-"""Entity aggregation and assembly logic.
-
-This module provides functions for processing and assembling FollowTheMoney
-entities from statement streams.
-"""
+"""Assemble FollowTheMoney entities from statement streams."""
 
 from collections import defaultdict
 from typing import Any, Iterator, TypedDict
@@ -16,27 +12,24 @@ from ftm_lakehouse.helpers.schema import merge_schema
 
 
 class EntityData(TypedDict):
-    """All data needed to compile a proper EntityDict"""
+    """The folded statement data an entity dict is compiled from."""
 
     schemata: set[str]
     datasets: set[str]
     referents: set[str]
     origins: set[str]
     roles: set[str]
-    first_seens: set[str]
-    last_seens: set[str]
-    last_changes: set[str]
     properties: defaultdict
+    first_seen: str | None
+    last_seen: str | None
+    last_change: str | None
     min_first_seen: str | None
     max_first_seen: str | None
 
 
 class EntityPayload:
-    """Lightweight entity accumulator that works on raw statement dicts.
-
-    Mirrors StatementEntity.from_statements() + to_dict() behavior but
-    bypasses all FtM object construction for speed.
-    """
+    """Entity accumulator over raw statement dicts – mirrors
+    ``StatementEntity.from_statements(...).to_dict()`` without FtM objects."""
 
     __slots__ = (
         "id",
@@ -70,24 +63,16 @@ class EntityPayload:
 
     @property
     def min_first_seen(self) -> str | None:
-        """Earliest ``first_seen`` across **all** statements, ``id`` rows included.
-
-        The diff's ADD/MOD discriminator: when this is at or after a diff's
-        ``since``, every statement the entity has is new, so the entity itself
-        is new. Deliberately not the ``first_seen`` of
-        [`to_dict`][EntityPayload.to_dict], which folds non-``id`` statements
-        only – an entity that existed as a bare id and just gained its first
-        properties would read as brand new there.
-        """
+        """Earliest ``first_seen`` across all statements, ``id`` rows included –
+        the diff's ADD/MOD discriminator. Not ``to_dict()["first_seen"]``, which
+        skips ``id`` rows: a bare-id entity that just gained properties would
+        read as new."""
         return self.compiled["min_first_seen"]
 
     @property
     def max_first_seen(self) -> str | None:
-        """Latest ``first_seen`` across **all** statements, ``id`` rows included.
-
-        The diff's change predicate: when this is at or after a diff's
-        ``since``, the entity gained at least one statement in the window.
-        """
+        """Latest ``first_seen`` across all statements, ``id`` rows included –
+        the diff's change predicate."""
         return self.compiled["max_first_seen"]
 
     def _build(self) -> EntityData:
@@ -97,10 +82,10 @@ class EntityPayload:
             referents=set(),
             origins=set(),
             roles=set(),
-            first_seens=set(),
-            last_seens=set(),
-            last_changes=set(),
             properties=defaultdict(set),
+            first_seen=None,
+            last_seen=None,
+            last_change=None,
             min_first_seen=None,
             max_first_seen=None,
         )
@@ -112,14 +97,13 @@ class EntityPayload:
         roles = data["roles"]
         referents = data["referents"]
         properties = data["properties"]
-        first_seens = data["first_seens"]
-        last_seens = data["last_seens"]
-        last_changes = data["last_changes"]
+        earliest: str | None = None
+        latest: str | None = None
+        last_change: str | None = None
         min_first_seen: str | None = None
         max_first_seen: str | None = None
         entity = self.id
 
-        # collect statements
         for s in self.statements:
             schemata.add(s["schema"])
             datasets.add(s["dataset"])
@@ -139,8 +123,7 @@ class EntityPayload:
             first_seen = datetime_iso(s.get("first_seen"))
             last_seen = datetime_iso(s.get("last_seen"))
 
-            # the diff bounds span every statement, `id` rows included – a
-            # bare-id entity that just gained properties predates the window
+            # the diff bounds span every statement, `id` rows included
             if first_seen is not None:
                 if min_first_seen is None or first_seen < min_first_seen:
                     min_first_seen = first_seen
@@ -150,16 +133,21 @@ class EntityPayload:
             if s["prop"] == BASE_ID:
                 # last_change = max of BASE_ID statement first_seen values
                 if first_seen is not None:
-                    last_changes.add(first_seen)
+                    if last_change is None or first_seen > last_change:
+                        last_change = first_seen
             else:
                 properties[s["prop"]].add(s["value"])
-                # first_seen/last_seen only from non-id statements
-                # (matches StatementEntity.to_context_dict which excludes BASE_ID)
+                # non-id statements only, as `StatementEntity.to_context_dict`
                 if first_seen is not None:
-                    first_seens.add(first_seen)
+                    if earliest is None or first_seen < earliest:
+                        earliest = first_seen
                 if last_seen is not None:
-                    last_seens.add(last_seen)
+                    if latest is None or last_seen > latest:
+                        latest = last_seen
 
+        data["first_seen"] = earliest
+        data["last_seen"] = latest
+        data["last_change"] = last_change
         data["min_first_seen"] = min_first_seen
         data["max_first_seen"] = max_first_seen
         return data
@@ -190,7 +178,7 @@ class EntityPayload:
         for prop_name in schema.caption:
             values = properties.get(prop_name)
             if values:
-                caption = next(iter(values))
+                caption = min(values)
                 break
         if caption is None:
             caption = schema.label
@@ -199,21 +187,22 @@ class EntityPayload:
             "id": self.id,
             "caption": caption,
             "schema": schema.name,
-            "properties": {k: list(v) for k, v in properties.items()},
-            "referents": list(compiled["referents"]),
-            "datasets": list(compiled["datasets"]),
+            # sorted: the statements of an entity come in no fixed order
+            "properties": {k: sorted(v) for k, v in sorted(properties.items())},
+            "referents": sorted(compiled["referents"]),
+            "datasets": sorted(compiled["datasets"]),
         }
 
         if compiled["origins"]:
-            data["origin"] = list(compiled["origins"])
+            data["origin"] = sorted(compiled["origins"])
         if compiled["roles"]:
-            data["role"] = list(compiled["roles"])
-        if compiled["first_seens"]:
-            data["first_seen"] = min(compiled["first_seens"])
-        if compiled["last_seens"]:
-            data["last_seen"] = max(compiled["last_seens"])
-        if compiled["last_changes"]:
-            data["last_change"] = max(compiled["last_changes"])
+            data["role"] = sorted(compiled["roles"])
+        if compiled["first_seen"] is not None:
+            data["first_seen"] = compiled["first_seen"]
+        if compiled["last_seen"] is not None:
+            data["last_seen"] = compiled["last_seen"]
+        if compiled["last_change"] is not None:
+            data["last_change"] = compiled["last_change"]
 
         return data
 
@@ -225,12 +214,10 @@ class EntityPayload:
 def aggregate_unsafe(
     data: Iterator[StatementDict], dataset: str | None = None
 ) -> Iterator[EntityPayload]:
-    """
-    Aggregate statement dicts (e.g. from DuckDB rows) to entity payloads.
+    """Aggregate statement dicts (e.g. DuckDB rows) into entity payloads.
 
-    Completely circumvents the dict -> Statement -> StatementEntity -> dict
-    Python path, but therefore has no validation checks. Input must be sorted
-    by entity_id.
+    Skips FtM object construction, and with it all validation. Input must be
+    sorted by ``entity_id``.
     """
     current: EntityPayload | None = None
     for statement in data:

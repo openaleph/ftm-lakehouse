@@ -369,8 +369,8 @@ Grace comes from `LAKEHOUSE_GRACE_PERIOD_DAYS` (default 30 days); set it to `0` 
 Deletes the obsolete parquet files that `merge` replaced in the Delta log.
 
 ```python
-entities._statements.vacuum()
-entities._statements.vacuum(retention_hours=24)
+entities.statements.vacuum()
+entities.statements.vacuum(retention_hours=24)
 ```
 
 ## Complete Example

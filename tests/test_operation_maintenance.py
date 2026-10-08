@@ -14,7 +14,7 @@ DATASET = "optimize_test"
 
 
 def count_parquet_files(repo: EntityRepository) -> int:
-    return len(repo._statements.deltatable.file_uris())
+    return len(repo.statements.deltatable.file_uris())
 
 
 def count_parquet_on_disk(tmp_path) -> int:
@@ -95,7 +95,7 @@ def test_operation_optimize_collapses_duplicates(tmp_path):
 
     def row_count() -> int:
         con = make_duckdb()
-        register_view(con, repo._statements.deltatable)
+        register_view(con, repo.statements.deltatable)
         return con.execute(f"SELECT COUNT(*) FROM {TABLE.name}").fetchone()[0]
 
     before = row_count()

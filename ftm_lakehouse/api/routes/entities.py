@@ -1,14 +1,11 @@
 """Entity API routes: flush, query, delete, stats, version."""
 
-from typing import cast
-
 import orjson
 from fastapi import APIRouter
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from ftmq.model.stats import DatasetStats
 
 from ftm_lakehouse.api.dependencies import Entities, QueryBody
-from ftm_lakehouse.model.statement import LakehouseStatement
 
 NDJSON_CONTENT_TYPE = "application/x-ndjson"
 
@@ -22,22 +19,17 @@ def entities_flush(entities: Entities) -> PlainTextResponse:
     return PlainTextResponse(str(count))
 
 
-@router.post("/{dataset}/_api/entities/merge")
-def entities_merge(entities: Entities, force: bool = False) -> PlainTextResponse:
-    """Collapse duplicates and reap expired tombstones from parquet store"""
-    entities.merge(force)
-    return PlainTextResponse("ok")
-
-
 @router.post("/{dataset}/_api/entities/query")
 def entities_query(entities: Entities, body: QueryBody) -> StreamingResponse:
     """Query entities from parquet store, streamed as NDJSON."""
-    # Parse (and thereby validate) the query BEFORE streaming starts – an
-    # invalid body must 400, not break the stream after 200 + headers.
+    # parse and flush before the stream starts: a bad body or a failing flush
+    # must fail the request, not cut a 200 response short
     query = body.to_query()
+    if body.flush_first:
+        entities.flush()
 
     def generate():
-        for entity in entities.query(query, flush_first=body.flush_first):
+        for entity in entities.query(query):
             yield orjson.dumps(
                 entity.to_statement_dict(), option=orjson.OPT_APPEND_NEWLINE
             )
@@ -74,27 +66,20 @@ def entities_stats(entities: Entities) -> DatasetStats:
 def entities_version(entities: Entities) -> PlainTextResponse:
     """Return current Delta table version."""
     v = entities.version
-    return PlainTextResponse(str(v or 0))
+    # empty for no table – the client reads that back as `None`, as locally
+    return PlainTextResponse("" if v is None else str(v))
 
 
 @router.post("/{dataset}/_api/entities/statements/query")
 def statements_query(entities: Entities, body: QueryBody) -> StreamingResponse:
     """Query statements from parquet store, streamed as NDJSON."""
-    # Parse (and thereby validate) the query BEFORE streaming starts.
+    # before the stream starts, as in `entities_query`
     query = body.to_query()
     if body.flush_first:
         entities.flush()
 
     def generate():
-        for statement in entities.query_statements(query):
-            # `to_dict` is FtM's and knows none of the lake columns, so
-            # `fragment` / `role` ride along explicitly
-            stmt = cast(LakehouseStatement, statement)
-            data = {
-                **stmt.to_dict(),
-                "fragment": stmt.fragment,
-                "role": stmt.role,
-            }
-            yield orjson.dumps(data, option=orjson.OPT_APPEND_NEWLINE)
+        for row in entities.query_statements_data(query):
+            yield orjson.dumps(row, option=orjson.OPT_APPEND_NEWLINE)
 
     return StreamingResponse(generate(), media_type=NDJSON_CONTENT_TYPE)

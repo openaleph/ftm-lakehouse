@@ -1,3 +1,5 @@
+import random
+
 from anystore.util import guess_mimetype
 from rigour.mime import normalize_mimetype
 from rigour.mime.types import DEFAULT, HTML, PDF, WORD
@@ -80,3 +82,20 @@ def test_helpers_file_folder_tree():
     tree.put("f2", "b", ["f3"])
     tree.put("f3", "c", ["f2"])
     assert tree.paths() == {"f1": "a", "f2": "c/b", "f3": "b/c"}
+
+
+def test_helpers_file_folder_tree_memoised():
+    """Each folder is walked once, its path built off its resolved parent's –
+    the same paths as walking every folder up its own chain, cycles,
+    unknown parents and empty names included."""
+    rng = random.Random(7)
+    for _ in range(200):
+        tree = file.FolderTree()
+        ids = [f"f{i}" for i in range(rng.randint(1, 40))]
+        for folder in ids:
+            parents = rng.choice([[], [rng.choice(ids)], ["missing"], ids[:2]])
+            tree.put(folder, rng.choice(["a", "b", "", "dir"]), parents)
+        assert tree.paths() == {f: tree._path(f) for f in ids}
+        assert list(tree.folders()) == [
+            (f, tree._folders[f][0], tree.paths()[f]) for f in ids
+        ]

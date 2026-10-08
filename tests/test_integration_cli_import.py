@@ -57,7 +57,7 @@ def test_cli_statements_import_roundtrip(tmp_path, cli_runner):
     assert result.exit_code == 0, result.output
 
     dst = EntityRepository("dst", tmp_path / "dst")
-    stmts = list(dst._statements.query_statements())
+    stmts = list(dst.statements.query_statements())
     assert len(stmts) == 4  # 2 entities x (id + name statements)
     for stmt in stmts:
         assert stmt.external is False
@@ -85,7 +85,7 @@ def test_cli_statements_import_override_origin(tmp_path, cli_runner):
         )
         assert result.exit_code == 0, result.output
         dst = EntityRepository(dst_name, tmp_path / dst_name)
-        origins = {s.origin for s in dst._statements.query_statements()}
+        origins = {s.origin for s in dst.statements.query_statements()}
         assert origins == {"forced"}, dst_name
 
 
@@ -146,13 +146,13 @@ def test_cli_entities_import_unsafe_roundtrip(tmp_path, cli_runner):
     assert entities["jane"].get("proof") == ["doc-1"]
     assert "Jane Doe" in entities["jane"].get("name")
 
-    stmts = list(dst._statements._statement_data())
+    stmts = list(dst.statements._statement_data())
     origins = {r["origin"] for r in stmts if r["entity_id"] == "jane"}
     assert origins == {"crawl"}  # payload origin wins over the bulk default
 
 
 def _sorted_rows(repo: EntityRepository) -> list[dict]:
-    rows = list(repo._statements._statement_data())
+    rows = list(repo.statements._statement_data())
     return sorted(rows, key=lambda r: (r["id"], r["fragment"]))
 
 
@@ -195,7 +195,7 @@ def test_import_entities_unsafe_bounded_buffer(tmp_path):
     }
     import_entities_unsafe(repo, [payload], bulk_size=3)
 
-    rows = list(repo._statements._statement_data())
+    rows = list(repo.statements._statement_data())
     assert len(rows) == 11  # 10 names + BASE stub
     assert repo.version is not None and repo.version >= 3  # several flushes
 
@@ -218,7 +218,7 @@ def test_cli_statements_import_unsafe_roundtrip(tmp_path, cli_runner):
         assert result.exit_code == 0, result.output
 
     unsafe = EntityRepository("ds", tmp_path / "root_unsafe" / "ds")
-    stmts = list(unsafe._statements.query_statements())
+    stmts = list(unsafe.statements.query_statements())
     assert len(stmts) == 4  # 2 entities x (id + name statements)
     for stmt in stmts:
         assert stmt.external is False
@@ -263,7 +263,7 @@ def test_cli_entities_import_per_item_origin(tmp_path, cli_runner):
 
     dst = EntityRepository("dst", tmp_path / "dst")
     origins: dict[str, set[str]] = {}
-    for stmt in dst._statements.query_statements():
+    for stmt in dst.statements.query_statements():
         origins.setdefault(stmt.entity_id, set()).add(stmt.origin)
     assert origins == {"a": {"crawl"}, "b": {"bulk"}, "c": {"bulk"}}
 
@@ -305,7 +305,7 @@ def test_cli_entities_import_role(tmp_path, cli_runner):
 
         dst = EntityRepository("dst", tmp_path / root / "dst")
         roles: dict[str, set[str]] = {}
-        for stmt in dst._statements.query_statements():
+        for stmt in dst.statements.query_statements():
             roles.setdefault(stmt.entity_id, set()).add(stmt.role)
         assert roles == {"a": {"user:42"}, "b": {"cli"}, "c": {"cli"}}, root
 
@@ -327,7 +327,7 @@ def test_cli_statements_import_role_roundtrip(tmp_path, cli_runner):
         )
         assert result.exit_code == 0, result.output
         dst = EntityRepository("ds", tmp_path / root / "ds")
-        roles = {s.role for s in dst._statements.query_statements()}
+        roles = {s.role for s in dst.statements.query_statements()}
         assert roles == {None, "user:42"}, root
 
 

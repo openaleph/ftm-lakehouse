@@ -1,10 +1,8 @@
-"""JournalStore - SQL statement buffer for write-ahead logging."""
+"""SqlJournalStore – SQL statement buffer for write-ahead logging."""
 
 from __future__ import annotations
 
-import random
 import threading
-import time
 from binascii import crc32
 from contextlib import contextmanager
 from functools import cached_property, partial
@@ -17,7 +15,7 @@ from ftmq.util import datetime_iso
 from rigour.time import utc_now
 from sqlalchemy import MetaData, Table, delete, insert, inspect, select
 from sqlalchemy.engine import Engine, create_engine, make_url
-from sqlalchemy.exc import DisconnectionError, OperationalError
+from sqlalchemy.exc import DisconnectionError
 from sqlalchemy.pool import NullPool, Pool, QueuePool, StaticPool
 from sqlalchemy.schema import CreateTable
 
@@ -54,14 +52,12 @@ SEGMENT_INFIX = "-seg-"
 """Separates a journal table from its rotated segments."""
 
 ROTATE_LOCK_TIMEOUT = "5s"
-ROTATE_MAX_RETRIES = 5
-ROTATE_BASE_DELAY = 1  # seconds
 
 COLUMNS = ", ".join(f'"{name}"' for name in JOURNAL_SCHEMA.names)
 
 
 def _row_to_statement(row: Any) -> LakehouseStatement:
-    """Build a statement from a journal row – typed columns, no unpacking."""
+    """Build a statement from a journal row."""
     return LakehouseStatement(
         id=row.id,
         entity_id=row.entity_id,
@@ -82,21 +78,9 @@ def _row_to_statement(row: Any) -> LakehouseStatement:
 
 
 class SqlJournalWriter(BaseJournalWriter["SqlJournalStore"]):
-    """SQL-backed bulk writer, appending batches.
+    """SQL bulk writer – borrows one store connection for its lifetime."""
 
-    Borrows one connection from the store for its lifetime and hands each
-    packed batch to the store, whose dialect implementation owns the insert.
-    `close` gives it back.
-    """
-
-    def __init__(
-        self,
-        store: "SqlJournalStore",
-        origin: str | None = None,
-        role: str | None = None,
-    ) -> None:
-        super().__init__(store, origin=origin, role=role)
-        self._conn: Any = None
+    _conn: Any = None
 
     @property
     def conn(self) -> Any:
@@ -108,10 +92,8 @@ class SqlJournalWriter(BaseJournalWriter["SqlJournalStore"]):
         try:
             self.store.insert_batch(self.conn, batch)
         except Exception:
-            # postgres leaves the session in an aborted transaction, where
-            # every later statement fails until it is rolled back – and
-            # handing the connection back is what rolls it back, so a caller
-            # that catches the error and keeps writing gets a usable one
+            # releasing rolls back postgres's aborted transaction, so a caller
+            # that catches the error and keeps writing gets a usable connection
             self.close()
             raise
 
@@ -123,18 +105,12 @@ class SqlJournalWriter(BaseJournalWriter["SqlJournalStore"]):
 
 
 class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
-    """
-    SQL-based journal for buffering writes.
+    """SQL journal – an append-only heap per dataset in `JOURNAL_SCHEMA`.
 
-    An append-only heap per dataset, carrying the producer statement columns
-    (`JOURNAL_SCHEMA`). A flush claims
-    the whole table by renaming it to a timestamped segment and creating a
-    fresh one in the same DDL transaction, streams the segment out as Arrow,
-    and drops it – so cleanup is a catalog operation, never a ``DELETE``.
-
-    Dialect specifics live in the subclasses `SqliteJournalStore` and
-    `PostgresJournalStore`, picked once by `sql_journal` – the
-    same construction-time choice ``get_journal`` makes for the api store.
+    A flush renames the table to a timestamped segment and creates a fresh one
+    in the same DDL transaction, streams the segment out as Arrow and drops it
+    – cleanup is a catalog operation, never a ``DELETE``. Dialects:
+    `SqliteJournalStore` / `PostgresJournalStore`, picked by `sql_journal`.
     """
 
     _writer_cls = SqlJournalWriter
@@ -152,7 +128,8 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
     # -- dialect hooks
 
     def make_engine(self) -> Engine:
-        raise NotImplementedError
+        # no idle connections: `get_journal` caches a store per dataset forever
+        return create_engine(self.uri, hide_parameters=True, poolclass=NullPool)
 
     def connect(self) -> Any:
         """Open a connection for a writer's inserts."""
@@ -161,23 +138,16 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
     def acquire(self) -> Any:
         """Take a connection for a writer's inserts.
 
-        A plain [`connect`][SqlJournalStore.connect] here – the engines in this module all use
-        non-caching pools, so a sqlite connection costs what it costs.
-        `PostgresJournalStore` overrides it to borrow from a pool of
-        its own, because the ADBC write path bypasses the engine entirely
-        and a cold ADBC connection is expensive.
+        A plain [`connect`][SqlJournalStore.connect]; `PostgresJournalStore`
+        borrows from an ADBC pool instead.
         """
         return self.connect()
 
     def release(self, conn: Any) -> None:
-        """Hand a writer's connection back.
+        """Hand a writer's connection back by closing it.
 
-        Closing is the whole of it in both dialects, though it means
-        different things: file-backed sqlite drops the connection, in-memory
-        sqlite returns the one shared connection to its ``StaticPool``, and
-        `PostgresJournalStore` checks the ADBC connection back into
-        its pool – rolled back on the way in, so the next writer never
-        inherits an aborted transaction.
+        On postgres that checks it into the pool, rolled back, so the next
+        writer never inherits an aborted transaction.
         """
         conn.close()
 
@@ -191,13 +161,10 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
 
     @contextmanager
     def flush_lock(self) -> Generator[bool, None, None]:
-        """Hold this dataset's flush window, or report that someone else has it.
+        """Hold this dataset's flush window; yields ``False`` if another flush has it.
 
-        Rotation alone does not serialize concurrent flushes: the second one
-        finds the live table already empty, skips rotating, and drains the
-        first one's segment – duplicating every row and then failing on the
-        double ``DROP``. The lock must release itself when a flusher dies,
-        or a crash would strand the segment it was draining.
+        Without it a second flush would drain the first one's segment. The lock
+        must release itself when its holder dies, or a crash strands a segment.
         """
         raise NotImplementedError
         yield True  # pragma: no cover - typing
@@ -217,11 +184,7 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
         return f"{self._prefix}{utc_now().strftime('%Y%m%dT%H%M%S')}{uuid4().hex[:4]}"
 
     def _segments(self) -> list[str]:
-        """Rotated segments, oldest first – the timestamp name sorts for us.
-
-        This is the whole of orphan recovery: a segment left behind by a
-        crashed or abandoned flush is picked up by the next one.
-        """
+        """Rotated segments, oldest first – orphans of a crashed flush included."""
         names = inspect(self.engine).get_table_names()
         return sorted(n for n in names if n.startswith(self._prefix))
 
@@ -233,45 +196,18 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
         return journal_table(MetaData(), name)
 
     def _rotate(self) -> None:
-        """Claim the current journal: rename it, create a fresh one, atomically.
+        """Rename the journal to a segment and recreate it in one DDL transaction.
 
-        DDL is transactional in both dialects, so a writer sees either the
-        old table or the new one, never a gap. The rename takes the strongest
-        table lock, which conflicts with every in-flight insert – so it waits
-        out uncommitted writers, and no row can land in the segment after it
-        returns. A writer blocked on that lock re-resolves the table name and
-        continues into the fresh table.
-
-        Raises:
-            RuntimeError: If the lock could not be taken within
-                `ROTATE_MAX_RETRIES` attempts.
+        The rename's exclusive lock waits out in-flight inserts, so no row lands
+        in the segment afterwards; blocked writers continue into the fresh table.
+        `lock_timeout` bounds the wait – every new insert queues behind it – so a
+        flush blocked by a long transaction fails, and the next flush retries.
         """
         name = self._segment_name()
-        attempt = 0
-        while True:
-            try:
-                with self.engine.begin() as conn:
-                    self._set_lock_timeout(conn)
-                    conn.exec_driver_sql(
-                        f'ALTER TABLE "{self.table.name}" RENAME TO "{name}"'
-                    )
-                    conn.execute(CreateTable(self.table))
-                return
-            except OperationalError as exc:
-                attempt += 1
-                if attempt >= ROTATE_MAX_RETRIES:
-                    raise RuntimeError(
-                        f"Cannot rotate journal `{self.table.name}`: {exc}"
-                    )
-                delay = ROTATE_BASE_DELAY * 2**attempt + random.uniform(
-                    0, ROTATE_BASE_DELAY
-                )
-                log.warning(
-                    "Journal rotation blocked, retrying in %.2fs (attempt %d)",
-                    delay,
-                    attempt,
-                )
-                time.sleep(delay)
+        with self.engine.begin() as conn:
+            self._set_lock_timeout(conn)
+            conn.exec_driver_sql(f'ALTER TABLE "{self.table.name}" RENAME TO "{name}"')
+            conn.execute(CreateTable(self.table))
 
     def _drop(self, name: str) -> None:
         with self.engine.begin() as conn:
@@ -285,19 +221,14 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
     # -- flush
 
     def flush_batches(self) -> StatementTables:
-        """Rotate the journal, then stream each segment as Arrow.
+        """Rotate the journal, then stream each segment as Arrow tables and drop it.
 
-        Held under [`flush_lock`][SqlJournalStore.flush_lock] for the whole
-        window – a second flush on the same dataset yields nothing rather than
-        draining the first one's segment twice. Segments left by a crashed flush are picked up
-        here, which is the whole of orphan recovery.
-
-        Segments stream out unordered: rows carry no ``shard`` column to sort
-        on, and the sort this used to do was an un-indexed pass over the whole
-        segment that had to finish before the first row could be handed over.
-        A drained table therefore spans shards and
+        Held under [`flush_lock`][SqlJournalStore.flush_lock] – a concurrent
+        flush yields nothing. Segments left by a crashed flush are drained too,
+        and a consumer that fails keeps the undrained rows for the next flush.
+        Rows stream unordered, so a table spans shards and
         [`append`][ftm_lakehouse.storage.parquet.ParquetStore.append] writes one
-        file per partition it touches, which the next ``merge`` rewrites.
+        file per partition it touches.
         """
         with self.flush_lock() as acquired:
             if not acquired:
@@ -314,14 +245,8 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
     def _drain(self, name: str) -> StatementTables:
         """Stream one segment in whole tables, then drop it.
 
-        Read chunks are gathered into a table *before* it is yielded – which
-        costs nothing, the table just references them – and the consumer
-        writes each table before asking for the next. So by the time this
-        resumes to drop the segment, every row it handed out is durable
-        downstream. Yielding chunks the consumer has to buffer would lose the
-        tail of a flush whenever the write fails, and a dropped segment is
-        gone for good, while a kept one only costs duplicates that
-        [`ParquetStore.merge`][ftm_lakehouse.storage.parquet.ParquetStore.merge] collapses.
+        The consumer writes each table before asking for the next, so the drop
+        only follows durable writes; a failure keeps the segment.
         """
         pending: list[pa.RecordBatch] = []
         rows = 0
@@ -333,8 +258,7 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
                 pending, rows = [], 0
         if pending:
             yield pa.Table.from_batches(pending, schema=JOURNAL_SCHEMA)
-        # only after the reader is closed: DROP needs the exclusive lock a
-        # still-open read transaction on the same connection would never yield
+        # only after the reader is closed – its read transaction blocks the DROP
         self._drop(name)
 
     # -- reads
@@ -342,9 +266,8 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
     def iterate_entity(self, entity_id: str) -> LakehouseStatements:
         """Iterate the live statements of one entity, across all segments.
 
-        A scan of the journal per call – the heap carries no index by design
-        (see [`journal_table`][ftm_lakehouse.model.statement.journal_table]). That is
-        the delete path's cost, and it is bounded by how much sits unflushed.
+        A full scan per call – the journal has no index (see
+        [`journal_table`][ftm_lakehouse.model.statement.journal_table]).
         """
         with self.engine.connect() as conn:
             for name in self._table_names():
@@ -389,11 +312,7 @@ class SqliteJournalStore(SqlJournalStore):
 
     @contextmanager
     def flush_lock(self) -> Generator[bool, None, None]:
-        """In-process guard – a sqlite journal has one process by design.
-
-        The store is cached per dataset, so this covers the threads of one
-        worker; it dies with the process, so nothing can be stranded.
-        """
+        """In-process lock – a sqlite journal has one process by design."""
         acquired = self._flush_lock.acquire(blocking=False)
         try:
             yield acquired
@@ -402,7 +321,7 @@ class SqliteJournalStore(SqlJournalStore):
                 self._flush_lock.release()
 
     def make_engine(self) -> Engine:
-        # For in-memory SQLite, use StaticPool to share the same connection
+        # in-memory: one shared connection, or each would see its own database
         if self.uri == "sqlite:///:memory:":
             log.warn("Using in-memory journal!")
             return create_engine(
@@ -410,31 +329,20 @@ class SqliteJournalStore(SqlJournalStore):
                 connect_args={"check_same_thread": False},
                 poolclass=StaticPool,
             )
-        return create_engine(self.uri, hide_parameters=True, poolclass=NullPool)
+        return super().make_engine()
 
     def connect(self) -> Any:
         return self.engine.connect()
 
     def insert_batch(self, conn: Any, batch: pa.Table) -> None:
-        """Hand the rows to SQLAlchemy's ``executemany``.
-
-        Per-row binding rather than one giant multi-values statement, so the
-        batch size is bounded by memory instead of by the driver's parameter
-        ceiling. The row shape is SQLAlchemy's cost here, not ours – binding
-        dominates, and building the dicts columnwise instead measures the
-        same.
-        """
+        """Hand the rows to SQLAlchemy's ``executemany`` – per-row binding, so no
+        driver parameter limit caps the batch size."""
         conn.execute(insert(self.table), batch.to_pylist())
         conn.commit()
 
     def read_segment(self, name: str) -> RecordBatches:
-        """Transpose each cursor chunk columnwise into Arrow.
-
-        Row tuples already arrive in `JOURNAL_SCHEMA` column order –
-        the table is built from that schema – so the batch is one
-        ``zip(*rows)`` away, with no dict per row and no keyed lookup per
-        column (~1.6x a ``from_pylist`` of row dicts).
-        """
+        """Transpose each cursor chunk columnwise into Arrow – rows arrive in
+        `JOURNAL_SCHEMA` column order."""
         q = select(self._table(name))
         with self.engine.connect() as conn:
             cursor = conn.execution_options(stream_results=True).execute(q)
@@ -458,15 +366,10 @@ ERR_NO_ADBC = ImproperlyConfigured(
 
 
 def _ping_on_checkout(conn: Any, record: Any, proxy: Any) -> None:
-    """Validate a pooled ADBC connection before a writer gets it.
+    """Ping a pooled ADBC connection on checkout.
 
-    Pooling reintroduces a failure a per-writer ``connect()`` did not have:
-    an idle connection the server has since dropped – an
-    ``idle_session_timeout``, a pgbouncer reap, a failover, a restart – sits
-    in the pool looking fine, and the writer finds out when its insert
-    fails. `DisconnectionError` is what the checkout
-    retry catches to retire that connection and dial a fresh one in its
-    place, so the round trip here is what keeps the failure off the caller.
+    A connection the server dropped while idle raises `DisconnectionError`,
+    which makes the pool retire it and dial a fresh one for the writer.
     """
     try:
         with conn.cursor() as cur:
@@ -477,13 +380,11 @@ def _ping_on_checkout(conn: Any, record: Any, proxy: Any) -> None:
 
 def _adbc_connect(uri: str) -> Any:
     """Dial one ADBC connection – the pools' creator, bound to a uri."""
-    if adbc_pg is None:
-        raise ERR_NO_ADBC
     return adbc_pg.connect(uri)
 
 
 _POOLS: dict[str, Pool] = {}
-"""ADBC pools by journal uri – see [`PostgresJournalStore.pool`][PostgresJournalStore.pool]."""
+"""ADBC pools by journal uri – see `PostgresJournalStore.pool`."""
 
 _POOLS_LOCK = threading.Lock()
 """Guards `_POOLS`: one store is shared across a worker's threads."""
@@ -494,32 +395,23 @@ class PostgresJournalStore(SqlJournalStore):
 
     lock_timeout = ROTATE_LOCK_TIMEOUT
 
-    def make_engine(self) -> Engine:
-        # NullPool: connections opened on demand, closed after use. The
-        # engine only carries DDL, counts and the advisory lock here – the
-        # write path goes through ADBC and the pool below – and
-        # ``get_journal`` is an unbounded ``@cache``, so a default QueuePool
-        # of 5+10 idle connections per cached dataset would multiply for no
-        # gain. What to size against postgres ``max_connections`` is
-        # ``journal_pool_size``, not this.
-        return create_engine(self.uri, hide_parameters=True, poolclass=NullPool)
+    def __init__(self, dataset: str, uri: str | None = None) -> None:
+        if adbc_pg is None:  # before the engine touches the server
+            raise ERR_NO_ADBC
+        super().__init__(dataset, uri)
 
     @cached_property
     def adbc_uri(self) -> str:
         """The journal uri as a libpq connection string for ADBC."""
-        if adbc_pg is None:
-            raise ERR_NO_ADBC
         url = make_url(self.uri).set(drivername="postgresql")
         return url.render_as_string(hide_password=False)
 
     @contextmanager
     def flush_lock(self) -> Generator[bool, None, None]:
-        """Session advisory lock, keyed on the journal table.
+        """Session advisory lock keyed on the journal table.
 
-        Session-scoped rather than transaction-scoped because a flush spans
-        many transactions – and because postgres drops it when the
-        connection goes, so a crashed flusher releases it for free and the
-        next flush recovers its segment.
+        Session-scoped since a flush spans many transactions; postgres drops it
+        with the connection, so a crashed flusher releases it.
         """
         key = crc32(self.table.name.encode())
         with self.engine.connect() as conn:
@@ -537,34 +429,14 @@ class PostgresJournalStore(SqlJournalStore):
         return _adbc_connect(self.adbc_uri)
 
     def pool(self) -> Pool:
-        """The writers' connection pool, built on first use and shared by
-        every journal on the same uri.
+        """The writers' ADBC connection pool (SQLAlchemy's), shared per uri.
 
-        ADBC ships no pool of its own, so this is SQLAlchemy's over
-        `connect` (the upstream recipe – see
-        https://arrow.apache.org/adbc/current/python/recipe/postgresql.html).
-        A cold ADBC connection costs way more than the liveness ping.
-
-        Keyed on the uri, not on the store: nothing about an ADBC connection
-        is dataset-scoped – `insert_batch` and `read_segment` name their
-        table per statement – while ``get_journal`` caches a store per
-        dataset for the life of the process. A pool per store therefore sized
-        idle connections by *how many datasets a worker had written to*: four
-        workers over seventy datasets exhaust a default postgres
-        ``max_connections`` and every journal write starts failing. One pool
-        per uri bounds them by ``settings.journal_pool_size`` per process,
-        which is what the setting says.
-
-        That size bounds what is kept *idle* between writers – ``0`` pools
-        nothing at all. ``max_overflow=-1`` keeps the burst behaviour a
-        per-writer ``connect()`` had: writers beyond the pool open their own
-        connection rather than queueing, so peak connections follow write
-        concurrency either way.
-
-        Built behind a lock rather than as a ``cached_property``: those have
-        had no lock since python 3.12, and one store is shared across a
-        worker's threads – two threads opening their first writer would each
-        build a pool, and only one of them would be reachable to dispose.
+        Keyed on the uri, not the store: ``get_journal`` caches a store per
+        dataset forever, so per-store pools would size idle connections by the
+        dataset count. ``settings.journal_pool_size`` bounds idle connections per
+        process (``0`` pools nothing); writers beyond it open their own rather
+        than queueing. Built under a lock – ``cached_property`` has none since
+        python 3.12.
         """
         uri = self.adbc_uri
         with _POOLS_LOCK:
@@ -588,11 +460,8 @@ class PostgresJournalStore(SqlJournalStore):
     def dispose(self) -> None:
         """Close the pooled connections along with the engine's.
 
-        The pool is dropped, not just emptied: ``get_journal`` caches this
-        store for the life of the process, so it has to come back up on the
-        next writer. It is the uri's pool, so this also drops what the other
-        datasets on that journal were sharing – they rebuild on their next
-        writer, and nothing but a shutdown or a test disposes a journal.
+        Drops the uri's pool, shared with the other datasets on that journal –
+        they rebuild it on their next writer.
         """
         with _POOLS_LOCK:
             pool = _POOLS.pop(self.adbc_uri, None)
@@ -608,10 +477,8 @@ class PostgresJournalStore(SqlJournalStore):
     def read_segment(self, name: str) -> RecordBatches:
         """Stream a segment's rows through a pooled connection.
 
-        `SqlJournalStore._drain` drops the segment as soon as this
-        returns, and that ``DROP`` needs a lock an open read transaction
-        would hold. Releasing is what ends the transaction: check-in rolls
-        back, so the connection is back in the pool with nothing held.
+        Released at the end – check-in rolls back, so the ``DROP`` that follows
+        is not blocked by an open read transaction.
         """
         conn = self.acquire()
         try:

@@ -20,6 +20,7 @@ from moto.server import ThreadedMotoServer
 from ftm_lakehouse.api.main import get_app
 from ftm_lakehouse.core.api import get_api
 from ftm_lakehouse.lake import get_lakehouse
+from ftm_lakehouse.operation.factories import optimize
 from ftm_lakehouse.repository import factories
 from ftm_lakehouse.repository.entities.main import EntityRepository
 from ftm_lakehouse.repository.factories import get_entities
@@ -212,6 +213,15 @@ def make_test_api(tmp_path: Path) -> Generator[str, None, None]:
     get_api.cache_clear()
 
 
+def merge(repo) -> None:
+    """Merge a repository's store – through the operations endpoint for an api
+    repository, which has no merge of its own."""
+    if repo._is_api:
+        optimize(repo.dataset, repo.uri)
+    else:
+        repo.merge()
+
+
 @pytest.fixture(params=["unmerged", "merged"])
 def settle(request):
     """Run a test's assertions against the un-merged store and against the
@@ -222,6 +232,6 @@ def settle(request):
 
     def _settle(repo) -> None:
         if request.param == "merged":
-            repo.merge()
+            merge(repo)
 
     return _settle

@@ -1,9 +1,4 @@
-"""Journal API routes: bulk write, count, clear.
-
-There is no flush route: a journal is drained by the store that holds it,
-and a repository in api mode delegates its whole flush to the server
-(``/entities/flush``) rather than streaming rows out to a local writer.
-"""
+"""Journal API routes: bulk write, count, clear – flushing is ``/entities/flush``."""
 
 import asyncio
 
@@ -18,10 +13,7 @@ router = APIRouter()
 
 @router.post("/{dataset}/_api/journal/bulk")
 async def journal_bulk(journal: Journal, request: Request) -> PlainTextResponse:
-    """Write an Arrow IPC stream of statement rows into the journal.
-
-    Rows are buffered as-is (`BaseJournalWriter.add_batch`) – the
-    sending writer already re-keyed ids and packed every column."""
+    """Write an Arrow IPC stream of packed statement rows into the journal as-is."""
     body = await request.body()
     if not body:
         return PlainTextResponse("0")
@@ -37,15 +29,3 @@ async def journal_bulk(journal: Journal, request: Request) -> PlainTextResponse:
     except KeyError as exc:  # a column the statement schema requires
         raise ValueError(f"Missing statement column: {exc}")
     return PlainTextResponse(str(count))
-
-
-@router.get("/{dataset}/_api/journal/count")
-def journal_count(journal: Journal) -> PlainTextResponse:
-    """Get the number of rows in the journal."""
-    return PlainTextResponse(str(journal.count()))
-
-
-@router.delete("/{dataset}/_api/journal/clear")
-def journal_clear(journal: Journal) -> PlainTextResponse:
-    """Delete all rows from the journal without flushing."""
-    return PlainTextResponse(str(journal.clear()))

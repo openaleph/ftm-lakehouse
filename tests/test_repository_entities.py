@@ -21,6 +21,7 @@ def _export(tmp_path, make_diff: bool = True) -> None:
 
 
 from ftm_lakehouse.repository.factories import get_artifacts, get_entities
+from ftm_lakehouse.storage.journal.api import ApiJournalStore
 from tests.conftest import make_docker_repo, make_test_api
 from tests.shared import BOB, JANE, JANE_FIRSTNAME, JOHN
 
@@ -61,14 +62,16 @@ def test_repository_entities(repo):
     # Query returns entities (flushes journal first)
     # before flush:
     assert not repo._tags.exists(tag.STATEMENTS_UPDATED)
-    assert repo._journal.count() > 0
+    # a remote journal (docker) has no count over the api
+    remote = isinstance(repo._journal, ApiJournalStore)
+    assert remote or repo._journal.count() > 0
     assert repo.stats().entity_count == 0
 
     # This auto flushes the journal:
     entities = list(repo.query(flush_first=True))
     # after flush:
     assert len(entities) == 2
-    assert repo._journal.count() == 0
+    assert remote or repo._journal.count() == 0
     assert repo.stats().entity_count == 2
     # Tag should be set after flush (triggered by query)
     assert repo._tags.exists(tag.STATEMENTS_UPDATED)
@@ -262,7 +265,7 @@ def test_repository_entities_export_diff_delete(tmp_path, settle):
     repo.delete_entity("jane")
     repo.flush()
     settle(repo)
-    assert [c.id for c in repo.deleted_candidates(since)] == ["jane"]
+    assert [c.id for c in repo.statements.deleted_candidates(since)] == ["jane"]
 
     # Incremental diff should contain a DEL for jane
     _export(tmp_path)
@@ -447,14 +450,14 @@ def test_repository_entities_export_diff_on_unmerged_store(tmp_path):
     with repo.writer() as writer:
         writer.add_entity(make_entity(JANE))
     repo.flush()
-    assert repo._statements.needs_merge
+    assert repo.statements.needs_merge
     _export(tmp_path)  # the first run only records where the series starts
 
     with repo.writer() as writer:
         writer.add_entity(make_entity(JANE))  # a duplicate, not a change
         writer.add_entity(make_entity(JOHN))
     repo.flush()
-    assert repo._statements.needs_merge
+    assert repo.statements.needs_merge
     _export(tmp_path)
 
     diff_files = sorted(
@@ -462,7 +465,7 @@ def test_repository_entities_export_diff_on_unmerged_store(tmp_path):
     )
     ops = [json.loads(line) for line in open(diff_files[-1])]
     assert [(o["op"], o["entity"]["id"]) for o in ops] == [("ADD", "john")]
-    assert repo._statements.needs_merge
+    assert repo.statements.needs_merge
 
 
 def test_export_no_diff_keeps_the_diff_watermark(tmp_path, settle):

@@ -1,11 +1,6 @@
-"""The export: every artifact that is a function of the entity stream –
-``statements.csv``, ``entities.ftm.json``, ``documents.csv`` per origin scope,
-``statistics.json`` and their diff series – from one sweep over the statement
-store, then ``index.json``.
-
-What an artifact is and how it is written belongs to
-[`ArtifactsRepository`][ftm_lakehouse.repository.artifacts.ArtifactsRepository];
-this operation drives the stream through them.
+"""The export: every artifact that is a function of the entity stream, from one
+sweep over the statement store, then ``index.json``. The artifacts themselves
+are declared in `ftm_lakehouse.repository.artifacts`.
 """
 
 from collections import Counter
@@ -13,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, Callable
 
 from anystore.io import SyncProgressBar, smart_open
 from anystore.util import Took, mask_uri
@@ -30,7 +25,6 @@ from ftm_lakehouse.model.job import DatasetJobModel
 from ftm_lakehouse.model.statement import statement_csv_header
 from ftm_lakehouse.operation.base import DatasetJobOperation
 from ftm_lakehouse.repository.artifacts import (
-    Artifact,
     Assembly,
     DiffableArtifact,
     ExportKind,
@@ -57,10 +51,7 @@ class ExportTask:
     uri: str
     now: datetime
     version: int | None
-    make_diff: bool
     parts: str
-    shard: str
-    bucket: str
     source: SweepSource
     duckdb_config: dict[str, str]
     pending: dict[str, frozenset[str]]
@@ -80,15 +71,14 @@ class ExportPart:
 def export_partition(task: ExportTask) -> ExportPart:
     """Sweep one ``(shard, bucket)`` pair into one part of every artifact.
 
-    Prepares and closes its session but never finishes or commits it – that is
-    work over the whole store, and the parent's. Silent: a spawned worker has no
-    logging setup, so ``took`` travels back in the `ExportPart`.
+    Never finishes or commits the session – that is the parent's. Logs nothing
+    (a spawned worker has no logging setup), so ``took`` travels back instead.
     """
     with Took() as t:
         artifacts = get_artifacts(task.dataset, task.uri)
         # no delete-candidate scan: the parent ran it and hands out `pending`
         runs = artifacts.runs(task.now, task.parts)
-        session = ExportSession(runs, task.version, task.make_diff)
+        session = ExportSession(runs, task.version)
         statements = artifacts.statements
         session.prepare()
         for run in session.diffable:
@@ -109,7 +99,7 @@ def export_partition(task: ExportTask) -> ExportPart:
             for run in session.diffable
         }
         stats = next(r.collector for r in session.runs if isinstance(r, StatisticsRun))
-        counts = dict(session.result())
+        counts = session.result()
     return ExportPart(task.parts, counts, seen, stats, t.took)
 
 
@@ -138,12 +128,10 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
     def export(self, now: datetime) -> dict[str, int]:
         """Write every streamed artifact from one pass over the entities.
 
-        Each ``(shard, bucket)`` pair is swept into parts of every artifact, in
-        ``LAKEHOUSE_WORKERS`` processes, and each part is appended to its
-        artifact as the pair finishes (`Assembly`) – beside the artifact, which
-        is replaced once every pair has made it in, and left as it was if one
-        fails. Held under the merge lock, so an ``optimize`` cannot vacuum the
-        snapshot's files.
+        Each ``(shard, bucket)`` pair is swept into parts of every artifact in
+        ``LAKEHOUSE_WORKERS`` processes; an artifact is replaced only once every
+        pair is in, so a failed run leaves the previous one intact. Held under
+        the merge lock, so an ``optimize`` cannot vacuum the snapshot's files.
 
         Args:
             now: When the run started – diff files are named after it.
@@ -151,41 +139,47 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
         Returns:
             Counts per artifact and per diff op.
         """
-        workers = max(settings.workers, 1)
-        store = self.entities._statements
+        workers = settings.workers
+        store = self.entities.statements
         counts: Counter[str] = Counter()
         with (
-            self.entities.merge_lock(),
+            store.merge_lock(),
             TemporaryDirectory(prefix="ftm-lakehouse-export-") as tmp,
         ):
-            version = store.version
+            # no diff asked for is no version: no diff window, no state recorded
+            version = store.version if self.job.make_diff else None
             sources = store.sweep_sources()
             # the parent's own part: the documents csv and the DELs of `finish`
             session = ExportSession(
                 self.artifacts.runs(now, f"{tmp}/parent"),
                 version,
-                self.job.make_diff,
-                self.entities.deleted_candidates,
+                store.deleted_candidates,
             )
             parts = [f"{tmp}/{s.key[0]}-{s.key[1]}" for s in sources]
-            # the bar's throughput: the bytes each pair read
-            sizes = {part: s.size for part, s in zip(parts, sources)}
-            files = [
-                (artifact, artifact.assembly())
-                for artifact in self.artifacts.streamed()
-                if not isinstance(artifact, VersionedArtifact)
+            streamed = list(self.artifacts.streamed())
+            # one file per artifact and diff series, each part appended as it comes
+            assemblies: list[tuple[Callable[[str], str], Assembly]] = [
+                *(
+                    (a.part, a.assembly())
+                    for a in streamed
+                    if not isinstance(a, VersionedArtifact)
+                ),
+                *(
+                    (a.diff_part, a.diff_assembly(now))
+                    for a in streamed
+                    if isinstance(a, DiffableArtifact)
+                ),
             ]
-            diffs = [
-                (artifact, artifact.diff_assembly(now))
-                for artifact, _ in files
-                if isinstance(artifact, DiffableArtifact)
-            ]
-            assemblies = [assembly for _, assembly in (*files, *diffs)]
+
+            def append(parts: str) -> None:
+                for part, assembly in assemblies:
+                    assembly.append(part(parts))
+
             try:
                 with (
                     session,
                     SyncProgressBar("Exporting...", len(sources)) as bar,
-                    process_map(workers, ordered=False) as run,
+                    process_map(workers) as run,
                 ):
                     pending = self._pending_by_shard(session)
                     tasks = [
@@ -194,64 +188,53 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
                             uri=str(self.uri),
                             now=now,
                             version=version,
-                            make_diff=self.job.make_diff,
                             parts=part,
-                            shard=source.key[0],
-                            bucket=source.key[1],
                             source=source,
                             duckdb_config=worker_duckdb_config(workers),
                             pending=pending.get(source.key[0], {}),
                         )
                         for part, source in zip(parts, sources)
                     ]
+                    # largest first, so no big pair starts last and holds up the end
+                    tasks.sort(key=lambda task: task.source.size, reverse=True)
                     by_parts = {task.parts: task for task in tasks}
-                    done: dict[str, ExportPart] = {}
                     headed = False
                     for part in run(export_partition, tasks):
-                        task = by_parts[part.parts]
-                        done[part.parts] = part
+                        shard, bucket = by_parts[part.parts].source.key
                         statements = part.counts.get("statements", 0)
                         counts.update(part.counts)
                         if statements and not headed:
                             # ahead of the first row, so an empty csv stays empty
-                            self._append(self._write_header(tmp), files, diffs)
+                            append(self._write_header(tmp))
                             headed = True
-                        self._append(part.parts, files, diffs)
-                        bar.advance(size=sizes[part.parts])
+                        append(part.parts)
+                        session.adopt(part.parts, part.seen, part.stats, part.counts)
+                        # the bar's throughput: the bytes each pair read
+                        bar.advance(size=by_parts[part.parts].source.size)
                         self.log.info(
-                            f"Processed `{task.shard}/{task.bucket}`.",
+                            f"Processed `{shard}/{bucket}`.",
                             took=part.took,
-                            shard=task.shard,
-                            bucket=task.bucket,
+                            shard=shard,
+                            bucket=bucket,
                             statements=statements,
                         )
-                    # in snapshot order, not as finished: the documents csv is
-                    # written from the staged parts in the order they are adopted
-                    for part in (done[p] for p in parts):
-                        session.adopt(part.parts, part.seen, part.stats)
+                    self.log.info(
+                        "Swept every pair, writing the documents ...",
+                        pairs=len(sources),
+                    )
                 # after the session closed: its own writers' codec trailers are
                 # written, so its part is a complete frame
-                self._append(f"{tmp}/parent", files, diffs)
-                for assembly in assemblies:
-                    assembly.commit()
+                with Took() as t:
+                    append(f"{tmp}/parent")
+                    for _, assembly in assemblies:
+                        assembly.commit()
+                self.log.info("Moved the artifacts into place.", took=t.took)
             except BaseException:
-                for assembly in assemblies:
+                for _, assembly in assemblies:
                     assembly.abort()
                 raise
             counts.update(session.result())
         return dict(counts)
-
-    @staticmethod
-    def _append(
-        parts: str,
-        files: list[tuple[Artifact, Assembly]],
-        diffs: list[tuple[DiffableArtifact, Assembly]],
-    ) -> None:
-        """Append every part in the ``parts`` directory to its file."""
-        for artifact, assembly in files:
-            assembly.append(artifact.part(parts))
-        for diffable, assembly in diffs:
-            assembly.append(diffable.diff_part(parts))
 
     def _write_header(self, tmp: str) -> str:
         """The ``statements.csv`` header as a part directory of its own."""
@@ -267,9 +250,8 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
     def _pending_by_shard(
         self, session: ExportSession
     ) -> dict[str, dict[str, frozenset[str]]]:
-        """Each diff series' DEL candidates per shard – not per pair: an id names
-        its shard but not its bucket, and its live rows may sit in another
-        bucket than its tombstones."""
+        """Each diff series' DEL candidates per shard – not per pair: an id
+        names its shard but not its bucket."""
         shards = self.entities.shards
         out: dict[str, dict[str, set[str]]] = {}
         for run in session.diffable:
@@ -293,7 +275,7 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
     def handle(self, run: JobRun[ExportJob], *args: Any, **kwargs: Any) -> None:
         """The sweep, then every artifact's freshness tag – none if it crashed –
         then ``index.json``, also for an empty store."""
-        if self.entities.exists:
+        if self.entities.statements.exists:
             started = utc_now()
             result = self.export(started)
             for artifact in self.artifacts.streamed():

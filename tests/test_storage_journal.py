@@ -13,10 +13,12 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from followthemoney import EntityProxy
 from followthemoney.statement import Statement
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import NullPool
 
 from ftm_lakehouse.api.routes.journal import router
 from ftm_lakehouse.core.api import get_api
+from ftm_lakehouse.exceptions import ImproperlyConfigured
 from ftm_lakehouse.lake import get_lakehouse
 from ftm_lakehouse.model.statement import (
     JOURNAL_SCHEMA,
@@ -299,9 +301,9 @@ def test_storage_journal_rollback_on_consumer_abandon(request, journal):
 
     # All five rows still present – in the orphaned segment.
     assert journal._segments()
-    assert journal.count() == 5
+    assert owner(journal).count() == 5
     assert len(flush(journal)) == 5
-    assert journal.count() == 0
+    assert owner(journal).count() == 0
     assert journal._segments() == []
 
 
@@ -405,17 +407,17 @@ def test_storage_journal_repeated_flush_inserts_nothing(journal, monkeypatch):
 
 def test_storage_journal_count(journal):
     """Test counting rows in journal."""
-    assert journal.count() == 0
+    assert owner(journal).count() == 0
 
     with journal.writer() as w:
         for i in range(10):
             w.add_statement(make_statement(f"e{i}", "name", f"Name {i}"))
 
-    assert journal.count() == 10
+    assert owner(journal).count() == 10
 
     # Flush empties the journal
     flush(journal)
-    assert journal.count() == 0
+    assert owner(journal).count() == 0
 
 
 def test_storage_journal_clear(journal):
@@ -424,11 +426,11 @@ def test_storage_journal_clear(journal):
         for i in range(10):
             w.add_statement(make_statement(f"e{i}", "name", f"Name {i}"))
 
-    assert journal.count() == 10
+    assert owner(journal).count() == 10
 
-    deleted = journal.clear()
+    deleted = owner(journal).clear()
     assert deleted == 10
-    assert journal.count() == 0
+    assert owner(journal).count() == 0
 
 
 def test_storage_journal_flush_large_batch(request, journal):
@@ -441,10 +443,10 @@ def test_storage_journal_flush_large_batch(request, journal):
         for i in range(10_001):
             w.add_statement(make_statement(f"e{i}", "name", f"Name {i}"))
 
-    assert journal.count() == 10_001
+    assert owner(journal).count() == 10_001
     rows = flush(journal)
     assert len(rows) == 10_001
-    assert journal.count() == 0
+    assert owner(journal).count() == 0
 
 
 @pytest.fixture(params=["sqlite"] + (["psql"] if PSQL_URI else []))
@@ -476,7 +478,7 @@ def test_storage_journal_flush_concurrent_write(concurrent_journal):
         for i in range(5):
             w.add_statement(make_statement(f"initial_{i}", "name", f"Initial {i}"))
 
-    assert journal.count() == 5
+    assert owner(journal).count() == 5
     initial_ids = {f"initial_{i}" for i in range(5)}
     concurrent_ids = {f"concurrent_{i}" for i in range(3)}
 
@@ -499,11 +501,11 @@ def test_storage_journal_flush_concurrent_write(concurrent_journal):
     writer.close()
 
     assert flushed == initial_ids
-    assert journal.count() == 3
+    assert owner(journal).count() == 3
 
     remaining = {r["entity_id"] for r in flush(journal)}
     assert remaining == concurrent_ids
-    assert journal.count() == 0
+    assert owner(journal).count() == 0
 
 
 def test_storage_journal_fragment_round_trip(journal):
@@ -525,7 +527,7 @@ def test_storage_journal_same_id_multiple_fragments(journal):
         w.add_statement(stmt, fragment="row1")
         w.add_statement(stmt, fragment="row2")
 
-    assert journal.count() == 3
+    assert owner(journal).count() == 3
     rows = flush(journal)
     assert sorted(r["fragment"] for r in rows) == ["", "row1", "row2"]
     assert len({r["id"] for r in rows}) == 1
@@ -539,7 +541,7 @@ def test_storage_journal_repeated_id_fragment_accumulates(journal):
     with journal.writer() as w:
         w.add_statement(stmt, fragment="row1")
 
-    assert journal.count() == 2
+    assert owner(journal).count() == 2
 
 
 def test_storage_journal_writer_keeps_entities_whole(journal, monkeypatch):
@@ -597,7 +599,7 @@ def test_storage_journal_writer_add_batch(journal):
     with journal.writer() as w:
         w.add_batch(batch)
 
-    assert journal.count() == 2
+    assert owner(journal).count() == 2
     rows = flush(journal)
     assert {r["id"] for r in rows} == {stmt.id}
     for row in rows:
@@ -630,7 +632,7 @@ def test_storage_journal_add_batch_rejects_null_required_column(journal):
     with journal.writer() as w:
         with pytest.raises(ValueError):
             w.add_batch(holed)
-    assert journal.count() == 0
+    assert owner(journal).count() == 0
 
 
 def test_storage_journal_iterate_entity(journal):
@@ -679,9 +681,9 @@ def test_storage_journal_flush_survives_a_failed_write(journal, request):
         for _ in journal.flush_batches():
             raise RuntimeError("downstream write failed")
 
-    assert journal.count() == 5
+    assert owner(journal).count() == 5
     assert len(flush(journal)) == 5
-    assert journal.count() == 0
+    assert owner(journal).count() == 0
 
 
 def test_storage_journal_concurrent_flushes_drain_once(concurrent_journal):
@@ -766,6 +768,36 @@ def _ingest_into_missing_table(conn, batch) -> None:
     with conn.cursor() as cur:
         cur.adbc_ingest("journal_no_such_table", batch, mode="append")
     conn.commit()
+
+
+def test_storage_journal_postgres_without_adbc_fails_on_creation(monkeypatch):
+    """No `postgres` extra fails the store up front, not its first writer."""
+    monkeypatch.setattr(journal_sql, "adbc_pg", None)
+    with pytest.raises(ImproperlyConfigured):
+        sql_journal(DATASET, "postgresql://nobody@127.0.0.1:1/none")
+
+
+@pytest.mark.skipif(not PSQL_URI, reason="needs PYTEST_POSTGRESQL_URI")
+def test_storage_journal_postgres_blocked_rotation_fails(monkeypatch):
+    """A flush behind a long transaction on the journal gives up after
+    ``lock_timeout`` rather than queueing every writer behind it; the rows stay
+    for the next flush."""
+    monkeypatch.setattr(journal_sql.PostgresJournalStore, "lock_timeout", "100ms")
+    store = sql_journal(DATASET, PSQL_URI)
+    store.clear()
+    try:
+        with store.writer() as w:
+            w.add_statement(make_statement("blocked", "name", "Blocked"))
+        with store.engine.connect() as reader:  # holds its lock until closed
+            reader.exec_driver_sql(f'SELECT 1 FROM "{store.table.name}"')
+            with pytest.raises(OperationalError, match="lock timeout"):
+                list(store.flush_batches())
+            with store.writer() as w:
+                w.add_statement(make_statement("after", "name", "After"))
+        assert len(collect_rows(store.flush_batches())) == 2
+    finally:
+        store.clear()
+        store.dispose()
 
 
 @pytest.mark.skipif(not PSQL_URI, reason="needs PYTEST_POSTGRESQL_URI")

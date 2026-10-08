@@ -8,6 +8,7 @@ pins that they produce the same thing, plus a ``DEL``, which no pair can see.
 
 import hashlib
 import json
+from contextlib import contextmanager
 from importlib import import_module
 from pathlib import Path
 
@@ -105,7 +106,7 @@ def test_export_parallel_matches_serial(tmp_path):
     """
     uri = _setup(tmp_path, 1)
     assert (
-        len(get_entities(DATASET, uri)._statements.sweep_sources()) > 1
+        len(get_entities(DATASET, uri).statements.sweep_sources()) > 1
     ), "the dataset must span several pairs or the fan-out proves nothing"
 
     one = export(DATASET, uri, make_diff=False)
@@ -135,6 +136,29 @@ def test_export_parallel_matches_serial(tmp_path):
     assert _rows(uri, path.EXPORTS_DOCUMENTS) == serial_documents
 
 
+def test_export_parallel_largest_pairs_first(tmp_path, monkeypatch):
+    """Pairs go to the workers largest first – none of the big ones starts last."""
+    uri = _setup(tmp_path, 3)
+    submitted: list[int] = []
+    process_map = export_module.process_map
+
+    @contextmanager
+    def recording(workers):
+        with process_map(1) as run:
+
+            def record(fn, tasks):
+                tasks = list(tasks)
+                submitted.extend(task.source.size for task in tasks)
+                return run(fn, tasks)
+
+            yield record
+
+    monkeypatch.setattr(export_module, "process_map", recording)
+    export(DATASET, uri, make_diff=False)
+    assert len(set(submitted)) > 1, "pairs of one size prove nothing"
+    assert submitted == sorted(submitted, reverse=True)
+
+
 def test_export_parallel_merged_store(tmp_path):
     """Unmerged, every partition is sorted on its own; merged, read in file
     order – both merged on ``entity_id``, writing the same artifacts."""
@@ -152,7 +176,7 @@ def test_export_parallel_merged_store(tmp_path):
     )
 
     repo.merge()
-    sources = repo._statements.sweep_sources()
+    sources = repo.statements.sweep_sources()
     partitions = [partition for source in sources for partition in source.partitions]
     assert all(partition.presorted for partition in partitions)
     assert any(len(source.partitions) > 1 for source in sources)
@@ -256,7 +280,7 @@ def test_export_parallel_multi_frame(tmp_path, algorithm):
     uri = _setup(tmp_path, 1, compression=algorithm)
     artifacts = get_artifacts(DATASET, uri)
     assert artifacts.statements.compression == algorithm
-    assert len(get_entities(DATASET, uri)._statements.sweep_sources()) > 1
+    assert len(get_entities(DATASET, uri).statements.sweep_sources()) > 1
 
     export(DATASET, uri, make_diff=False)
 

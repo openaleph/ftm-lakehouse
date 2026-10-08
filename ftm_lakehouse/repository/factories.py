@@ -1,14 +1,7 @@
-"""
-Factory functions for the repositories that fall back to the default configured
-settings. These are the single instantiation path for repositories – every
-caller, from the module-level ``get_entities("my_dataset")`` convenience to
-operations and the API server, resolves through the same cache.
+"""Cached repository factories – the single instantiation path for repositories.
 
-All factories share one LRU cache of `LRU_MAX` entries, keyed on the
-builder callable plus the canonical dataset URI from `dataset_uri` –
-the same storage location always resolves to the same instance, whether
-addressed by name only (settings-derived) or by an explicit uri (str or
-``Path``, with or without scheme).
+One shared LRU, keyed on the builder plus the canonical `dataset_uri`, so a
+storage location resolves to one instance however it is addressed.
 """
 
 from functools import lru_cache
@@ -40,30 +33,21 @@ __all__ = [
 ]
 
 LRU_MAX = 4096
-"""Maximum number of entries retained across all factory kinds (one shared
-cache): generous enough to cover any realistic multi-tenant dataset count in
-a single process, but bounded so an attacker that probes many distinct
-dataset names cannot permanently retain a repository (and its SQLAlchemy
-engine / DuckDB connection) per probe."""
+"""Entries across all factory kinds – bounded so probing many dataset names
+cannot pin a repository (and its engine / DuckDB connection) per probe."""
 
 
 @lru_cache(maxsize=LRU_MAX)
 def _resolve(builder: Callable[..., Any], *args: Any) -> Any:
-    """One shared LRU over ``(builder, canonical args)`` – the builder
-    callable is part of the key, so kinds never collide."""
+    """One shared LRU over ``(builder, canonical args)``."""
     return builder(*args)
 
 
 def _build_entities(dataset: str, uri: str) -> EntityRepository:
-    # Construction-time api pick, mirroring `get_journal`'s Sql-vs-Api choice
-    # - but keyed on the dataset uri, not global settings.
+    # keyed on the dataset uri – `get_journal` picks on global settings
     if get_api(uri) is not None:
         return ApiEntityRepository(dataset, uri)
     return EntityRepository(dataset, uri)
-
-
-def _build_jobs(dataset: str, uri: str, model: type[J]) -> JobRepository[J]:
-    return JobRepository(dataset, uri, model)
 
 
 def _build_versions(dataset: str, uri: str) -> VersionStore:
@@ -110,7 +94,7 @@ def get_jobs(dataset: str, model: type[J], uri: Uri | None = None) -> JobReposit
     """Get the job repository for a dataset and job model class (cached)."""
     return cast(
         JobRepository[J],
-        _resolve(_build_jobs, dataset, dataset_uri(dataset, uri), model),
+        _resolve(JobRepository, dataset, dataset_uri(dataset, uri), model),
     )
 
 
@@ -133,8 +117,6 @@ def get_tags(
 def clear_caches() -> None:
     """Clear all factory caches – test isolation and config-write invalidation.
 
-    Called by [`update_dataset`][ftm_lakehouse.catalog.update_dataset] after a
-    ``config.yml`` write so newly fetched repositories see the fresh model
-    snapshot; repositories held across the write keep their old snapshot.
+    Repositories held across a config write keep their old model snapshot.
     """
     _resolve.cache_clear()

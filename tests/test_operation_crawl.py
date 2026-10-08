@@ -38,7 +38,7 @@ def test_operation_crawl(fixtures_path, tmp_path):
 
     # Verify auto-flush happened (journal should be empty, store should have data)
     assert op.entities._journal.count() == 0
-    assert op.entities._statements.stats().entity_count > 0
+    assert op.entities.statements.stats().entity_count > 0
 
     # Verify entities (no flush needed, CrawlOperation auto-flushes)
     entities = list(op.entities.query(Query(C(origin=tag.CRAWL_ORIGIN))))
