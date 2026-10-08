@@ -75,15 +75,12 @@ def _finish(task: tuple[str, bool]) -> bool:
 
 
 def test_process_map_order(tmp_path):
-    """``ordered=False`` yields results as they finish, so a slow first task
-    holds back none of the others; the default keeps input order."""
+    """Results come as they finish, so a slow first task holds back none of
+    the others."""
     marker = str(tmp_path / "marker")
     tasks = [(marker, True), (marker, False)]
-    with util.process_map(2, ordered=False) as run:
-        assert list(run(_finish, tasks)) == [False, True]
-    Path(marker).unlink()
     with util.process_map(2) as run:
-        assert list(run(_finish, tasks)) == [True, False]
+        assert list(run(_finish, tasks)) == [False, True]
 
 
 def test_prefetch():

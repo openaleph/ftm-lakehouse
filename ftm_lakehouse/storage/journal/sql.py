@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import random
 import threading
-import time
 from binascii import crc32
 from contextlib import contextmanager
 from functools import cached_property, partial
@@ -17,7 +15,7 @@ from ftmq.util import datetime_iso
 from rigour.time import utc_now
 from sqlalchemy import MetaData, Table, delete, insert, inspect, select
 from sqlalchemy.engine import Engine, create_engine, make_url
-from sqlalchemy.exc import DisconnectionError, OperationalError
+from sqlalchemy.exc import DisconnectionError
 from sqlalchemy.pool import NullPool, Pool, QueuePool, StaticPool
 from sqlalchemy.schema import CreateTable
 
@@ -54,8 +52,6 @@ SEGMENT_INFIX = "-seg-"
 """Separates a journal table from its rotated segments."""
 
 ROTATE_LOCK_TIMEOUT = "5s"
-ROTATE_MAX_RETRIES = 5
-ROTATE_BASE_DELAY = 1  # seconds
 
 COLUMNS = ", ".join(f'"{name}"' for name in JOURNAL_SCHEMA.names)
 
@@ -204,34 +200,14 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
 
         The rename's exclusive lock waits out in-flight inserts, so no row lands
         in the segment afterwards; blocked writers continue into the fresh table.
-        Raises `RuntimeError` after `ROTATE_MAX_RETRIES` attempts.
+        `lock_timeout` bounds the wait – every new insert queues behind it – so a
+        flush blocked by a long transaction fails, and the next flush retries.
         """
         name = self._segment_name()
-        attempt = 0
-        while True:
-            try:
-                with self.engine.begin() as conn:
-                    self._set_lock_timeout(conn)
-                    conn.exec_driver_sql(
-                        f'ALTER TABLE "{self.table.name}" RENAME TO "{name}"'
-                    )
-                    conn.execute(CreateTable(self.table))
-                return
-            except OperationalError as exc:
-                attempt += 1
-                if attempt >= ROTATE_MAX_RETRIES:
-                    raise RuntimeError(
-                        f"Cannot rotate journal `{self.table.name}`: {exc}"
-                    )
-                delay = ROTATE_BASE_DELAY * 2**attempt + random.uniform(
-                    0, ROTATE_BASE_DELAY
-                )
-                log.warning(
-                    "Journal rotation blocked, retrying in %.2fs (attempt %d)",
-                    delay,
-                    attempt,
-                )
-                time.sleep(delay)
+        with self.engine.begin() as conn:
+            self._set_lock_timeout(conn)
+            conn.exec_driver_sql(f'ALTER TABLE "{self.table.name}" RENAME TO "{name}"')
+            conn.execute(CreateTable(self.table))
 
     def _drop(self, name: str) -> None:
         with self.engine.begin() as conn:

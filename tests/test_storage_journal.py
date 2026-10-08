@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from followthemoney import EntityProxy
 from followthemoney.statement import Statement
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import NullPool
 
 from ftm_lakehouse.api.routes.journal import router
@@ -774,6 +775,29 @@ def test_storage_journal_postgres_without_adbc_fails_on_creation(monkeypatch):
     monkeypatch.setattr(journal_sql, "adbc_pg", None)
     with pytest.raises(ImproperlyConfigured):
         sql_journal(DATASET, "postgresql://nobody@127.0.0.1:1/none")
+
+
+@pytest.mark.skipif(not PSQL_URI, reason="needs PYTEST_POSTGRESQL_URI")
+def test_storage_journal_postgres_blocked_rotation_fails(monkeypatch):
+    """A flush behind a long transaction on the journal gives up after
+    ``lock_timeout`` rather than queueing every writer behind it; the rows stay
+    for the next flush."""
+    monkeypatch.setattr(journal_sql.PostgresJournalStore, "lock_timeout", "100ms")
+    store = sql_journal(DATASET, PSQL_URI)
+    store.clear()
+    try:
+        with store.writer() as w:
+            w.add_statement(make_statement("blocked", "name", "Blocked"))
+        with store.engine.connect() as reader:  # holds its lock until closed
+            reader.exec_driver_sql(f'SELECT 1 FROM "{store.table.name}"')
+            with pytest.raises(OperationalError, match="lock timeout"):
+                list(store.flush_batches())
+            with store.writer() as w:
+                w.add_statement(make_statement("after", "name", "After"))
+        assert len(collect_rows(store.flush_batches())) == 2
+    finally:
+        store.clear()
+        store.dispose()
 
 
 @pytest.mark.skipif(not PSQL_URI, reason="needs PYTEST_POSTGRESQL_URI")

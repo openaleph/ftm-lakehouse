@@ -681,7 +681,7 @@ class ParquetStore:
             # advanced per partition, throughput in bytes read
             with (
                 SyncProgressBar("Merging partitions", len(tasks)) as bar,
-                process_map(workers, ordered=False) as run,
+                process_map(workers) as run,
             ):
                 done: list[MergeResult] = []
                 try:

@@ -136,14 +136,12 @@ def validate_dataset_name(name: str) -> str:
 
 
 @contextmanager
-def process_map(
-    workers: int, ordered: bool = True
-) -> Iterator[Callable[..., Iterator[Any]]]:
-    """A ``map`` over ``workers`` spawned processes – the builtin for one.
+def process_map(workers: int) -> Iterator[Callable[..., Iterator[Any]]]:
+    """A ``map`` over ``workers`` spawned processes yielding results as they
+    finish – the builtin for one.
 
-    ``ordered=False`` yields results as they finish. Spawned, not forked: the
-    parent holds DuckDB and Delta threads. Pending tasks are cancelled when the
-    caller fails.
+    Spawned, not forked: the parent holds DuckDB and Delta threads. Pending
+    tasks are cancelled when the caller fails.
     """
     if workers <= 1:
         yield map
@@ -156,7 +154,7 @@ def process_map(
             yield future.result()
 
     try:
-        yield pool.map if ordered else unordered
+        yield unordered
     finally:
         pool.shutdown(cancel_futures=True)
 

@@ -179,7 +179,7 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
                 with (
                     session,
                     SyncProgressBar("Exporting...", len(sources)) as bar,
-                    process_map(workers, ordered=False) as run,
+                    process_map(workers) as run,
                 ):
                     pending = self._pending_by_shard(session)
                     tasks = [

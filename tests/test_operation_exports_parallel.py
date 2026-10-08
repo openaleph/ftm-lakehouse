@@ -143,7 +143,7 @@ def test_export_parallel_largest_pairs_first(tmp_path, monkeypatch):
     process_map = export_module.process_map
 
     @contextmanager
-    def recording(workers, ordered=True):
+    def recording(workers):
         with process_map(1) as run:
 
             def record(fn, tasks):
