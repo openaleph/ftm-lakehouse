@@ -224,7 +224,7 @@ def _iso_column(name: str) -> Any:
 
     The sweep hands its Arrow batches to ``to_pylist()``, which turns a
     timestamp column into one ``datetime`` per row – 5x the cost of a string
-    column, for values `ftm_lakehouse.logic.entities.aggregate.aggregate_unsafe`
+    column, for values ftmq's `aggregate_statement_payloads`
     immediately spells back as ISO through ``datetime_iso``. Formatting in SQL
     keeps the whole path in string-land, and the csv gets proper ISO-8601
     instead of DuckDB's ``2026-09-08 16:53:31.000000Z`` rendering.

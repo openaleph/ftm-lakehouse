@@ -4,21 +4,16 @@ Pure transformations, with no storage or infrastructure dependencies.
 
 ## Entity Aggregation
 
-Fold a stream of statement dicts into entities, without building FtM objects:
+Fold a stream of statement dicts into entities, without building FtM objects – [`ftmq.aggregate`](https://docs.investigraph.dev/lib/ftmq/reference/aggregate/):
 
 ```python
-from ftm_lakehouse.logic.entities import aggregate_unsafe
+from ftmq.aggregate import aggregate_statement_payloads
 
-for entity in aggregate_unsafe(statement_dicts, "my_dataset"):
+for entity in aggregate_statement_payloads(statement_dicts, "my_dataset"):
     print(f"{entity.id}: {entity.to_dict()['caption']}")
 ```
 
 The input must be contiguous per `entity_id`, as the parquet store's reads are.
-
-::: ftm_lakehouse.logic.entities.aggregate.aggregate_unsafe
-    options:
-        heading_level: 3
-        show_root_heading: true
 
 ## Parquet helpers
 

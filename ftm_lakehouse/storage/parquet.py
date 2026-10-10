@@ -32,6 +32,7 @@ from deltalake import DeltaTable, Schema, write_deltalake
 from deltalake.exceptions import DeltaError, TableNotFoundError
 from deltalake.transaction import AddAction, RemoveAction
 from followthemoney.statement import StatementDict
+from ftmq.aggregate import aggregate_statement_payloads
 from ftmq.model.stats import DatasetStats
 from ftmq.query import Query, Sql, SqlSource
 from ftmq.store.lake import (
@@ -52,7 +53,6 @@ from sqlalchemy import Select
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.helpers.shards import entity_shard
-from ftm_lakehouse.logic.entities import aggregate_unsafe
 from ftm_lakehouse.logic.parquet import (
     MERGE_COMMIT_BATCH,
     MERGED_PREFIX,
@@ -443,7 +443,7 @@ class ParquetStore:
         Yields:
             `StatementEntity` objects.
         """
-        for data in aggregate_unsafe(self._statement_data(q), self.dataset):
+        for data in aggregate_statement_payloads(self._statement_data(q), self.dataset):
             yield data.to_entity()
 
     def query_statements(self, q: Query | None = None) -> Statements:
