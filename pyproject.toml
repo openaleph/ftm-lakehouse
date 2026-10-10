@@ -20,7 +20,7 @@ classifiers = [
 ]
 requires-python = ">=3.12,<3.15"
 dependencies = [
-    "ftmq[lake] @ git+https://github.com/dataresearchcenter/ftmq.git@feat/aggregate-unsafe",
+    "ftmq[lake] @ git+https://github.com/dataresearchcenter/ftmq.git",
     "followthemoney (>=4.11.0,<5.0.0)",
     "anystore (>=1.5.3,<2.0.0)",
     "httpx (>=0.28.1,<0.29.0)",
