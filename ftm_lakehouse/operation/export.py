@@ -12,13 +12,13 @@ from typing import Any, Callable
 
 from anystore.io import SyncProgressBar, smart_open
 from anystore.util import Took, mask_uri
+from ftmq.aggregate import aggregate_statement_payloads
 from ftmq.model.stats import DatasetStats
 from rigour.time import utc_now
 
 from ftm_lakehouse.core.conventions import tag
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.helpers.shards import entity_shard
-from ftm_lakehouse.logic.entities.aggregate import aggregate_unsafe
 from ftm_lakehouse.logic.entities.stats import StatsCollector
 from ftm_lakehouse.logic.parquet import worker_duckdb_config
 from ftm_lakehouse.model.job import DatasetJobModel
@@ -90,7 +90,7 @@ def export_partition(task: ExportTask) -> ExportPart:
                 compression=statements.compression,
             ) as csv:
                 with sweep_pair(task.source, task.duckdb_config, csv) as rows:
-                    for payload in aggregate_unsafe(rows, task.dataset):
+                    for payload in aggregate_statement_payloads(rows, task.dataset):
                         session.consume(payload)
         finally:
             session.close()

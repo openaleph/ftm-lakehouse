@@ -6,7 +6,7 @@ dicts) directly into packed parquet row dicts matching
 `JOURNAL_SCHEMA`, bypassing the
 EntityProxy → Namespace → StatementEntity → Statement → LakeStatement
 object chain entirely. Like
-[`aggregate_unsafe`][ftm_lakehouse.logic.entities.aggregate.aggregate_unsafe] on the read
+ftmq's `aggregate_statement_payloads` on the read
 side, this trades validation for speed if the input can be trusted.
 
 Parity with the safe path is the contract: identical statement ids

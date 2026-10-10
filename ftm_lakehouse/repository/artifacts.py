@@ -35,6 +35,7 @@ from anystore.types import SDict, Uri
 from anystore.util import Took, join_uri
 from followthemoney import model
 from followthemoney.dataset import DataResource
+from ftmq.aggregate import EntityPayload
 from ftmq.util import datetime_iso
 from rigour.mime.types import CSV, FTM, JSON
 
@@ -42,7 +43,6 @@ from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.core.settings import CHECKSUM_ALGORITHM
 from ftm_lakehouse.helpers.file import FolderTree, get_filename
 from ftm_lakehouse.helpers.schema import FOLDER_SCHEMATA
-from ftm_lakehouse.logic.entities.aggregate import EntityPayload
 from ftm_lakehouse.logic.entities.stats import StatsCollector
 from ftm_lakehouse.logic.path import DateTimeKey, StoreKey
 from ftm_lakehouse.model.file import Document, Documents
@@ -572,7 +572,7 @@ class EntitiesRun(DiffableRun):
     """Writes ``entities.ftm.json`` and its delta series."""
 
     def consume(self, payload: EntityPayload) -> None:
-        data = payload.to_dict()
+        data = cast(SDict, payload.to_dict())
         self.writer.write(data)
         # no `total`: that is the session's `entities`
         op = self.op_for(payload)
@@ -666,7 +666,7 @@ class ParentsRun(ArtifactRun):
     def consume(self, payload: EntityPayload) -> None:
         """Stage every potential parent – whatever its scope, so paths resolve
         across origins – and every document in some scope."""
-        data = payload.to_dict()
+        data = cast(SDict, payload.to_dict())
         parents = data.get("properties", {}).get("parent", [])
         if DocumentsArtifact.is_parent_schema(data.get("schema")):
             self.folders.write(
@@ -749,7 +749,7 @@ class StatisticsRun(ArtifactRun):
         self.collector = StatsCollector()
 
     def consume(self, payload: EntityPayload) -> None:
-        self.collector.collect(payload.to_dict())
+        self.collector.collect(cast(SDict, payload.to_dict()))
 
     def finish(self) -> None:
         self.artifact.write(self.collector.export())
@@ -855,8 +855,6 @@ class ExportSession:
         """Hand one entity to every artifact this run is writing."""
         self.counts["statements"] += len(payload.statements)
         self.counts["entities"] += 1
-        if not payload.to_dict():  # no resolvable schema
-            return
         for run in self.runs:
             run.consume(payload)
 
