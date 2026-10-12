@@ -5,7 +5,6 @@ A run writes ``statements.csv``, ``entities.ftm.json``, every
 entities, then ``index.json`` registering them.
 """
 
-import hashlib
 import json
 
 import pytest
@@ -13,7 +12,6 @@ from anystore.io import smart_stream_csv_models
 from ftmq.util import make_entity
 from rigour.mime.types import CSV, FTM, JSON
 
-from ftm_lakehouse.catalog import ensure_dataset
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.model.file import Document
 from ftm_lakehouse.operation.export import ExportJob, ExportOperation
