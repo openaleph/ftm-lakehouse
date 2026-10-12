@@ -3,7 +3,7 @@
 from typing import Annotated
 
 from anystore.types import SDict
-from fastapi import Body, Depends, Request
+from fastapi import Depends, Request
 from ftmq.query import Query
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -15,10 +15,6 @@ from ftm_lakehouse.storage.journal import get_journal as _get_journal
 from ftm_lakehouse.util import validate_dataset_name
 
 api_settings = ApiSettings()
-
-EMBED = Body(embed=True)
-"""Use for single-parameter endpoints so FastAPI expects ``{"<name>": value}``
-rather than the bare value as the entire body."""
 
 
 def get_dataset_name(dataset: str) -> str:

@@ -54,8 +54,11 @@ from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.helpers.shards import entity_shard
 from ftm_lakehouse.logic.parquet import (
+    MERGE_BATCH_ROWS,
+    MERGE_CHUNK_BYTES,
     MERGE_COMMIT_BATCH,
     MERGED_PREFIX,
+    STAGING_DIR,
     SWEEP_BATCH_SIZE,
     TABLE_CONFIGURATION,
     build_merge_sql,
@@ -65,7 +68,6 @@ from ftm_lakehouse.logic.parquet import (
     live_rows_sql,
     live_view_sql,
     make_prune_by_shard,
-    merge_copy_options,
     partition_source_sql,
     raw_view_sql,
     shard_target_file_size,
@@ -85,6 +87,9 @@ from ftm_lakehouse.storage.tags import TagStore
 from ftm_lakehouse.util import prefetch, process_map, validate_origin
 
 PARTITIONS = ["shard", "bucket", "origin"]
+
+FILE_SCHEMA = pa.schema([f for f in SHARDED_SCHEMA if f.name not in PARTITIONS])
+"""A data file's columns – the partition values live in its path."""
 
 T = TypeVar("T")
 
@@ -109,11 +114,12 @@ class MergeTask:
 
 @dataclass
 class MergeResult:
-    """A worker's merged ``(path, size, rows)`` file – ``None`` when every row
-    was reaped – and its ``took`` for the parent to log."""
+    """A worker's merged ``(path, size, stats)`` files in ``entity_id`` order –
+    none when every row was reaped, ``stats`` the ``add`` stats delta-rs wrote –
+    and its ``took`` for the parent to log."""
 
     task: MergeTask
-    file: tuple[str, int, int] | None
+    files: list[tuple[str, int, str]]
     took: timedelta
 
 
@@ -136,7 +142,7 @@ def _relation(root: str, partition: Partition, files: Files) -> str:
 
 
 def merge_partition(task: MergeTask) -> MergeResult:
-    """Merge one partition into a new data file next to its old ones.
+    """Merge one partition into new data files next to its old ones.
 
     Writes but does not commit – [`ParquetStore.merge`][ParquetStore.merge]
     does; an uncommitted file is an orphan the next ``vacuum`` removes.
@@ -152,16 +158,67 @@ def merge_partition(task: MergeTask) -> MergeResult:
             source=source,
             select=f"* EXCLUDE ({', '.join(PARTITIONS)})",
         )
+        reader = con.execute(sql).to_arrow_reader(MERGE_BATCH_ROWS)
         directory = posixpath.dirname(task.files[0][0])
-        file = f"{directory}/{MERGED_PREFIX}{ensure_uuid()}.zstd.parquet"
-        target = f"{task.root}/{file}".replace("'", "''")
-        # RETURN_STATS: (filename, count, file_size_bytes, ...)
-        stats = con.execute(
-            f"COPY ({sql}) TO '{target}' ({merge_copy_options(bucket)})"
-        ).fetchone()
-    if stats and stats[1]:
-        return MergeResult(task, (file, int(stats[2]), int(stats[1])), t.took)
-    return MergeResult(task, None, t.took)
+        prefix = f"{directory}/{MERGED_PREFIX}{ensure_uuid()}"
+        files = _write_merged(task.root, reader.cast(FILE_SCHEMA), bucket, prefix)
+    return MergeResult(task, files, t.took)
+
+
+def _write_merged(
+    root: str, batches: pa.RecordBatchReader, bucket: str, prefix: str
+) -> list[tuple[str, int, str]]:
+    """Write ``batches`` as ``{prefix}-{n}.zstd.parquet`` files under ``root``,
+    uncommitted.
+
+    delta-rs writes them as it writes an append – the bucket's
+    `writer_for_bucket` profile, full ``add`` stats: each `MERGE_CHUNK_BYTES`
+    chunk is one ``write_deltalake`` into a staging table under `STAGING_DIR`,
+    whose file moves into place with the stats logged for it. The names sort in
+    write order.
+    """
+    store = get_store(root)
+    fs_key = store._keys.to_fs_key
+    stage = f"{STAGING_DIR}/{ensure_uuid()}"
+    files: list[tuple[str, int, str]] = []
+    try:
+        for version, chunk in enumerate(_chunks(batches, MERGE_CHUNK_BYTES)):
+            write_deltalake(
+                f"{root}/{stage}",
+                chunk,
+                mode="append",
+                writer_properties=writer_for_bucket(bucket),
+                target_file_size=1 << 62,  # one file per chunk
+                storage_options=storage_options(),
+            )
+            with store.open(f"{stage}/_delta_log/{version:020d}.json", "r") as log:
+                actions = [json.loads(line) for line in log]
+            for add in (action["add"] for action in actions if "add" in action):
+                file = f"{prefix}-{len(files):05d}.zstd.parquet"
+                store._fs.mv(fs_key(f"{stage}/{unquote(add['path'])}"), fs_key(file))
+                files.append((file, add["size"], add["stats"]))
+    finally:
+        if store.exists(stage):
+            store._fs.rm(fs_key(stage), recursive=True)
+    return files
+
+
+def _chunks(
+    batches: Iterable[pa.RecordBatch], size: int
+) -> Iterator[list[pa.RecordBatch]]:
+    """``batches`` cut into lists of at least ``size`` Arrow bytes (the last one
+    short), empty batches dropped."""
+    chunk: list[pa.RecordBatch] = []
+    nbytes = 0
+    for batch in batches:
+        if batch.num_rows:
+            chunk.append(batch)
+            nbytes += batch.nbytes
+        if nbytes >= size:
+            yield chunk
+            chunk, nbytes = [], 0
+    if chunk:
+        yield chunk
 
 
 def pair_source(
@@ -181,7 +238,7 @@ class SweepPartition:
     clean: bool
     """Only `merge` output – read as a plain scan, else through the dedupe."""
     presorted: bool
-    """One `merge` file, already in ``entity_id`` order – read unsorted."""
+    """Only one `merge`'s files, already in ``entity_id`` order – read unsorted."""
     size: int
     """Bytes of its files."""
 
@@ -401,7 +458,7 @@ class ParquetStore:
                     files.setdefault(key, []).append((unquote(file), size))
                 partitions = {
                     key: (
-                        fs,
+                        sorted(fs),  # a merge's files sort in entity_id order
                         all(
                             posixpath.basename(f).startswith(MERGED_PREFIX)
                             for f, _ in fs
@@ -647,7 +704,8 @@ class ParquetStore:
         return not all(clean for _, clean in self._partitions()[1].values())
 
     def merge(self, force: bool = False) -> None:
-        """Rewrite every dirty partition into one canonical file.
+        """Rewrite every dirty partition into canonical files, in ``entity_id``
+        order – one per `MERGE_CHUNK_BYTES` of rows.
 
         Duplicates collapse, fragments supersede, ``first_seen`` folds and
         tombstones past ``LAKEHOUSE_GRACE_PERIOD_DAYS`` go with the rows they
@@ -717,9 +775,7 @@ class ParquetStore:
         for result in batch:
             task = result.task
             values: dict[str, str | None] = dict(zip(PARTITIONS, task.partition))
-            if result.file is not None:
-                file, size, rows = result.file
-                stats = json.dumps({"numRecords": rows})
+            for file, size, stats in result.files:
                 actions.append(AddAction(file, size, values, now, False, stats))
             for file, size in task.files:
                 actions.append(RemoveAction(file, False, now, size, values))
@@ -841,7 +897,8 @@ class ParquetStore:
         return deleted
 
     def vacuum(self, retention_hours: int = 0) -> None:
-        """Delete the files the Delta log no longer references.
+        """Delete the files the Delta log no longer references, and the staging
+        tables a crashed merge left (`STAGING_DIR`).
 
         Args:
             retention_hours: Keep such files newer than this.
@@ -855,6 +912,10 @@ class ParquetStore:
                 enforce_retention_duration=False,
                 full=True,
             )
+            # no merge stages under the fence
+            staging = f"{path.STATEMENTS}/{STAGING_DIR}"
+            if self._store.exists(staging):
+                self._store._fs.rm(self._store._keys.to_fs_key(staging), recursive=True)
         self.log.info("Vacuumed.", files=len(deleted), took=t.took)
 
     def sweep_sources(self) -> list[SweepSource]:
@@ -868,7 +929,7 @@ class ParquetStore:
                     SweepPartition(
                         relation=_relation(root, partition, files),
                         clean=clean,
-                        presorted=clean and len(files) == 1,
+                        presorted=clean,
                         size=sum(size for _, size in files),
                     )
                     for partition, files, clean in pairs[key]

@@ -33,7 +33,7 @@ There is no environment setting for the shard count: `shards` is per-dataset con
 Each worker's DuckDB gets `LAKEHOUSE_DUCKDB_MEMORY_LIMIT / LAKEHOUSE_WORKERS`, in a merge and in the export sweep alike. Two rules follow:
 
 - **The share has to cover the heaviest partition.** Sorts and windows spill, but the full-text values of the `document` and `page` buckets are held in memory, so a share that is too small fails the partition with DuckDB's `Out of Memory Error`. The defaults fail this way on full-text partitions: `8GB` split 8 ways is 1GB a worker. A merge needs a few times a partition's *uncompressed* size, which its size on disk understates.
-- **RAM has to fit `workers × (share + ~2GB)`, plus the ARC on ZFS.** A worker peaks 1–2GB above its share (DuckDB allocations outside the limit, its Python process). When the sum does not fit, the kernel kills a worker and the merge stops with `BrokenProcessPool`; finished partitions are committed, so a rerun picks up the rest.
+- **RAM has to fit `workers × (share + ~3GB)`, plus the ARC on ZFS.** A worker peaks 1–2GB above its share (DuckDB allocations outside the limit, its Python process), a merge worker ~1.3GB more for delta-rs writing a 512MB chunk. When the sum does not fit, the kernel kills a worker and the merge stops with `BrokenProcessPool`; finished partitions are committed, so a rerun picks up the rest.
 
 When the share is too small, lower `LAKEHOUSE_WORKERS` rather than the share. For reference, a 140GB (zstd) store of ~500 partitions merges at 80–120MB/s with `LAKEHOUSE_WORKERS=8` and `LAKEHOUSE_DUCKDB_MEMORY_LIMIT=128GB` on 48 cores and 256GB RAM.
 
