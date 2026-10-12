@@ -18,7 +18,7 @@ from ftmq.types import Statements
 from pyarrow.csv import CSVWriter  # type: ignore[attr-defined]
 
 from ftm_lakehouse.helpers.shards import entity_shard
-from ftm_lakehouse.logic.parquet import MERGED_PREFIX, TABLE_CONFIGURATION
+from ftm_lakehouse.logic.parquet import MERGED_PREFIX, STAGING_DIR, TABLE_CONFIGURATION
 from ftm_lakehouse.model.statement import (
     JOURNAL_SCHEMA,
     TABLE_RAW,
@@ -701,3 +701,83 @@ def test_storage_parquet_merge_writes_a_checkpoint(tmp_path):
 
     store.merge()  # nothing dirty, nothing committed, no new checkpoint
     assert list(log.glob("*.checkpoint.parquet")) == checkpoints
+
+
+def _written(store: ParquetStore, root) -> dict[tuple[str, str, str], list[tuple]]:
+    """Per partition, every active file's per-column parquet profile (encodings,
+    compression, bloom filter) and its Delta ``add`` stats."""
+    actions = pa.table(store.deltatable.get_add_actions(flatten=True))
+    stats = [
+        c
+        for c in actions.column_names
+        if c.split(".")[0] in ("num_records", "null_count", "min", "max")
+    ]
+    written: dict[tuple[str, str, str], list[tuple]] = defaultdict(list)
+    with storage_parquet._connect({}) as con:
+        for row in actions.to_pylist():
+            profile = con.execute(
+                "SELECT path_in_schema, string_agg(DISTINCT encodings ORDER BY "
+                "encodings), any_value(compression), bool_or(bloom_filter_offset "
+                "IS NOT NULL) FROM parquet_metadata(?) GROUP BY ALL ORDER BY ALL",
+                [str(root / row["path"])],
+            ).fetchall()
+            partition = tuple(
+                row[f"partition.{p}"] for p in ("shard", "bucket", "origin")
+            )
+            written[partition].append((profile, [row[c] for c in stats]))
+    return dict(written)
+
+
+def test_storage_parquet_merge_writes_like_an_append(tmp_path):
+    """A merged file is written as an append writes it: the bucket's writer
+    profile – dictionaries and bloom filters per column – and delta-rs's full
+    ``add`` stats, so reads of a merged store skip files as before."""
+    store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
+    rows = [_pack(make_statement(f"e{i}", "name", f"Name {i}")) for i in range(20)]
+    rows += [
+        _pack(make_statement(f"p{i}", "bodyText", f"Page {i} " * 50, "Page"))
+        for i in range(20)
+    ]
+    _flush(store, rows)
+    root = tmp_path / "statements"
+    appended = _written(store, root)
+    assert {bucket for _, bucket, _ in appended} == {"thing", "page"}
+
+    store.merge()
+    assert not store.needs_merge
+    assert _written(store, root) == appended
+
+
+def test_storage_parquet_merge_chunks(tmp_path, monkeypatch):
+    """A partition merges into one file per `MERGE_CHUNK_BYTES` chunk, whose
+    names sort in entity order – the sweep reads them unsorted – and leaves no
+    staging table behind."""
+    monkeypatch.setattr(storage_parquet, "MERGE_BATCH_ROWS", 7)
+    monkeypatch.setattr(storage_parquet, "MERGE_CHUNK_BYTES", 1)  # a file a batch
+    store = ParquetStore(tmp_path, DATASET, shards=1)
+    _flush(store, _origin_rows("a", 30))
+
+    store.merge()
+    files = _partition_files(store)[("0", "thing", "a")]
+    assert len(files) == 5  # 30 rows, 7 a batch
+    assert all(f.startswith(MERGED_PREFIX) for f in files)
+    assert not list((tmp_path / "statements" / STAGING_DIR).iterdir())
+    (source,) = store.sweep_sources()
+    assert [p.presorted for p in source.partitions] == [True]
+    ids = [row["entity_id"] for row in _swept(source)]
+    assert ids == sorted(ids)
+    assert len(ids) == 30
+
+
+def test_storage_parquet_vacuum_drops_staging(tmp_path):
+    """What a crashed merge staged goes with the next vacuum – Delta's own
+    vacuum never lists the hidden directory."""
+    store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
+    _flush(store, _origin_rows("a"))
+    staged = tmp_path / "statements" / STAGING_DIR / "crashed"
+    staged.mkdir(parents=True)
+    (staged / "part-0.parquet").write_bytes(b"x")
+
+    store.vacuum()
+    assert not staged.parent.exists()
+    assert _row_count(store) == 40

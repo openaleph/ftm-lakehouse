@@ -16,7 +16,7 @@ from deltalake import DeltaTable
 from ftmq.query import Query
 from ftmq.query.leaves import IdLeaf
 from ftmq.query.sql import PruneFn
-from ftmq.store.lake import BUCKET_DOCUMENT, BUCKET_PAGE, TARGET_SIZE
+from ftmq.store.lake import TARGET_SIZE
 
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.helpers.shards import entity_shard, shard_hex_width
@@ -37,8 +37,17 @@ clean (read without the dedupe); a ``part-*`` file makes it dirty."""
 MERGE_COMMIT_BATCH = 64
 """Merged partitions per Delta commit – one commit each bloats the log."""
 
-LARGE_BUCKETS = (BUCKET_DOCUMENT, BUCKET_PAGE)
-"""Buckets holding full-text values – ftmq's ``WRITER_LARGE`` profile."""
+MERGE_BATCH_ROWS = 10_000
+"""Rows per Arrow batch a merge reads – its chunks are cut between batches."""
+
+MERGE_CHUNK_BYTES = 512 * 1_048_576
+"""Arrow bytes per ``write_deltalake`` call of a merge, one ``merged-*`` file
+each. delta-rs holds a call's whole input – about 2.3x it at peak, measured on
+deltalake 1.6.6 – so one call per partition would be unbounded."""
+
+STAGING_DIR = ".staging"
+"""Table-relative directory of `merge`'s staging tables – hidden, so Delta's
+``vacuum`` never lists it."""
 
 TABLE_CONFIGURATION = {
     "delta.logRetentionDuration": "interval 1 days",
@@ -262,17 +271,6 @@ def partition_source_sql(
     return (
         f"(SELECT {projection} FROM ("
         f"SELECT * FROM {read_parquet_sql(files)} UNION ALL BY NAME {_FILE_COLUMNS}))"
-    )
-
-
-def merge_copy_options(bucket: str) -> str:
-    """DuckDB ``COPY`` options for a merged ``bucket`` file: zstd level 3,
-    10k-row groups for the full-text buckets, 100k otherwise. ``RETURN_STATS``
-    yields what the Delta ``add`` action needs."""
-    rows = 10_000 if bucket in LARGE_BUCKETS else 100_000
-    return (
-        "FORMAT parquet, COMPRESSION zstd, COMPRESSION_LEVEL 3, "
-        f"ROW_GROUP_SIZE {rows}, RETURN_STATS"
     )
 
 
