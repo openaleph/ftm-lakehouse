@@ -1,6 +1,8 @@
 import multiprocessing
 import os
 import re
+import threading
+import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from functools import lru_cache
@@ -158,19 +160,34 @@ def validate_dataset_name(name: str) -> str:
     return name
 
 
+def _exit_with(parent: int) -> None:
+    """Worker initializer: exit once ``parent`` is gone – a killed parent
+    leaves its workers blocked on the task queue for good otherwise."""
+
+    def watch() -> None:
+        while os.getppid() == parent:
+            time.sleep(1)
+        os._exit(1)
+
+    threading.Thread(target=watch, daemon=True).start()
+
+
 @contextmanager
 def process_map(workers: int) -> Iterator[Callable[..., Iterator[Any]]]:
     """A ``map`` over ``workers`` spawned processes yielding results as they
     finish – the builtin for one.
 
-    Spawned, not forked: the parent holds DuckDB and Delta threads. Pending
-    tasks are cancelled when the caller fails.
+    Spawned, not forked: the parent holds DuckDB and Delta threads. When the
+    caller fails or is interrupted, the workers are terminated; they also exit
+    when the parent dies.
     """
     if workers <= 1:
         yield map
         return
     context = multiprocessing.get_context("spawn")
-    pool = ProcessPoolExecutor(workers, mp_context=context)
+    pool = ProcessPoolExecutor(
+        workers, mp_context=context, initializer=_exit_with, initargs=(os.getpid(),)
+    )
 
     def unordered(fn: Callable[[Any], Any], items: Iterable[Any]) -> Iterator[Any]:
         for future in as_completed([pool.submit(fn, item) for item in items]):
@@ -178,6 +195,17 @@ def process_map(workers: int) -> Iterator[Callable[..., Iterator[Any]]]:
 
     try:
         yield unordered
+    except BaseException:
+        # the caller drops the results still out, so stop the workers rather
+        # than wait – they would also run the queued tasks, which start right
+        # after a Ctrl+C (as 3.14's `terminate_workers`)
+        processes = list(pool._processes.values())
+        pool.shutdown(wait=False, cancel_futures=True)
+        for process in processes:
+            process.terminate()
+        for process in processes:
+            process.join()
+        raise
     finally:
         pool.shutdown(cancel_futures=True)
 
