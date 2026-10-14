@@ -861,6 +861,26 @@ def test_storage_parquet_write_stream_commits_per_call(tmp_path, monkeypatch):
     assert store.version == 4  # 16 partitions, 5 a call
 
 
+def test_storage_parquet_write_stream_budget_setting(tmp_path, monkeypatch):
+    """The budget defaults to ``LAKEHOUSE_WRITE_BUFFER``, a byte size."""
+    monkeypatch.setenv("LAKEHOUSE_WRITE_BUFFER", "80%")
+    with pytest.raises(ValueError):
+        ParquetStore(tmp_path, DATASET)
+    monkeypatch.setenv("LAKEHOUSE_WRITE_BUFFER", "1KiB")
+    store = ParquetStore(tmp_path, DATASET, shards=1)
+    big = _journal_table(_origin_rows("big", 40))
+    small = _journal_table(_origin_rows("small", 5))
+    seen: list[dict] = []
+
+    def tables():
+        yield pa.concat_tables([big, small])
+        seen.append(_files_per_partition(store))
+        yield small
+
+    store.write_stream(tables())
+    assert seen == [{("0", "thing", "big"): 1, ("0", "thing", "small"): 1}]
+
+
 def test_storage_parquet_by_partition_copies(tmp_path):
     """A part holds its own rows only – dropping the others frees them."""
     store = ParquetStore(tmp_path, DATASET, shards=4)

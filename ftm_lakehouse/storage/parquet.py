@@ -61,7 +61,6 @@ from ftm_lakehouse.logic.parquet import (
     STAGING_DIR,
     SWEEP_BATCH_SIZE,
     TABLE_CONFIGURATION,
-    WRITE_BUFFER_BYTES,
     WRITE_FLUSH_PARTITIONS,
     build_merge_sql,
     build_shard_sql,
@@ -86,7 +85,12 @@ from ftm_lakehouse.model.statement import (
     statement_csv_select,
 )
 from ftm_lakehouse.storage.tags import TagStore
-from ftm_lakehouse.util import prefetch, process_map, validate_origin
+from ftm_lakehouse.util import (
+    parse_byte_size,
+    prefetch,
+    process_map,
+    validate_origin,
+)
 
 PARTITIONS = ["shard", "bucket", "origin"]
 
@@ -721,7 +725,7 @@ class ParquetStore:
             offset += count
 
     def write_stream(
-        self, tables: Iterable[pa.Table], budget: int = WRITE_BUFFER_BYTES
+        self, tables: Iterable[pa.Table], budget: int | None = None
     ) -> int:
         """Append a stream of `JOURNAL_SCHEMA` tables as a ``part-*`` file per
         ``(shard, bucket, origin)``. This is not the journal drain but used for
@@ -732,9 +736,15 @@ class ParquetStore:
         written, down to half the budget, in one commit per bucket of up to
         `WRITE_FLUSH_PARTITIONS` partitions.
 
+        Args:
+            tables: Stream of packed statement tables.
+            budget: Arrow bytes to hold, default ``LAKEHOUSE_WRITE_BUFFER``.
+
         Returns:
             Number of rows written.
         """
+        if budget is None:
+            budget = parse_byte_size(self.settings.write_buffer)
         held: dict[Partition, list[pa.Table]] = {}
         sizes: dict[Partition, int] = {}
         rows = files = commits = 0

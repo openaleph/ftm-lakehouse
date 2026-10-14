@@ -14,6 +14,7 @@ from ftm_lakehouse.lake import get_lakehouse
 from ftm_lakehouse.operation import factories as op
 from ftm_lakehouse.repository.entities.main import EntityRepository
 from ftm_lakehouse.repository.factories import get_entities
+from ftm_lakehouse.storage.parquet import ParquetStore
 from tests.shared import JANE, JOHN
 
 
@@ -182,7 +183,7 @@ def test_cli_entities_import_unsafe_parity(tmp_path, cli_runner):
     assert name_row["id"] == Statement.make_key("ds", "jane", "name", "Jane Doe", False)
 
 
-def test_import_entities_unsafe_bounded_buffer(tmp_path):
+def test_import_entities_unsafe_bounded_buffer(tmp_path, monkeypatch):
     """A payload larger than bulk_size flushes mid-entity instead of growing
     the row buffer unbounded."""
     lake = get_lakehouse(str(tmp_path))
@@ -193,11 +194,36 @@ def test_import_entities_unsafe_bounded_buffer(tmp_path):
         "properties": {"name": [f"Name {i}" for i in range(10)]},
         "last_change": "2024-01-01T00:00:00",
     }
+    flushed: list[int] = []
+    write_stream = ParquetStore.write_stream
+    monkeypatch.setattr(
+        ParquetStore,
+        "write_stream",
+        lambda self, tables: write_stream(
+            self, (t for t in tables if not flushed.append(len(t)))
+        ),
+    )
     import_entities_unsafe(repo, [payload], bulk_size=3)
 
     rows = list(repo.statements._statement_data())
     assert len(rows) == 11  # 10 names + BASE stub
-    assert repo.version is not None and repo.version >= 3  # several flushes
+    assert len(flushed) >= 3 and max(flushed) <= 3
+
+
+def test_cli_entities_import_one_file_per_partition(tmp_path, cli_runner):
+    """However many batches an import flushes, a partition gets one file."""
+    in_uri = str(tmp_path / "entities.ftm.json")
+    smart_write_proxies(
+        in_uri, [make_entity({**JANE, "id": f"jane{i}"}) for i in range(6)]
+    )
+    result = cli_runner.invoke(
+        cli_app, ["-d", "dst", "entities", "import", "--bulk-size", "2", "-i", in_uri]
+    )
+    assert result.exit_code == 0, result.output
+
+    files = EntityRepository("dst", tmp_path / "dst").statements.deltatable.file_uris()
+    assert files
+    assert len(files) == len({f.rsplit("/", 1)[0] for f in files})
 
 
 def test_cli_statements_import_unsafe_roundtrip(tmp_path, cli_runner):

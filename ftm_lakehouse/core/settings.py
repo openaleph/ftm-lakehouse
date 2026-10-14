@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     journal_pool_size: int = 5
     """Postgres journal connections (adbc)"""
 
+    write_buffer: str = "1GiB"
+    """Arrow bytes a bulk import holds across its partitions before it writes
+    the largest ones (``LAKEHOUSE_WRITE_BUFFER``) – a byte size."""
+
     lock_max_retries: int = 10
     """Retry bound for every wait on a dataset lock: acquiring ``.LOCK`` or
     ``.LOCK-MERGE``. A lock left behind can be released via ``ftm-lakehouse
@@ -69,7 +73,7 @@ class Settings(BaseSettings):
 
     public_url_prefix: str | None = None
 
-    @field_validator("duckdb_memory_limit")
+    @field_validator("duckdb_memory_limit", "write_buffer")
     @classmethod
     def _byte_size(cls, value: str) -> str:
         parse_byte_size(value)

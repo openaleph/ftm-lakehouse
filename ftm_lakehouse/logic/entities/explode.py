@@ -229,7 +229,9 @@ class RowBuffer:
     on the same row identity that buffer uses – so the same id under distinct
     fragments, origins *or* roles stays distinct – and flushes a `JOURNAL_SCHEMA`
     table, the same currency the journal drain hands to
-    [`write_batches`][ftm_lakehouse.repository.EntityRepository.write_batches].
+    [`write_batches`][ftm_lakehouse.repository.EntityRepository.write_batches]
+    and the bulk imports to
+    [`write_stream`][ftm_lakehouse.repository.EntityRepository.write_stream].
     Memory is bounded by the caller, which flushes every ``bulk_size`` rows.
     """
 
