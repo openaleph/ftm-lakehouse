@@ -781,3 +781,29 @@ def test_storage_parquet_vacuum_drops_staging(tmp_path):
     store.vacuum()
     assert not staged.parent.exists()
     assert _row_count(store) == 40
+
+
+def test_storage_parquet_statements_uri(tmp_path, monkeypatch):
+    """``LAKEHOUSE_STATEMENTS_URI`` moves the table – merge staging included –
+    while locks and tags stay with the dataset."""
+    ssd, hdd = tmp_path / "ssd", tmp_path / "hdd"
+    monkeypatch.setenv("LAKEHOUSE_STATEMENTS_URI", str(ssd))
+    store = ParquetStore(hdd, DATASET, shards=SHARDS)
+    table = ssd / DATASET / "statements"
+    _flush(store, _origin_rows("a"))
+    store.merge()
+    assert (table / "_delta_log").is_dir()
+    assert list(table.glob("shard=*"))
+    assert not (hdd / "statements").exists()
+    assert (hdd / "tags").is_dir()
+    with store.merge_lock():
+        assert (hdd / ".LOCK-MERGE").exists()
+
+    staged = table / STAGING_DIR / "crashed"
+    staged.mkdir(parents=True)
+    store.vacuum()
+    assert not staged.parent.exists()
+    assert _row_count(store) == 20
+
+    with pytest.raises(ValueError):
+        ParquetStore(hdd, "../escape")

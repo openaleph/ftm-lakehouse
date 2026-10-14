@@ -29,6 +29,8 @@ class Settings(BaseSettings):
 
     uri: str = "data"
     journal_uri: str = "sqlite:///:memory:"
+    statements_uri: str | None = None
+    """Place parquet different from main `uri`"""
     api_key: str | None = None
     api_secret: str | None = None
     on_zfs: bool = False

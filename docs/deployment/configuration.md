@@ -9,6 +9,7 @@
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `LAKEHOUSE_URI` | Base path or URI of the lakehouse storage | `data` |
+| `LAKEHOUSE_STATEMENTS_URI` | Root of every dataset's statements table, as `{uri}/{dataset}/statements` – e.g. on SSDs while the archive stays on HDDs. Config, tags, locks and exports stay in the dataset. It applies to every dataset, whatever uri it is opened with – see [Separate statements storage](#separate-statements-storage). | (unset: `{LAKEHOUSE_URI}/{dataset}/statements`) |
 | `LAKEHOUSE_JOURNAL_URI` | SQLAlchemy URI of the statement journal – see [Journal Database](#journal-database) | `sqlite:///:memory:` |
 | `LAKEHOUSE_GRACE_PERIOD_DAYS` | Days a tombstone (`deleted_at`) is kept before the merge of `maintenance optimize` drops it and the rows it shadows | `30` |
 | `LAKEHOUSE_MAX_BUFFER_ROWS` | Row cap of an in-memory `EntityBuffer`. Bulk imports that hit it raise `BufferFullError`; the caller flushes and retries. | `1_000_000` |
@@ -40,7 +41,7 @@ When the share is too small, lower `LAKEHOUSE_WORKERS` rather than the share. Fo
 The largest partitions on disk (after a `vacuum`, since unreferenced files count too):
 
 ```bash
-du -sh "$LAKEHOUSE_URI/<dataset>/statements"/shard=*/bucket=*/origin=* | sort -h | tail
+du -sh "${LAKEHOUSE_STATEMENTS_URI:-$LAKEHOUSE_URI}/<dataset>/statements"/shard=*/bucket=*/origin=* | sort -h | tail
 ```
 
 Workers are spawned processes that re-import the main module. The CLI is safe; a script calling `merge` or `export` with more than one worker needs an `if __name__ == "__main__":` guard, and cannot be piped into `python` on stdin.
@@ -88,6 +89,23 @@ Write it with `ftm-lakehouse -d my_dataset configure -c config.yml` (or `update_
 ```bash
 export LAKEHOUSE_URI=/path/to/lakehouse
 ```
+
+### Separate statements storage
+
+The statements table is the hot path – flushes, merges, exports and queries all read or rewrite it – while the archive is mostly cold blobs. `LAKEHOUSE_STATEMENTS_URI` puts every dataset's table on its own volume:
+
+```bash
+export LAKEHOUSE_URI=/mnt/hdd/lakehouse             # config, archive, exports, tags, locks
+export LAKEHOUSE_STATEMENTS_URI=/mnt/ssd/lakehouse  # {dataset}/statements
+```
+
+The setting moves no data. On an existing lake every store reads empty until its table is moved, and an export in between replaces the artifacts with empty ones. With writers and maintenance stopped, copy each table first – the Delta log's paths are table-relative, so a copy is a valid table:
+
+```bash
+rsync -a "$LAKEHOUSE_URI/<dataset>/statements/" "$LAKEHOUSE_STATEMENTS_URI/<dataset>/statements/"
+```
+
+Then set the variable, compare `ftm-lakehouse -d <dataset> statements sql "SELECT count(*) FROM statement_raw"` with the count before the move, and remove the old directory.
 
 ### Amazon S3
 
