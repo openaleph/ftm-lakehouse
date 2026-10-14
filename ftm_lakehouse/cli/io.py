@@ -1,16 +1,16 @@
 """Shared bulk-import loop for the CLI ``import`` commands.
 
 Both ``entities import`` and ``statements import`` stream items through an
-in-memory `EntityBuffer` and hand each full batch to
-[`write_batches`][ftm_lakehouse.repository.EntityRepository.write_batches]
-as one packed table, bypassing the journal. The loop here is the single
-implementation; the command modules only differ in how they parse their
-input.
+in-memory `EntityBuffer` and hand its batches to
+[`write_stream`][ftm_lakehouse.repository.EntityRepository.write_stream],
+bypassing the journal. The loop here is the single implementation; the
+command modules only differ in how they parse their input.
 """
 
 from datetime import datetime
-from typing import Callable, Iterable, TypeVar
+from typing import Callable, Iterable, Iterator, TypeVar
 
+import pyarrow as pa
 from anystore.io import logged_items, smart_open
 from anystore.logic.io import stream
 from anystore.types import SDict
@@ -95,34 +95,36 @@ def _bulk_import(
     )
     now = last_seen or utc_now()
 
-    for item in logged_items(
-        items,
-        "Import",
-        item_name=item_name,
-        logger=repo.log,
-        chunk_size=100_000 if item_name == "Statement" else 10_000,
-    ):
-        # Per-item provenance: an item's own origin wins unless the caller
-        # forces the CLI origin. ``None`` falls through to per-statement
-        # origin, then the buffer default.
-        item_origin = origin if override_origin else _extract_origin(item)
-        fragment = _extract_fragment(item)
-        # `role` has no override flag: it arrives inside submissions, and the
-        # CLI value is only the fallback for input that carries none.
-        item_role = _extract_role(item)
-        try:
-            add(buffer, item, origin=item_origin, fragment=fragment, role=item_role)
-        except BufferFullError:
-            # Buffer hit its cap before we got to the bulk_size check
-            # (e.g. bulk_size > LAKEHOUSE_MAX_BUFFER_ROWS). Drain and
-            # retry the failed add so the item isn't dropped.
-            repo.write_batches([buffer.flush_table(now)])
-            add(buffer, item, origin=item_origin, fragment=fragment, role=item_role)
-        if len(buffer) >= bulk_size:
-            repo.write_batches([buffer.flush_table(now)])
+    def tables() -> Iterator[pa.Table]:
+        for item in logged_items(
+            items,
+            "Import",
+            item_name=item_name,
+            logger=repo.log,
+            chunk_size=100_000 if item_name == "Statement" else 10_000,
+        ):
+            # Per-item provenance: an item's own origin wins unless the caller
+            # forces the CLI origin. ``None`` falls through to per-statement
+            # origin, then the buffer default.
+            item_origin = origin if override_origin else _extract_origin(item)
+            fragment = _extract_fragment(item)
+            # `role` has no override flag: it arrives inside submissions, and
+            # the CLI value is only the fallback for input that carries none.
+            item_role = _extract_role(item)
+            try:
+                add(buffer, item, origin=item_origin, fragment=fragment, role=item_role)
+            except BufferFullError:
+                # Buffer hit its cap before we got to the bulk_size check
+                # (e.g. bulk_size > LAKEHOUSE_MAX_BUFFER_ROWS). Drain and
+                # retry the failed add so the item isn't dropped.
+                yield buffer.flush_table(now)
+                add(buffer, item, origin=item_origin, fragment=fragment, role=item_role)
+            if len(buffer) >= bulk_size:
+                yield buffer.flush_table(now)
+        if buffer:
+            yield buffer.flush_table(now)
 
-    if buffer:
-        repo.write_batches([buffer.flush_table(now)])
+    repo.write_stream(tables())
 
 
 def import_entities(
@@ -182,12 +184,16 @@ def _bulk_import_rows(
     large entity cannot grow the buffer past the ``bulk_size`` memory bound.
     """
     buffer = RowBuffer()
-    for row in rows:
-        buffer.add(row)
-        if len(buffer) >= bulk_size:
-            repo.write_batches([buffer.flush()])
-    if buffer:
-        repo.write_batches([buffer.flush()])
+
+    def tables() -> Iterator[pa.Table]:
+        for row in rows:
+            buffer.add(row)
+            if len(buffer) >= bulk_size:
+                yield buffer.flush()
+        if buffer:
+            yield buffer.flush()
+
+    repo.write_stream(tables())
 
 
 def import_entities_unsafe(

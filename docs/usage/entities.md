@@ -88,16 +88,18 @@ repo = get_entities("my_dataset")
 buffer = EntityBuffer(repo.dataset, origin="bulk")
 now = datetime.now(timezone.utc)
 
-for proxy in smart_read_proxies("entities.ftm.json"):
-    buffer.add_entity(proxy)
-    if len(buffer) >= 1_000_000:
-        repo.write_batches([buffer.flush_table(now)])
+def tables():
+    for proxy in smart_read_proxies("entities.ftm.json"):
+        buffer.add_entity(proxy)
+        if len(buffer) >= 1_000_000:
+            yield buffer.flush_table(now)
+    if buffer:
+        yield buffer.flush_table(now)
 
-if buffer:
-    repo.write_batches([buffer.flush_table(now)])
+repo.write_stream(tables())
 ```
 
-`EntityBuffer` collapses repeated statements per `(id, origin, fragment, role)`. `flush_table()` empties it as one Arrow table, and `write_batches` appends that as one parquet file per `(shard, bucket, origin)` partition it spans. Adding past `LAKEHOUSE_MAX_BUFFER_ROWS` raises `BufferFullError`, so flush before that.
+`EntityBuffer` collapses repeated statements per `(id, origin, fragment, role)`, and `flush_table()` empties it as one Arrow table. Adding past `LAKEHOUSE_MAX_BUFFER_ROWS` raises `BufferFullError`, so flush before that. `write_stream` writes one parquet file per `(shard, bucket, origin)` partition rather than one per table, holding up to `LAKEHOUSE_WRITE_BUFFER` of rows at a time.
 
 `ftm-lakehouse entities import` runs this loop.
 

@@ -41,7 +41,7 @@ class EntityBuffer:
     The buffer is bounded by ``max_rows`` (defaulting to
     `Settings.max_buffer_rows`, i.e. ``LAKEHOUSE_MAX_BUFFER_ROWS``) – the only
     memory bound on the write path. Adding past the cap raises
-    `BufferFullError`; callers must flush (`flush_table` + ``write_batches``)
+    `BufferFullError`; callers must flush (`flush_table` + ``write_stream``)
     and retry.
     """
 
@@ -290,9 +290,10 @@ class EntityBuffer:
         """Empty the buffer as one packed Arrow table.
 
         What the parquet write path consumes:
+        [`write_stream`][ftm_lakehouse.repository.EntityRepository.write_stream]
+        (bulk imports) or
         [`write_batches`][ftm_lakehouse.repository.EntityRepository.write_batches]
-        appends it as one parquet file per ``(shard, bucket, origin)``
-        partition it spans. There is no shard grouping to preserve –
+        (the journal drain). There is no shard grouping to preserve –
         [`append`][ftm_lakehouse.storage.parquet.ParquetStore.append] derives
         every row's partition key – so the whole buffer goes over in one
         table, and one Delta commit. Peak memory is the buffered rows plus

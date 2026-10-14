@@ -9,6 +9,7 @@ from contextlib import nullcontext
 from datetime import datetime, timezone
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pytest
 from followthemoney import Statement
 from ftmq.query import M, Query
@@ -78,6 +79,18 @@ def _flush(store: ParquetStore, rows: list[dict]) -> int:
         store.append(table)
         total += len(table)
     return total
+
+
+def _journal_table(rows: list[dict]) -> pa.Table:
+    return pa.Table.from_pylist(
+        [{k: v for k, v in r.items() if k != "shard"} for r in rows],
+        schema=JOURNAL_SCHEMA,
+    )
+
+
+def _raw_rows(store: ParquetStore) -> list[tuple]:
+    with store._lake.cursor() as cur:
+        return cur.execute(f"SELECT * FROM {TABLE_RAW.name} ORDER BY ALL").fetchall()
 
 
 def _row_count(store: ParquetStore) -> int:
@@ -781,6 +794,110 @@ def test_storage_parquet_vacuum_drops_staging(tmp_path):
     store.vacuum()
     assert not staged.parent.exists()
     assert _row_count(store) == 40
+
+
+def test_storage_parquet_write_stream(tmp_path):
+    """One file per partition a stream spans – not one per table – with the
+    rows `append` writes, and a checkpoint at the end."""
+    rows = _origin_rows("a", 30) + _origin_rows("b", 30)
+    rows += [
+        _pack(make_statement(f"p{i}", "bodyText", f"Page {i}", "Page"))
+        for i in range(30)
+    ]
+    tables = [_journal_table(rows[i::3]) for i in range(3)]
+
+    streamed = ParquetStore(tmp_path / "stream", DATASET, shards=2)
+    assert streamed.write_stream(iter(tables)) == len(rows)
+    appended = ParquetStore(tmp_path / "append", DATASET, shards=2)
+    for table in tables:
+        appended.append(table)
+
+    assert _raw_rows(streamed) == _raw_rows(appended)
+    files = _partition_files(streamed)
+    assert files.keys() == _partition_files(appended).keys()
+    assert all(len(fs) == 1 for fs in files.values())
+    assert streamed.version == 2  # one commit per bucket
+    assert sum(map(len, _partition_files(appended).values())) > len(files)
+    log = tmp_path / "stream" / "statements" / "_delta_log"
+    assert list(log.glob("*.checkpoint.parquet"))
+
+
+def test_storage_parquet_write_stream_flushes(tmp_path, monkeypatch):
+    """A partition is written when its rows fill a file, or – the budget
+    exceeded – the largest first."""
+    store = ParquetStore(tmp_path, DATASET, shards=1)
+    big = _journal_table(_origin_rows("big", 40))
+    small = _journal_table(_origin_rows("small", 5))
+    seen: list[dict] = []
+
+    def tables():
+        yield pa.concat_tables([big, small])
+        seen.append(_files_per_partition(store))
+        yield small
+
+    store.write_stream(tables(), budget=3 * small.nbytes)
+    assert seen == [{("0", "thing", "big"): 1}]
+    assert _files_per_partition(store) == {
+        ("0", "thing", "big"): 1,
+        ("0", "thing", "small"): 1,
+    }
+
+    monkeypatch.setattr(storage_parquet, "MERGE_CHUNK_BYTES", 1)  # a file a part
+    store = ParquetStore(tmp_path / "rotate", DATASET, shards=1)
+    store.write_stream([small, small])
+    assert _files_per_partition(store) == {("0", "thing", "small"): 2}
+
+
+def test_storage_parquet_write_stream_commits_per_call(tmp_path, monkeypatch):
+    """A flush writes a bucket's partitions in one commit per
+    `WRITE_FLUSH_PARTITIONS`."""
+    monkeypatch.setattr(storage_parquet, "WRITE_FLUSH_PARTITIONS", 5)
+    store = ParquetStore(tmp_path, DATASET, shards=8)
+    rows = _origin_rows("a", 200) + _origin_rows("b", 200)
+    store.write_stream([_journal_table(rows)])
+    files = _files_per_partition(store)
+    assert len(files) == 16  # 8 shards x 2 origins
+    assert all(count == 1 for count in files.values())
+    assert store.version == 4  # 16 partitions, 5 a call
+
+
+def test_storage_parquet_write_stream_budget_setting(tmp_path, monkeypatch):
+    """The budget defaults to ``LAKEHOUSE_WRITE_BUFFER``, a byte size."""
+    monkeypatch.setenv("LAKEHOUSE_WRITE_BUFFER", "80%")
+    with pytest.raises(ValueError):
+        ParquetStore(tmp_path, DATASET)
+    monkeypatch.setenv("LAKEHOUSE_WRITE_BUFFER", "1KiB")
+    store = ParquetStore(tmp_path, DATASET, shards=1)
+    big = _journal_table(_origin_rows("big", 40))
+    small = _journal_table(_origin_rows("small", 5))
+    seen: list[dict] = []
+
+    def tables():
+        yield pa.concat_tables([big, small])
+        seen.append(_files_per_partition(store))
+        yield small
+
+    store.write_stream(tables())
+    assert seen == [{("0", "thing", "big"): 1, ("0", "thing", "small"): 1}]
+
+
+def test_storage_parquet_by_partition_copies(tmp_path):
+    """A part holds its own rows only – dropping the others frees them."""
+    store = ParquetStore(tmp_path, DATASET, shards=4)
+    baseline = pa.total_allocated_bytes()
+    table = _journal_table(_origin_rows("a", 500))
+    parts = dict(store._by_partition(table))
+    assert len(parts) == 4
+    assert sum(len(p) for p in parts.values()) == len(table)
+    assert all(
+        set(pc.unique(p["shard"]).to_pylist()) == {shard}
+        for (shard, _, _), p in parts.items()
+    )
+    nbytes = table.nbytes
+    kept = parts.popitem()[1]
+    del table, parts
+    assert pa.total_allocated_bytes() - baseline < nbytes // 2  # one part's worth
+    assert len(kept) > 0
 
 
 def test_storage_parquet_statements_uri(tmp_path, monkeypatch):

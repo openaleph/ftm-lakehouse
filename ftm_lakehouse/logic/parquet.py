@@ -52,6 +52,10 @@ MERGE_CHUNK_BYTES = 512 * 1_048_576
 each. delta-rs holds a call's whole input – about 2.3x it at peak, measured on
 deltalake 1.6.6 – so one call per partition would be unbounded."""
 
+WRITE_FLUSH_PARTITIONS = 64
+"""Partitions per ``write_deltalake`` call of `write_stream` – delta-rs holds
+page buffers per partition of a call, and each call is one commit."""
+
 STAGING_DIR = ".staging"
 """Table-relative directory of `merge`'s staging tables – hidden, so Delta's
 ``vacuum`` never lists it."""

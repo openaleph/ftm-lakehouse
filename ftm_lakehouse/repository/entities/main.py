@@ -131,9 +131,8 @@ class EntityRepository(DatasetHandle):
         return total
 
     def write_batches(self, tables: Iterable[pa.Table]) -> int:
-        """Append `JOURNAL_SCHEMA` tables to parquet – the write loop of the
-        journal drain and the bulk imports. Each table is durable before the
-        next is pulled.
+        """Append `JOURNAL_SCHEMA` tables to parquet – the journal drain's write
+        loop. Each table is durable before the next is pulled.
 
         Args:
             tables: Stream of packed statement tables.
@@ -149,6 +148,19 @@ class EntityRepository(DatasetHandle):
             store.append(table)
             total += table.num_rows
         return total
+
+    def write_stream(self, tables: Iterable[pa.Table]) -> int:
+        """Append `JOURNAL_SCHEMA` tables to parquet as one file per partition –
+        the bulk imports' write
+        ([`write_stream`][ftm_lakehouse.storage.parquet.ParquetStore.write_stream]).
+
+        Args:
+            tables: Stream of packed statement tables.
+
+        Returns:
+            Number of rows written.
+        """
+        return self.statements.write_stream(tables)  # raises in api mode
 
     def merge(self, force: bool = False) -> None:
         """Flush, then [`merge`][ParquetStore.merge] the parquet store – ``force``
