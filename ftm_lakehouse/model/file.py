@@ -13,6 +13,7 @@ from ftmq.util import DEFAULT_DATASET, make_entity
 from pydantic import ConfigDict, computed_field, field_validator, model_validator
 
 from ftm_lakehouse.core.conventions import path
+from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.helpers.file import (
     get_filename,
     guess_mime,
@@ -22,6 +23,8 @@ from ftm_lakehouse.helpers.file import (
     pick_mime,
 )
 from ftm_lakehouse.util import validate_checksum
+
+settings = Settings()
 
 
 class Document(BaseModel):
@@ -39,7 +42,7 @@ class Document(BaseModel):
     @field_validator("checksum")
     @classmethod
     def check_checksum(cls, v: str) -> str:
-        return validate_checksum(v)
+        return validate_checksum(v, settings.allow_sha1_documents)
 
     @classmethod
     def from_entity(cls, e: EntityProxy, public_url: str | None = None) -> Self:
@@ -97,7 +100,7 @@ class File(Stats):
     @field_validator("checksum")
     @classmethod
     def check_checksum(cls, v: str) -> str:
-        return validate_checksum(v)
+        return validate_checksum(v, settings.allow_sha1_documents)
 
     @field_validator("store")
     @classmethod

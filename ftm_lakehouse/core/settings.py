@@ -78,6 +78,9 @@ class Settings(BaseSettings):
 
     public_url_prefix: str | None = None
 
+    allow_sha1_documents: bool = False
+    """Allow sha1 checksums during exports (legacy read-only datasets)"""
+
     @field_validator("duckdb_memory_limit", "write_buffer")
     @classmethod
     def _byte_size(cls, value: str) -> str:

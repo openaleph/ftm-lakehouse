@@ -18,6 +18,7 @@ RESERVED_DATASET_NAMES = frozenset({"catalog", "default"})
 SAFE_NAME_MAX_LEN = 255
 _SAFE_NAME_FORBIDDEN = re.compile(r"[\x00-\x1f\x7f/\\]")
 _CHECKSUM_RE = re.compile(r"\A[0-9a-f]{64}\Z")
+_CHECKSUM_RE_SHA1 = re.compile(r"\A[0-9a-f]{40}\Z")
 _QUOTES = re.compile(r"['\"]")
 
 
@@ -68,10 +69,14 @@ def validate_origin(origin: str) -> str:
     return origin
 
 
-def validate_checksum(ch: str) -> str:
+def validate_checksum(ch: str, allow_legacy_sha1: bool = False) -> str:
     """Validate ``ch`` as a SHA256 digest – exactly 64 lowercase hex chars, so
-    it is safe in archive paths."""
-    if not isinstance(ch, str) or not _CHECKSUM_RE.fullmatch(ch):
+    it is safe in archive paths. Allows legacy sha1 validation as well if
+    explicitly passed."""
+    if not isinstance(ch, str) or not (
+        _CHECKSUM_RE.fullmatch(ch)
+        or (allow_legacy_sha1 and _CHECKSUM_RE_SHA1.fullmatch(ch))
+    ):
         raise ValueError(
             f"Invalid checksum: `{ch!r}` "
             "(must be 64-character lowercase hex SHA256 digest)"
