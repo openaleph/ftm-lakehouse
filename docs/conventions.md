@@ -41,6 +41,8 @@ lakehouse/
         └── runs/{job_type}/{timestamp}.json
 ```
 
+With `LAKEHOUSE_STATEMENTS_URI` set, `statements/` sits at `{LAKEHOUSE_STATEMENTS_URI}/{dataset}/statements` instead; everything else stays under the storage root – see [Separate statements storage](deployment/configuration.md#separate-statements-storage).
+
 ## Freshness Tags
 
 Operations skip work their tags say is fresh: `is_latest(key, dependencies)` is `True` when `key` is newer than all its dependencies.

@@ -34,7 +34,8 @@ def cli_zfs_init(
     """Create ZFS datasets for a lakehouse dataset.
 
     Creates the parent, archive, and statements ZFS datasets with
-    tuned properties under the given pool.
+    tuned properties under the given pool – the statements one under
+    LAKEHOUSE_ZFS_STATEMENTS_POOL when that is set.
     """
     settings = Settings()
     zfs_pool = pool or settings.zfs_pool
@@ -43,5 +44,10 @@ def cli_zfs_init(
             "[red]No ZFS pool specified. Use --pool or set LAKEHOUSE_ZFS_POOL.[/red]"
         )
         raise typer.Exit(code=1)
-    ensure_zfs_dataset(zfs_pool, dataset)
-    log.info("ZFS datasets initialized", pool=zfs_pool, dataset=dataset)
+    ensure_zfs_dataset(zfs_pool, dataset, settings.zfs_statements_pool)
+    log.info(
+        "ZFS datasets initialized",
+        pool=zfs_pool,
+        statements_pool=settings.zfs_statements_pool,
+        dataset=dataset,
+    )

@@ -3,7 +3,6 @@ from typing import Generator
 
 import pytest
 from anystore.store import get_store
-from moto import mock_aws
 from rigour.mime.types import PLAIN
 
 from ftm_lakehouse.core.conventions import path, tag
@@ -29,9 +28,9 @@ def repo(
             yield ArchiveRepository("test", f"{base_url}/test"), tmp_path / "test"
     elif request.param == "s3":
         moto_server = request.getfixturevalue("moto_server")
-        with mock_aws():
-            moto_server.create_bucket(Bucket="lakehouse")
-            yield ArchiveRepository("test", "s3://lakehouse/test"), None
+        bucket = moto_server.create_bucket(Bucket="lakehouse")
+        yield ArchiveRepository("test", "s3://lakehouse/test"), None
+        bucket.objects.all().delete()  # the server keeps its state across tests
     else:  # docker
         skip_unless_docker_mode()
         name = make_docker_dataset_name()

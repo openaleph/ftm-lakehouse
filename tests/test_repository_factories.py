@@ -111,3 +111,26 @@ def test_config_shards_drive_partitioning(tmp_path, monkeypatch):
     entity = repo.get("entity-1")
     assert entity is not None
     assert "Person 1" in entity.get("name")
+
+
+def test_get_entities_statements_uri(tmp_path, monkeypatch):
+    """With ``LAKEHOUSE_STATEMENTS_URI`` the table lives under it; config, tags
+    and locks stay in the dataset."""
+    monkeypatch.setenv("LAKEHOUSE_URI", str(tmp_path / "hdd"))
+    monkeypatch.setenv("LAKEHOUSE_STATEMENTS_URI", str(tmp_path / "ssd"))
+    ensure_dataset("split")
+    repo = get_entities("split")
+    with repo.writer(origin="test") as writer:
+        writer.add_entity(
+            make_entity(
+                {"id": "jane", "schema": "Person", "properties": {"name": ["Jane"]}}
+            )
+        )
+    repo.flush()
+
+    assert (tmp_path / "ssd/split/statements/_delta_log").is_dir()
+    assert not (tmp_path / "hdd/split/statements").exists()
+    assert (tmp_path / "hdd/split/config.yml").exists()
+    entity = repo.get("jane")
+    assert entity is not None
+    assert entity.caption == "Jane"
