@@ -53,15 +53,21 @@ PARENT_PROPS = {
 
 
 @cache
-def ensure_zfs_dataset(pool: str, dataset: str) -> None:
+def ensure_zfs_dataset(
+    pool: str, dataset: str, statements_pool: str | None = None
+) -> None:
     """Create the dataset's tuned ZFS hierarchy under ``pool`` (idempotent).
 
     One parent plus one child per storage type, each with its
-    `DatasetConfig` properties. Cached per ``(pool, dataset)`` so the
-    actual ``zfs create`` calls fire once per process.
+    `DatasetConfig` properties – the statements child under a parent of its
+    own in ``statements_pool`` when given. Cached per arguments so the actual
+    ``zfs create`` calls fire once per process.
     """
     dataset_name_check(dataset)
     base = f"{pool}/{dataset}"
     zfs_create(base, **PARENT_PROPS)
     zfs_create(f"{base}/{path.ARCHIVE}", **ARCHIVE.to_props())
+    if statements_pool:
+        base = f"{statements_pool}/{dataset}"
+        zfs_create(base, **PARENT_PROPS)
     zfs_create(f"{base}/{path.STATEMENTS}", **STATEMENTS.to_props())

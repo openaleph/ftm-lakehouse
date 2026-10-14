@@ -50,7 +50,7 @@ def ensure_zfs(dataset: str, uri: Uri) -> None:
     if store.is_local and settings.on_zfs:
         if settings.zfs_pool is None:
             raise RuntimeError("Configure LAKEHOUSE_ZFS_POOL for zfs integration!")
-        ensure_zfs_dataset(settings.zfs_pool, dataset)
+        ensure_zfs_dataset(settings.zfs_pool, dataset, settings.zfs_statements_pool)
     elif api is not None:
         api.ensure()
 

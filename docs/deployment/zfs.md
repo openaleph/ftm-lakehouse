@@ -24,6 +24,20 @@ Each new dataset gets these ZFS datasets (`zfs create` via `zfs-agent`):
 
 Both children also set `sync=standard` and `logbias=throughput`.
 
+### Separate statements pool
+
+With the statements tables on their own volume ([`LAKEHOUSE_STATEMENTS_URI`](configuration.md#separate-statements-storage)), name the ZFS dataset path that volume is mounted from, as `LAKEHOUSE_ZFS_POOL` names the one of `LAKEHOUSE_URI`:
+
+```bash
+export LAKEHOUSE_URI=/zpools/hdd/lakehouse
+export LAKEHOUSE_STATEMENTS_URI=/zpools/ssd/lakehouse
+export LAKEHOUSE_ON_ZFS=1
+export LAKEHOUSE_ZFS_POOL=zpools/hdd/lakehouse
+export LAKEHOUSE_ZFS_STATEMENTS_POOL=zpools/ssd/lakehouse
+```
+
+The parent and `archive` are created under `LAKEHOUSE_ZFS_POOL`; the `statements` child under a parent of its own (`{dataset}/`, same properties) in `LAKEHOUSE_ZFS_STATEMENTS_POOL`. On ZFS the two statements settings go together – one without the other fails at startup. A socket agent creates under one `--pool` only, so this works in local mode, or with an agent whose pool holds both paths.
+
 ## Mountpoint Ownership
 
 ZFS creates mountpoints owned by `root:root`. Set the `zfs-agent` package's `ZFS_OWNER` to chown new mountpoints; unset, no `chown` happens:
@@ -89,8 +103,8 @@ To create a dataset's ZFS datasets without starting the application:
 ftm-lakehouse zfs init my_dataset --pool zpools/tank/lakehouse
 ```
 
-This creates the parent, archive and statements ZFS datasets. `--pool` defaults to `LAKEHOUSE_ZFS_POOL`.
+This creates the parent, archive and statements ZFS datasets. `--pool` defaults to `LAKEHOUSE_ZFS_POOL`; the statements dataset goes to `LAKEHOUSE_ZFS_STATEMENTS_POOL` when that is set.
 
 ## Environment Variables
 
-Lakehouse-side: `LAKEHOUSE_ON_ZFS` and `LAKEHOUSE_ZFS_POOL` – see the [configuration reference](configuration.md). Transport-side (`ZFS_SOCKET`, `ZFS_OWNER`, `ZFS_POOL`, `ZFS_ALLOWED_UID`, `ZFS_EXTRA_PROPS`, `ZFS_LOG_LEVEL`): the [zfs-agent](https://github.com/dataresearchcenter/zfs-agent) package.
+Lakehouse-side: `LAKEHOUSE_ON_ZFS`, `LAKEHOUSE_ZFS_POOL` and `LAKEHOUSE_ZFS_STATEMENTS_POOL` – see the [configuration reference](configuration.md). Transport-side (`ZFS_SOCKET`, `ZFS_OWNER`, `ZFS_POOL`, `ZFS_ALLOWED_UID`, `ZFS_EXTRA_PROPS`, `ZFS_LOG_LEVEL`): the [zfs-agent](https://github.com/dataresearchcenter/zfs-agent) package.

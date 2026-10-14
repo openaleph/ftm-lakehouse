@@ -1,10 +1,11 @@
 from pathlib import Path
 from tempfile import gettempdir
+from typing import Self
 
 from anystore.exceptions import DoesNotExist
 from anystore.io import smart_read
 from anystore.settings import BaseSettings
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import SettingsConfigDict
 
 from ftm_lakehouse.util import parse_byte_size
@@ -29,11 +30,15 @@ class Settings(BaseSettings):
 
     uri: str = "data"
     journal_uri: str = "sqlite:///:memory:"
+    statements_uri: str | None = None
+    """Place parquet different from main `uri`"""
     api_key: str | None = None
     api_secret: str | None = None
     on_zfs: bool = False
     zfs_pool: str | None = None
     """ZFS dataset path the lakehouse's datasets are created under"""
+    zfs_statements_pool: str | None = None
+    """ZFS dataset path the statements tables are created under"""
 
     grace_period_days: int = 30
     max_buffer_rows: int = 1_000_000
@@ -74,6 +79,16 @@ class Settings(BaseSettings):
     def _byte_size(cls, value: str) -> str:
         parse_byte_size(value)
         return value
+
+    @model_validator(mode="after")
+    def _zfs_statements_pool(self) -> Self:
+        # one without the other provisions the statements child where no table is
+        if self.on_zfs and bool(self.statements_uri) != bool(self.zfs_statements_pool):
+            raise ValueError(
+                "On ZFS, set LAKEHOUSE_STATEMENTS_URI and "
+                "LAKEHOUSE_ZFS_STATEMENTS_POOL together"
+            )
+        return self
 
     @property
     def api_mode(self) -> bool:

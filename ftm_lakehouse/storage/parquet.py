@@ -27,7 +27,7 @@ from anystore.io import SyncProgressBar
 from anystore.logging import get_logger
 from anystore.store import get_store
 from anystore.types import Uri
-from anystore.util import Took, ensure_uuid, join_uri, mask_uri
+from anystore.util import Took, ensure_uri, ensure_uuid, join_uri, mask_uri
 from deltalake import DeltaTable, Schema, write_deltalake
 from deltalake.exceptions import DeltaError, TableNotFoundError
 from deltalake.transaction import AddAction, RemoveAction
@@ -84,7 +84,12 @@ from ftm_lakehouse.model.statement import (
     statement_csv_select,
 )
 from ftm_lakehouse.storage.tags import TagStore
-from ftm_lakehouse.util import prefetch, process_map, validate_origin
+from ftm_lakehouse.util import (
+    prefetch,
+    process_map,
+    validate_dataset_name,
+    validate_origin,
+)
 
 PARTITIONS = ["shard", "bucket", "origin"]
 
@@ -351,7 +356,9 @@ class _LakeStore(LakeStore):
 
 class ParquetStore:
     """The statement store of one dataset: one Delta table, partitioned by
-    ``(shard, bucket, origin)``."""
+    ``(shard, bucket, origin)``, at ``{uri}/statements`` – or at
+    ``{LAKEHOUSE_STATEMENTS_URI}/{dataset}/statements`` when that is set. Locks
+    and tags stay with the dataset at ``uri``."""
 
     def __init__(
         self,
@@ -359,8 +366,14 @@ class ParquetStore:
         dataset: str,
         shards: int | None = None,
     ) -> None:
-        self.uri = join_uri(uri, path.STATEMENTS)
         self.settings = Settings()
+        root = uri
+        if self.settings.statements_uri:
+            root = join_uri(
+                ensure_uri(self.settings.statements_uri),
+                validate_dataset_name(dataset),
+            )
+        self.uri = join_uri(root, path.STATEMENTS)
         self.dataset = dataset
         self.shards = shards if shards is not None else DEFAULT_SHARDS
         self._store = get_store(uri)
@@ -913,9 +926,9 @@ class ParquetStore:
                 full=True,
             )
             # no merge stages under the fence
-            staging = f"{path.STATEMENTS}/{STAGING_DIR}"
-            if self._store.exists(staging):
-                self._store._fs.rm(self._store._keys.to_fs_key(staging), recursive=True)
+            table = get_store(self.uri)
+            if table.exists(STAGING_DIR):
+                table._fs.rm(table._keys.to_fs_key(STAGING_DIR), recursive=True)
         self.log.info("Vacuumed.", files=len(deleted), took=t.took)
 
     def sweep_sources(self) -> list[SweepSource]:
