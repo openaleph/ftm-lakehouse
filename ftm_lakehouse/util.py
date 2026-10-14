@@ -1,4 +1,5 @@
 import multiprocessing
+import os
 import re
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
@@ -122,6 +123,28 @@ def parse_byte_size(value: str) -> int:
     if factor is None:
         raise ValueError(f"Invalid byte size unit: `{value}`")
     return int(float(number) * factor)
+
+
+_MOUNT_ESCAPE = re.compile(r"\\([0-7]{3})")
+
+
+def mount_fstype(path: str) -> str | None:
+    """Type of the filesystem ``path`` is on (``tmpfs``, ``ext4``, …), read from
+    ``/proc/self/mounts`` – ``None`` where that is unreadable (not Linux)."""
+    path = os.path.realpath(path)
+    target, fstype = "", None
+    try:
+        with open("/proc/self/mounts") as mounts:
+            for line in mounts:
+                _, mount, kind, *_ = line.split()
+                mount = _MOUNT_ESCAPE.sub(lambda m: chr(int(m[1], 8)), mount)
+                inside = path == mount or path.startswith(mount.rstrip("/") + "/")
+                # the longest mount point holds it; of equal ones the last is on top
+                if inside and len(mount) >= len(target):
+                    target, fstype = mount, kind
+    except OSError:
+        return None
+    return fstype
 
 
 def validate_dataset_name(name: str) -> str:

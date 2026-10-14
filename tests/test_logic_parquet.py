@@ -1,6 +1,7 @@
 """Tests for the DuckDB merge query in ``ftm_lakehouse.logic.parquet``."""
 
 from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -9,10 +10,12 @@ from ftmq.query import M, P, Query
 from ftmq.store.lake import TARGET_SIZE
 
 from ftm_lakehouse.helpers.shards import entity_shard
+from ftm_lakehouse.logic import parquet as logic_parquet
 from ftm_lakehouse.logic.parquet import (
     SHARD_MIN_FILE_SIZE,
     build_merge_sql,
     build_shard_sql,
+    duckdb_config,
     make_prune_by_shard,
     partition_source_sql,
     shard_expr_sql,
@@ -820,3 +823,22 @@ def test_partition_source_sql_fills_missing_columns(tmp_path, now):
     assert [d[0] for d in con.execute(f"SELECT * FROM {source}").description] == (
         SHARDED_SCHEMA.names
     )
+
+
+def test_duckdb_config_warns_on_ram_spill(tmp_path, monkeypatch):
+    monkeypatch.setenv("LAKEHOUSE_DUCKDB_TEMP_DIRECTORY", str(tmp_path))
+    log = MagicMock()
+    monkeypatch.setattr(logic_parquet, "log", log)
+    logic_parquet._warn_ram_spill.cache_clear()
+
+    monkeypatch.setattr(logic_parquet, "mount_fstype", lambda _: "ext4")
+    duckdb_config()
+    log.warning.assert_not_called()
+
+    logic_parquet._warn_ram_spill.cache_clear()
+    monkeypatch.setattr(logic_parquet, "mount_fstype", lambda _: "tmpfs")
+    duckdb_config()
+    duckdb_config()
+    log.warning.assert_called_once()
+    assert log.warning.call_args.kwargs["temp_directory"] == str(tmp_path)
+    logic_parquet._warn_ram_spill.cache_clear()

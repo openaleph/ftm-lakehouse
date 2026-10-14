@@ -112,3 +112,26 @@ def test_prefetch():
     assert produced == [0, 1]
     time.sleep(0.1)
     assert produced == [0, 1]
+
+
+def test_mount_fstype(tmp_path, monkeypatch):
+    if Path("/proc/self/mounts").exists():
+        assert util.mount_fstype("/proc/self") == "proc"
+    mounts = tmp_path / "mounts"
+    mounts.write_text(
+        "/dev/sda1 / ext4 rw 0 0\n"
+        "tmpfs /spill tmpfs rw 0 0\n"
+        "/dev/sdb1 /spill/my\\040disk xfs rw 0 0\n"
+        "none /spill/my\\040disk ramfs rw 0 0\n"  # mounted over the xfs
+    )
+    monkeypatch.setattr(util, "open", lambda *_: mounts.open(), raising=False)
+    assert util.mount_fstype("/") == "ext4"
+    assert util.mount_fstype("/spill/duckdb") == "tmpfs"
+    assert util.mount_fstype("/spillover") == "ext4"
+    assert util.mount_fstype("/spill/my disk/duckdb") == "ramfs"
+
+    def unreadable(*_):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(util, "open", unreadable, raising=False)
+    assert util.mount_fstype("/") is None

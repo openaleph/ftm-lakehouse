@@ -7,9 +7,11 @@ merged partition reads as a plain scan (`live_rows_sql`).
 
 import os
 from datetime import datetime
+from functools import cache
 from typing import Iterable
 
 import pyarrow as pa
+from anystore.logging import get_logger
 from anystore.util import ensure_uuid
 from banal import ensure_list
 from deltalake import DeltaTable
@@ -21,7 +23,12 @@ from ftmq.store.lake import TARGET_SIZE
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.helpers.shards import entity_shard, shard_hex_width
 from ftm_lakehouse.model.statement import PA_TS, SHARDED_SCHEMA, TABLE_RAW
-from ftm_lakehouse.util import parse_byte_size, validate_origin
+from ftm_lakehouse.util import mount_fstype, parse_byte_size, validate_origin
+
+log = get_logger(__name__)
+
+RAM_FILESYSTEMS = ("tmpfs", "ramfs")
+"""Filesystems held in RAM – a DuckDB spill there adds to memory, not relieves it."""
 
 SWEEP_BATCH_SIZE = 50_000
 """Rows per Arrow batch when a read materialises Python dicts (DuckDB's 1M
@@ -75,21 +82,33 @@ def duckdb_config() -> dict[str, str]:
     extension directories.
 
     Call once per DuckDB instance: each call gets its own spill subdirectory,
-    as instances sharing one overwrite each other's spill files. No
-    ``TimeZone`` – at connect time it installs ``icu`` (fails offline); sessions
-    pin UTC after connecting.
+    as instances sharing one overwrite each other's spill files. Warns once
+    when that directory is RAM-backed. No ``TimeZone`` – at connect time it
+    installs ``icu`` (fails offline); sessions pin UTC after connecting.
     """
     settings = Settings()
     config: dict[str, str] = {"memory_limit": settings.duckdb_memory_limit}
     if settings.duckdb_temp_directory:
         # DuckDB creates the spill directory but not its parents
         os.makedirs(settings.duckdb_temp_directory, exist_ok=True)
+        _warn_ram_spill(settings.duckdb_temp_directory)
         config["temp_directory"] = os.path.join(
             settings.duckdb_temp_directory, ensure_uuid()
         )
     if settings.duckdb_extension_directory:
         config["extension_directory"] = settings.duckdb_extension_directory
     return config
+
+
+@cache
+def _warn_ram_spill(directory: str) -> None:
+    """Warn, once per process and directory, that DuckDB spills to RAM there."""
+    if mount_fstype(directory) in RAM_FILESYSTEMS:
+        log.warning(
+            "DuckDB spill directory is RAM-backed – spilled data stays in memory. "
+            "Set LAKEHOUSE_DUCKDB_TEMP_DIRECTORY to a path on disk.",
+            temp_directory=directory,
+        )
 
 
 def worker_duckdb_config(workers: int) -> dict[str, str]:
