@@ -61,6 +61,8 @@ from ftm_lakehouse.logic.parquet import (
     STAGING_DIR,
     SWEEP_BATCH_SIZE,
     TABLE_CONFIGURATION,
+    WRITE_BUFFER_BYTES,
+    WRITE_FLUSH_PARTITIONS,
     build_merge_sql,
     build_shard_sql,
     dedupe_rows_sql,
@@ -682,20 +684,103 @@ class ParquetStore:
             buckets=buckets,
             shards=shards,
         )
+        self._ensure_table()
+        for bucket in buckets:
+            self._write(bucket, batch.filter(pc.equal(batch["bucket"], bucket)))
+
+    def _write(
+        self, bucket: str, table: pa.Table, target_file_size: int | None = None
+    ) -> None:
+        """Write a bucket from pyarrow Table to deltalake, exclusively via .LOCK"""
         with self._tags.touch(tag.STATEMENTS_UPDATED):
-            self._ensure_table()
             self._await_unlocked()
             with self._snapshot_lock:
-                snapshot = self._existing_snapshot()
-                for bucket in buckets:
-                    sub = batch.filter(pc.equal(batch["bucket"], bucket))
-                    write_deltalake(
-                        snapshot,
-                        sub,
-                        partition_by=PARTITIONS,
-                        mode="append",
-                        writer_properties=writer_for_bucket(bucket),
+                write_deltalake(
+                    self._existing_snapshot(),
+                    table,
+                    partition_by=PARTITIONS,
+                    mode="append",
+                    writer_properties=writer_for_bucket(bucket),
+                    target_file_size=target_file_size,
+                )
+
+    def _by_partition(self, batch: pa.Table) -> Iterator[tuple[Partition, pa.Table]]:
+        """`JOURNAL_SCHEMA` rows as one table per ``(shard, bucket, origin)``,
+        ``shard`` derived."""
+        batch = self._with_shard(batch)
+        order = pc.sort_indices(batch, sort_keys=[(c, "ascending") for c in PARTITIONS])
+        keys = pc.binary_join_element_wise(*(batch[c] for c in PARTITIONS), "/")
+        runs = pc.value_counts(pc.take(keys, order))  # first seen first: sorted
+        offset = 0
+        for key, count in zip(
+            runs.field("values").to_pylist(), runs.field("counts").to_pylist()
+        ):
+            shard, bucket, origin = key.split("/")
+            # a copy per part – a slice would keep the whole batch alive
+            yield (shard, bucket, origin), batch.take(order.slice(offset, count))
+            offset += count
+
+    def write_stream(
+        self, tables: Iterable[pa.Table], budget: int = WRITE_BUFFER_BYTES
+    ) -> int:
+        """Append a stream of `JOURNAL_SCHEMA` tables as a ``part-*`` file per
+        ``(shard, bucket, origin)``. This is not the journal drain but used for
+        bulk imports via cli or scripts.
+
+        A partition's rows are held until they fill a file (`MERGE_CHUNK_BYTES`)
+        or the held rows exceed ``budget``; then the largest partitions are
+        written, down to half the budget, in one commit per bucket of up to
+        `WRITE_FLUSH_PARTITIONS` partitions.
+
+        Returns:
+            Number of rows written.
+        """
+        held: dict[Partition, list[pa.Table]] = {}
+        sizes: dict[Partition, int] = {}
+        rows = files = commits = 0
+
+        def flush(keys: list[Partition]) -> None:
+            nonlocal files, commits
+            for bucket in sorted({key[1] for key in keys}):
+                of_bucket = [key for key in keys if key[1] == bucket]
+                for i in range(0, len(of_bucket), WRITE_FLUSH_PARTITIONS):
+                    chunk = of_bucket[i : i + WRITE_FLUSH_PARTITIONS]
+                    table = pa.concat_tables(
+                        chain.from_iterable(held.pop(key) for key in chunk)
                     )
+                    for key in chunk:
+                        del sizes[key]
+                    self.log.debug(
+                        "Writing partitions ...",
+                        bucket=bucket,
+                        partitions=len(chunk),
+                        rows=len(table),
+                    )
+                    self._write(bucket, table, target_file_size=1 << 62)  # a file each
+                    files += len(chunk)
+                    commits += 1
+
+        self._ensure_table()
+        for batch in tables:
+            for key, part in self._by_partition(batch):
+                held.setdefault(key, []).append(part)
+                sizes[key] = sizes.get(key, 0) + part.nbytes
+                rows += part.num_rows
+                if sizes[key] >= MERGE_CHUNK_BYTES:
+                    flush([key])
+            if (left := sum(sizes.values())) > budget:
+                largest: list[Partition] = []
+                for key in sorted(sizes, key=sizes.__getitem__, reverse=True):
+                    largest.append(key)
+                    if (left := left - sizes[key]) <= budget // 2:
+                        break
+                flush(largest)
+        flush(list(held))
+        if commits:
+            with self._snapshot_lock:
+                self._existing_snapshot().create_checkpoint()
+        self.log.info("Wrote statements.", rows=rows, files=files, commits=commits)
+        return rows
 
     @property
     def needs_merge(self) -> bool:
