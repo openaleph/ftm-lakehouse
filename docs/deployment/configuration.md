@@ -22,6 +22,7 @@
 | `LAKEHOUSE_DUCKDB_EXTENSION_DIRECTORY` | Where DuckDB loads (and auto-installs) extensions. Unset means `$HOME/.duckdb/extensions`, which fails without a writable `HOME`. The Docker image pre-installs `delta` into `/opt/duckdb/extensions` and sets this. | (unset) |
 | `LAKEHOUSE_ON_ZFS` | Create tuned ZFS datasets for new datasets – see [ZFS Integration](zfs.md) | `false` |
 | `LAKEHOUSE_ZFS_POOL` | ZFS dataset path new datasets are created under (e.g. `zpools/tank/lakehouse`). Transport settings (`ZFS_SOCKET`, `ZFS_OWNER`, …) belong to the [zfs-agent](https://github.com/dataresearchcenter/zfs-agent) package. | (required with `LAKEHOUSE_ON_ZFS`) |
+| `LAKEHOUSE_ZFS_STATEMENTS_POOL` | ZFS dataset path the statements datasets are created under when `LAKEHOUSE_STATEMENTS_URI` puts them on another volume – see [Separate statements pool](zfs.md#separate-statements-pool). On ZFS, set both or neither. | (unset) |
 | `LAKEHOUSE_API_KEY` / `LAKEHOUSE_API_SECRET` | Sent as `X-Api-Key` / `X-Api-Secret` on a client's lakehouse-API requests, for the reverse proxy in front of the server to check | (unset) |
 | `LAKEHOUSE_PUBLIC_URL_PREFIX` | Public URL prefix for blob URLs, `${dataset}` substituted. A dataset's own `public_url_prefix` takes precedence. | (unset) |
 | `LOG_LEVEL` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) | `INFO` |

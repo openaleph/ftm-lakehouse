@@ -228,9 +228,9 @@ Each dataset's parquet store is partitioned by `(shard, bucket, origin)`:
 
 When deployed on ZFS (`LAKEHOUSE_ON_ZFS=1`), the lakehouse auto-creates ZFS datasets with tuned properties per storage type. The transport (local subprocess vs. socket agent, chown, peer auth) is the external `zfs-agent` package (github.com/dataresearchcenter/zfs-agent, its own `ZFS_*` env + `zfs-agent` host command); the lakehouse only owns the tuning and the caller.
 
-- **`core/zfs.py`**: `DatasetConfig` tuning + `ensure_zfs_dataset(pool, dataset)` calling `zfs_agent.zfs_create`. `archive` uses `zstd-9`; `statements` uses `compression=off` because parquet handles compression internally.
+- **`core/zfs.py`**: `DatasetConfig` tuning + `ensure_zfs_dataset(pool, dataset, statements_pool=None)` calling `zfs_agent.zfs_create`. `archive` uses `zstd-9`; `statements` uses `compression=off` because parquet handles compression internally. With a `statements_pool` (`LAKEHOUSE_ZFS_STATEMENTS_POOL`, pairing `LAKEHOUSE_STATEMENTS_URI`) the statements child goes there under a parent of its own; a socket agent creates under one `--pool` only.
 - **`cli/zfs.py`**: `ftm-lakehouse zfs init` (manual dataset creation). The agent daemon is the package's own `zfs-agent` command.
-- **Settings**: `LAKEHOUSE_ON_ZFS`, `LAKEHOUSE_ZFS_POOL` only – socket/owner/peer-auth are the package's `ZFS_*` env.
+- **Settings**: `LAKEHOUSE_ON_ZFS`, `LAKEHOUSE_ZFS_POOL`, `LAKEHOUSE_ZFS_STATEMENTS_POOL` (on ZFS required with `LAKEHOUSE_STATEMENTS_URI` and vice versa – `Settings` model validator) only – socket/owner/peer-auth are the package's `ZFS_*` env.
 
 ### Configuration
 
@@ -251,6 +251,7 @@ Settings via environment variables with `LAKEHOUSE_` prefix:
 - `LAKEHOUSE_DUCKDB_EXTENSION_DIRECTORY`: Where DuckDB loads/auto-installs extensions; unset = `$HOME/.duckdb/extensions` (breaks without a writable `HOME` – the Docker image pre-installs `delta` into `/opt/duckdb/extensions` and sets this)
 - `LAKEHOUSE_ON_ZFS`: Enable ZFS dataset creation (default: `false`)
 - `LAKEHOUSE_ZFS_POOL`: ZFS pool path for dataset creation
+- `LAKEHOUSE_ZFS_STATEMENTS_POOL`: ZFS pool path for the statements datasets, matching `LAKEHOUSE_STATEMENTS_URI`
 
 API settings use `LAKEHOUSE_API_` prefix:
 

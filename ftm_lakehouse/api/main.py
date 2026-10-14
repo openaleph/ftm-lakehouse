@@ -31,7 +31,9 @@ class ZfsEnsureMiddleware(BaseHTTPMiddleware):
             path = request.url.path.lstrip("/")
             dataset = path.split("/")[0] if path else None
             if dataset:
-                ensure_zfs_dataset(settings.zfs_pool, dataset)
+                ensure_zfs_dataset(
+                    settings.zfs_pool, dataset, settings.zfs_statements_pool
+                )
         return await call_next(request)
 
 
