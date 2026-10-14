@@ -47,7 +47,7 @@ MERGE_COMMIT_BATCH = 64
 MERGE_BATCH_ROWS = 10_000
 """Rows per Arrow batch a merge reads – its chunks are cut between batches."""
 
-MERGE_CHUNK_BYTES = 512 * 1_048_576
+MERGE_CHUNK_BYTES = 2048 * 1_048_576
 """Arrow bytes per ``write_deltalake`` call of a merge, one ``merged-*`` file
 each. delta-rs holds a call's whole input – about 2.3x it at peak, measured on
 deltalake 1.6.6 – so one call per partition would be unbounded."""
