@@ -1,7 +1,11 @@
 import csv
+import os
 import re
+import signal
+import time
 
 import orjson
+import pytest
 from ftmq.util import make_entity
 from typer.testing import CliRunner
 
@@ -49,6 +53,20 @@ def test_cli(fixtures_path):
     #     ).exit_code
     #     == 0
     # )
+
+
+def test_cli_sigterm_unwinds():
+    """After the cli started, SIGTERM raises ``SystemExit`` – ``finally`` blocks
+    run (locks, a merge's commit) instead of the process dying on the spot."""
+    previous = signal.getsignal(signal.SIGTERM)
+    try:
+        assert runner.invoke(cli, "--version").exit_code == 0
+        with pytest.raises(SystemExit) as exc:
+            os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(5)
+        assert exc.value.code == 128 + signal.SIGTERM
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 def test_cli_export(tmp_path):

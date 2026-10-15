@@ -818,7 +818,8 @@ class ParquetStore:
 
         Partitions merge in ``LAKEHOUSE_WORKERS`` processes, committed in
         batches of `MERGE_COMMIT_BATCH`; a failed run still commits what
-        finished. Holds only [`merge_lock`][ParquetStore.merge_lock], so appends
+        finished, including the partitions still running when one failed.
+        Holds only [`merge_lock`][ParquetStore.merge_lock], so appends
         keep flowing.
 
         Args:
@@ -843,7 +844,7 @@ class ParquetStore:
             # advanced per partition, throughput in bytes read
             with (
                 SyncProgressBar("Merging partitions", len(tasks)) as bar,
-                process_map(workers) as run,
+                process_map(workers, drain=True) as run,
             ):
                 done: list[MergeResult] = []
                 try:

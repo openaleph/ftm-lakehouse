@@ -83,6 +83,32 @@ def test_process_map_order(tmp_path):
         assert list(run(_finish, tasks)) == [False, True]
 
 
+def _fail_or_finish(task: tuple[str, bool]) -> str:
+    """The failing task fails while the other one is still running."""
+    marker, fail = task
+    if fail:
+        Path(marker).touch()
+        raise RuntimeError("task failed")
+    deadline = time.monotonic() + 30
+    while not Path(marker).exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.2)
+    return "finished"
+
+
+@pytest.mark.parametrize("drain,results", [(False, []), (True, ["finished"])])
+def test_process_map_drain(tmp_path, drain, results):
+    """A failed task drops the results still out – with ``drain`` the running
+    ones finish and come out before the failure is raised."""
+    marker = str(tmp_path / "marker")
+    seen = []
+    with pytest.raises(RuntimeError, match="task failed"):
+        with util.process_map(2, drain=drain) as run:
+            for result in run(_fail_or_finish, [(marker, False), (marker, True)]):
+                seen.append(result)
+    assert seen == results
+
+
 def test_prefetch():
     """Every item in order, a producer's error raised to the consumer, and no
     read left running once the context is left early."""

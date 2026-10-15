@@ -5,7 +5,9 @@ catalog-level commands (``ls``, ``datasets``).  Submodules register their
 own commands by importing the ``cli`` app object from this package.
 """
 
+import signal
 from datetime import datetime
+from types import FrameType
 from typing import Annotated, Optional, TypedDict
 
 import typer
@@ -205,6 +207,10 @@ class DatasetContext(ErrorHandler):
 SKIP_CATALOG_COMMANDS = {"zfs"}
 
 
+def _exit_on_sigterm(signum: int, _: FrameType | None) -> None:
+    raise SystemExit(128 + signum)
+
+
 @cli.callback(invoke_without_command=True)
 def cli_ftm_lakehouse(
     ctx: typer.Context,
@@ -220,6 +226,10 @@ def cli_ftm_lakehouse(
         str | None, typer.Option(..., help="Dataset lakehouse uri")
     ] = None,
 ):
+    # unwind on SIGTERM (`docker stop`) as on Ctrl+C, so locks are released and
+    # a merge commits what finished – by default Python dies on the spot, or
+    # ignores it as a container's PID 1 until the SIGKILL follows
+    signal.signal(signal.SIGTERM, _exit_on_sigterm)
     if version:
         console.print(__version__)
         raise typer.Exit()

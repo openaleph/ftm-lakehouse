@@ -178,13 +178,17 @@ def _exit_with(parent: int) -> None:
 
 
 @contextmanager
-def process_map(workers: int) -> Iterator[Callable[..., Iterator[Any]]]:
+def process_map(
+    workers: int, drain: bool = False
+) -> Iterator[Callable[..., Iterator[Any]]]:
     """A ``map`` over ``workers`` spawned processes yielding results as they
     finish – the builtin for one.
 
     Spawned, not forked: the parent holds DuckDB and Delta threads. When the
     caller fails or is interrupted, the workers are terminated; they also exit
-    when the parent dies.
+    when the parent dies. With ``drain``, a failed task cancels the queued ones
+    but lets the running ones finish, and yields their results before raising –
+    for callers that keep partial work.
     """
     if workers <= 1:
         yield map
@@ -195,7 +199,15 @@ def process_map(workers: int) -> Iterator[Callable[..., Iterator[Any]]]:
     )
 
     def unordered(fn: Callable[[Any], Any], items: Iterable[Any]) -> Iterator[Any]:
-        for future in as_completed([pool.submit(fn, item) for item in items]):
+        futures = [pool.submit(fn, item) for item in items]
+        finished = as_completed(futures)
+        for future in finished:
+            if drain and future.exception() is not None:
+                for queued in futures:
+                    queued.cancel()
+                for other in finished:
+                    if not other.cancelled() and other.exception() is None:
+                        yield other.result()
             yield future.result()
 
     try:
