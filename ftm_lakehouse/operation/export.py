@@ -130,8 +130,10 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
 
         Each ``(shard, bucket)`` pair is swept into parts of every artifact in
         ``LAKEHOUSE_WORKERS`` processes; an artifact is replaced only once every
-        pair is in, so a failed run leaves the previous one intact. Held under
-        the merge lock, so an ``optimize`` cannot vacuum the snapshot's files.
+        pair is in, so a failed run leaves the previous one intact – and the
+        diff states and ``statistics.json`` only once every artifact is. Held
+        under the merge lock, so an ``optimize`` cannot vacuum the snapshot's
+        files.
 
         Args:
             now: When the run started – diff files are named after it.
@@ -229,6 +231,7 @@ class ExportOperation(DatasetJobOperation[ExportJob]):
                     for _, assembly in assemblies:
                         assembly.commit()
                 self.log.info("Moved the artifacts into place.", took=t.took)
+                session.commit()
             except BaseException:
                 for _, assembly in assemblies:
                     assembly.abort()

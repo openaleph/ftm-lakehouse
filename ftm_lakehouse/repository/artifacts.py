@@ -481,7 +481,8 @@ class ArtifactRun:
         """Write anything only knowable once the sweep has ended."""
 
     def commit(self, version: int | None) -> None:
-        """Record whatever the next run is taken against."""
+        """Record what the next run is taken against, and write what is not
+        assembled from parts – once every assembled file is in place."""
 
     def close(self) -> None:
         """Release whatever the run opened."""
@@ -740,7 +741,7 @@ class ParentsRun(ArtifactRun):
 
 
 class StatisticsRun(ArtifactRun):
-    """Folds ``statistics.json`` out of the stream, written in `finish`."""
+    """Folds ``statistics.json`` out of the stream, written in `commit`."""
 
     artifact: StatisticsArtifact
 
@@ -752,15 +753,18 @@ class StatisticsRun(ArtifactRun):
         self.collector.collect(cast(SDict, payload.to_dict()))
 
     def finish(self) -> None:
-        self.artifact.write(self.collector.export())
         self.counts["total"] += self.collector.entities
+
+    def commit(self, version: int | None) -> None:
+        self.artifact.write(self.collector.export())
 
 
 class ExportSession:
     """Every run of one export, driven as one loop.
 
-    On entry: prepare and load the DEL candidates. On a clean exit: finish and
-    commit. The writers close either way, so no codec frame is cut off.
+    On entry: prepare and load the DEL candidates. On a clean exit: finish. The
+    writers close either way, so no codec frame is cut off. `commit` is the
+    caller's, once the assembled files are in place.
     """
 
     def __init__(
@@ -843,9 +847,13 @@ class ExportSession:
                     run.finish()
         finally:
             self.close()
-        if exc_type is None:
-            for run in self.runs:
-                run.commit(self.version)
+
+    def commit(self) -> None:
+        """Record every diff state and write ``statistics.json`` – after the
+        assembled files are moved into place, so a run that failed to move them
+        leaves the diff windows where they were."""
+        for run in self.runs:
+            run.commit(self.version)
 
     @property
     def diffable(self) -> tuple[DiffableRun, ...]:
