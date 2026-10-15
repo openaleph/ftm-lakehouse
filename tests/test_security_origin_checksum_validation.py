@@ -10,6 +10,7 @@ from followthemoney import model
 from ftm_lakehouse import util
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.logic.entities.buffer import EntityBuffer
+from ftm_lakehouse.repository.archive import ArchiveRepository
 from ftm_lakehouse.repository.factories import get_artifacts
 
 VALID_CHECKSUM = "bbb1f047ff1f0c333560e09cff0c4a052eb87a2998d6d16775a276645877c5b7"
@@ -150,6 +151,26 @@ def test_archive_meta_rejects_traversal_file_id() -> None:
 def test_archive_blob_rejects_invalid_checksum() -> None:
     with pytest.raises(ValueError):
         path.ArchiveKey("not-a-valid-checksum")
+
+
+@pytest.mark.parametrize(
+    "data_path", ["../escape", "a/../../b", "%2e%2e/x", "/abs", "", "."]
+)
+def test_archive_data_rejects_unsafe_path(tmp_path, data_path: str) -> None:
+    archive = ArchiveRepository("test", tmp_path)
+    with pytest.raises(ValueError):
+        archive.put_data(VALID_CHECKSUM, data_path, b"x")
+    with pytest.raises(ValueError):
+        archive.get_data(VALID_CHECKSUM, data_path)
+
+
+@pytest.mark.parametrize("data_path", ["blob", "./blob", "x.txt", "./x.txt"])
+def test_archive_data_rejects_reserved_path(tmp_path, data_path: str) -> None:
+    archive = ArchiveRepository("test", tmp_path)
+    with pytest.raises(ValueError, match="Reserved"):
+        archive.put_data(VALID_CHECKSUM, data_path, b"x")
+    with pytest.raises(ValueError, match="Reserved"):
+        archive.get_data(VALID_CHECKSUM, data_path)
 
 
 # --- EntityBuffer call sites -----------------------------------------------

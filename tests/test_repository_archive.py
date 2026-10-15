@@ -245,10 +245,12 @@ def test_repository_archive_store_and_retrieve(repo, fixtures_path):
     checksum = "bbb1f047ff1f0c333560e09cff0c4a052eb87a2998d6d16775a276645877c5b7"
 
     # arbitrary data
-    archive.put_data(checksum, "data.txt", b"hello")
-    assert archive.get_data(checksum, "data.txt") == b"hello"
+    archive.put_data(checksum, "pages/data.txt", b"hello")
+    assert archive.get_data(checksum, "pages/data.txt") == b"hello"
+    assert archive.get_txt(checksum) is None
     if base_path:
-        assert (base_path / make_checksum_key(checksum) / "data.txt").exists()
+        assert (base_path / path.ArchiveKey(checksum) / "pages/data.txt").exists()
+        assert not (base_path / make_checksum_key(checksum)).exists()
 
     # write via file handler
     fixture = str(fixtures_path / "src/utf.txt")
