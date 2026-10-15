@@ -1000,6 +1000,21 @@ class ParquetStore:
             )
         return deleted
 
+    def destroy(self) -> None:
+        """Soft-delete the store: drop its ``_delta_log``. The parquet files stay
+        on disk until a [`vacuum`][ParquetStore.vacuum] of the re-created table.
+
+        Other processes keep the snapshot they hold – restart them.
+        """
+        if not self.exists:
+            return
+        with self._maintenance_fence(), Took() as t, self._snapshot_lock:
+            table = get_store(self.uri)
+            table._fs.rm(table._keys.to_fs_key("_delta_log"), recursive=True)
+            self._snapshot = self._files = None
+            self._tags.set(tag.STATEMENTS_UPDATED)
+        self.log.warning("Destroyed statement store.", took=t.took)
+
     def vacuum(self, retention_hours: int = 0) -> None:
         """Delete the files the Delta log no longer references, and the staging
         tables a crashed merge left (`STAGING_DIR`).

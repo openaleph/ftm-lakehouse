@@ -18,6 +18,7 @@ from ftmq.store.lake import pack_statement
 from ftmq.types import Statements
 from pyarrow.csv import CSVWriter  # type: ignore[attr-defined]
 
+from ftm_lakehouse.core.conventions import tag
 from ftm_lakehouse.helpers.shards import entity_shard
 from ftm_lakehouse.logic.parquet import MERGED_PREFIX, STAGING_DIR, TABLE_CONFIGURATION
 from ftm_lakehouse.model.statement import (
@@ -780,6 +781,32 @@ def test_storage_parquet_merge_chunks(tmp_path, monkeypatch):
     ids = [row["entity_id"] for row in _swept(source)]
     assert ids == sorted(ids)
     assert len(ids) == 30
+
+
+def test_storage_parquet_destroy(tmp_path, monkeypatch):
+    """Drops the log, under ``LAKEHOUSE_STATEMENTS_URI`` too; the files stay
+    until the re-created table is vacuumed."""
+    monkeypatch.setenv("LAKEHOUSE_STATEMENTS_URI", str(tmp_path / "ssd"))
+    store = ParquetStore(tmp_path / "hdd", DATASET, shards=SHARDS)
+    table = tmp_path / "ssd" / DATASET / "statements"
+    _flush(store, _origin_rows("a"))
+    files = {p for p in table.rglob("*.parquet") if "_delta_log" not in p.parts}
+    assert files
+    updated = store._tags.set(tag.STATEMENTS_UPDATED)
+
+    store.destroy()
+    assert not store.exists
+    assert not (table / "_delta_log").exists()
+    assert all(p.exists() for p in files)
+    assert not list(store.query())
+    assert store._tags.get(tag.STATEMENTS_UPDATED) > updated
+    store.destroy()  # nothing left to destroy
+
+    _flush(store, _origin_rows("b", entities=5))
+    assert _row_count(store) == 10
+    store.vacuum()
+    assert not any(p.exists() for p in files)
+    assert _row_count(store) == 10
 
 
 def test_storage_parquet_vacuum_drops_staging(tmp_path):
