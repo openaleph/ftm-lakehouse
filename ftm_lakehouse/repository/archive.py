@@ -11,7 +11,12 @@ from anystore.logic.io import stream
 from anystore.store import get_store
 from anystore.store.resource import UriResource
 from anystore.types import BytesGenerator, Uri
-from anystore.util import dict_merge, join_relpaths, make_checksum
+from anystore.util import (
+    dict_merge,
+    join_relpaths,
+    make_checksum,
+    validate_relative_uri,
+)
 from banal import clean_dict
 from ftmq.store.base import DEFAULT_ORIGIN
 
@@ -21,7 +26,7 @@ from ftm_lakehouse.core.settings import CHECKSUM_ALGORITHM
 from ftm_lakehouse.model import File
 from ftm_lakehouse.model.file import Files
 from ftm_lakehouse.repository.base import DatasetHandle
-from ftm_lakehouse.util import make_checksum_key, validate_checksum
+from ftm_lakehouse.util import validate_checksum
 
 
 class ArchiveRepository(DatasetHandle):
@@ -265,14 +270,36 @@ class ArchiveRepository(DatasetHandle):
             return value
 
     def put_data(self, checksum: str, path: str, data: bytes) -> None:
-        """Store raw data at the given path"""
-        key = join_relpaths(make_checksum_key(checksum), path)
-        self._store.put(key, data)
+        """Store raw data at the given path in the checksum's archive directory
+
+        Raises:
+            ValueError: If ``checksum`` is not a valid SHA256 hex digest or
+                ``path`` is empty, absolute, has a ``..`` segment or is
+                reserved (``blob`` or a top-level ``*.txt``).
+        """
+        self._store.put(self._data_key(checksum, path), data)
 
     def get_data(self, checksum: str, path: str) -> bytes:
-        """Get raw data at the given path"""
-        key = join_relpaths(make_checksum_key(checksum), path)
-        return self._store.get(key)
+        """Get raw data at the given path in the checksum's archive directory
+
+        Raises:
+            ValueError: If ``checksum`` is not a valid SHA256 hex digest or
+                ``path`` is empty, absolute, has a ``..`` segment or is
+                reserved (``blob`` or a top-level ``*.txt``).
+        """
+        return self._store.get(self._data_key(checksum, path))
+
+    def _data_key(self, checksum: str, key: str) -> str:
+        # out here because `put_data` / `get_data` shadow the `path` module
+        relative = validate_relative_uri(key)
+        if not relative:  # "." normalises to nothing
+            raise ValueError(f"Invalid empty data path: `{key}`")
+        # the file's content and what `get_txt` reads as extracted text
+        if relative == path.ARCHIVE_BLOB or (
+            "/" not in relative and relative.endswith(".txt")
+        ):
+            raise ValueError(f"Reserved data path: `{key}`")
+        return join_relpaths(path.ArchiveKey(checksum), relative)
 
     def touch(self) -> datetime:
         with self._tags.touch(tag.ARCHIVE_UPDATED) as now:
