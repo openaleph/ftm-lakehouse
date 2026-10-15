@@ -23,6 +23,7 @@ from ftm_lakehouse.helpers.shards import entity_shard
 from ftm_lakehouse.model.statement import statement_csv_header
 from ftm_lakehouse.operation.export import settings as export_settings
 from ftm_lakehouse.operation.factories import export
+from ftm_lakehouse.repository.artifacts import Assembly, DiffableArtifact
 from ftm_lakehouse.repository.factories import (
     clear_caches,
     get_artifacts,
@@ -215,6 +216,47 @@ def test_export_failed_pair_keeps_previous_artifacts(tmp_path, monkeypatch):
     assert not list(root.rglob("*.tmp"))
     for file, data in before.items():
         assert file.read_bytes() == data, file
+
+
+def test_export_failed_move_keeps_diff_state(tmp_path, monkeypatch):
+    """A run that fails to move its files into place records no diff state and
+    writes no ``statistics.json`` – the next run's diff still covers its
+    window."""
+    uri = _setup(tmp_path, 1)
+    export(DATASET, uri, make_diff=True)  # records the state, writes no diff
+    artifacts = get_artifacts(DATASET, uri)
+    series = [a for a in artifacts.streamed() if isinstance(a, DiffableArtifact)]
+    states = [a.get_state() for a in series]
+    assert all(states)
+    stats = _stats(uri)
+
+    repo = get_entities(DATASET, uri)
+    with repo.writer() as writer:
+        writer.add_entity(
+            make_entity(
+                {"id": "new", "schema": "Person", "properties": {"name": ["New"]}}
+            )
+        )
+    repo.flush()
+
+    def fail(self):
+        raise RuntimeError("move failed")
+
+    monkeypatch.setattr(Assembly, "commit", fail)
+    clear_caches()
+    with pytest.raises(RuntimeError, match="move failed"):
+        export(DATASET, uri, make_diff=True, force=True)
+    assert [a.get_state() for a in series] == states
+    assert _stats(uri) == stats
+
+    monkeypatch.undo()
+    clear_caches()
+    export(DATASET, uri, make_diff=True, force=True)
+    (diff_key,) = list(repo._store.iterate_keys(prefix=path.DIFFS_ENTITIES))
+    with repo._store.open(diff_key, "rb") as fh:
+        envelopes = [orjson.loads(line) for line in fh if line.strip()]
+    assert [(e["op"], e["entity"]["id"]) for e in envelopes] == [("ADD", "new")]
+    assert _stats(uri)["entity_count"] == 61
 
 
 def test_export_parallel_spill_directory_per_pair(tmp_path, monkeypatch):
