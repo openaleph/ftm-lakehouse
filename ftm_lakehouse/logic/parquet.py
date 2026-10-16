@@ -52,6 +52,21 @@ MERGE_CHUNK_BYTES = 2048 * 1_048_576
 each. delta-rs holds a call's whole input – about 2.3x it at peak, measured on
 deltalake 1.6.6 – so one call per partition would be unbounded."""
 
+MERGE_RUN_BYTES = 1024 * 1_048_576
+"""Uncompressed parquet bytes (summed from the footers) of ``part-*`` files a
+merge sorts into one run – the Arrow sort holds about twice it."""
+
+MERGE_DEDUPE_BYTES = 512 * 1_048_576
+"""Arrow bytes per entity-closed chunk the merge's dedupe query runs over –
+about 3x it in DuckDB, measured. An entity's rows never split, so a chunk is at
+least one entity."""
+
+MERGE_MEMORY_LIMIT = 4 * 1024 * 1_048_576
+"""DuckDB memory per merge worker. A merge's DuckDB never holds more than one
+`MERGE_DEDUPE_BYTES` chunk plus its streaming reads, whatever the partition's
+size, so this is a constant rather than a share of
+``LAKEHOUSE_DUCKDB_MEMORY_LIMIT``."""
+
 WRITE_FLUSH_PARTITIONS = 64
 """Partitions per ``write_deltalake`` call of `write_stream` – delta-rs holds
 page buffers per partition of a call, and each call is one commit."""
@@ -126,6 +141,13 @@ def worker_duckdb_config(workers: int) -> dict[str, str]:
     config["memory_limit"] = f"{budget // workers}B"
     config["threads"] = str(max((os.cpu_count() or 1) // workers, 1))
     return config
+
+
+def merge_duckdb_config(workers: int) -> dict[str, str]:
+    """[`worker_duckdb_config`][worker_duckdb_config] with `MERGE_MEMORY_LIMIT`
+    as the memory limit – a merge's DuckDB footprint is bounded by the chunk,
+    not the partition, so it takes no share of the global limit."""
+    return {**worker_duckdb_config(workers), "memory_limit": f"{MERGE_MEMORY_LIMIT}B"}
 
 
 def _string_literal(value: str) -> str:
@@ -269,16 +291,21 @@ def read_parquet_sql(files: Iterable[str]) -> str:
     return f"read_parquet([{paths}], union_by_name = true, hive_partitioning = false)"
 
 
-def partition_source_sql(
-    files: Iterable[str], shard: str, bucket: str, origin: str
-) -> str:
-    """One partition's files as a `SHARDED_SCHEMA` relation, read without
-    ``delta_scan``.
+def parquet_sizes_sql(files: Iterable[str]) -> str:
+    """``(file_name, uncompressed bytes)`` per file of ``files``, summed from
+    the footers – no data read."""
+    paths = ", ".join(f"'{_string_literal(f)}'" for f in files)
+    return (
+        "SELECT file_name, SUM(total_uncompressed_size) "
+        f"FROM parquet_metadata([{paths}]) GROUP BY file_name"
+    )
 
-    Partition columns come in as constants, columns the files predate read as
-    ``NULL`` and ``fragment`` is coalesced to ``''``. ``origin`` is validated
-    before interpolation.
-    """
+
+def relation_source_sql(relation: str, shard: str, bucket: str, origin: str) -> str:
+    """``relation`` – rows of a partition's files, the partition columns absent –
+    as a `SHARDED_SCHEMA` relation: the partition columns as constants,
+    ``fragment`` coalesced to ``''``. ``origin`` is validated before
+    interpolation."""
     origin = validate_origin(origin)
     constants = {"shard": shard, "bucket": bucket, "origin": origin}
     projection = ", ".join(
@@ -291,10 +318,20 @@ def partition_source_sql(
         )
         for f in SHARDED_SCHEMA
     )
-    return (
-        f"(SELECT {projection} FROM ("
-        f"SELECT * FROM {read_parquet_sql(files)} UNION ALL BY NAME {_FILE_COLUMNS}))"
+    return f"(SELECT {projection} FROM {relation})"
+
+
+def partition_source_sql(
+    files: Iterable[str], shard: str, bucket: str, origin: str
+) -> str:
+    """One partition's files as a `SHARDED_SCHEMA` relation, read without
+    ``delta_scan`` – [`relation_source_sql`][relation_source_sql] over the
+    files, columns they predate reading as ``NULL``.
+    """
+    files_sql = (
+        f"(SELECT * FROM {read_parquet_sql(files)} UNION ALL BY NAME {_FILE_COLUMNS})"
     )
+    return relation_source_sql(files_sql, shard, bucket, origin)
 
 
 def shard_expr_sql(shards: int, column: str = "entity_id") -> str:
