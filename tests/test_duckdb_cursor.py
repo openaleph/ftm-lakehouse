@@ -71,13 +71,12 @@ def test_cursor_isolation_under_concurrent_reads(tmp_path) -> None:
 
 
 def test_cursor_can_query_registered_view(tmp_path) -> None:
-    """Cursors inherit the loaded Delta extension and the registered view
-    from the parent connection, so they can read the statement store
-    without any per-cursor setup."""
+    """``ParquetStore.cursor`` registers the whole table on the cursor it
+    yields, so the live view reads the store without further setup."""
     store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
     _seed(store)
 
-    with store._lake.cursor() as cur:
+    with store.cursor() as cur:
         (n,) = cur.execute("SELECT COUNT(*) FROM statement").fetchone()
     assert n == 1
 

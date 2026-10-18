@@ -17,7 +17,7 @@ The input must be contiguous per `entity_id`, as the parquet store's reads are.
 
 ## Parquet helpers
 
-The DuckDB SQL behind `ParquetStore`. Reads, merges and re-shards name a partition's files directly (`partition_source_sql`); a read's `statement` view is a plain scan over merged partitions (`live_rows_sql`) and the dedupe query otherwise (`dedupe_rows_sql`). `raw_view_sql` / `live_view_sql` are the `delta_scan` views of the connection-level `LakeStore` behind `stats()` and `statements sql`.
+The DuckDB SQL behind `ParquetStore`. Reads, merges and re-shards name a partition's files directly (`partition_source_sql`); a read's `statement` view is a plain scan over merged partitions (`live_rows_sql`) and the dedupe query otherwise (`dedupe_rows_sql`). `raw_view_sql` is the connection-level `LakeStore`'s `statement_raw` view over `delta_scan`; `statements sql` runs on `ParquetStore.cursor`, the whole table registered like a read.
 
 ::: ftm_lakehouse.logic.parquet.duckdb_config
     options:
@@ -25,11 +25,6 @@ The DuckDB SQL behind `ParquetStore`. Reads, merges and re-shards name a partiti
         show_root_heading: true
 
 ::: ftm_lakehouse.logic.parquet.raw_view_sql
-    options:
-        heading_level: 3
-        show_root_heading: true
-
-::: ftm_lakehouse.logic.parquet.live_view_sql
     options:
         heading_level: 3
         show_root_heading: true

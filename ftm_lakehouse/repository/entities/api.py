@@ -6,7 +6,6 @@ import orjson
 from anystore.types import Uri
 from followthemoney import StatementEntity
 from followthemoney.statement import StatementDict
-from ftmq.model.stats import DatasetStats
 from ftmq.query import Query
 from ftmq.types import StatementEntities, Statements
 from ftmq.util import ensure_entity
@@ -81,11 +80,6 @@ class ApiEntityRepository(EntityRepository):
         # fail locally with the local repository's `ValueError`, not a remote 400
         url = self._make_url(f"origins/{validate_origin(origin)}")
         self._api.make_request(url, "DELETE")
-
-    def stats(self) -> DatasetStats:
-        url = self._make_url("stats")
-        res = self._api.make_request(url)
-        return DatasetStats(**res.json())
 
     @property
     def version(self) -> int | None:

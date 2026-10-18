@@ -20,7 +20,7 @@ its own.
 ``canonical_id`` is dropped from physical storage: this is a single-dataset
 store with no entity resolution, so ``canonical_id`` always equals
 ``entity_id``. It is re-derived as ``entity_id AS canonical_id`` in the live
-``statement`` view ([`live_view_sql`][ftm_lakehouse.logic.parquet.live_view_sql]) so
+``statement`` view ([`live_rows_sql`][ftm_lakehouse.logic.parquet.live_rows_sql]) so
 ftmq's query layer (which keys entity identity on ``canonical_id``) keeps
 working unchanged.
 """

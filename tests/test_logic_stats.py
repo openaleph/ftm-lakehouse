@@ -1,17 +1,22 @@
 """`statistics.json` folded from the stream must say what the store says.
 
 The sweep folds the counts out of the entity stream (`StatsCollector`) where
-ftmq's `stats()` asks the store with six aggregate queries. The two have to
-agree – that is the whole point of moving it into the sweep.
+ftmq's `stats()` asked the store with six aggregate queries over the
+reconciling view. That path is gone from the store and kept here as the
+oracle: the two have to agree.
 """
 
 from ftmq.model.stats import DatasetStats
+from ftmq.store.lake import LakeStore
 from ftmq.util import make_entity
 
 from ftm_lakehouse.core.conventions import path
 from ftm_lakehouse.logic.entities.stats import StatsCollector, _date_props
+from ftm_lakehouse.logic.parquet import dedupe_rows_sql, delta_scan_sql, duckdb_config
+from ftm_lakehouse.model.statement import TABLE
 from ftm_lakehouse.operation.export import ExportJob, ExportOperation
 from ftm_lakehouse.repository import EntityRepository
+from ftm_lakehouse.storage.parquet import PARTITIONS
 
 DATASET = "stats_test"
 
@@ -71,6 +76,20 @@ def _setup(uri) -> EntityRepository:
             writer.add_entity(make_entity(data))
     repo.flush()
     return repo
+
+
+def _queried(repo: EntityRepository) -> DatasetStats:
+    """ftmq's aggregate queries over the dedupe view of the whole table."""
+    store = LakeStore(
+        uri=str(repo.statements.uri),
+        dataset=DATASET,
+        partition_by=PARTITIONS,
+        view_sqls={
+            TABLE.name: lambda dt: dedupe_rows_sql(delta_scan_sql(dt.table_uri))
+        },
+        duckdb_config=duckdb_config(),
+    )
+    return store.default_view().stats()
 
 
 def _normalize(stats: DatasetStats) -> dict:
@@ -183,7 +202,7 @@ def test_logic_stats_matches_the_store(tmp_path):
     ExportOperation(job=job, uri=tmp_path).run(force=True)
 
     written = repo._store.get(path.EXPORTS_STATISTICS, model=DatasetStats)
-    swept, queried = _normalize(written), _normalize(repo.stats())
+    swept, queried = _normalize(written), _normalize(_queried(repo))
     assert {k: v for k, v in swept.items() if k not in ("start", "end")} == {
         k: v for k, v in queried.items() if k not in ("start", "end")
     }

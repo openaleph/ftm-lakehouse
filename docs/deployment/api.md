@@ -47,7 +47,6 @@ The body is an Arrow IPC stream (`application/vnd.apache.arrow.stream`) of the s
 | `POST` | `/{dataset}/_api/entities/flush` | Drain the journal into parquet |
 | `POST` | `/{dataset}/_api/entities/query` | Query entities, streamed as NDJSON |
 | `POST` | `/{dataset}/_api/entities/statements/query` | Query raw statements, streamed as NDJSON |
-| `GET` | `/{dataset}/_api/entities/stats` | Dataset statistics |
 | `GET` | `/{dataset}/_api/entities/statements/version` | Current Delta table version |
 | `DELETE` | `/{dataset}/_api/entities/{entity_id}` | Tombstone all statements of an entity (`?origin=` narrows to one origin) |
 | `DELETE` | `/{dataset}/_api/entities/origins/{origin}` | Physically drop an origin's partitions |

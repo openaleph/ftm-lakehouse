@@ -10,7 +10,6 @@ from anystore.util import Took, mask_uri
 from followthemoney import EntityProxy, Statement, StatementEntity
 from followthemoney.statement import StatementDict
 from ftmq.io import smart_read_proxies
-from ftmq.model.stats import DatasetStats
 from ftmq.query import M, Query
 from ftmq.types import StatementEntities, Statements, ValueEntities
 from rigour.time import utc_now
@@ -306,10 +305,6 @@ class EntityRepository(DatasetHandle):
                 stmts_by_key[stmt.dedupe_key] = stmt
 
         return list(stmts_by_key.values())
-
-    def stats(self) -> DatasetStats:
-        """Compute statistics from the parquet store."""
-        return self.statements.stats()
 
     @property
     def version(self) -> int | None:

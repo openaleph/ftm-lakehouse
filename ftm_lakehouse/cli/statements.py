@@ -38,6 +38,12 @@ from ftm_lakehouse.repository.factories import get_entities
 
 statements = sub_typer("statements", "Read and write raw FtM statements")
 
+SQL_ROWS = "statement"
+"""Raw-SQL view over every physical row."""
+
+SQL_MERGED = "statement_merged"
+"""Raw-SQL view over the live rows – what the store reads."""
+
 
 @statements.command("iterate")
 def cli_statements_iterate(out_uri: OPT_OUT = "-"):
@@ -109,9 +115,12 @@ def cli_statements_import(
 def cli_statements_sql(query: str):
     """Run a raw SQL query against the parquet store, rendered as a table.
 
-    Queries the registered DuckDB views – ``statement`` (deduped-live) and
-    ``statement_raw`` (physical rows). Results print as a rich table; add a
-    ``LIMIT`` when scanning large partitions.
+    Two DuckDB views: ``statement`` – every physical row, duplicates and
+    tombstones included – and ``statement_merged`` – the live rows a read
+    sees, a plain scan on a merged store and the dedupe query otherwise.
+    Filter ``statement`` where you can: on an unmerged store a predicate
+    on ``statement_merged`` runs above the dedupe windows. Add a ``LIMIT``
+    when scanning large partitions.
 
     Local-only: raw SQL is deliberately not exposed over the API – run this
     where the storage is directly accessible.
@@ -120,8 +129,7 @@ def cli_statements_sql(query: str):
         entities = get_entities(name, uri)
         if entities._is_api:
             raise RuntimeError("`statements sql` is not available in API mode")
-        store = entities.statements._lake
-        with store.cursor() as cur:
+        with entities.statements.cursor(raw=SQL_ROWS, live=SQL_MERGED) as cur:
             # an unknown table name would otherwise resolve against this
             # module's globals
             cur.execute("SET python_enable_replacements = false")

@@ -835,7 +835,9 @@ def test_storage_parquet_merge_matches_the_whole_partition_query(tmp_path, monke
     runs: list[str] = []
     read_run = storage_parquet._read_run
     monkeypatch.setattr(
-        storage_parquet, "_read_run", lambda path: runs.append(path) or read_run(path)
+        storage_parquet,
+        "_read_run",
+        lambda path, rows: runs.append(path) or read_run(path, rows),
     )
     rng = random.Random(3)
     now = utc_now()

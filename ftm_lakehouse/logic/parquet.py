@@ -44,17 +44,28 @@ clean (read without the dedupe); a ``part-*`` file makes it dirty."""
 MERGE_COMMIT_BATCH = 64
 """Merged partitions per Delta commit – one commit each bloats the log."""
 
-MERGE_BATCH_ROWS = 10_000
-"""Rows per Arrow batch a merge reads – its chunks are cut between batches."""
+MERGE_BATCH_BYTES = 16 * 1_048_576
+"""Arrow bytes per batch a merge reads, about: rows per batch follow the
+partition's average row size (the footers' uncompressed bytes over rows), so a
+stream of full-text rows holds no more than one of thin rows. A merge holds a
+batch of every stream."""
 
-MERGE_CHUNK_BYTES = 2048 * 1_048_576
+MERGE_BATCH_ROWS = 100_000
+"""Rows per batch a merge reads at most, whatever `MERGE_BATCH_BYTES` allows."""
+
+MERGE_CHUNK_BYTES = 512 * 1_048_576
 """Arrow bytes per ``write_deltalake`` call of a merge, one ``merged-*`` file
 each. delta-rs holds a call's whole input – about 2.3x it at peak, measured on
-deltalake 1.6.6 – so one call per partition would be unbounded."""
+deltalake 1.6.6 – on top of the gathered batches and their concatenation, so
+the write is a merge's largest term."""
 
 MERGE_RUN_BYTES = 1024 * 1_048_576
 """Uncompressed parquet bytes (summed from the footers) of ``part-*`` files a
 merge sorts into one run – the Arrow sort holds about twice it."""
+
+MERGE_MAX_RUNS = 32
+"""Runs a partition's ``part-*`` files are sorted into at most – a merge holds
+a batch of every run; past it the runs grow beyond `MERGE_RUN_BYTES` instead."""
 
 MERGE_DEDUPE_BYTES = 512 * 1_048_576
 """Arrow bytes per entity-closed chunk the merge's dedupe query runs over –
@@ -232,12 +243,6 @@ WHERE {tombstone}
 """.strip()
 
 
-def live_view_sql(dt: DeltaTable) -> str:
-    """SELECT body for the connection-level ``statement`` view over
-    ``delta_scan`` (``stats()``, raw SQL) – always the dedupe."""
-    return dedupe_rows_sql(delta_scan_sql(dt.table_uri))
-
-
 def live_rows_sql(source: str) -> str:
     """Live rows of a **clean** ``source`` – a filtered scan. ``canonical_id`` is
     ``entity_id``, for ftmq's query layer."""
@@ -292,11 +297,12 @@ def read_parquet_sql(files: Iterable[str]) -> str:
 
 
 def parquet_sizes_sql(files: Iterable[str]) -> str:
-    """``(file_name, uncompressed bytes)`` per file of ``files``, summed from
-    the footers – no data read."""
+    """``(file_name, uncompressed bytes, rows)`` per file of ``files``, summed
+    from the footers – no data read."""
     paths = ", ".join(f"'{_string_literal(f)}'" for f in files)
     return (
-        "SELECT file_name, SUM(total_uncompressed_size) "
+        "SELECT file_name, SUM(total_uncompressed_size), "
+        "SUM(CASE WHEN column_id = 0 THEN row_group_num_rows ELSE 0 END) "
         f"FROM parquet_metadata([{paths}]) GROUP BY file_name"
     )
 

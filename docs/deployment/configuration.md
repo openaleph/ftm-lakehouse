@@ -17,8 +17,8 @@
 | `LAKEHOUSE_WRITE_BUFFER` | Memory a bulk import (`entities import` / `statements import`) holds across partitions before it writes the largest ones, as a byte size. Peak memory is about twice it; on a store with many partitions it also sets how big the import's files get. | `1GiB` |
 | `LAKEHOUSE_JOURNAL_POOL_SIZE` | Postgres journal connections kept idle between writers, one pool per journal uri and process, shared by all datasets. Writers beyond it open their own connection rather than queue. Multiply by the process count to size against postgres `max_connections`; `0` pools nothing. | `5` |
 | `LAKEHOUSE_LOCK_MAX_RETRIES` | Retry bound for every wait on a dataset lock – acquiring `.LOCK` or `.LOCK-MERGE`, and appends backing off while `.LOCK` is held. The total wait is about `N²/2` seconds (a minute at the default), then `RuntimeError`. A lock left by a crashed process needs `ftm-lakehouse maintenance unlock`. | `10` |
-| `LAKEHOUSE_DUCKDB_MEMORY_LIMIT` | DuckDB's memory budget; queries beyond it spill to disk. A byte size (`8GB`, `512MiB`) – a share such as `80%` fails at startup, since the limit is split between the workers – see [Sizing parallel workers](#sizing-parallel-workers). | `8GB` |
-| `LAKEHOUSE_WORKERS` | Processes the merge of `maintenance optimize` and the export sweep spread their partitions over; `1` (the minimum) runs in-process. The memory limit and CPU threads are split between them – see [Sizing parallel workers](#sizing-parallel-workers). An export uses at most one worker per `(shard, bucket)` pair (`shards` × at most five buckets), and `TMPDIR` holds the parts of the pairs in flight. | `1` |
+| `LAKEHOUSE_DUCKDB_MEMORY_LIMIT` | DuckDB's memory budget; queries beyond it spill to disk. A byte size (`8GB`, `512MiB`) – a share such as `80%` fails at startup, since the export sweep splits it between its workers – see [Sizing parallel workers](#sizing-parallel-workers). A merge worker's DuckDB runs on a fixed 4GB instead. | `8GB` |
+| `LAKEHOUSE_WORKERS` | Processes the merge of `maintenance optimize` and the export sweep spread their partitions over; `1` (the minimum) runs in-process. CPU threads are split between them, the memory limit too in the export sweep – see [Sizing parallel workers](#sizing-parallel-workers). An export uses at most one worker per `(shard, bucket)` pair (`shards` × at most five buckets); `TMPDIR` holds the parts of the pairs in flight and a merge's temporary runs. | `1` |
 | `LAKEHOUSE_DUCKDB_TEMP_DIRECTORY` | Where DuckDB spills queries that outgrow the memory limit, each DuckDB instance into its own subdirectory, removed on close (a killed process leaves it behind). Point it at a fast volume with room – not a `tmpfs` `/tmp`, which spills into RAM (a `tmpfs` / `ramfs` spill directory logs a warning). Empty uses DuckDB's own default, `.tmp` in the working directory. | `{OS temp dir}/duckdb` |
 | `LAKEHOUSE_DUCKDB_EXTENSION_DIRECTORY` | Where DuckDB loads (and auto-installs) extensions. Unset means `$HOME/.duckdb/extensions`, which fails without a writable `HOME`. The Docker image pre-installs `delta` into `/opt/duckdb/extensions` and sets this. | (unset) |
 | `LAKEHOUSE_ON_ZFS` | Create tuned ZFS datasets for new datasets – see [ZFS Integration](zfs.md) | `false` |
@@ -33,12 +33,11 @@ There is no environment setting for the shard count: `shards` is per-dataset con
 
 ### Sizing parallel workers
 
-Each worker's DuckDB gets `LAKEHOUSE_DUCKDB_MEMORY_LIMIT / LAKEHOUSE_WORKERS`, in a merge and in the export sweep alike. Two rules follow:
+**Merge.** A worker's memory follows the merge's constants, not its partition: measured end to end, a worker peaks at about 2.7× the sum of its run (1GB), dedupe chunk (512MB) and write chunk (512MB) – about 5.5GB – plus a 16MB batch of every sorted run, 32 at most. Budget 7GB a worker: 16 workers in 112GB, 24 in 168GB. DuckDB's limit is a fixed 4GB per worker, not a share of `LAKEHOUSE_DUCKDB_MEMORY_LIMIT`. A partition with more than 1GB (uncompressed) of unmerged files writes temporary runs to `TMPDIR`, about their size on disk per worker; a huge one sorts bigger runs rather than more. One entity larger than a chunk makes DuckDB spill for that chunk.
 
-- **The share has to cover the heaviest partition.** Sorts and windows spill, but the full-text values of the `document` and `page` buckets are held in memory, so a share that is too small fails the partition with DuckDB's `Out of Memory Error`. The defaults fail this way on full-text partitions: `8GB` split 8 ways is 1GB a worker. A merge needs a few times a partition's *uncompressed* size, which its size on disk understates.
-- **RAM has to fit `workers × (share + ~7GB)`, plus the ARC on ZFS.** A worker peaks 1–2GB above its share (DuckDB allocations outside the limit, its Python process), a merge worker ~4.6GB more for delta-rs writing a 2GB chunk. When the sum does not fit, the kernel kills a worker and the merge stops with `BrokenProcessPool`; finished partitions are committed, so a rerun picks up the rest.
+**Export.** A worker's DuckDB gets `LAKEHOUSE_DUCKDB_MEMORY_LIMIT / LAKEHOUSE_WORKERS`. A merged pair streams in file order and needs little; an unmerged partition is sorted through the dedupe with the full-text values of the `document` and `page` buckets in memory, so a share too small for the heaviest one fails it with DuckDB's `Out of Memory Error` – run `optimize` first (`make` does).
 
-When the share is too small, lower `LAKEHOUSE_WORKERS` rather than the share. For reference, a 140GB (zstd) store of ~500 partitions merges at 80–120MB/s with `LAKEHOUSE_WORKERS=8` and `LAKEHOUSE_DUCKDB_MEMORY_LIMIT=128GB` on 48 cores and 256GB RAM.
+RAM has to fit `workers × (share + 1–2GB)`, plus the ARC on ZFS. When the sum does not fit, the kernel kills a worker and the run stops with `BrokenProcessPool`; a merge keeps the partitions it committed, so a rerun picks up the rest.
 
 The largest partitions on disk (after a `vacuum`, since unreferenced files count too):
 
@@ -107,7 +106,7 @@ The setting moves no data. On an existing lake every store reads empty until its
 rsync -a "$LAKEHOUSE_URI/<dataset>/statements/" "$LAKEHOUSE_STATEMENTS_URI/<dataset>/statements/"
 ```
 
-Then set the variable, compare `ftm-lakehouse -d <dataset> statements sql "SELECT count(*) FROM statement_raw"` with the count before the move, and remove the old directory.
+Then set the variable, compare `ftm-lakehouse -d <dataset> statements sql "SELECT count(*) FROM statement"` with the count before the move, and remove the old directory.
 
 ### Amazon S3
 

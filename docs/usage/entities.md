@@ -426,9 +426,9 @@ if __name__ == "__main__":
 The catalog enumerates all datasets under one storage root:
 
 ```python
-from ftm_lakehouse import get_entities, get_lakehouse
+from ftm_lakehouse import get_lakehouse
 
 catalog = get_lakehouse()
 for name in catalog.list_datasets():
-    print(name, get_entities(name).stats())
+    print(name, catalog.dataset_uri(name))
 ```
