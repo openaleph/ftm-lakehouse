@@ -56,7 +56,7 @@ Issues = "https://github.com/openaleph/ftm-lakehouse/issues"
 [tool.poetry.group.dev.dependencies]
 pytest = "^9.0.2"
 pytest-cov = ">=4.1,<8.0"
-pytest-env = "^1.1.1"
+pytest-env = "^1.8.1"
 black = ">=23.11,<27.0"
 isort = "^9.0.1"
 mypy = "^2.1.0"
