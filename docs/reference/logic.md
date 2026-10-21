@@ -59,11 +59,6 @@ The DuckDB SQL behind `ParquetStore`. Reads, merges and re-shards name a partiti
         heading_level: 3
         show_root_heading: true
 
-::: ftm_lakehouse.logic.parquet.parquet_sizes_sql
-    options:
-        heading_level: 3
-        show_root_heading: true
-
 ::: ftm_lakehouse.logic.parquet.read_parquet_sql
     options:
         heading_level: 3
@@ -94,11 +89,6 @@ The DuckDB SQL behind `ParquetStore`. Reads, merges and re-shards name a partiti
 The pure Arrow side of `ParquetStore.merge`: a partition is read as `entity_id`-sorted streams and cut into entity-closed chunks, each deduped by `build_merge_sql` on its own – every window key holds `entity_id`, so the chunks give the rows the whole partition would, with memory bounded by the chunk rather than the partition.
 
 ::: ftm_lakehouse.logic.merge.entity_chunks
-    options:
-        heading_level: 3
-        show_root_heading: true
-
-::: ftm_lakehouse.logic.merge.run_groups
     options:
         heading_level: 3
         show_root_heading: true

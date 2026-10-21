@@ -7,6 +7,7 @@ Layout:
 
 import heapq
 import json
+import os
 import posixpath
 from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass
@@ -54,7 +55,7 @@ from sqlalchemy import Select
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.helpers.shards import entity_shard
-from ftm_lakehouse.logic.merge import entity_chunks, run_groups
+from ftm_lakehouse.logic.merge import entity_chunks
 from ftm_lakehouse.logic.parquet import (
     MERGE_BATCH_BYTES,
     MERGE_BATCH_ROWS,
@@ -76,7 +77,6 @@ from ftm_lakehouse.logic.parquet import (
     live_rows_sql,
     make_prune_by_shard,
     merge_duckdb_config,
-    parquet_sizes_sql,
     partition_source_sql,
     raw_view_sql,
     relation_source_sql,
@@ -180,13 +180,8 @@ def merge_partition(task: MergeTask) -> MergeResult:
         TemporaryDirectory(prefix="lakehouse-merge-") as tmp,
     ):
         con.execute("SET preserve_insertion_order = true")  # merged files' order
-        footers = _footers(con, task)
-        nbytes = sum(size for size, _ in footers.values())
-        nrows = sum(rows for _, rows in footers.values())
-        rows = max(
-            1, min(MERGE_BATCH_ROWS, MERGE_BATCH_BYTES * nrows // max(nbytes, 1))
-        )
-        chunks = entity_chunks(_runs(con, task, tmp, footers, rows), MERGE_DEDUPE_BYTES)
+        rows = _batch_rows(con, _relation(task.root, task.partition, task.files[:1]))
+        chunks = entity_chunks(_runs(con, task, tmp, rows), MERGE_DEDUPE_BYTES)
         batches = pa.RecordBatchReader.from_batches(
             FILE_SCHEMA, _dedupe(con, task, chunks, rows)
         )
@@ -196,16 +191,15 @@ def merge_partition(task: MergeTask) -> MergeResult:
     return MergeResult(task, files, t.took)
 
 
-def _footers(
-    con: duckdb.DuckDBPyConnection, task: MergeTask
-) -> dict[str, tuple[int, int]]:
-    """``(uncompressed bytes, rows)`` per file basename of the task, from the
-    footers (`parquet_sizes_sql`)."""
-    sql = parquet_sizes_sql(f"{task.root}/{f}" for f, _ in task.files)
-    return {
-        posixpath.basename(file): (size, rows)
-        for file, size, rows in con.execute(sql).fetchall()
-    }
+def _batch_rows(con: duckdb.DuckDBPyConnection, source: str) -> int:
+    """Rows a batch of about `MERGE_BATCH_BYTES` holds at ``source``'s row size
+    – the Arrow bytes of its first rows averaged – at most `MERGE_BATCH_ROWS`,
+    at least 1."""
+    sql = f"SELECT * EXCLUDE ({', '.join(PARTITIONS)}) FROM {source} LIMIT 4096"
+    with closing(con.cursor()) as cur:
+        sample = cur.execute(sql).to_arrow_table()
+    row_bytes = max(1, int(sample.nbytes) // max(int(sample.num_rows), 1))
+    return max(1, min(MERGE_BATCH_ROWS, MERGE_BATCH_BYTES // row_bytes))
 
 
 def _scan(
@@ -230,21 +224,38 @@ def _read_run(path: str, rows: int) -> Iterator[pa.RecordBatch]:
             yield batch.cast(FILE_SCHEMA)
 
 
+def _write_run(path: str, tables: Iterable[pa.Table], rows: int) -> str:
+    """``tables`` as one temporary run at ``path`` – zstd level 1, row groups
+    of ``rows``."""
+    with pq.ParquetWriter(
+        path, FILE_SCHEMA, compression="zstd", compression_level=1
+    ) as writer:
+        for table in tables:
+            writer.write_table(table, row_group_size=rows)
+    return path
+
+
+def _merge_runs(paths: list[str], path: str, rows: int) -> str:
+    """Sorted runs ``paths`` merged into one sorted run at ``path``, the inputs
+    removed – through the chunker, so one `MERGE_DEDUPE_BYTES` chunk is held."""
+    chunks = entity_chunks([_read_run(p, rows) for p in paths], MERGE_DEDUPE_BYTES)
+    _write_run(path, (chunk.sort_by("entity_id") for chunk in chunks), rows)
+    for p in paths:
+        os.remove(p)
+    return path
+
+
 def _runs(
-    con: duckdb.DuckDBPyConnection,
-    task: MergeTask,
-    tmp: str,
-    footers: dict[str, tuple[int, int]],
-    rows: int,
+    con: duckdb.DuckDBPyConnection, task: MergeTask, tmp: str, rows: int
 ) -> list[Iterator[pa.RecordBatch]]:
     """The partition as ``entity_id``-sorted `FILE_SCHEMA` streams of ``rows``
     a batch.
 
     The last merge's files are one stream in file order (their sort). The
-    ``part-*`` files are read, sorted in Arrow and streamed back: as one
-    in-memory run when their uncompressed bytes (``footers``) fit
-    `MERGE_RUN_BYTES`, else in runs of that size – or a `MERGE_MAX_RUNS`th of
-    the bytes when that is more – each a temporary parquet file under ``tmp``.
+    ``part-*`` files are read in file order and sorted in Arrow
+    `MERGE_RUN_BYTES` at a time into temporary parquet runs under ``tmp``; more
+    than `MERGE_MAX_RUNS` of them are first merged (`_merge_runs`) in rounds of
+    that many, so no more streams than that are ever open.
     """
     root, partition = task.root, task.partition
     files = [f for f, _ in task.files]
@@ -255,26 +266,32 @@ def _runs(
         streams.append(_scan(con, root, partition, merged, rows))
     if not parts:
         return streams
-    sizes = [(f, footers.get(posixpath.basename(f), (0, 0))[0]) for f in parts]
-    budget = max(MERGE_RUN_BYTES, -(-sum(size for _, size in sizes) // MERGE_MAX_RUNS))
-    groups = run_groups(sizes, budget)
-    for n, group in enumerate(groups):
-        batches = _scan(con, root, partition, group, rows)
-        table = pa.Table.from_batches(batches, FILE_SCHEMA).sort_by("entity_id")
-        if len(groups) == 1:
-            streams.append(iter(table.to_batches(rows)))
-        else:
-            path = f"{tmp}/run-{n:05d}.parquet"
-            pq.write_table(
-                table,
-                path,
-                compression="zstd",
-                compression_level=1,
-                row_group_size=rows,
+    runs: list[str] = []
+    held: list[pa.RecordBatch] = []
+    nbytes = 0
+    for batch in chain(_scan(con, root, partition, parts, rows), [None]):
+        if batch is not None:
+            held.append(batch)
+            nbytes += batch.nbytes
+        if held and (batch is None or nbytes >= MERGE_RUN_BYTES):
+            table = pa.Table.from_batches(held, FILE_SCHEMA).sort_by("entity_id")
+            held, nbytes = [], 0
+            runs.append(
+                _write_run(f"{tmp}/run-0-{len(runs):05d}.parquet", [table], rows)
             )
-            streams.append(_read_run(path, rows))
-        del table
-    return streams
+            del table
+    rounds = 0
+    while len(runs) > MERGE_MAX_RUNS:
+        rounds += 1
+        runs = [
+            _merge_runs(
+                runs[i : i + MERGE_MAX_RUNS],
+                f"{tmp}/run-{rounds}-{i:05d}.parquet",
+                rows,
+            )
+            for i in range(0, len(runs), MERGE_MAX_RUNS)
+        ]
+    return streams + [_read_run(run, rows) for run in runs]
 
 
 def _dedupe(
@@ -1050,7 +1067,10 @@ class ParquetStore:
         self.log.info("Re-shard complete.", shards=shards)
 
     def _rewrite_shards(self, shards: int) -> None:
-        """Rewrite every ``(bucket, origin)`` group, under the maintenance fence."""
+        """Rewrite every ``(bucket, origin)`` group, under the maintenance fence,
+        read in batches of `MERGE_BATCH_BYTES` (`_batch_rows`) – DuckDB's default
+        of a million rows a batch overflows Arrow's 2GiB string buffer on
+        document rows."""
         with self._maintenance_fence():
             root, partitions = self._partitions()
             groups: dict[tuple[str, str], list[tuple[Partition, Files]]] = {}
@@ -1071,8 +1091,9 @@ class ParquetStore:
                         )
                         for partition, files in sources
                     ]
+                    rows = _batch_rows(con, _relation(root, *sources[0]))
                     # lazily: executing the next query closes the current result
-                    readers = (con.execute(sql).to_arrow_reader() for sql in sqls)
+                    readers = (con.execute(sql).to_arrow_reader(rows) for sql in sqls)
                     first = next(readers)
                     batches = chain.from_iterable(chain([first], readers))
                     write_deltalake(

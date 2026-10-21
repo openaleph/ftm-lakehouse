@@ -163,14 +163,10 @@ def cli_optimize(
     ] = 0,
     force: OPT_FORCE = False,
 ):
-    """Optimize the statement store: rewrite every dirty partition into one
-    canonical file (collapse duplicates, reap expired tombstones), then
-    delete the files that replaced. Reads reconcile un-merged rows, so this is
-    an optimisation and a disk reclaim, not a precondition.
-
-    Tombstones older than ``LAKEHOUSE_GRACE_PERIOD_DAYS`` are dropped. Each
-    step is held under the dataset write fence.
-    """
+    """Optimize the statement store: Merge dirty partitions into sorted files
+    with statements deduped, tombstones applied and expired ones deleted (older
+    than ``LAKEHOUSE_GRACE_PERIOD_DAYS``). Reclaims storage afterwards via
+    vacuuming."""
     with DatasetContext() as (name, uri):
         res = op.optimize(
             name, uri, retention_hours=int(retention_hours or 0), force=bool(force)

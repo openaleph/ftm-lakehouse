@@ -46,9 +46,8 @@ MERGE_COMMIT_BATCH = 64
 
 MERGE_BATCH_BYTES = 16 * 1_048_576
 """Arrow bytes per batch a merge reads, about: rows per batch follow the
-partition's average row size (the footers' uncompressed bytes over rows), so a
-stream of full-text rows holds no more than one of thin rows. A merge holds a
-batch of every stream."""
+average row size of a sample, so a stream of full-text rows holds no more than
+one of thin rows. A merge holds a batch of every stream."""
 
 MERGE_BATCH_ROWS = 100_000
 """Rows per batch a merge reads at most, whatever `MERGE_BATCH_BYTES` allows."""
@@ -60,12 +59,12 @@ deltalake 1.6.6 – on top of the gathered batches and their concatenation, so
 the write is a merge's largest term."""
 
 MERGE_RUN_BYTES = 1024 * 1_048_576
-"""Uncompressed parquet bytes (summed from the footers) of ``part-*`` files a
-merge sorts into one run – the Arrow sort holds about twice it."""
+"""Arrow bytes of ``part-*`` rows a merge sorts into one run – the sort holds
+about twice it."""
 
 MERGE_MAX_RUNS = 32
-"""Runs a partition's ``part-*`` files are sorted into at most – a merge holds
-a batch of every run; past it the runs grow beyond `MERGE_RUN_BYTES` instead."""
+"""Sorted runs a merge reads at once, at most – it holds a batch of every one.
+More are first merged into fewer, in rounds of this many."""
 
 MERGE_DEDUPE_BYTES = 512 * 1_048_576
 """Arrow bytes per entity-closed chunk the merge's dedupe query runs over –
@@ -294,17 +293,6 @@ def read_parquet_sql(files: Iterable[str]) -> str:
     it would parse a shard like ``10`` as an integer."""
     paths = ", ".join(f"'{_string_literal(f)}'" for f in files)
     return f"read_parquet([{paths}], union_by_name = true, hive_partitioning = false)"
-
-
-def parquet_sizes_sql(files: Iterable[str]) -> str:
-    """``(file_name, uncompressed bytes, rows)`` per file of ``files``, summed
-    from the footers – no data read."""
-    paths = ", ".join(f"'{_string_literal(f)}'" for f in files)
-    return (
-        "SELECT file_name, SUM(total_uncompressed_size), "
-        "SUM(CASE WHEN column_id = 0 THEN row_group_num_rows ELSE 0 END) "
-        f"FROM parquet_metadata([{paths}]) GROUP BY file_name"
-    )
 
 
 def relation_source_sql(relation: str, shard: str, bucket: str, origin: str) -> str:

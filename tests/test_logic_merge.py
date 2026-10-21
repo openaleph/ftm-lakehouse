@@ -9,7 +9,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
 
-from ftm_lakehouse.logic.merge import entity_chunks, run_groups
+from ftm_lakehouse.logic.merge import entity_chunks
 
 SCHEMA = pa.schema([("entity_id", pa.string()), ("value", pa.string())])
 
@@ -84,11 +84,3 @@ def test_entity_chunks_one_stream():
 def test_entity_chunks_nothing():
     assert list(entity_chunks([], 1)) == []
     assert list(entity_chunks([iter([]), _stream(_rows([]), [5])], 1)) == []
-
-
-def test_run_groups():
-    sizes = [("a", 300), ("b", 300), ("c", 300), ("d", 500), ("e", 1200), ("f", 100)]
-    assert run_groups(sizes, 1000) == [["a", "b", "c"], ["d"], ["e"], ["f"]]
-    assert run_groups(sizes, 10**6) == [["a", "b", "c", "d", "e", "f"]]
-    assert run_groups([("e", 1200)], 1000) == [["e"]]
-    assert run_groups([], 1000) == []

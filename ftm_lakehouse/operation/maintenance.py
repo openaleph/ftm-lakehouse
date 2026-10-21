@@ -23,17 +23,15 @@ class OptimizeOperation(DatasetJobOperation[OptimizeJob]):
     """Optimize the parquet statement store: merge, then vacuum.
 
     Merge rewrites each dirty ``(shard, bucket, origin)`` partition into one
-    file – latest row per statement id, ``first_seen`` folded to the minimum,
-    tombstones past the grace period dropped; vacuum deletes the replaced files.
+    file, keeping the latest row per statement id with ``min(first_seen)`` and
+    ``max(last_seen)``. Tombstones past the grace period are dropped; vacuum
+    deletes the replaced files.
     """
 
     target = tag.OP_OPTIMIZE
     dependencies: list[str] = []
 
     def is_fresh(self) -> bool:
-        """Whether no partition is dirty – asked of the store
-        ([`ParquetStore.needs_merge`][ftm_lakehouse.storage.parquet.ParquetStore.needs_merge]),
-        not a tag pair."""
         return not self.entities.statements.needs_merge
 
     def handle(self, run: JobRun[OptimizeJob], force: bool = False, **kwargs) -> None:

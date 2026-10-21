@@ -672,6 +672,28 @@ def test_storage_parquet_shard_escaped_origin(tmp_path):
     assert _row_count(store) == 20
 
 
+def test_storage_parquet_shard_reads_in_bounded_batches(tmp_path, monkeypatch):
+    """A re-shard hands delta-rs batches of `_batch_rows` rows, not DuckDB's
+    default of a million – a document group's strings overflowed Arrow's 2GiB
+    offset limit in one such batch."""
+    monkeypatch.setattr(storage_parquet, "MERGE_BATCH_ROWS", 5)
+    store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
+    _flush(store, _origin_rows("a"))
+    sizes: list[int] = []
+    write = storage_parquet.write_deltalake
+
+    def record(table, data, **kwargs):
+        batches = list(data)
+        sizes.extend(b.num_rows for b in batches)
+        reader = pa.RecordBatchReader.from_batches(data.schema, batches)
+        return write(table, reader, **kwargs)
+
+    monkeypatch.setattr(storage_parquet, "write_deltalake", record)
+    store.shard(2)
+    assert sizes and max(sizes) <= 5 and sum(sizes) == 40
+    assert _row_count(store) == 40
+
+
 def test_storage_parquet_merge_commits_across_a_racing_append(tmp_path, monkeypatch):
     """An append that lands while a merge runs is kept: the merge removes
     only the files it read, the append only adds, Delta commits both, and the
@@ -824,14 +846,15 @@ def _random_rows(rng: random.Random, now: datetime, count: int) -> list[dict]:
 
 
 def test_storage_parquet_merge_matches_the_whole_partition_query(tmp_path, monkeypatch):
-    """Merged in runs and entity chunks – both cut tiny here, so every file is
-    a run of its own through a temporary file and nearly every entity a chunk –
-    a partition holds row for row what the dedupe query gives over all of its
-    files at once, and its files read sorted. A second round merges the first's
-    output with new files, the new ones as one in-memory run."""
+    """Merged in runs and entity chunks – both cut tiny here, so every batch is
+    a run of its own, the runs merge in rounds of two and nearly every entity
+    is a chunk – a partition holds row for row what the dedupe query gives over
+    all of its files at once, and its files read sorted. A second round merges
+    the first's output with new files, the new ones as one run."""
     monkeypatch.setattr(storage_parquet, "MERGE_RUN_BYTES", 1)
     monkeypatch.setattr(storage_parquet, "MERGE_DEDUPE_BYTES", 1)
     monkeypatch.setattr(storage_parquet, "MERGE_BATCH_ROWS", 5)
+    monkeypatch.setattr(storage_parquet, "MERGE_MAX_RUNS", 2)
     runs: list[str] = []
     read_run = storage_parquet._read_run
     monkeypatch.setattr(
@@ -859,14 +882,14 @@ def test_storage_parquet_merge_matches_the_whole_partition_query(tmp_path, monke
             assert ids == sorted(ids)
 
     check()
-    assert runs  # part files went through temporary runs
+    assert any("run-1-" in run for run in runs)  # runs merged in rounds
     assert any(deleted for *_, deleted in _raw_rows(store))  # tombstones in grace
 
     runs.clear()
     monkeypatch.setattr(storage_parquet, "MERGE_RUN_BYTES", 10**12)
     _flush(store, _random_rows(rng, now, 60))
     check()
-    assert not runs  # one run per partition stays in memory
+    assert runs and all("run-0-" in run for run in runs)  # one run, no rounds
 
 
 def test_storage_parquet_destroy(tmp_path, monkeypatch):

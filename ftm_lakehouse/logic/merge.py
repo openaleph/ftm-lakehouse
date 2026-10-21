@@ -14,25 +14,6 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 
-def run_groups(sizes: Iterable[tuple[str, int]], budget: int) -> list[list[str]]:
-    """Group ``(file, bytes)`` pairs in order, each group filled up to ``budget``.
-
-    A file larger than the budget forms a group of its own.
-    """
-    groups: list[list[str]] = []
-    group: list[str] = []
-    total = 0
-    for file, size in sizes:
-        if group and total + size > budget:
-            groups.append(group)
-            group, total = [], 0
-        group.append(file)
-        total += size
-    if group:
-        groups.append(group)
-    return groups
-
-
 def entity_chunks(
     streams: Iterable[Iterator[pa.RecordBatch]], target: int
 ) -> Iterator[pa.Table]:
