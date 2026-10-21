@@ -180,6 +180,8 @@ def merge_partition(task: MergeTask) -> MergeResult:
         TemporaryDirectory(prefix="lakehouse-merge-") as tmp,
     ):
         con.execute("SET preserve_insertion_order = true")  # merged files' order
+        # a batch's strings may pass 2GiB when `_batch_rows` underestimates
+        con.execute("SET arrow_large_buffer_size = true")
         rows = _batch_rows(con, _relation(task.root, task.partition, task.files[:1]))
         chunks = entity_chunks(_runs(con, task, tmp, rows), MERGE_DEDUPE_BYTES)
         batches = pa.RecordBatchReader.from_batches(
@@ -1084,6 +1086,9 @@ class ParquetStore:
                     _connect(config) as con,
                     self._snapshot_lock,
                 ):
+                    # a batch's strings may pass 2GiB when `_batch_rows`
+                    # underestimates
+                    con.execute("SET arrow_large_buffer_size = true")
                     snapshot = self._existing_snapshot()
                     sqls = [
                         build_shard_sql(
