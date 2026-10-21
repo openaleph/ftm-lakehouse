@@ -21,9 +21,7 @@ from ftmq.store.lake import pack_statement
 
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.logic.parquet import (
-    MERGE_MEMORY_LIMIT,
     duckdb_config,
-    merge_duckdb_config,
     worker_duckdb_config,
 )
 from ftm_lakehouse.model.statement import JOURNAL_SCHEMA
@@ -135,15 +133,6 @@ def test_settings_reject_no_workers(monkeypatch) -> None:
 def test_worker_duckdb_config_splits_memory_limit(monkeypatch) -> None:
     monkeypatch.setenv("LAKEHOUSE_DUCKDB_MEMORY_LIMIT", "1GiB")
     assert worker_duckdb_config(4)["memory_limit"] == f"{2**28}B"
-
-
-def test_merge_duckdb_config_fixed_memory_limit(monkeypatch) -> None:
-    """A merge's DuckDB holds a chunk, not a partition – its limit is the
-    constant, not a share of the global one; threads still split."""
-    monkeypatch.setenv("LAKEHOUSE_DUCKDB_MEMORY_LIMIT", "1GiB")
-    config = merge_duckdb_config(4)
-    assert config["memory_limit"] == f"{MERGE_MEMORY_LIMIT}B"
-    assert config["threads"] == worker_duckdb_config(4)["threads"]
 
 
 def test_make_duckdb_applies_temp_directory(monkeypatch, tmp_path) -> None:

@@ -72,12 +72,6 @@ MERGE_DEDUPE_BYTES = 512 * 1_048_576
 about 3x it in DuckDB, measured. An entity's rows never split, so a chunk is at
 least one entity."""
 
-MERGE_MEMORY_LIMIT = 4 * 1024 * 1_048_576
-"""DuckDB memory per merge worker. A merge's DuckDB never holds more than one
-`MERGE_DEDUPE_BYTES` chunk plus its streaming reads, whatever the partition's
-size, so this is a constant rather than a share of
-``LAKEHOUSE_DUCKDB_MEMORY_LIMIT``."""
-
 WRITE_FLUSH_PARTITIONS = 64
 """Partitions per ``write_deltalake`` call of `write_stream` – delta-rs holds
 page buffers per partition of a call, and each call is one commit."""
@@ -152,13 +146,6 @@ def worker_duckdb_config(workers: int) -> dict[str, str]:
     config["memory_limit"] = f"{budget // workers}B"
     config["threads"] = str(max((os.cpu_count() or 1) // workers, 1))
     return config
-
-
-def merge_duckdb_config(workers: int) -> dict[str, str]:
-    """[`worker_duckdb_config`][worker_duckdb_config] with `MERGE_MEMORY_LIMIT`
-    as the memory limit – a merge's DuckDB footprint is bounded by the chunk,
-    not the partition, so it takes no share of the global limit."""
-    return {**worker_duckdb_config(workers), "memory_limit": f"{MERGE_MEMORY_LIMIT}B"}
 
 
 def _string_literal(value: str) -> str:

@@ -76,11 +76,11 @@ from ftm_lakehouse.logic.parquet import (
     duckdb_config,
     live_rows_sql,
     make_prune_by_shard,
-    merge_duckdb_config,
     partition_source_sql,
     raw_view_sql,
     relation_source_sql,
     shard_target_file_size,
+    worker_duckdb_config,
 )
 from ftm_lakehouse.model.dataset import DEFAULT_SHARDS
 from ftm_lakehouse.model.statement import (
@@ -997,7 +997,7 @@ class ParquetStore:
             root, partitions = self._partitions()
             tasks = [
                 MergeTask(
-                    partition, files, root, grace_cutoff, merge_duckdb_config(workers)
+                    partition, files, root, grace_cutoff, worker_duckdb_config(workers)
                 )
                 for partition, (files, clean) in partitions.items()
                 if force or not clean

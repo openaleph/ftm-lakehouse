@@ -69,11 +69,6 @@ The DuckDB SQL behind `ParquetStore`. Reads, merges and re-shards name a partiti
         heading_level: 3
         show_root_heading: true
 
-::: ftm_lakehouse.logic.parquet.merge_duckdb_config
-    options:
-        heading_level: 3
-        show_root_heading: true
-
 ::: ftm_lakehouse.logic.parquet.build_shard_sql
     options:
         heading_level: 3
