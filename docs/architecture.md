@@ -88,7 +88,7 @@ The async `optimize` operation runs two storage primitives:
 
 `merge` takes the merge lock (`.LOCK-MERGE`), which the export sweep takes too, so an optimize never vacuums files a running sweep reads. Appends don't wait for it – a merge removes exactly the files it read, an append only adds – so ingest flows through a long merge. The in-place rewrites (re-shard, `delete_origin`, schema changes, `vacuum`) take the exclusive `.LOCK`, and appends back off while it is held.
 
-A merge loads one Delta snapshot, reads each dirty partition's files with `read_parquet`, has delta-rs write the result – the bucket's writer profile and full Delta file stats, exactly as an append gets them – as one `merged-*` file per 2GB of rows (a delta-rs write holds its whole input in memory), and commits in batches of 64 partitions; a failed run keeps the batches it committed, and the next run picks up the rest. A run that committed anything ends with a Delta checkpoint, so the next load doesn't replay the removed files. Partitions merge in parallel processes (`LAKEHOUSE_WORKERS`), each worker getting its partition's files from the parent. Each worker's share of `LAKEHOUSE_DUCKDB_MEMORY_LIMIT` has to cover the heaviest partition – see [Sizing parallel workers](deployment/configuration.md#sizing-parallel-workers); a partition too large to merge in acceptable time wants more shards.
+A merge loads one Delta snapshot and reads each dirty partition's files without `delta_scan`: the last merge's files stream in file order (their sort), `part-*` files are sorted in Arrow 1GB at a time into temporary runs under `TMPDIR` (more than 32 runs are first merged in rounds of 32), batches sized in bytes at the average row size of a sample (one that comes out larger is halved until it fits), and the streams are cut into entity-closed chunks of about 512MB – every dedupe key holds `entity_id`, so the dedupe query runs over each chunk alone and gives the rows the whole partition would, sorted. delta-rs writes the result – the bucket's writer profile and full Delta file stats, exactly as an append gets them – as one `merged-*` file per 512MB of rows, each written as a single record batch (delta-rs reorders a multi-batch write within the file), and commits in batches of 64 partitions; a failed run keeps the batches it committed, and the next run picks up the rest. A run that committed anything ends with a Delta checkpoint, so the next load doesn't replay the removed files. Partitions merge in parallel processes (`LAKEHOUSE_WORKERS`), each worker getting its partition's files from the parent; a worker's memory follows the chunk sizes, not the partition – see [Sizing parallel workers](deployment/configuration.md#sizing-parallel-workers).
 
 The Delta table is created with `delta.deletedFileRetentionDuration = 1 hour` and `delta.logRetentionDuration = 1 day` (the `migrate_parquet_table_properties` migration sets them on older stores) – with the Delta defaults the log of a frequently merged store outgrows its data.
 
@@ -97,8 +97,8 @@ The Delta table is created with `delta.deletedFileRetentionDuration = 1 hour` an
 Everything expensive runs one `(shard, bucket)` pair at a time, so the shard count bounds the working set:
 
 - **Writes:** `append` writes one file per `(shard, bucket, origin)` partition a batch spans – bigger batches cost fewer files.
-- **Reads:** statement queries run per pair over that pair's files, taken from a Delta snapshot each process keeps and advances incrementally, so a read never replays the log. A lookup by entity id reads only its own shard. A sorted or sliced query reads every pair it can touch in one query; `stats()` and the raw-SQL CLI use `delta_scan` views.
-- **Optimize and export:** a worker holds one partition (merge) or one pair (export sweep) at a time, so memory scales with the largest partition, not the table.
+- **Reads:** statement queries run per pair over that pair's files, taken from a Delta snapshot each process keeps and advances incrementally, so a read never replays the log. A lookup by entity id reads only its own shard. A sorted or sliced query reads every pair it can touch in one query; the raw-SQL CLI registers the whole table the same way, over `delta_scan`.
+- **Optimize and export:** a merge worker holds one chunk of one partition at a time, an export worker one pair, so memory scales with the chunk or the largest pair, not the table.
 
 Every shard multiplies the partition count (`shard × bucket × origin`) – more small files, more log metadata, more per-pair queries – which costs small and medium datasets more than it saves. The **default is `0`**, a single shard `"0"` (`shards <= 1`). The count is per-dataset config, recorded in `config.yml` at creation (`ensure_dataset("big_leak", shards=8)`), not an environment setting. From roughly tens of millions of statements, configure `8` or more, sized for the data you expect: changing it later rewrites every partition – see [Re-sharding](#re-sharding-an-existing-dataset).
 
@@ -202,6 +202,7 @@ ftm_lakehouse/
 │
 ├── logic/                   # Business logic, no storage
 │   ├── entities/            # aggregate.py, buffer.py, explode.py, stats.py
+│   ├── merge.py             # sorted-run chunking for merge (pure Arrow)
 │   ├── parquet.py           # DuckDB view / merge / shard SQL builders
 │   └── path.py              # path primitives for the conventions
 │

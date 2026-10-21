@@ -73,18 +73,6 @@ def test_delete_entity_filters_from_query(repo, settle):
     assert {e.id for e in repo.query()} == {"john"}
 
 
-def test_delete_entity_filters_from_stats(repo, settle):
-    repo, _ = repo
-    _populate(repo)
-    assert repo.stats().entity_count == 2
-
-    repo.delete_entity("jane")
-    repo.flush()
-    settle(repo)
-
-    assert repo.stats().entity_count == 1
-
-
 def test_delete_then_readd(repo, settle):
     """Delete; re-add lands fresh."""
     repo, _ = repo

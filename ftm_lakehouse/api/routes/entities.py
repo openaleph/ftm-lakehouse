@@ -1,9 +1,8 @@
-"""Entity API routes: flush, query, delete, stats, version."""
+"""Entity API routes: flush, query, delete, version."""
 
 import orjson
 from fastapi import APIRouter
 from fastapi.responses import PlainTextResponse, StreamingResponse
-from ftmq.model.stats import DatasetStats
 
 from ftm_lakehouse.api.dependencies import Entities, QueryBody
 
@@ -54,12 +53,6 @@ def entities_delete(
     """
     count = entities.delete_entity(entity_id, origin)
     return PlainTextResponse(str(count))
-
-
-@router.get("/{dataset}/_api/entities/stats")
-def entities_stats(entities: Entities) -> DatasetStats:
-    """Return dataset statistics from parquet store."""
-    return entities.stats()
 
 
 @router.get("/{dataset}/_api/entities/statements/version")

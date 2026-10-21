@@ -138,6 +138,34 @@ def test_cli_statements_sql_api_guard(tmp_path):
         assert "Query took" not in res.output
 
 
+def test_cli_statements_sql_views(tmp_path):
+    """``statement`` is every physical row, ``statement_merged`` the live rows –
+    the dedupe query on an unmerged store, a plain scan once merged."""
+    lake, name = str(tmp_path / "lake"), "sql_views"
+    repo = EntityRepository(name, f"{lake}/{name}")
+    for _ in range(2):
+        with repo.writer(origin="test") as writer:
+            writer.add_entity(make_entity(JANE))
+        repo.flush()
+    base = ["--uri", lake, "-d", name]
+
+    def sql(query: str) -> str:
+        res = runner.invoke(cli, base + ["statements", "sql", query])
+        assert res.exit_code == 0, res.output
+        return plain(res.output)
+
+    rows, live = (
+        "(SELECT count(*) FROM statement)",
+        "(SELECT count(*) FROM statement_merged)",
+    )
+    assert "True" in sql(f"SELECT {rows} = 2 * {live} AS twice")
+    assert "WINDOW" in sql("EXPLAIN SELECT * FROM statement_merged")
+
+    assert runner.invoke(cli, base + ["maintenance", "optimize"]).exit_code == 0
+    assert "True" in sql(f"SELECT {rows} = {live} AS same")
+    assert "WINDOW" not in sql("EXPLAIN SELECT * FROM statement_merged")
+
+
 def test_cli_maintenance_unlock_api_guard(tmp_path):
     """Unlock is local-only: the CLI errors in api mode instead of relying on
     the ``@no_api`` RuntimeError deep in the repository (message assert

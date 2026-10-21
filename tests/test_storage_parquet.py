@@ -2,11 +2,12 @@
 
 import io
 import math
+import random
 import subprocess
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from contextlib import nullcontext
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -17,10 +18,17 @@ from ftmq.store.base import DEFAULT_ORIGIN
 from ftmq.store.lake import pack_statement
 from ftmq.types import Statements
 from pyarrow.csv import CSVWriter  # type: ignore[attr-defined]
+from rigour.time import utc_now
 
 from ftm_lakehouse.core.conventions import tag
 from ftm_lakehouse.helpers.shards import entity_shard
-from ftm_lakehouse.logic.parquet import MERGED_PREFIX, STAGING_DIR, TABLE_CONFIGURATION
+from ftm_lakehouse.logic.parquet import (
+    MERGED_PREFIX,
+    STAGING_DIR,
+    TABLE_CONFIGURATION,
+    build_merge_sql,
+    duckdb_config,
+)
 from ftm_lakehouse.model.statement import (
     JOURNAL_SCHEMA,
     TABLE_RAW,
@@ -664,6 +672,28 @@ def test_storage_parquet_shard_escaped_origin(tmp_path):
     assert _row_count(store) == 20
 
 
+def test_storage_parquet_shard_reads_in_bounded_batches(tmp_path, monkeypatch):
+    """A re-shard hands delta-rs batches of `_batch_rows` rows, not DuckDB's
+    default of a million – a document group's strings overflowed Arrow's 2GiB
+    offset limit in one such batch."""
+    monkeypatch.setattr(storage_parquet, "MERGE_BATCH_ROWS", 5)
+    store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
+    _flush(store, _origin_rows("a"))
+    sizes: list[int] = []
+    write = storage_parquet.write_deltalake
+
+    def record(table, data, **kwargs):
+        batches = list(data)
+        sizes.extend(b.num_rows for b in batches)
+        reader = pa.RecordBatchReader.from_batches(data.schema, batches)
+        return write(table, reader, **kwargs)
+
+    monkeypatch.setattr(storage_parquet, "write_deltalake", record)
+    store.shard(2)
+    assert sizes and max(sizes) <= 5 and sum(sizes) == 40
+    assert _row_count(store) == 40
+
+
 def test_storage_parquet_merge_commits_across_a_racing_append(tmp_path, monkeypatch):
     """An append that lands while a merge runs is kept: the merge removes
     only the files it read, the append only adds, Delta commits both, and the
@@ -781,6 +811,85 @@ def test_storage_parquet_merge_chunks(tmp_path, monkeypatch):
     ids = [row["entity_id"] for row in _swept(source)]
     assert ids == sorted(ids)
     assert len(ids) == 30
+
+
+def _whole_partition_merge(store: ParquetStore, grace_days: int) -> list[tuple]:
+    """What the dedupe query gives over all files of every partition at once –
+    the rows a merge has to produce."""
+    cutoff = utc_now() - timedelta(days=grace_days)
+    root, partitions = store._partitions()
+    rows: list[tuple] = []
+    with storage_parquet._connect(duckdb_config()) as con:
+        for partition, (files, _) in partitions.items():
+            source = storage_parquet._relation(root, partition, files)
+            rows += con.execute(build_merge_sql(*partition, cutoff, source)).fetchall()
+    return rows
+
+
+def _random_rows(rng: random.Random, now: datetime, count: int) -> list[dict]:
+    """Duplicates, fragment groups, roles and tombstones inside and past a
+    30-day grace, in two origins."""
+    rows = []
+    for _ in range(count):
+        entity = f"e{rng.randrange(40)}"
+        prop, value = rng.choice([("name", "A"), ("name", "B"), ("alias", "C")])
+        row = _pack(make_statement(entity, prop, value))
+        row["origin"] = rng.choice(["a", "b"])
+        row["role"] = rng.choice([None, "r1"])
+        row["fragment"] = rng.choice(["", "", "f1", "f2"])
+        row["first_seen"] = now - timedelta(days=rng.randrange(100))
+        row["last_seen"] = now - timedelta(days=rng.randrange(100))
+        if rng.random() < 0.25:
+            row["deleted_at"] = now - timedelta(days=rng.choice([5, 60]))
+        rows.append(row)
+    return rows
+
+
+def test_storage_parquet_merge_matches_the_whole_partition_query(tmp_path, monkeypatch):
+    """Merged in runs and entity chunks – both cut tiny here, so every batch is
+    a run of its own, the runs merge in rounds of two and nearly every entity
+    is a chunk – a partition holds row for row what the dedupe query gives over
+    all of its files at once, and its files read sorted. A second round merges
+    the first's output with new files, the new ones as one run."""
+    monkeypatch.setattr(storage_parquet, "MERGE_RUN_BYTES", 1)
+    monkeypatch.setattr(storage_parquet, "MERGE_DEDUPE_BYTES", 1)
+    monkeypatch.setattr(storage_parquet, "MERGE_BATCH_ROWS", 5)
+    monkeypatch.setattr(storage_parquet, "MERGE_MAX_RUNS", 2)
+    runs: list[str] = []
+    read_run = storage_parquet._read_run
+    monkeypatch.setattr(
+        storage_parquet,
+        "_read_run",
+        lambda path, rows: runs.append(path) or read_run(path, rows),
+    )
+    rng = random.Random(3)
+    now = utc_now()
+    store = ParquetStore(tmp_path, DATASET, shards=2)
+    store.settings.grace_period_days = 30
+    rows = _random_rows(rng, now, 150)
+    for i in range(0, len(rows), 30):  # several files per partition
+        _flush(store, rows[i : i + 30])
+
+    def check() -> None:
+        expected = _whole_partition_merge(store, 30)
+        assert expected
+        store.merge()
+        assert not store.needs_merge
+        assert Counter(_raw_rows(store)) == Counter(expected)
+        for source in store.sweep_sources():
+            assert all(p.presorted for p in source.partitions)
+            ids = [row["entity_id"] for row in _swept(source)]
+            assert ids == sorted(ids)
+
+    check()
+    assert any("run-1-" in run for run in runs)  # runs merged in rounds
+    assert any(deleted for *_, deleted in _raw_rows(store))  # tombstones in grace
+
+    runs.clear()
+    monkeypatch.setattr(storage_parquet, "MERGE_RUN_BYTES", 10**12)
+    _flush(store, _random_rows(rng, now, 60))
+    check()
+    assert runs and all("run-0-" in run for run in runs)  # one run, no rounds
 
 
 def test_storage_parquet_destroy(tmp_path, monkeypatch):

@@ -65,14 +65,13 @@ def test_repository_entities(repo):
     # a remote journal (docker) has no count over the api
     remote = isinstance(repo._journal, ApiJournalStore)
     assert remote or repo._journal.count() > 0
-    assert repo.stats().entity_count == 0
+    assert len(list(repo.query())) == 0
 
     # This auto flushes the journal:
     entities = list(repo.query(flush_first=True))
     # after flush:
     assert len(entities) == 2
     assert remote or repo._journal.count() == 0
-    assert repo.stats().entity_count == 2
     # Tag should be set after flush (triggered by query)
     assert repo._tags.exists(tag.STATEMENTS_UPDATED)
     # Verify actual tag file path (hardcoded to detect convention changes)

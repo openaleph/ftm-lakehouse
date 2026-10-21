@@ -82,9 +82,9 @@ def test_api_returns_400_on_invalid_dataset_name(tmp_path) -> None:
     app = get_app(lake_uri=str(tmp_path))
     client = TestClient(app)
 
-    response = client.get("/catalog/_api/entities/stats")
+    response = client.get("/catalog/_api/entities/statements/version")
     assert response.status_code == 400
     assert "reserved" in response.json()["detail"].lower()
 
-    response = client.get("/foo%20bar/_api/entities/stats")
+    response = client.get("/foo%20bar/_api/entities/statements/version")
     assert response.status_code == 400

@@ -7,6 +7,7 @@ Layout:
 
 import heapq
 import json
+import os
 import posixpath
 from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from datetime import datetime, timedelta
 from functools import cache
 from itertools import chain
 from operator import itemgetter
+from tempfile import TemporaryDirectory
 from threading import RLock
 from typing import IO, Any, Callable, Iterable, Iterator, TypeVar, cast
 from urllib.parse import unquote
@@ -21,6 +23,7 @@ from urllib.parse import unquote
 import duckdb
 import pyarrow as pa
 import pyarrow.compute as pc
+import pyarrow.parquet as pq
 from anystore.decorators import error_handler
 from anystore.interface.lock import Lock
 from anystore.io import SyncProgressBar
@@ -33,7 +36,6 @@ from deltalake.exceptions import DeltaError, TableNotFoundError
 from deltalake.transaction import AddAction, RemoveAction
 from followthemoney.statement import StatementDict
 from ftmq.aggregate import aggregate_statement_payloads
-from ftmq.model.stats import DatasetStats
 from ftmq.query import Query, Sql, SqlSource
 from ftmq.store.lake import (
     PRUNE,
@@ -53,10 +55,15 @@ from sqlalchemy import Select
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.core.settings import Settings
 from ftm_lakehouse.helpers.shards import entity_shard
+from ftm_lakehouse.logic.merge import entity_chunks
 from ftm_lakehouse.logic.parquet import (
+    MERGE_BATCH_BYTES,
     MERGE_BATCH_ROWS,
     MERGE_CHUNK_BYTES,
     MERGE_COMMIT_BATCH,
+    MERGE_DEDUPE_BYTES,
+    MERGE_MAX_RUNS,
+    MERGE_RUN_BYTES,
     MERGED_PREFIX,
     STAGING_DIR,
     SWEEP_BATCH_SIZE,
@@ -65,12 +72,13 @@ from ftm_lakehouse.logic.parquet import (
     build_merge_sql,
     build_shard_sql,
     dedupe_rows_sql,
+    delta_scan_sql,
     duckdb_config,
     live_rows_sql,
-    live_view_sql,
     make_prune_by_shard,
     partition_source_sql,
     raw_view_sql,
+    relation_source_sql,
     shard_target_file_size,
     worker_duckdb_config,
 )
@@ -151,25 +159,180 @@ def _relation(root: str, partition: Partition, files: Files) -> str:
 def merge_partition(task: MergeTask) -> MergeResult:
     """Merge one partition into new data files next to its old ones.
 
+    The partition is read as ``entity_id``-sorted streams (`_runs`) and cut
+    into entity-closed chunks
+    ([`entity_chunks`][ftm_lakehouse.logic.merge.entity_chunks]), each deduped
+    by [`build_merge_sql`][ftm_lakehouse.logic.parquet.build_merge_sql] on its
+    own – every window key holds ``entity_id``, so the chunks give the rows the
+    whole would – and written as they come, sorted within and ascending across
+    chunks. Batches hold about `MERGE_BATCH_BYTES` at the partition's average
+    row size, so memory follows the merge constants, not the partition.
+
     Writes but does not commit – [`ParquetStore.merge`][ParquetStore.merge]
     does; an uncommitted file is an orphan the next ``vacuum`` removes.
     """
-    shard, bucket, origin = task.partition
-    with Took() as t, _connect(task.duckdb_config) as con:
-        source = _relation(task.root, task.partition, task.files)
-        sql = build_merge_sql(
-            shard,
-            bucket,
-            origin,
-            task.grace_cutoff,
-            source=source,
-            select=f"* EXCLUDE ({', '.join(PARTITIONS)})",
+    bucket = task.partition[1]
+    if threads := task.duckdb_config.get("threads"):
+        pa.set_cpu_count(int(threads))  # the Arrow sorts, split like DuckDB's
+    with (
+        Took() as t,
+        _connect(task.duckdb_config) as con,
+        TemporaryDirectory(prefix="lakehouse-merge-") as tmp,
+    ):
+        con.execute("SET preserve_insertion_order = true")  # merged files' order
+        # a batch's strings may pass 2GiB when `_batch_rows` underestimates
+        con.execute("SET arrow_large_buffer_size = true")
+        rows = _batch_rows(con, _relation(task.root, task.partition, task.files[:1]))
+        chunks = entity_chunks(_runs(con, task, tmp, rows), MERGE_DEDUPE_BYTES)
+        batches = pa.RecordBatchReader.from_batches(
+            FILE_SCHEMA, _dedupe(con, task, chunks, rows)
         )
-        reader = con.execute(sql).to_arrow_reader(MERGE_BATCH_ROWS)
         directory = posixpath.dirname(task.files[0][0])
         prefix = f"{directory}/{MERGED_PREFIX}{ensure_uuid()}"
-        files = _write_merged(task.root, reader.cast(FILE_SCHEMA), bucket, prefix)
+        files = _write_merged(task.root, batches, bucket, prefix)
     return MergeResult(task, files, t.took)
+
+
+def _batch_rows(con: duckdb.DuckDBPyConnection, source: str) -> int:
+    """Rows a batch of about `MERGE_BATCH_BYTES` holds at ``source``'s row size
+    – the Arrow bytes of its first rows averaged – at most `MERGE_BATCH_ROWS`,
+    at least 1."""
+    sql = f"SELECT * EXCLUDE ({', '.join(PARTITIONS)}) FROM {source} LIMIT 4096"
+    with closing(con.cursor()) as cur:
+        sample = cur.execute(sql).to_arrow_table()
+    row_bytes = max(1, int(sample.nbytes) // max(int(sample.num_rows), 1))
+    return max(1, min(MERGE_BATCH_ROWS, MERGE_BATCH_BYTES // row_bytes))
+
+
+def _fit(
+    batches: Iterable[pa.RecordBatch], sliced: bool = False
+) -> Iterator[pa.RecordBatch]:
+    """``batches`` as `FILE_SCHEMA` batches of at most `MERGE_BATCH_BYTES` (or
+    one row), halved until they fit – `_batch_rows` estimates from a sample, and
+    a batch it underestimated can hold more than the 2GiB of strings a
+    `FILE_SCHEMA` column takes."""
+    for batch in batches:
+        if batch.num_rows > 1 and batch.nbytes > MERGE_BATCH_BYTES:
+            half = batch.num_rows // 2
+            yield from _fit([batch.slice(0, half), batch.slice(half)], True)
+        else:
+            # a slice keeps its parent's offsets, which the cast checks
+            yield (pa.concat_batches([batch]) if sliced else batch).cast(FILE_SCHEMA)
+
+
+def _scan(
+    con: duckdb.DuckDBPyConnection,
+    root: str,
+    partition: Partition,
+    files: list[str],
+    rows: int,
+) -> Iterator[pa.RecordBatch]:
+    """``files`` in file order as `FILE_SCHEMA` batches of ``rows`` at most
+    (`_fit`), on a cursor of their own."""
+    source = partition_source_sql([f"{root}/{f}" for f in files], *partition)
+    sql = f"SELECT * EXCLUDE ({', '.join(PARTITIONS)}) FROM {source}"
+    with closing(con.cursor()) as cur:
+        yield from _fit(cur.execute(sql).to_arrow_reader(rows))
+
+
+def _read_run(path: str, rows: int) -> Iterator[pa.RecordBatch]:
+    """A temporary run's batches of ``rows`` at most (`_fit`) in file order."""
+    with pq.ParquetFile(path) as file:
+        yield from _fit(file.iter_batches(rows))
+
+
+def _write_run(path: str, tables: Iterable[pa.Table], rows: int) -> str:
+    """``tables`` as one temporary run at ``path`` – zstd level 1, row groups
+    of ``rows``."""
+    with pq.ParquetWriter(
+        path, FILE_SCHEMA, compression="zstd", compression_level=1
+    ) as writer:
+        for table in tables:
+            writer.write_table(table, row_group_size=rows)
+    return path
+
+
+def _merge_runs(paths: list[str], path: str, rows: int) -> str:
+    """Sorted runs ``paths`` merged into one sorted run at ``path``, the inputs
+    removed – through the chunker, so one `MERGE_DEDUPE_BYTES` chunk is held."""
+    chunks = entity_chunks([_read_run(p, rows) for p in paths], MERGE_DEDUPE_BYTES)
+    _write_run(path, (chunk.sort_by("entity_id") for chunk in chunks), rows)
+    for p in paths:
+        os.remove(p)
+    return path
+
+
+def _runs(
+    con: duckdb.DuckDBPyConnection, task: MergeTask, tmp: str, rows: int
+) -> list[Iterator[pa.RecordBatch]]:
+    """The partition as ``entity_id``-sorted `FILE_SCHEMA` streams of ``rows``
+    a batch.
+
+    The last merge's files are one stream in file order (their sort). The
+    ``part-*`` files are read in file order and sorted in Arrow
+    `MERGE_RUN_BYTES` at a time into temporary parquet runs under ``tmp``; more
+    than `MERGE_MAX_RUNS` of them are first merged (`_merge_runs`) in rounds of
+    that many, so no more streams than that are ever open.
+    """
+    root, partition = task.root, task.partition
+    files = [f for f, _ in task.files]
+    merged = [f for f in files if posixpath.basename(f).startswith(MERGED_PREFIX)]
+    parts = [f for f in files if f not in merged]
+    streams: list[Iterator[pa.RecordBatch]] = []
+    if merged:
+        streams.append(_scan(con, root, partition, merged, rows))
+    if not parts:
+        return streams
+    runs: list[str] = []
+    held: list[pa.RecordBatch] = []
+    nbytes = 0
+    for batch in chain(_scan(con, root, partition, parts, rows), [None]):
+        if batch is not None:
+            held.append(batch)
+            nbytes += batch.nbytes
+        if held and (batch is None or nbytes >= MERGE_RUN_BYTES):
+            table = pa.Table.from_batches(held, FILE_SCHEMA).sort_by("entity_id")
+            held, nbytes = [], 0
+            runs.append(
+                _write_run(f"{tmp}/run-0-{len(runs):05d}.parquet", [table], rows)
+            )
+            del table
+    rounds = 0
+    while len(runs) > MERGE_MAX_RUNS:
+        rounds += 1
+        runs = [
+            _merge_runs(
+                runs[i : i + MERGE_MAX_RUNS],
+                f"{tmp}/run-{rounds}-{i:05d}.parquet",
+                rows,
+            )
+            for i in range(0, len(runs), MERGE_MAX_RUNS)
+        ]
+    return streams + [_read_run(run, rows) for run in runs]
+
+
+def _dedupe(
+    con: duckdb.DuckDBPyConnection,
+    task: MergeTask,
+    chunks: Iterable[pa.Table],
+    rows: int,
+) -> Iterator[pa.RecordBatch]:
+    """Each chunk's rows through
+    [`build_merge_sql`][ftm_lakehouse.logic.parquet.build_merge_sql], sorted –
+    the chunks ascend, so the whole does."""
+    shard, bucket, origin = task.partition
+    sql = build_merge_sql(
+        shard,
+        bucket,
+        origin,
+        task.grace_cutoff,
+        source=relation_source_sql("chunk", shard, bucket, origin),
+        select=f"* EXCLUDE ({', '.join(PARTITIONS)})",
+    )
+    for chunk in chunks:
+        con.register("chunk", chunk)
+        yield from _fit(con.execute(sql).to_arrow_reader(rows))
+        con.unregister("chunk")
 
 
 def _write_merged(
@@ -182,7 +345,8 @@ def _write_merged(
     `writer_for_bucket` profile, full ``add`` stats: each `MERGE_CHUNK_BYTES`
     chunk is one ``write_deltalake`` into a staging table under `STAGING_DIR`,
     whose file moves into place with the stats logged for it. The names sort in
-    write order.
+    write order, the rows in ``batches`` order – a chunk goes in as one record
+    batch (`_chunks`).
     """
     store = get_store(root)
     fs_key = store._keys.to_fs_key
@@ -210,11 +374,11 @@ def _write_merged(
     return files
 
 
-def _chunks(
-    batches: Iterable[pa.RecordBatch], size: int
-) -> Iterator[list[pa.RecordBatch]]:
-    """``batches`` cut into lists of at least ``size`` Arrow bytes (the last one
-    short), empty batches dropped."""
+def _chunks(batches: Iterable[pa.RecordBatch], size: int) -> Iterator[pa.RecordBatch]:
+    """``batches`` cut into chunks of at least ``size`` Arrow bytes (the last one
+    short), empty batches dropped, each concatenated into one record batch:
+    delta-rs reorders the batches of a multi-batch write within the file
+    (measured, deltalake 1.6.6), and file order is the sweep's sort."""
     chunk: list[pa.RecordBatch] = []
     nbytes = 0
     for batch in batches:
@@ -222,10 +386,13 @@ def _chunks(
             chunk.append(batch)
             nbytes += batch.nbytes
         if nbytes >= size:
-            yield chunk
-            chunk, nbytes = [], 0
+            # the list goes before the yield, so a write holds one copy
+            whole, chunk, nbytes = pa.concat_batches(chunk), [], 0
+            yield whole
+            del whole
     if chunk:
-        yield chunk
+        whole, chunk = pa.concat_batches(chunk), []
+        yield whole
 
 
 def pair_source(
@@ -265,20 +432,23 @@ class SweepSource:
 
 
 def register_partition(
-    cur: duckdb.DuckDBPyConnection, source: str, clean: bool
+    cur: duckdb.DuckDBPyConnection,
+    source: str,
+    clean: bool,
+    raw: str = TABLE_RAW.name,
+    live: str = TABLE.name,
 ) -> None:
-    """Point the ``statement`` / ``statement_raw`` temp views at ``source``.
+    """Point the ``raw`` / ``live`` temp views (``statement_raw`` /
+    ``statement``) at ``source``.
 
-    ``statement`` is a plain scan over a clean source, the dedupe otherwise.
-    The footer cache is set here: at connect time it autoloads parquet too
-    early (offline).
+    ``live`` is a plain scan over a clean source, the dedupe otherwise. The
+    footer cache is set here: at connect time it autoloads parquet too early
+    (offline).
     """
     cur.execute("SET parquet_metadata_cache = true")
-    cur.execute(
-        f"CREATE OR REPLACE TEMP VIEW {TABLE_RAW.name} AS SELECT * FROM {source}"
-    )
-    live = live_rows_sql if clean else dedupe_rows_sql
-    cur.execute(f"CREATE OR REPLACE TEMP VIEW {TABLE.name} AS {live(TABLE_RAW.name)}")
+    cur.execute(f"CREATE OR REPLACE TEMP VIEW {raw} AS SELECT * FROM {source}")
+    rows = live_rows_sql if clean else dedupe_rows_sql
+    cur.execute(f"CREATE OR REPLACE TEMP VIEW {live} AS {rows(raw)}")
 
 
 @contextmanager
@@ -317,6 +487,8 @@ def sweep_pair(
         # presorted partitions are read without ORDER BY: turning this off (as
         # DuckDB's OOM advice says) would silently split entities
         con.execute("SET preserve_insertion_order = true")
+        # `SWEEP_BATCH_SIZE` full-text rows can hold more than 2GiB of strings
+        con.execute("SET arrow_large_buffer_size = true")
         readers = []
         for partition in source.partitions:
             cur = stack.enter_context(closing(con.cursor()))
@@ -387,10 +559,7 @@ class ParquetStore:
             uri=str(self.uri),
             dataset=self.dataset,
             partition_by=PARTITIONS,
-            view_sqls={
-                TABLE.name: live_view_sql,
-                TABLE_RAW.name: raw_view_sql,
-            },
+            view_sqls={TABLE_RAW.name: raw_view_sql},
             duckdb_config=duckdb_config(),
             exists=lambda: self.exists,
         )
@@ -531,11 +700,6 @@ class ParquetStore:
         """
         for stmt_dict in self._statement_data(q):
             yield LakehouseStatement.from_dict(stmt_dict)
-
-    def stats(self) -> DatasetStats:
-        """ftmq's statistics over the reconciling connection-level ``statement``
-        view."""
-        return self._lake.default_view().stats()
 
     def _lock(self, key: Uri) -> Lock:
         """A store lock file, waited for at most ``lock_max_retries`` times."""
@@ -850,6 +1014,15 @@ class ParquetStore:
                 try:
                     for result in run(merge_partition, tasks):
                         bar.advance(size=sum(size for _, size in result.task.files))
+                        shard, bucket, origin = result.task.partition
+                        self.log.info(
+                            f"Merged partition `{shard}/{bucket}/{origin}`.",
+                            took=result.took,
+                            shard=shard,
+                            bucket=bucket,
+                            origin=origin,
+                            grace_period_days=self.settings.grace_period_days,
+                        )
                         done.append(result)
                         if len(done) == MERGE_COMMIT_BATCH:
                             batch, done = done, []
@@ -884,7 +1057,7 @@ class ParquetStore:
                 actions.append(AddAction(file, size, values, now, False, stats))
             for file, size in task.files:
                 actions.append(RemoveAction(file, False, now, size, values))
-        with self._snapshot_lock:
+        with self._snapshot_lock, Took() as t:
             snapshot = self._existing_snapshot()
             snapshot.create_write_transaction(
                 actions,
@@ -893,16 +1066,9 @@ class ParquetStore:
                 partition_by=PARTITIONS,
             )
             snapshot.update_incremental()
-        for result in batch:
-            shard, bucket, origin = result.task.partition
-            self.log.info(
-                f"Merged partition `{shard}/{bucket}/{origin}`.",
-                took=result.took,
-                shard=shard,
-                bucket=bucket,
-                origin=origin,
-                grace_period_days=self.settings.grace_period_days,
-            )
+        self.log.info(
+            "Committed merged partitions.", partitions=len(batch), took=t.took
+        )
 
     def shard(self, shards: int) -> None:
         """Rewrite the store onto ``shards`` entity-hash shards.
@@ -920,7 +1086,10 @@ class ParquetStore:
         self.log.info("Re-shard complete.", shards=shards)
 
     def _rewrite_shards(self, shards: int) -> None:
-        """Rewrite every ``(bucket, origin)`` group, under the maintenance fence."""
+        """Rewrite every ``(bucket, origin)`` group, under the maintenance fence,
+        read in batches of `MERGE_BATCH_BYTES` (`_batch_rows`) – DuckDB's default
+        of a million rows a batch overflows Arrow's 2GiB string buffer on
+        document rows."""
         with self._maintenance_fence():
             root, partitions = self._partitions()
             groups: dict[tuple[str, str], list[tuple[Partition, Files]]] = {}
@@ -934,6 +1103,9 @@ class ParquetStore:
                     _connect(config) as con,
                     self._snapshot_lock,
                 ):
+                    # a batch's strings may pass 2GiB when `_batch_rows`
+                    # underestimates
+                    con.execute("SET arrow_large_buffer_size = true")
                     snapshot = self._existing_snapshot()
                     sqls = [
                         build_shard_sql(
@@ -941,8 +1113,9 @@ class ParquetStore:
                         )
                         for partition, files in sources
                     ]
+                    rows = _batch_rows(con, _relation(root, *sources[0]))
                     # lazily: executing the next query closes the current result
-                    readers = (con.execute(sql).to_arrow_reader() for sql in sqls)
+                    readers = (con.execute(sql).to_arrow_reader(rows) for sql in sqls)
                     first = next(readers)
                     batches = chain.from_iterable(chain([first], readers))
                     write_deltalake(
@@ -1114,13 +1287,37 @@ class ParquetStore:
             yield pair_source(root, pairs[key])
 
     @contextmanager
+    def cursor(
+        self, raw: str = TABLE_RAW.name, live: str = TABLE.name
+    ) -> Iterator[duckdb.DuckDBPyConnection]:
+        """A cursor with the whole table registered as a read's views
+        (`register_partition`): the live view is a plain scan when every
+        partition is clean, the dedupe query otherwise.
+
+        Args:
+            raw: Name of the view over every physical row.
+            live: Name of the view over the live rows.
+
+        Yields:
+            A DuckDB cursor of the store's connection.
+        """
+        with self._snapshot_lock:
+            source = delta_scan_sql(self._existing_snapshot().table_uri)
+        with self._cursor_over(source, not self.needs_merge, raw, live) as cur:
+            yield cur
+
+    @contextmanager
     def _cursor_over(
-        self, source: str, clean: bool
+        self,
+        source: str,
+        clean: bool,
+        raw: str = TABLE_RAW.name,
+        live: str = TABLE.name,
     ) -> Iterator[duckdb.DuckDBPyConnection]:
         """A cursor of the shared connection, its views reading ``source``
         (`register_partition`)."""
         with self._lake.cursor() as cur:
-            register_partition(cur, source, clean)
+            register_partition(cur, source, clean, raw, live)
             yield cur
 
     def _rows(

@@ -44,13 +44,33 @@ clean (read without the dedupe); a ``part-*`` file makes it dirty."""
 MERGE_COMMIT_BATCH = 64
 """Merged partitions per Delta commit – one commit each bloats the log."""
 
-MERGE_BATCH_ROWS = 10_000
-"""Rows per Arrow batch a merge reads – its chunks are cut between batches."""
+MERGE_BATCH_BYTES = 16 * 1_048_576
+"""Arrow bytes per batch a merge reads, about: rows per batch follow the
+average row size of a sample, so a stream of full-text rows holds no more than
+one of thin rows; a batch the sample underestimated is halved until it fits.
+A merge holds a batch of every stream."""
 
-MERGE_CHUNK_BYTES = 2048 * 1_048_576
+MERGE_BATCH_ROWS = 100_000
+"""Rows per batch a merge reads at most, whatever `MERGE_BATCH_BYTES` allows."""
+
+MERGE_CHUNK_BYTES = 512 * 1_048_576
 """Arrow bytes per ``write_deltalake`` call of a merge, one ``merged-*`` file
 each. delta-rs holds a call's whole input – about 2.3x it at peak, measured on
-deltalake 1.6.6 – so one call per partition would be unbounded."""
+deltalake 1.6.6 – on top of the gathered batches and their concatenation, so
+the write is a merge's largest term."""
+
+MERGE_RUN_BYTES = 1024 * 1_048_576
+"""Arrow bytes of ``part-*`` rows a merge sorts into one run – the sort holds
+about twice it."""
+
+MERGE_MAX_RUNS = 32
+"""Sorted runs a merge reads at once, at most – it holds a batch of every one.
+More are first merged into fewer, in rounds of this many."""
+
+MERGE_DEDUPE_BYTES = 512 * 1_048_576
+"""Arrow bytes per entity-closed chunk the merge's dedupe query runs over –
+about 3x it in DuckDB, measured. An entity's rows never split, so a chunk is at
+least one entity."""
 
 WRITE_FLUSH_PARTITIONS = 64
 """Partitions per ``write_deltalake`` call of `write_stream` – delta-rs holds
@@ -210,12 +230,6 @@ WHERE {tombstone}
 """.strip()
 
 
-def live_view_sql(dt: DeltaTable) -> str:
-    """SELECT body for the connection-level ``statement`` view over
-    ``delta_scan`` (``stats()``, raw SQL) – always the dedupe."""
-    return dedupe_rows_sql(delta_scan_sql(dt.table_uri))
-
-
 def live_rows_sql(source: str) -> str:
     """Live rows of a **clean** ``source`` – a filtered scan. ``canonical_id`` is
     ``entity_id``, for ftmq's query layer."""
@@ -269,16 +283,11 @@ def read_parquet_sql(files: Iterable[str]) -> str:
     return f"read_parquet([{paths}], union_by_name = true, hive_partitioning = false)"
 
 
-def partition_source_sql(
-    files: Iterable[str], shard: str, bucket: str, origin: str
-) -> str:
-    """One partition's files as a `SHARDED_SCHEMA` relation, read without
-    ``delta_scan``.
-
-    Partition columns come in as constants, columns the files predate read as
-    ``NULL`` and ``fragment`` is coalesced to ``''``. ``origin`` is validated
-    before interpolation.
-    """
+def relation_source_sql(relation: str, shard: str, bucket: str, origin: str) -> str:
+    """``relation`` – rows of a partition's files, the partition columns absent –
+    as a `SHARDED_SCHEMA` relation: the partition columns as constants,
+    ``fragment`` coalesced to ``''``. ``origin`` is validated before
+    interpolation."""
     origin = validate_origin(origin)
     constants = {"shard": shard, "bucket": bucket, "origin": origin}
     projection = ", ".join(
@@ -291,10 +300,20 @@ def partition_source_sql(
         )
         for f in SHARDED_SCHEMA
     )
-    return (
-        f"(SELECT {projection} FROM ("
-        f"SELECT * FROM {read_parquet_sql(files)} UNION ALL BY NAME {_FILE_COLUMNS}))"
+    return f"(SELECT {projection} FROM {relation})"
+
+
+def partition_source_sql(
+    files: Iterable[str], shard: str, bucket: str, origin: str
+) -> str:
+    """One partition's files as a `SHARDED_SCHEMA` relation, read without
+    ``delta_scan`` – [`relation_source_sql`][relation_source_sql] over the
+    files, columns they predate reading as ``NULL``.
+    """
+    files_sql = (
+        f"(SELECT * FROM {read_parquet_sql(files)} UNION ALL BY NAME {_FILE_COLUMNS})"
     )
+    return relation_source_sql(files_sql, shard, bucket, origin)
 
 
 def shard_expr_sql(shards: int, column: str = "entity_id") -> str:
