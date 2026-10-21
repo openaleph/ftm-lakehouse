@@ -487,6 +487,8 @@ def sweep_pair(
         # presorted partitions are read without ORDER BY: turning this off (as
         # DuckDB's OOM advice says) would silently split entities
         con.execute("SET preserve_insertion_order = true")
+        # `SWEEP_BATCH_SIZE` full-text rows can hold more than 2GiB of strings
+        con.execute("SET arrow_large_buffer_size = true")
         readers = []
         for partition in source.partitions:
             cur = stack.enter_context(closing(con.cursor()))
