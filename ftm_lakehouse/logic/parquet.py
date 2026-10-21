@@ -47,7 +47,8 @@ MERGE_COMMIT_BATCH = 64
 MERGE_BATCH_BYTES = 16 * 1_048_576
 """Arrow bytes per batch a merge reads, about: rows per batch follow the
 average row size of a sample, so a stream of full-text rows holds no more than
-one of thin rows. A merge holds a batch of every stream."""
+one of thin rows; a batch the sample underestimated is halved until it fits.
+A merge holds a batch of every stream."""
 
 MERGE_BATCH_ROWS = 100_000
 """Rows per batch a merge reads at most, whatever `MERGE_BATCH_BYTES` allows."""

@@ -204,6 +204,22 @@ def _batch_rows(con: duckdb.DuckDBPyConnection, source: str) -> int:
     return max(1, min(MERGE_BATCH_ROWS, MERGE_BATCH_BYTES // row_bytes))
 
 
+def _fit(
+    batches: Iterable[pa.RecordBatch], sliced: bool = False
+) -> Iterator[pa.RecordBatch]:
+    """``batches`` as `FILE_SCHEMA` batches of at most `MERGE_BATCH_BYTES` (or
+    one row), halved until they fit – `_batch_rows` estimates from a sample, and
+    a batch it underestimated can hold more than the 2GiB of strings a
+    `FILE_SCHEMA` column takes."""
+    for batch in batches:
+        if batch.num_rows > 1 and batch.nbytes > MERGE_BATCH_BYTES:
+            half = batch.num_rows // 2
+            yield from _fit([batch.slice(0, half), batch.slice(half)], True)
+        else:
+            # a slice keeps its parent's offsets, which the cast checks
+            yield (pa.concat_batches([batch]) if sliced else batch).cast(FILE_SCHEMA)
+
+
 def _scan(
     con: duckdb.DuckDBPyConnection,
     root: str,
@@ -211,19 +227,18 @@ def _scan(
     files: list[str],
     rows: int,
 ) -> Iterator[pa.RecordBatch]:
-    """``files`` in file order as `FILE_SCHEMA` batches of ``rows``, on a cursor
-    of their own."""
+    """``files`` in file order as `FILE_SCHEMA` batches of ``rows`` at most
+    (`_fit`), on a cursor of their own."""
     source = partition_source_sql([f"{root}/{f}" for f in files], *partition)
     sql = f"SELECT * EXCLUDE ({', '.join(PARTITIONS)}) FROM {source}"
     with closing(con.cursor()) as cur:
-        yield from cur.execute(sql).to_arrow_reader(rows).cast(FILE_SCHEMA)
+        yield from _fit(cur.execute(sql).to_arrow_reader(rows))
 
 
 def _read_run(path: str, rows: int) -> Iterator[pa.RecordBatch]:
-    """A temporary run's batches of ``rows`` in file order."""
+    """A temporary run's batches of ``rows`` at most (`_fit`) in file order."""
     with pq.ParquetFile(path) as file:
-        for batch in file.iter_batches(rows):
-            yield batch.cast(FILE_SCHEMA)
+        yield from _fit(file.iter_batches(rows))
 
 
 def _write_run(path: str, tables: Iterable[pa.Table], rows: int) -> str:
@@ -316,7 +331,7 @@ def _dedupe(
     )
     for chunk in chunks:
         con.register("chunk", chunk)
-        yield from con.execute(sql).to_arrow_reader(rows).cast(FILE_SCHEMA)
+        yield from _fit(con.execute(sql).to_arrow_reader(rows))
         con.unregister("chunk")
 
 
