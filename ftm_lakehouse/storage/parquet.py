@@ -869,6 +869,14 @@ class ParquetStore:
         self, bucket: str, table: pa.Table, target_file_size: int | None = None
     ) -> None:
         """Write a bucket from pyarrow Table to deltalake, exclusively via .LOCK"""
+        # delta-rs concatenates the batches it is handed, and one entity's text
+        # can pass the 2GiB 32-bit string offsets hold
+        table = table.cast(
+            pa.schema(
+                f.with_type(pa.large_string()) if pa.types.is_string(f.type) else f
+                for f in table.schema
+            )
+        )
         with self._tags.touch(tag.STATEMENTS_UPDATED):
             self._await_unlocked()
             with self._snapshot_lock:
