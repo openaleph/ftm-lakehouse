@@ -7,10 +7,14 @@ Sub-typer group, parallel to ``entities`` but at the statement grain:
     ftm-lakehouse statements import    # statements CSV -> parquet (no journal)
 """
 
+from typing import Annotated
+
+import typer
 from anystore import smart_open
-from anystore.io import smart_write_csv
+from anystore.io import smart_read, smart_write_csv
 from anystore.io.read import smart_stream_csv
 from anystore.util import Took
+from pyarrow.csv import CSVWriter  # type: ignore[attr-defined]  # missing from stubs
 from rich.console import Console
 from rich.table import Table
 
@@ -33,6 +37,7 @@ from ftm_lakehouse.cli.io import (
     import_statements_unsafe,
     stream_export,
 )
+from ftm_lakehouse.logic.parquet import SWEEP_BATCH_SIZE
 from ftm_lakehouse.model.statement import read_csv_statements
 from ftm_lakehouse.repository.factories import get_entities
 
@@ -112,8 +117,19 @@ def cli_statements_import(
 
 
 @statements.command("sql")
-def cli_statements_sql(query: str):
-    """Run a raw SQL query against the parquet store, rendered as a table.
+def cli_statements_sql(
+    query: Annotated[
+        str | None, typer.Argument(help="SQL query – read from -i when omitted")
+    ] = None,
+    in_uri: OPT_IN = "-",
+    out_uri: OPT_OUT = "-",
+    csv: Annotated[
+        bool, typer.Option("--csv", help="Write the result as csv to the output")
+    ] = False,
+):
+    """Run a raw SQL query against the parquet store, rendered as a table – or,
+    with ``--csv``, streamed as csv to the output. Without a query argument the
+    query is read from the input.
 
     Two DuckDB views: ``statement`` – every physical row, duplicates and
     tombstones included – and ``statement_merged`` – the live rows a read
@@ -125,6 +141,11 @@ def cli_statements_sql(query: str):
     Local-only: raw SQL is deliberately not exposed over the API – run this
     where the storage is directly accessible.
     """
+    if query is None:
+        query = smart_read(in_uri, "r")
+    elif in_uri != "-":
+        raise typer.BadParameter("Pass the query as an argument or via -i, not both")
+    console = Console(stderr=csv)  # stdout may be the csv
     with DatasetContext() as (name, uri):
         entities = get_entities(name, uri)
         if entities._is_api:
@@ -133,10 +154,22 @@ def cli_statements_sql(query: str):
             # an unknown table name would otherwise resolve against this
             # module's globals
             cur.execute("SET python_enable_replacements = false")
+            if csv:
+                # a batch of full-text rows can pass 2GiB of strings
+                cur.execute("SET arrow_large_buffer_size = true")
             with Took() as t:
                 cur.execute(query)
-            Console().print(f"Query took: {t.took}")
+            console.print(f"Query took: {t.took}")
             if cur.description is None:  # statement with no result set
+                return
+            if csv:
+                reader = cur.to_arrow_reader(SWEEP_BATCH_SIZE)
+                with (
+                    smart_open(out_uri, "wb") as fh,
+                    CSVWriter(fh, reader.schema) as writer,
+                ):
+                    for batch in reader:
+                        writer.write(batch)
                 return
             columns = [d[0] for d in cur.description]
             rows = cur.fetchall()

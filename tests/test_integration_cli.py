@@ -166,6 +166,54 @@ def test_cli_statements_sql_views(tmp_path):
     assert "WINDOW" not in sql("EXPLAIN SELECT * FROM statement_merged")
 
 
+def test_cli_statements_sql_csv(tmp_path):
+    """``--csv`` streams the result as csv – to stdout by default, the timing
+    going to stderr – or to ``-o``."""
+    lake, name = str(tmp_path / "lake"), "sql_csv"
+    repo = EntityRepository(name, f"{lake}/{name}")
+    with repo.writer(origin="test") as writer:
+        writer.add_entity(make_entity(JANE))
+    repo.flush()
+    query = "SELECT entity_id, prop, value FROM statement WHERE prop = 'name'"
+    args = ["--uri", lake, "-d", name, "statements", "sql", "--csv", query]
+    expected = [{"entity_id": "jane", "prop": "name", "value": "Jane Doe"}]
+
+    res = runner.invoke(cli, args)
+    assert res.exit_code == 0, res.output
+    assert list(csv.DictReader(res.stdout.splitlines())) == expected
+    assert "Query took" in res.stderr
+
+    out = tmp_path / "out.csv"
+    res = runner.invoke(cli, args + ["-o", str(out)])
+    assert res.exit_code == 0, res.output
+    assert list(csv.DictReader(out.read_text().splitlines())) == expected
+
+
+def test_cli_statements_sql_query_from_input(tmp_path):
+    """Without a query argument the query is read from ``-i`` – a file or
+    stdin; an argument and ``-i`` together are refused."""
+    lake, name = str(tmp_path / "lake"), "sql_input"
+    repo = EntityRepository(name, f"{lake}/{name}")
+    with repo.writer(origin="test") as writer:
+        writer.add_entity(make_entity(JANE))
+    repo.flush()
+    query = "SELECT value FROM statement WHERE prop = 'name'"
+    base = ["--uri", lake, "-d", name, "statements", "sql", "--csv"]
+    sql_file = tmp_path / "query.sql"
+    sql_file.write_text(query)
+
+    res = runner.invoke(cli, base + ["-i", str(sql_file)])
+    assert res.exit_code == 0, res.output
+    assert res.stdout.splitlines() == ['"value"', '"Jane Doe"']
+
+    res = runner.invoke(cli, base, input=query)
+    assert res.exit_code == 0, res.output
+    assert res.stdout.splitlines() == ['"value"', '"Jane Doe"']
+
+    res = runner.invoke(cli, base + ["-i", str(sql_file), query])
+    assert res.exit_code != 0
+
+
 def test_cli_maintenance_unlock_api_guard(tmp_path):
     """Unlock is local-only: the CLI errors in api mode instead of relying on
     the ``@no_api`` RuntimeError deep in the repository (message assert
