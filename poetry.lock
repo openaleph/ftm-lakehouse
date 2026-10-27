@@ -2568,50 +2568,50 @@ files = [
 
 [[package]]
 name = "griffe"
-version = "2.4.0"
+version = "2.4.1"
 description = "Signatures for entire Python programs. Extract the structure, the frame, the skeleton of your project, to generate API documentation or find breaking changes in your API."
 optional = false
 python-versions = ">=3.11"
 groups = ["dev"]
 files = [
-    {file = "griffe-2.4.0-py3-none-any.whl", hash = "sha256:23752bee668b22e25cca88b931f42ae826484c7b3cb3dd59a8ab0d9b36a296bd"},
-    {file = "griffe-2.4.0.tar.gz", hash = "sha256:3bfcbe946a5a457d14d51cc5bd77e0b772f87821b419ca76bd1b1f95371f2afa"},
+    {file = "griffe-2.4.1-py3-none-any.whl", hash = "sha256:ca58ccdb1d8590ad062fad837a875dd704f94acf7a0104795a098a991ceaf728"},
+    {file = "griffe-2.4.1.tar.gz", hash = "sha256:766123e26ec35b2ead63202e9e43ec309d876085d571b7df288256cd6fe4a3ef"},
 ]
 
 [package.dependencies]
-griffecli = "2.4.0"
-griffelib = "2.4.0"
+griffecli = "2.4.1"
+griffelib = "2.4.1"
 
 [package.extras]
-faster = ["griffelib[faster] (==2.4.0)"]
-pypi = ["griffelib[pypi] (==2.4.0)"]
+faster = ["griffelib[faster] (==2.4.1)"]
+pypi = ["griffelib[pypi] (==2.4.1)"]
 
 [[package]]
 name = "griffecli"
-version = "2.4.0"
+version = "2.4.1"
 description = "Signatures for entire Python programs. Extract the structure, the frame, the skeleton of your project, to generate API documentation or find breaking changes in your API."
 optional = false
 python-versions = ">=3.11"
 groups = ["dev"]
 files = [
-    {file = "griffecli-2.4.0-py3-none-any.whl", hash = "sha256:fd56fe5cd420881a91589857889bf69e7e8ca29eb037528afbd72a36367727dc"},
-    {file = "griffecli-2.4.0.tar.gz", hash = "sha256:1f58718b6abb807afa359b8855ff81cfb2b774fe4d497924661c1aa17f5574aa"},
+    {file = "griffecli-2.4.1-py3-none-any.whl", hash = "sha256:1678938e7b75a0aa34d3e408d550707a192f5297c3005aa0f92660648c30bc0a"},
+    {file = "griffecli-2.4.1.tar.gz", hash = "sha256:6db9acad984990b08c833ab5ec73d5a604e317b2290074d04c91ca9e52d35a7b"},
 ]
 
 [package.dependencies]
 colorama = ">=0.4"
-griffelib = "2.4.0"
+griffelib = "2.4.1"
 
 [[package]]
 name = "griffelib"
-version = "2.4.0"
+version = "2.4.1"
 description = "Signatures for entire Python programs. Extract the structure, the frame, the skeleton of your project, to generate API documentation or find breaking changes in your API."
 optional = false
 python-versions = ">=3.11"
 groups = ["dev"]
 files = [
-    {file = "griffelib-2.4.0-py3-none-any.whl", hash = "sha256:0a7db47b0bdf5123a6ceca2f71aa996742a4f04d9048046778f4a9006772d27f"},
-    {file = "griffelib-2.4.0.tar.gz", hash = "sha256:a277a462c56ff4479efe5cbcb4f882dc9a63cfa5ab6404a3e60957c6c8d2f7c9"},
+    {file = "griffelib-2.4.1-py3-none-any.whl", hash = "sha256:76bc562f936ad1ce198d2cf6d0731bd5c92a7d934b69ef828ef22ee0ffdb62ce"},
+    {file = "griffelib-2.4.1.tar.gz", hash = "sha256:40c028dd2e623f464423f0e11e3c553158f1cf4f1368239a370534d73e1407ff"},
 ]
 
 [package.extras]
