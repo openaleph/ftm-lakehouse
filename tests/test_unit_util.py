@@ -24,9 +24,9 @@ def test_checksum_algorithm_pin(tmp_path):
     # repository/archive.py – content checksum of a stored file
     src = tmp_path / "src.txt"
     src.write_text("hello")
-    file = ArchiveRepository("test", tmp_path / "data").store(src)
-    assert SHA256.match(file.checksum)
-    util.validate_checksum(file.checksum)  # the archive-layout validator agrees
+    checksum = ArchiveRepository("test", tmp_path / "data").store(src)
+    assert SHA256.match(checksum)
+    util.validate_checksum(checksum)  # the archive-layout validator agrees
 
     # storage/versions.py – snapshot dedupe tag carries the digest
     VersionStore(tmp_path / "data").make("config.yml", DatasetModel(name="test"))
@@ -34,7 +34,7 @@ def test_checksum_algorithm_pin(tmp_path):
     assert SHA256.match(tag.name.rsplit("-", 1)[1])
 
     # helpers/file.py – content-derived file / folder entity ids
-    assert SHA256.match(make_file_id("a/path.txt", file.checksum)[len("file-") :])
+    assert SHA256.match(make_file_id("a/path.txt", checksum)[len("file-") :])
     assert SHA256.match(make_folder_id("a/path")[len("folder-") :])
 
 

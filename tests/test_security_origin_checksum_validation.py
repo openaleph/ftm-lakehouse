@@ -143,11 +143,6 @@ def test_archive_txt_rejects_traversal_origin() -> None:
         path.ArchiveKey(VALID_CHECKSUM).txt("../../../etc/passwd")
 
 
-def test_archive_meta_rejects_traversal_file_id() -> None:
-    with pytest.raises(ValueError):
-        path.ArchiveKey(VALID_CHECKSUM).meta("../evil")
-
-
 def test_archive_blob_rejects_invalid_checksum() -> None:
     with pytest.raises(ValueError):
         path.ArchiveKey("not-a-valid-checksum")

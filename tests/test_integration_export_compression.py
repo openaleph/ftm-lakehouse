@@ -23,7 +23,7 @@ from ftm_lakehouse.repository.factories import (
     get_documents,
     get_entities,
 )
-from tests.shared import BOB, JANE, JOHN
+from tests.shared import BOB, JANE, JOHN, archive_file
 
 MAGIC = {
     CompressKind.gz: b"\x1f\x8b",
@@ -141,9 +141,8 @@ def test_export_compression_documents(tmp_path, fixtures_path, algorithm):
 
     archive = get_archive(*dataset)
     entities = get_entities(*dataset)
-    file = archive.store(fixtures_path / "src" / "utf.txt")
     with entities.writer() as bulk:
-        for entity in file.make_entities():
+        for entity in archive_file(archive, fixtures_path / "src" / "utf.txt"):
             bulk.add_entity(entity)
     entities.flush()
 
@@ -162,9 +161,8 @@ def test_export_compression_documents(tmp_path, fixtures_path, algorithm):
     # a second file produces a diff, compressed the same way
     file2 = tmp_path / "second.txt"
     file2.write_text("second content")
-    file = archive.store(file2)
     with entities.writer() as bulk:
-        for entity in file.make_entities():
+        for entity in archive_file(archive, file2):
             bulk.add_entity(entity)
     entities.flush()
     export(dataset.name, dataset.uri, force=True)

@@ -55,7 +55,7 @@ See [Model Reference](reference/model.md).
 
 ## Layer 2: Storage
 
-Single-purpose stores, each doing one thing: the `ParquetStore` (Delta Lake statement store), the SQL journal (write-ahead log), the `TagStore` (freshness) and the `VersionStore` (timestamped snapshots). Blobs, file metadata and text are plain `anystore.Store` instances (`get_store()`) used by the repositories.
+Single-purpose stores, each doing one thing: the `ParquetStore` (Delta Lake statement store), the SQL journal (write-ahead log), the `TagStore` (freshness) and the `VersionStore` (timestamped snapshots). Blobs and text are plain `anystore.Store` instances (`get_store()`) used by the repositories.
 
 - Each store is independent and operates on a single storage URI
 - No business logic
@@ -171,7 +171,7 @@ ftm_lakehouse/
 │
 ├── model/                   # Layer 1: Pure data structures
 │   ├── dataset.py           # DatasetModel – dataset metadata / config
-│   ├── file.py              # File metadata
+│   ├── file.py              # Document – a documents csv row
 │   ├── job.py               # Job models
 │   └── statement.py         # JOURNAL / SHARDED_SCHEMA, LakehouseStatement, statements_to_arrow
 │

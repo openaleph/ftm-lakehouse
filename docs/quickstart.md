@@ -92,11 +92,11 @@ from ftm_lakehouse import get_archive
 archive = get_archive("my_dataset")
 
 # Archive a file
-file = archive.store("/path/to/document.pdf")
-print(f"Archived: {file.checksum}")
+checksum = archive.store("/path/to/document.pdf")
+print(f"Archived: {checksum}")
 
 # Retrieve it
-with archive.open(file.checksum) as fh:
+with archive.open(checksum) as fh:
     content = fh.read()
 ```
 

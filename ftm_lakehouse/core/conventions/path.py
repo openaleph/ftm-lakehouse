@@ -34,7 +34,6 @@ Dataset Layout
             archive/                        # content-addressed file storage
                 ab/cd/ef/{checksum}/        # SHA256 split into segments
                     blob                    # file blob (stored once)
-                    {file_id}.json          # metadata (one per source path)
                     {origin}.txt            # extracted text (one per engine)
 
             statements/                     # statement store (shard-partitioned)
@@ -77,7 +76,7 @@ from ftm_lakehouse.logic.path import (
     StoreKey,
     make_ts,
 )
-from ftm_lakehouse.util import make_checksum_key, safe_name, validate_origin
+from ftm_lakehouse.util import make_checksum_key, validate_origin
 
 TENANT = "lakehouse"
 """Default tenant name"""
@@ -148,10 +147,9 @@ class ArchiveKey(StoreKey):
 
     Layout: ``archive/5a/6a/cf/5a6acf229ba576d9a40b09292595658bbb74ef56/``
 
-    One checksum is stored once, but it can have arrived by several source
-    paths and been read by several text extractors – hence
-    [`meta`][ArchiveKey.meta] and [`txt`][ArchiveKey.txt] being keyed rather
-    than fixed like [`blob`][ArchiveKey.blob].
+    One checksum is stored once, but it can have been read by several text
+    extractors – hence [`txt`][ArchiveKey.txt] being keyed rather than fixed
+    like [`blob`][ArchiveKey.blob].
 
     Args:
         checksum: SHA256 checksum of the file
@@ -164,22 +162,6 @@ class ArchiveKey(StoreKey):
     def blob(self) -> StoreKey:
         """The file's content, stored once per checksum."""
         return self / ARCHIVE_BLOB
-
-    def meta(self, file_id: str) -> StoreKey:
-        """Metadata for one file instance.
-
-        Several files with the same checksum but different source paths each
-        get their own metadata, keyed by their ``File.id``.
-
-        Layout: ``archive/5a/6a/cf/.../file-abc123.json``
-
-        Args:
-            file_id: The ``File.id`` (hash of source path + checksum)
-
-        Raises:
-            ValueError: If ``file_id`` is malformed.
-        """
-        return self / f"{safe_name(file_id, 'file_id')}.json"
 
     def txt(self, origin: str) -> StoreKey:
         """Extracted text for one extraction origin.

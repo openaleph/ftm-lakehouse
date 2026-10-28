@@ -14,6 +14,7 @@ from ftm_lakehouse.repository import (
     DocumentRepository,
     EntityRepository,
 )
+from tests.shared import archive_file
 
 
 def _export(tmp_path, make_diff: bool = True) -> None:
@@ -23,12 +24,12 @@ def _export(tmp_path, make_diff: bool = True) -> None:
 
 
 def _archive_with_entities(archive: ArchiveRepository, entities: EntityRepository, uri):
-    """Archive a file and write its entities to the entity repository."""
-    file = archive.store(uri)
+    """Archive a file and write its entities to the entity repository; returns
+    its Document entity."""
     with entities.writer() as writer:
-        for entity in file.make_entities():
+        for entity in archive_file(archive, uri):
             writer.add_entity(entity)
-    return file
+    return entity
 
 
 def test_repository_document_rows(tmp_path, fixtures_path):
@@ -114,7 +115,7 @@ def test_repository_document_export_csv_paths(tmp_path, fixtures_path):
 
     with entities.writer() as writer:
         for key in ("a/b/utf.txt", "other/utf.txt"):
-            for entity in archive.store(src, key=key).make_entities():
+            for entity in archive_file(archive, src, key):
                 writer.add_entity(entity)
     entities.flush()
 
@@ -264,7 +265,7 @@ def test_repository_document_multi_metadata(tmp_path):
     documents = list(repo.stream())
 
     assert len(documents) == 2
-    assert result1.checksum == result2.checksum
+    assert result1.first("contentHash") == result2.first("contentHash")
 
     # Different IDs and names
     ids = {d.id for d in documents}
@@ -396,11 +397,10 @@ def test_repository_document_export_diff_no_changes(tmp_path, fixtures_path, set
 def _archive_with_origin(
     archive: ArchiveRepository, entities: EntityRepository, uri, origin: str
 ):
-    file = archive.store(uri)
     with entities.writer(origin=origin) as writer:
-        for entity in file.make_entities():
+        for entity in archive_file(archive, uri):
             writer.add_entity(entity)
-    return file
+    return entity
 
 
 def test_repository_document_export_csv_origin(tmp_path, fixtures_path):
