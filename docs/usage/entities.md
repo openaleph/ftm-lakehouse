@@ -357,7 +357,7 @@ ftm-lakehouse maintenance flush --all
 
 ### Merge (expensive)
 
-Flushes, then rewrites each dirty partition: collapses duplicates and superseded fragment emissions, folds `first_seen` to the earliest and drops tombstones older than the grace period, with the rows they shadow. `force=True` rewrites clean partitions too.
+Flushes, then rewrites each dirty partition: collapses duplicates and superseded fragment emissions, folds `first_seen` to the earliest and drops tombstones older than the grace period, with the rows they shadow. `force=True` rewrites every partition from scratch, clean ones included.
 
 ```python
 entities.merge()

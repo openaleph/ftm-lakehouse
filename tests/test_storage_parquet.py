@@ -829,6 +829,39 @@ def test_storage_parquet_merge_chunks(tmp_path, monkeypatch):
     assert len(ids) == 30
 
 
+def test_storage_parquet_merge_force_resorts(tmp_path, monkeypatch):
+    """``force`` re-sorts the last merge's files: one out of order comes out in
+    entity order."""
+    monkeypatch.setattr(storage_parquet, "MERGE_BATCH_ROWS", 7)
+    monkeypatch.setattr(storage_parquet, "MERGE_DEDUPE_BYTES", 1)  # a chunk a batch
+    store = ParquetStore(tmp_path, DATASET, shards=1)
+    _flush(store, _origin_rows("a", 30))
+    chunks = storage_parquet._chunks
+
+    def rotated(batches, size):
+        # one file, its 14 highest rows first: two whole read batches, which a
+        # merge trusting the order writes out before the lower rows arrive
+        whole = pa.concat_batches(list(batches))
+        cut = whole.num_rows - 14
+        yield pa.concat_batches([whole.slice(cut), whole.slice(0, cut)])
+
+    monkeypatch.setattr(storage_parquet, "_chunks", rotated)
+    store.merge()
+    monkeypatch.setattr(storage_parquet, "_chunks", chunks)
+
+    def swept() -> list[str]:
+        (source,) = store.sweep_sources()
+        assert [p.presorted for p in source.partitions] == [True]
+        return [row["entity_id"] for row in _swept(source)]
+
+    assert swept() != sorted(swept())
+    assert not store.needs_merge  # clean: only `force` rewrites it
+    store.merge(force=True)
+    ids = swept()
+    assert ids == sorted(ids)
+    assert len(ids) == 30
+
+
 def _whole_partition_merge(store: ParquetStore, grace_days: int) -> list[tuple]:
     """What the dedupe query gives over all files of every partition at once –
     the rows a merge has to produce."""

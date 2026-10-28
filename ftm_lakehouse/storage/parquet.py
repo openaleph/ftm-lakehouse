@@ -125,6 +125,9 @@ class MergeTask:
     root: str
     grace_cutoff: datetime
     duckdb_config: dict[str, str]
+    presorted: bool = True
+    """Stream the last merge's files as sorted; off, sort them like ``part-*``
+    files."""
 
 
 @dataclass
@@ -268,15 +271,20 @@ def _runs(
     """The partition as ``entity_id``-sorted `FILE_SCHEMA` streams of ``rows``
     a batch.
 
-    The last merge's files are one stream in file order (their sort). The
-    ``part-*`` files are read in file order and sorted in Arrow
+    The last merge's files are one stream in file order (their sort), unless
+    ``task.presorted`` is off. Every other file is read in file order and sorted
+    in Arrow
     `MERGE_RUN_BYTES` at a time into temporary parquet runs under ``tmp``; more
     than `MERGE_MAX_RUNS` of them are first merged (`_merge_runs`) in rounds of
     that many, so no more streams than that are ever open.
     """
     root, partition = task.root, task.partition
     files = [f for f, _ in task.files]
-    merged = [f for f in files if posixpath.basename(f).startswith(MERGED_PREFIX)]
+    merged = [
+        f
+        for f in files
+        if task.presorted and posixpath.basename(f).startswith(MERGED_PREFIX)
+    ]
     parts = [f for f in files if f not in merged]
     streams: list[Iterator[pa.RecordBatch]] = []
     if merged:
@@ -997,8 +1005,10 @@ class ParquetStore:
         keep flowing.
 
         Args:
-            force: Rewrite clean partitions too – with a grace period of ``0``
-                that purges tombstones in otherwise idle partitions.
+            force: Rewrite every partition from scratch, clean ones included,
+                re-sorting the last merge's files instead of trusting them. With
+                a grace period of ``0`` it purges tombstones in otherwise idle
+                partitions.
         """
         if not self.exists:
             return
@@ -1009,7 +1019,12 @@ class ParquetStore:
             root, partitions = self._partitions()
             tasks = [
                 MergeTask(
-                    partition, files, root, grace_cutoff, worker_duckdb_config(workers)
+                    partition,
+                    files,
+                    root,
+                    grace_cutoff,
+                    worker_duckdb_config(workers),
+                    presorted=not force,
                 )
                 for partition, (files, clean) in partitions.items()
                 if force or not clean

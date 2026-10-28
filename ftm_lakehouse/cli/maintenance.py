@@ -68,7 +68,7 @@ def cli_make(
     ] = True,
     force_optimize: Annotated[
         Optional[bool],
-        typer.Option(help="Optimize even when no partition is dirty."),
+        typer.Option(help="Re-merge every partition from scratch, dirty or not."),
     ] = False,
     force_exports: Annotated[
         Optional[bool],
@@ -166,7 +166,7 @@ def cli_optimize(
     """Optimize the statement store: Merge dirty partitions into sorted files
     with statements deduped, tombstones applied and expired ones deleted (older
     than ``LAKEHOUSE_GRACE_PERIOD_DAYS``). Reclaims storage afterwards via
-    vacuuming."""
+    vacuuming. ``--force`` re-merges every partition from scratch."""
     with DatasetContext() as (name, uri):
         res = op.optimize(
             name, uri, retention_hours=int(retention_hours or 0), force=bool(force)

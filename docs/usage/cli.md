@@ -79,7 +79,7 @@ Set `shards` before the dataset is written to. Changing it on a store that holds
 | `--flush` / `--no-flush` | on | Flush outstanding journal statements into the parquet store |
 | `--exports` / `--no-exports` | on | Write every export artifact – statements, entities, documents, parents, their diffs, the statistics and the index. `--no-exports` flushes only |
 | `--optimize` / `--no-optimize` | on | Run [optimize](entities.md#maintenance) (merge + vacuum) before exporting; only with `--exports`. Exports are correct either way – an optimized store exports faster and takes less disk |
-| `--force-optimize` | off | Optimize even when no partition is dirty |
+| `--force-optimize` | off | Re-merge every partition from scratch, dirty or not |
 | `--force-exports` | off | Export even when the tags say the exports are fresh |
 
 ### `maintenance flush`
