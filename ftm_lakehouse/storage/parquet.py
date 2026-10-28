@@ -877,17 +877,19 @@ class ParquetStore:
                 for f in table.schema
             )
         )
-        with self._tags.touch(tag.STATEMENTS_UPDATED):
-            self._await_unlocked()
-            with self._snapshot_lock:
-                write_deltalake(
-                    self._existing_snapshot(),
-                    table,
-                    partition_by=PARTITIONS,
-                    mode="append",
-                    writer_properties=writer_for_bucket(bucket),
-                    target_file_size=target_file_size,
-                )
+        self._await_unlocked()
+        with self._snapshot_lock:
+            write_deltalake(
+                self._existing_snapshot(),
+                table,
+                partition_by=PARTITIONS,
+                mode="append",
+                writer_properties=writer_for_bucket(bucket),
+                target_file_size=target_file_size,
+            )
+        # stamped once committed: an entry-time stamp would predate an export
+        # that started meanwhile and missed these rows, leaving it fresh
+        self._tags.set(tag.STATEMENTS_UPDATED)
 
     def _by_partition(self, batch: pa.Table) -> Iterator[tuple[Partition, pa.Table]]:
         """`JOURNAL_SCHEMA` rows as one table per ``(shard, bucket, origin)``,

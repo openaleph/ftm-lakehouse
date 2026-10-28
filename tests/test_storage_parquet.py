@@ -162,6 +162,22 @@ def test_storage_parquet_append_keeps_duplicates(tmp_path):
     assert _row_count(store) == 2
 
 
+def test_storage_parquet_append_stamps_after_commit(tmp_path, monkeypatch):
+    """``statements/last_updated`` postdates the commit: an export starting while
+    an append writes misses its rows, so it must not count as fresh."""
+    store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
+    write = storage_parquet.write_deltalake
+    started: list[datetime] = []
+
+    def write_deltalake(*args, **kwargs):
+        started.append(utc_now())  # an export starting mid-append
+        return write(*args, **kwargs)
+
+    monkeypatch.setattr(storage_parquet, "write_deltalake", write_deltalake)
+    _flush(store, _origin_rows("a"))
+    assert store._tags.get(tag.STATEMENTS_UPDATED) > started[-1]
+
+
 def test_storage_parquet_merge_collapses_duplicates(tmp_path):
     """merge() folds duplicate statements per partition."""
     store = ParquetStore(tmp_path, DATASET, shards=SHARDS)
