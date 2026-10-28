@@ -1,10 +1,14 @@
 import random
 
+from anystore import get_store
+from anystore.model import Stats
 from anystore.util import guess_mimetype
 from rigour.mime import normalize_mimetype
-from rigour.mime.types import DEFAULT, HTML, PDF, WORD
+from rigour.mime.types import DEFAULT, HTML, PDF, PLAIN, WORD
 
 from ftm_lakehouse.helpers import file
+
+FAKE_CHECKSUM = "5b93539659eb03f4c5dfa64f342a667db6946913ce4d3243f4846bbe37f391d9"
 
 
 def test_helpers_file():
@@ -14,6 +18,61 @@ def test_helpers_file():
     assert file.mime_to_schema(WORD).name == "Pages"
     assert file.mime_to_schema(DEFAULT).name == "Document"
     assert file.mime_to_schema("foo").name == "Document"
+
+
+def test_helpers_file_make_file_entities(fixtures_path):
+    """The Document entity of an archived file – ids are stored keys, so they
+    are pinned."""
+    info = get_store(fixtures_path).info("src/utf.txt")
+    folder, entity = file.make_file_entities(info, FAKE_CHECKSUM)
+    assert folder.schema.name == "Folder"
+    assert folder.first("fileName") == "src"
+    assert (
+        entity.id
+        == "file-df082aa01243e36fed47a2b1de2bd563ad6dae11449431d9a1ef3795c63e0427"
+    )
+    assert entity.schema.name == "PlainText"
+    assert entity.first("contentHash") == FAKE_CHECKSUM
+    assert entity.first("fileName") == "utf.txt"
+    assert entity.first("fileSize") == "19"
+    assert entity.first("mimeType") == PLAIN
+    assert entity.first("parent") == folder.id
+
+    info = Stats(key="test.txt", name="test.txt", store="s3://bucket", size=100)
+    (entity,) = file.make_file_entities(info, FAKE_CHECKSUM, "test")
+    assert (
+        entity.id
+        == "file-725fa66861ba50448ace5adbb6474165ed07540a08f0d07f2fd723e80b172461"
+    )
+    assert entity.dataset.name == "test"
+    assert entity.datasets == {"test"}
+    assert entity.first("parent") is None
+
+    # archived under its checksum: that is the id
+    info = Stats(key=FAKE_CHECKSUM, name=FAKE_CHECKSUM, store="s3://b", size=1)
+    (entity,) = file.make_file_entities(info, FAKE_CHECKSUM)
+    assert entity.id == FAKE_CHECKSUM
+
+
+def test_helpers_file_make_file_entities_parents():
+    """Every folder of the key's path, root first, each the parent of the next."""
+    info = Stats(key="foo/bar/test.txt", name="test.txt", store="s3://b", size=100)
+    *folders, entity = file.make_file_entities(info, FAKE_CHECKSUM, "test")
+    assert [f.id for f in folders] == [
+        "folder-2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
+        "folder-dbbc59510ed49771423ffcd2ddbaaa7846666628fee87ee5e61656a93273b3f5",
+    ]
+    assert all(f.schema.name == "Folder" for f in folders)
+    assert folders[0].dataset.name == "test"
+    assert [f.first("fileName") for f in folders] == ["foo", "bar"]
+    assert folders[0].first("parent") is None
+    assert folders[1].first("parent") == folders[0].id
+    assert entity.first("parent") == folders[1].id
+
+    # weird (surrounding whitespace) but valid folder names
+    info = Stats(key="Foo / è e/test.txt", name="test.txt", store="s3://b", size=1)
+    *folders, _ = file.make_file_entities(info, FAKE_CHECKSUM)
+    assert [f.first("fileName") for f in folders] == ["Foo ", " è e"]
 
 
 NAMES = [

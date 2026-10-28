@@ -2,6 +2,7 @@ from functools import cache, lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
+from anystore.model import Stats
 from anystore.util import guess_mimetype, make_data_checksum
 from followthemoney import Schema, StatementEntity, model
 from ftmq.types import StatementEntities
@@ -51,6 +52,32 @@ def make_folders(path: Path, dataset: str | None = None) -> StatementEntities:
             parent_id = folder.id
             yield folder
     yield make_folder(path.name, parent_id, dataset)
+
+
+def make_file_entities(
+    info: Stats, checksum: str, dataset: str | None = None
+) -> StatementEntities:
+    """The Folders of ``info.key``'s path, then the Document entity of the file
+    archived under ``checksum``. Its id hashes key and checksum
+    (`make_file_id`), unless the key is the checksum itself."""
+    parent_id = None
+    parent = Path(info.key).parent
+    if parent.name:
+        for folder in make_folders(parent, dataset):
+            parent_id = folder.id
+            yield folder
+    file_id = checksum if info.key == checksum else make_file_id(info.key, checksum)
+    entity = make_entity(
+        {"id": file_id, "schema": mime_to_schema(info.mimetype)},
+        StatementEntity,
+        dataset,
+    )
+    entity.add("contentHash", checksum)
+    entity.add("fileName", info.name)
+    entity.add("fileSize", info.size)
+    entity.add("mimeType", info.mimetype)
+    entity.add("parent", parent_id)
+    yield entity
 
 
 MIME_SCHEMAS = {
