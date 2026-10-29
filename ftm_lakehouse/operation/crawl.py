@@ -18,6 +18,7 @@ from rigour.time import utc_now
 
 from ftm_lakehouse.core.conventions import tag
 from ftm_lakehouse.core.settings import CHECKSUM_ALGORITHM
+from ftm_lakehouse.helpers.file import make_file_entities
 from ftm_lakehouse.model.job import DatasetJobModel
 from ftm_lakehouse.operation.base import DatasetJobOperation
 from ftm_lakehouse.repository.job import JobRun
@@ -25,7 +26,6 @@ from ftm_lakehouse.repository.job import JobRun
 
 class HandleExistingMode(str, Enum):
     overwrite = "overwrite"
-    skip_path = "skip-path"
     skip_checksum = "skip-checksum"
 
 
@@ -42,7 +42,7 @@ class CrawlJob(DatasetJobModel):
         glob: Include only keys matching this glob pattern
         exclude_glob: Exclude keys matching this glob pattern
         make_entities: Add document entities to statement store
-        store_metadata: Write file.json metadata alongside archive blobs
+        existing: Skip files whose checksum is already archived, or overwrite
     """
 
     uri: Uri
@@ -51,8 +51,7 @@ class CrawlJob(DatasetJobModel):
     glob: str | None = None
     exclude_glob: str | None = None
     make_entities: bool = False
-    store_metadata: bool = True
-    existing: HandleExistingMode | None = HandleExistingMode.skip_path
+    existing: HandleExistingMode | None = HandleExistingMode.overwrite
 
 
 class CrawlOperation(DatasetJobOperation[CrawlJob]):
@@ -136,17 +135,14 @@ class CrawlOperation(DatasetJobOperation[CrawlJob]):
         checksum = None
         if self.source.is_local:
             checksum = self.source.checksum(uri, algorithm=CHECKSUM_ALGORITHM)
-        if not self._should_skip(uri, checksum):
-            file = self.archive.store(
-                self.source.to_uri(uri),
-                checksum=checksum,
-                store_metadata=self.job.store_metadata,
-                tag_updated=False,
-                key=uri,
-                origin=tag.CRAWL_ORIGIN,
+        if not self._should_skip(checksum):
+            checksum = self.archive.store(
+                self.source.to_uri(uri), checksum=checksum, tag_updated=False
             )
             if self.job.make_entities:
-                self.entities.add_many(file.make_entities(), tag.CRAWL_ORIGIN)
+                info = self.source.info(uri)
+                entities = make_file_entities(info, checksum, self.dataset)
+                self.entities.add_many(entities, tag.CRAWL_ORIGIN)
             run.job.done += 1
         return now
 
@@ -167,24 +163,10 @@ class CrawlOperation(DatasetJobOperation[CrawlJob]):
         if self.job.make_entities:
             self.entities.flush()
 
-    def _should_skip(self, uri: Uri, checksum: str | None) -> bool:
-        if self.job.existing is None:
+    def _should_skip(self, checksum: str | None) -> bool:
+        if self.job.existing != HandleExistingMode.skip_checksum or checksum is None:
             return False
-        if self.job.existing == HandleExistingMode.overwrite:
-            return False
-        if checksum is None:
-            return False
-        if (
-            self.job.existing == HandleExistingMode.skip_checksum
-            or not self.job.store_metadata
-        ):
-            return self.archive.exists(checksum)
-        if self.job.existing == HandleExistingMode.skip_path:
-            if self.archive.exists(checksum):
-                for file in self.archive.get_all_files(checksum):
-                    if file.key == str(uri):
-                        return True
-        return False
+        return self.archive.exists(checksum)
 
     def _api_run(self, force: bool | None = False, *args, **kwargs) -> CrawlJob:
         """Crawl always runs locally – source files aren't on the API server."""
@@ -199,8 +181,7 @@ def crawl(
     glob: str | None = None,
     exclude_glob: str | None = None,
     make_entities: bool = False,
-    store_metadata: bool = True,
-    existing: HandleExistingMode | None = HandleExistingMode.skip_path,
+    existing: HandleExistingMode | None = HandleExistingMode.overwrite,
     *,
     uri: Uri | None = None,
 ) -> CrawlJob:
@@ -217,8 +198,7 @@ def crawl(
         glob: Glob pattern for keys to include
         exclude_glob: Glob pattern for keys to exclude
         make_entities: Create file entities from crawled files
-        existing: Ignore already existing (by relative path, checksum) or overwrite
-        store_metadata: Create metadata json for each file
+        existing: Skip files whose checksum is already archived, or overwrite
         uri: Dataset storage root override (keyword-only – ``source`` is the
             crawl origin, this is where the dataset lives)
 
@@ -233,7 +213,6 @@ def crawl(
         glob=glob,
         exclude_glob=exclude_glob,
         make_entities=make_entities,
-        store_metadata=store_metadata,
         existing=existing,
     )
     return CrawlOperation(job, uri).run()

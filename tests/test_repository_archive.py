@@ -3,7 +3,6 @@ from typing import Generator
 
 import pytest
 from anystore.store import get_store
-from rigour.mime.types import PLAIN
 
 from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.repository.archive import ArchiveRepository
@@ -57,35 +56,31 @@ def test_repository_archive(repo, fixtures_path):
     if base_path:
         assert (base_path / "tags/lakehouse/archive/last_updated").exists()
 
-    files = [f for f in archive.iterate_files()]
-    assert len(files) == 5
+    checksums = list(archive.iterate_checksums())
+    assert len(checksums) == 5
 
     content_hash = "bbb1f047ff1f0c333560e09cff0c4a052eb87a2998d6d16775a276645877c5b7"
+    assert content_hash in checksums
     if base_path:
         assert (base_path / "archive" / "bb/b1/f0" / content_hash / "blob").exists()
     assert archive.exists(content_hash)
-    file = archive.get_file(content_hash)
-    assert file.key == "utf.txt"
-    assert file.checksum == content_hash
-    assert file.mimetype == PLAIN
-    with archive.open(file.checksum) as fh:
+    with archive.open(content_hash) as fh:
         assert fh.read() == "Îș unî©ođ€.\n".encode()
 
-    assert b"\n".join(archive.stream(file.checksum)) == "Îș unî©ođ€.\n".encode()
+    assert b"\n".join(archive.stream(content_hash)) == "Îș unî©ođ€.\n".encode()
 
     # Storing another file updates the tag
-    archive.store(crawl.to_uri("utf.txt"))
+    assert archive.store(crawl.to_uri("utf.txt")) == content_hash
     assert archive._tags.get(tag.ARCHIVE_UPDATED) > archive_updated
 
     return True
 
 
-def test_repository_archive_multi_metadata(repo, tmp_path):
-    """Test that multiple crawlers can archive the same file with different metadata."""
+def test_repository_archive_same_content(repo, tmp_path):
+    """Identical content archived from different paths is one blob."""
     archive, base_path = repo
 
-    # Create two files with identical content but different paths
-    content = b"identical content for multi-metadata test"
+    content = b"identical content from two paths"
     file1_path = tmp_path / "crawler1" / "documents" / "file.txt"
     file2_path = tmp_path / "crawler2" / "data" / "same_file.txt"
 
@@ -94,129 +89,40 @@ def test_repository_archive_multi_metadata(repo, tmp_path):
     file1_path.write_bytes(content)
     file2_path.write_bytes(content)
 
-    # Archive from first crawler
-    result1 = archive.store(file1_path)
-    checksum = result1.checksum
+    checksum = archive.store(file1_path)
+    assert archive.store(file2_path) == checksum
+    assert list(archive.iterate_checksums()) == [checksum]
 
-    # Archive same content from second crawler (different path)
-    result2 = archive.store(file2_path)
-
-    # Both should have the same checksum
-    assert result1.checksum == result2.checksum
-
-    # But different File.id (based on source path + checksum)
-    assert result1.id != result2.id
-
-    # Different source paths (key is filename, full path in raw['name'])
-    assert result1.key != result2.key
-    assert result1.key == "file.txt"
-    assert result2.key == "same_file.txt"
-
-    # Verify storage layout on local backends
     if base_path:
-        blob_path = base_path / path.ArchiveKey(checksum).blob
-        assert blob_path.exists()
-
-        meta1_path = base_path / path.ArchiveKey(checksum).meta(result1.id)
-        meta2_path = base_path / path.ArchiveKey(checksum).meta(result2.id)
-        assert meta1_path.exists()
-        assert meta2_path.exists()
+        blob_dir = base_path / path.ArchiveKey(checksum)
+        assert [p.name for p in blob_dir.iterdir()] == [path.ARCHIVE_BLOB]
 
 
-def test_repository_archive_lookup_files(repo, tmp_path):
-    """Test lookup_files returns all metadata for a checksum."""
+def test_repository_archive_iterate_checksums(repo, tmp_path):
+    """Every blob once, and only blobs – raw data named `blob` is not one."""
     archive, _ = repo
 
-    content = b"content for lookup_files test"
-    paths = [
-        tmp_path / "source1" / "a.txt",
-        tmp_path / "source2" / "b.txt",
-        tmp_path / "source3" / "c.txt",
-    ]
+    paths = {
+        b"content A": [tmp_path / "src1" / "a.txt", tmp_path / "src2" / "a_copy.txt"],
+        b"content B": [tmp_path / "src1" / "b.txt", tmp_path / "src3" / "b_copy.txt"],
+    }
+    checksums = set()
+    for content, files in paths.items():
+        for p in files:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(content)
+            checksums.add(archive.store(p))
+    assert len(checksums) == 2
 
-    for p in paths:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(content)
-
-    results = [archive.store(p) for p in paths]
-    checksum = results[0].checksum
-
-    # get_files should return all 3 metadata entries
-    all_files = list(archive.get_all_files(checksum))
-    assert len(all_files) == 3
-
-    # All should have the same checksum
-    assert all(f.checksum == checksum for f in all_files)
-
-    # All should have different ids
-    ids = {f.id for f in all_files}
-    assert len(ids) == 3
-
-
-def test_repository_archive_get_file_by_id(repo, tmp_path):
-    """Test get_file with specific file_id returns correct metadata."""
-    archive, _ = repo
-
-    content = b"content for lookup by id test"
-    file1 = tmp_path / "path1" / "doc.txt"
-    file2 = tmp_path / "path2" / "doc.txt"
-
-    file1.parent.mkdir(parents=True)
-    file2.parent.mkdir(parents=True)
-    file1.write_bytes(content)
-    file2.write_bytes(content)
-
-    result1 = archive.store(file1)
-    result2 = archive.store(file2)
-
-    # get_file without file_id returns any (first found)
-    found = archive.get_file(result1.checksum)
-    assert found.checksum == result1.checksum
-
-    # get_file with specific file_id returns that specific file
-    found1 = archive.get_file(result1.checksum, file_id=result1.id)
-    assert found1.id == result1.id
-    assert found1.key == result1.key
-
-    found2 = archive.get_file(result1.checksum, file_id=result2.id)
-    assert found2.id == result2.id
-    assert found2.key == result2.key
-
-
-def test_repository_archive_iter_files_multi_metadata(repo, tmp_path):
-    """Test iter_files returns all metadata entries across checksums."""
-    archive, _ = repo
-
-    # Create files with two different contents
-    content_a = b"content A"
-    content_b = b"content B"
-
-    # Each content archived from 2 different paths
-    paths_a = [tmp_path / "src1" / "a.txt", tmp_path / "src2" / "a_copy.txt"]
-    paths_b = [tmp_path / "src1" / "b.txt", tmp_path / "src3" / "b_copy.txt"]
-
-    for p in paths_a + paths_b:
-        p.parent.mkdir(parents=True, exist_ok=True)
-
-    for p in paths_a:
-        p.write_bytes(content_a)
-    for p in paths_b:
-        p.write_bytes(content_b)
-
-    for p in paths_a + paths_b:
-        archive.store(p)
-
-    # iter_files should return all 4 metadata entries
-    all_files = list(archive.iterate_files())
-    assert len(all_files) == 4
+    archive.put_data(next(iter(checksums)), "pages/blob", b"not a blob")
+    assert set(archive.iterate_checksums()) == checksums
 
 
 def test_repository_archive_put_text_multi_origin(repo, fixtures_path):
     """Test put_text stores text keyed by origin."""
     archive, base_path = repo
 
-    file = archive.store(fixtures_path / "src" / "utf.txt")
-    checksum = file.checksum
+    checksum = archive.store(fixtures_path / "src" / "utf.txt")
 
     # Store text from different OCR engines
     archive.put_txt(checksum, "Text from tesseract", origin="tesseract")

@@ -4,14 +4,14 @@ Domain-specific combinations of multiple stores. Each repository owns one domain
 
 ## ArchiveRepository
 
-Content-addressed file archive with metadata and extracted text storage.
+Content-addressed file archive with extracted text and raw data storage.
 
 ```python
 from ftm_lakehouse import get_archive
 
 archive = get_archive("my_dataset")
-archive.store(uri)
-archive.get_file(checksum)
+checksum = archive.store(uri)
+archive.exists(checksum)
 archive.stream(checksum)
 ```
 

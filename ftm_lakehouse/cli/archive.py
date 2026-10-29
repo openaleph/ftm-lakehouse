@@ -1,14 +1,13 @@
 """File archive commands for the CLI.
 
-Provides the ``archive`` sub-command group with operations to retrieve,
-inspect, list, and download files stored in the content-addressed archive.
+Provides the ``archive`` sub-command group with operations to retrieve, list,
+and download files stored in the content-addressed archive.
 """
 
 from typing import Annotated
 
 import typer
-from anystore.io import smart_open, smart_write_models
-from anystore.util import dump_json_model
+from anystore.io import smart_open
 
 from ftm_lakehouse import operation as op
 from ftm_lakehouse.cli import OPT_OUT, DatasetContext, console, sub_typer
@@ -21,39 +20,20 @@ archive = sub_typer("archive", "Access the file archive")
 def cli_archive_get(content_hash: str, out_uri: OPT_OUT = "-"):
     """Retrieve a file by content hash and write it to an output URI."""
     with DatasetContext() as (name, uri):
-        archive_repo = get_archive(name, uri)
-        file = archive_repo.get_file(content_hash)
         with (
-            archive_repo.open(file.checksum) as i,
+            get_archive(name, uri).open(content_hash) as i,
             smart_open(out_uri, "wb") as o,
         ):
             o.write(i.read())
 
 
-@archive.command("head")
-def cli_archive_head(content_hash: str, out_uri: OPT_OUT = "-"):
-    """Retrieve all metadata objects for a content hash and write them out."""
-    with DatasetContext() as (name, uri):
-        smart_write_models(out_uri, get_archive(name, uri).get_all_files(content_hash))
-
-
 @archive.command("ls")
-def cli_archive_ls(
-    out_uri: OPT_OUT = "-",
-    keys: Annotated[bool, typer.Option(help="Show only keys")] = False,
-    checksums: Annotated[bool, typer.Option(help="Show only checksums")] = False,
-):
-    """List all files in the dataset archive."""
+def cli_archive_ls(out_uri: OPT_OUT = "-"):
+    """List the checksums of all files in the dataset archive."""
     with DatasetContext() as (name, uri):
-        iterator = get_archive(name, uri).iterate_files()
-        if keys:
-            files = (f.key.encode() + b"\n" for f in iterator)
-        elif checksums:
-            files = (f.checksum.encode() + b"\n" for f in iterator)
-        else:
-            files = (dump_json_model(f, newline=True) for f in iterator)
+        checksums = get_archive(name, uri).iterate_checksums()
         with smart_open(out_uri, "wb") as o:
-            o.writelines(files)
+            o.writelines(f"{checksum}\n".encode() for checksum in checksums)
 
 
 @archive.command("download")

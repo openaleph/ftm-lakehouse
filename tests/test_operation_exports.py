@@ -17,7 +17,7 @@ from ftm_lakehouse.model.file import Document
 from ftm_lakehouse.operation.export import ExportJob, ExportOperation
 from ftm_lakehouse.operation.export import settings as export_settings
 from ftm_lakehouse.repository import ArchiveRepository, EntityRepository
-from tests.shared import JANE, JOHN
+from tests.shared import JANE, JOHN, archive_file
 
 DATASET = "export_test"
 
@@ -46,9 +46,9 @@ def setup_documents(tmp_path, fixtures_path) -> EntityRepository:
     archive = ArchiveRepository(dataset=DATASET, uri=tmp_path)
     repo = EntityRepository(dataset=DATASET, uri=tmp_path)
     for key, origin in (("utf.txt", tag.CRAWL_ORIGIN), ("companies.csv", None)):
-        doc = archive.store(fixtures_path / "src" / key)
+        entities = archive_file(archive, fixtures_path / "src" / key)
         with repo.writer(origin=origin) as writer:
-            for entity in doc.make_entities():
+            for entity in entities:
                 writer.add_entity(entity)
     repo.flush()
     return repo

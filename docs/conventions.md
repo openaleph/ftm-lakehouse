@@ -17,7 +17,6 @@ lakehouse/
     ├── archive/                  # Content-addressed file storage
     │   └── {ch[0:2]}/{ch[2:4]}/{ch[4:6]}/{checksum}/
     │       ├── blob              # Raw file content (stored once)
-    │       ├── {file_id}.json    # File metadata (one per source path)
     │       └── {origin}.txt      # Extracted text (one per engine)
     │
     ├── statements/               # Delta Lake parquet store

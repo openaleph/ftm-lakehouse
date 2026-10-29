@@ -1,30 +1,25 @@
 """ArchiveRepository - file archive operations using content-addressed blob
-storage, JSON metadata, and optional extracted fulltext."""
+storage, optional extracted fulltext and raw data."""
 
 from datetime import datetime
 from pathlib import Path
-from typing import IO, Any, BinaryIO, ContextManager
+from typing import IO, BinaryIO, ContextManager, Generator
 
 from anystore.io.read import open_virtual
 from anystore.logic.constants import DEFAULT_MODE
 from anystore.logic.io import stream
 from anystore.store import get_store
-from anystore.store.resource import UriResource
 from anystore.types import BytesGenerator, Uri
 from anystore.util import (
-    dict_merge,
     join_relpaths,
     make_checksum,
+    mask_uri,
     validate_relative_uri,
 )
-from banal import clean_dict
 from ftmq.store.base import DEFAULT_ORIGIN
 
 from ftm_lakehouse.core.conventions import path, tag
-from ftm_lakehouse.core.conventions.tag import ARCHIVE_ORIGIN
 from ftm_lakehouse.core.settings import CHECKSUM_ALGORITHM
-from ftm_lakehouse.model import File
-from ftm_lakehouse.model.file import Files
 from ftm_lakehouse.repository.base import DatasetHandle
 from ftm_lakehouse.util import validate_checksum
 
@@ -33,35 +28,29 @@ class ArchiveRepository(DatasetHandle):
     """
     Repository for file archive operations.
 
-    Combines content-addressed blob storage (raw bytes) and model-based
-    metadata storage (JSON) to provide file archiving.
-
-    Blobs are stored once per checksum, but each unique source path
-    creates its own metadata file (keyed by File.id).
+    Content-addressed blob storage (raw bytes): a blob is stored once per
+    checksum.
 
     Optionally, extracted text (by different origins) can be stored and
     retrieved. As well, other programs can write arbitrary additional data to
-    the archive (such as pdf page thumbnails).
+    the archive (such as pdf page thumbnails or their own file metadata) via
+    [`put_data`][ArchiveRepository.put_data].
 
     Example:
         ```python
         archive = ArchiveRepository(dataset="my_data", uri="s3://bucket/dataset")
 
         # Archive a file
-        file = archive.store("path/to/file.pdf")
-
-        # Retrieve file info
-        file = archive.get_file(checksum)
+        checksum = archive.store("path/to/file.pdf")
 
         # Stream file contents by checksum
-        for chunk in archive.stream(file.checksum):
+        for chunk in archive.stream(checksum):
             process(chunk)
         ```
     """
 
     def __init__(self, dataset: str, uri: Uri) -> None:
         super().__init__(dataset, uri)
-        self._files = get_store(self._store_uri, model=File, raise_on_nonexist=True)
         self._txts = get_store(
             self._store_uri, serialization_mode="auto", raise_on_nonexist=False
         )
@@ -70,46 +59,12 @@ class ArchiveRepository(DatasetHandle):
         """Check if blob exists for the given checksum."""
         return self._store.exists(path.ArchiveKey(checksum).blob)
 
-    def get_file(self, checksum: str, file_id: str | None = None) -> File:
-        """
-        Get file metadata for the given checksum.
-
-        Args:
-            checksum: SHA256 checksum of file
-            file_id: Optional File.id to get specific metadata
-
-        Raises:
-            FileNotFoundError: When no metadata file exists
-        """
-        if file_id is not None:
-            key = path.ArchiveKey(checksum).meta(file_id)
-            return self._files.get(key)
-
-        # Return first found metadata
-        for file in self.get_all_files(checksum):
-            return file
-        raise FileNotFoundError(checksum)
-
-    def get_all_files(self, checksum: str) -> Files:
-        """
-        Iterate all metadata files for the given checksum.
-
-        Multiple crawlers may have archived the same file content from
-        different source paths, each creating their own metadata file.
-        """
-        prefix = path.ArchiveKey(checksum)
-        yield from self._files.iterate_values(prefix, glob="*.json")
-
-    def iterate_files(self) -> Files:
-        """Iterate all file metadata in the archive."""
-        yield from self._files.iterate_values(path.ARCHIVE, glob="**/*.json")
-
-    def put_file(self, file: File) -> File:
-        """Store file metadata object."""
-        file.store = str(self.uri)
-        file.dataset = self.dataset
-        self._files.put(file.meta_path, file)
-        return file
+    def iterate_checksums(self) -> Generator[str, None, None]:
+        """Iterate the checksums of all blobs in the archive."""
+        # exactly the checksum depth – a `put_data` path may end in "blob" too
+        glob = f"*/*/*/*/{path.ARCHIVE_BLOB}"
+        for key in self._store.iterate_keys(prefix=path.ARCHIVE, glob=glob):
+            yield key.split("/")[-2]
 
     def stream(self, checksum: str) -> BytesGenerator:
         """Stream blob contents as bytes."""
@@ -132,64 +87,25 @@ class ArchiveRepository(DatasetHandle):
         return self._store.local_path(path.ArchiveKey(checksum).blob)
 
     def store(
-        self,
-        uri: Uri,
-        file: File | None = None,
-        checksum: str | None = None,
-        tag_updated: bool = True,
-        store_metadata: bool = True,
-        **metadata: Any,
-    ) -> File:
+        self, uri: Uri, checksum: str | None = None, tag_updated: bool = True
+    ) -> str:
         """
         Archive a file from a local or remote URI.
 
-        The blob is stored once per checksum, but each unique source path
-        creates its own metadata file (keyed by File.id).
-
         Args:
             uri: Local or remote URI to the file
-            file: Optional metadata file object to patch
             checksum: Content hash (skip computation if provided)
-            **metadata: Additional data to store in file's extra field, including
-                FollowTheMoney properties for the `Document` schema
+            tag_updated: Touch the `archive/last_updated` tag
 
         Returns:
-            File metadata object
+            checksum
         """
-        resource = UriResource(uri)
-
-        # store bytes blob (skipped if already exists)
         checksum = self.store_blob(uri, checksum)
-
-        # file metadata
-        if file is None:
-            info = resource.info()
-            file = File.from_info(info, checksum)
-
-        # patch File from given file props
-        file_props: dict[str, Any] = {}
-        for key in list(metadata.keys()):
-            if key in file.__class__.model_fields:
-                file_props[key] = metadata.pop(key)
-        file = File(**dict_merge(file.model_dump(), file_props))
-        # add remaining metadata
-        file.extra = clean_dict(metadata)
-        file.dataset = self.dataset
-        file.origin = file.origin or ARCHIVE_ORIGIN
-
-        if store_metadata:
-            # Store metadata
-            self._files.put(file.meta_path, file)
         if tag_updated:
             # Notify archive was updated
             self.touch()
-
-        self.log.info(
-            f"Archived `{file.key} ({file.checksum})`",
-            checksum=file.checksum,
-        )
-
-        return file
+        self.log.info(f"Archived `{mask_uri(uri)}` ({checksum})", checksum=checksum)
+        return checksum
 
     def store_blob(self, uri: Uri, checksum: str | None = None) -> str:
         """
@@ -233,19 +149,6 @@ class ArchiveRepository(DatasetHandle):
         with self._store.open(path.ArchiveKey(checksum).blob, "wb") as out:
             stream(fh, out)
         return checksum
-
-    def delete(self, file: File) -> None:
-        """
-        Delete a file's metadata from the archive.
-
-        The blob is never deleted. (FIXME)
-        """
-        self.log.warning(
-            "Deleting file metadata",
-            checksum=file.checksum,
-            file_id=file.id,
-        )
-        self._files.delete(file.meta_path)
 
     def put_txt(self, checksum: str, text: str, origin: str = DEFAULT_ORIGIN) -> None:
         """Store extracted text for a file.

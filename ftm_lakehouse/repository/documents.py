@@ -16,7 +16,7 @@ class DocumentRepository(DatasetHandle):
     """
     Repository for documents to consume for clients.
 
-    This gathers File entities created during storing blobs in the archive and
+    This gathers Document entities of the files stored in the archive and
     compiles a streamable csv list of document metadata.
 
     Format: id,checksum,name,mimetype,path,size,updated_at,public_url

@@ -23,7 +23,7 @@ from ftm_lakehouse.core.conventions import path, tag
 from ftm_lakehouse.lake import get_lakehouse
 from ftm_lakehouse.model.dataset import DatasetModel
 from ftm_lakehouse.operation import export, make
-from ftm_lakehouse.operation.crawl import crawl
+from ftm_lakehouse.operation.crawl import HandleExistingMode, crawl
 from ftm_lakehouse.repository.base import DatasetRef
 from ftm_lakehouse.repository.factories import get_archive, get_entities, get_versions
 from tests.conftest import (
@@ -33,6 +33,7 @@ from tests.conftest import (
     make_test_api,
     skip_unless_docker_mode,
 )
+from tests.shared import archive_file
 
 DATASET = "test"
 
@@ -286,14 +287,9 @@ def test_e2e_workflows_file_archive_and_entity_creation(dataset, fixtures_path):
     """Test that archived files create Document entities."""
     dataset, base_path = dataset
 
-    # Archive a file
-    file = get_archive(*dataset).store(fixtures_path / "src" / "example.pdf")
-
-    assert file.checksum is not None
-    assert file.mimetype is not None
-
-    # Create entity from file
-    entity = file.to_entity()
+    # Archive a file and create its entity
+    archive = get_archive(*dataset)
+    (entity,) = archive_file(archive, fixtures_path / "src" / "example.pdf")
     get_entities(*dataset).add(entity, origin="archive")
 
     get_entities(*dataset).flush()
@@ -408,7 +404,11 @@ def test_e2e_workflows_crawl_skip_existing(dataset, fixtures_path):
 
     # Second crawl should skip existing files (archive handles deduplication)
     result2 = crawl(
-        dataset.name, fixtures_path / "src", make_entities=True, uri=dataset.uri
+        dataset.name,
+        fixtures_path / "src",
+        make_entities=True,
+        existing=HandleExistingMode.skip_checksum,
+        uri=dataset.uri,
     )
 
     # All files already exist → all skipped, none processed
@@ -510,29 +510,18 @@ def test_e2e_workflows_is_latest_logic(dataset):
 def test_e2e_workflows_archive_file(dataset, fixtures_path):
     """Test archiving a file."""
     dataset, base_path = dataset
-    file = get_archive(*dataset).store(fixtures_path / "src" / "example.pdf")
-
-    assert file.checksum is not None
-    assert file.size > 0
-    assert file.mimetype == "application/pdf"
-
-
-def test_e2e_workflows_archive_lookup(dataset, fixtures_path):
-    """Test looking up an archived file."""
-    dataset, base_path = dataset
-    file = get_archive(*dataset).store(fixtures_path / "src" / "example.pdf")
-
-    # Lookup by checksum
-    found = get_archive(*dataset).get_file(file.checksum)
-    assert found.checksum == file.checksum
+    checksum = get_archive(*dataset).store(fixtures_path / "src" / "example.pdf")
+    assert checksum == (
+        "32ca2800160763fbbcf42c0a4617e666c156583da1eb00b91b09afb3c654f055"
+    )
 
 
 def test_e2e_workflows_archive_file_exists(dataset, fixtures_path):
     """Test checking if a file exists."""
     dataset, base_path = dataset
-    file = get_archive(*dataset).store(fixtures_path / "src" / "example.pdf")
+    checksum = get_archive(*dataset).store(fixtures_path / "src" / "example.pdf")
 
-    assert get_archive(*dataset).exists(file.checksum)
+    assert get_archive(*dataset).exists(checksum)
     # Use a valid but non-existent checksum format (64 hex chars for SHA256)
     assert not get_archive(*dataset).exists("0" * 64)
 
@@ -540,9 +529,9 @@ def test_e2e_workflows_archive_file_exists(dataset, fixtures_path):
 def test_e2e_workflows_archive_open_file(dataset, fixtures_path):
     """Test opening an archived file."""
     dataset, base_path = dataset
-    file = get_archive(*dataset).store(fixtures_path / "src" / "utf.txt")
+    checksum = get_archive(*dataset).store(fixtures_path / "src" / "utf.txt")
 
-    with get_archive(*dataset).open(file.checksum) as fh:
+    with get_archive(*dataset).open(checksum) as fh:
         content = fh.read()
         assert len(content) > 0
 
@@ -555,5 +544,4 @@ def test_e2e_workflows_archive_iter_files(dataset, fixtures_path):
     get_archive(*dataset).store(fixtures_path / "src" / "example.pdf")
     get_archive(*dataset).store(fixtures_path / "src" / "utf.txt")
 
-    files = list(get_archive(*dataset).iterate_files())
-    assert len(files) == 2
+    assert len(list(get_archive(*dataset).iterate_checksums())) == 2

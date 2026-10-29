@@ -9,13 +9,6 @@ Pure data structures with no dependencies. Pydantic models for serialization.
         heading_level: 3
         show_root_heading: true
 
-## File Model
-
-::: ftm_lakehouse.model.file.File
-    options:
-        heading_level: 3
-        show_root_heading: true
-
 ## Statement Schema
 
 Two schemas, one column apart. `JOURNAL_SCHEMA` is what every write path packs, the journal table (`journal_table`) stores and the api wire carries. `SHARDED_SCHEMA` adds the `shard` partition key and is what parquet holds – `ParquetStore.append` derives it from `entity_id`.

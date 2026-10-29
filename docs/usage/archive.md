@@ -1,15 +1,10 @@
 # Working with Files
 
-The archive repository stores source files and their metadata, content-addressed by SHA256 checksum: identical files are stored once per dataset, and every file can be verified against its checksum and turned into a [FollowTheMoney](https://followthemoney.tech/explorer/schemata/Document/) entity.
-
-!!! info "Blob vs. File object"
-    A _Blob_ is the bytes of a source file, identified by its SHA256 checksum.
-
-    A _File_ is the metadata [File](../reference/model.md#ftm_lakehouse.model.file.File) model. One blob can have several File objects – one per source path it was archived from.
+The archive repository stores source files as blobs, content-addressed by SHA256 checksum: identical files are stored once per dataset, and every file can be verified against its checksum. A file's name, path and type live in its [FollowTheMoney](https://followthemoney.tech/explorer/schemata/Document/) entity; anything else a caller wants to keep goes next to the blob as [raw data](#extra-metadata).
 
 ## Archiving Files
 
-`store` takes a local path or a URL and returns the `File` metadata:
+`store` takes a local path or a URL and returns the checksum:
 
 ```python
 from ftm_lakehouse import ensure_dataset, get_archive
@@ -17,24 +12,23 @@ from ftm_lakehouse import ensure_dataset, get_archive
 ensure_dataset("my_dataset")
 archive = get_archive("my_dataset")
 
-file = archive.store("/path/to/document.pdf")
-file = archive.store("https://example.com/report.pdf")
-print(file.name, file.checksum, file.size, file.mimetype)
+checksum = archive.store("/path/to/document.pdf")
+checksum = archive.store("https://example.com/report.pdf")
 ```
 
 ## Reading Files
 
 ```python
 # File-like handle
-with archive.open(file.checksum) as fh:
+with archive.open(checksum) as fh:
     content = fh.read()
 
 # Chunks, for large files
-for chunk in archive.stream(file.checksum):
+for chunk in archive.stream(checksum):
     process_chunk(chunk)
 
 # A local path, for tools that need one
-with archive.local_path(file.checksum) as path:
+with archive.local_path(checksum) as path:
     subprocess.run(["pdftotext", str(path), "output.txt"])
 ```
 
@@ -43,40 +37,52 @@ with archive.local_path(file.checksum) as path:
 !!! warning
     On a local archive `local_path` returns the blob's actual path. Do not modify or delete it.
 
-## File Metadata
+## Listing Files
 
 ```python
 archive.exists(checksum)                    # is the blob there?
-file = archive.get_file(checksum)           # first File, FileNotFoundError if none
-files = list(archive.get_all_files(checksum))  # every File of the blob
 
-for file in archive.iterate_files():        # every File in the archive
-    print(f"{file.key}: {file.checksum}")
+for checksum in archive.iterate_checksums():  # every blob in the archive
+    print(checksum)
 ```
+
+## Extra Metadata
+
+Callers keep their own metadata about a file – where it came from, who crawled it – next to its blob: `put_data` writes raw bytes at a relative path in the blob's directory, `get_data` reads them back:
+
+```python
+import json
+
+archive.put_data(checksum, "my_crawler.json", json.dumps({"url": url}).encode())
+meta = json.loads(archive.get_data(checksum, "my_crawler.json"))
+```
+
+`blob` and top-level `*.txt` paths are reserved – the content and the extracted text (`put_txt` / `get_txt`).
 
 ## File to Entity
 
-```python
-from ftm_lakehouse import get_entities
+`make_file_entities` builds the `Document` entity of an archived file – its schema picked by mime type – after the `Folder` entities of its path. The `info` is the file's anystore `Stats`: `store.info(key)` for a file in a crawled store (the key is its path), `UriResource(uri).info()` for a single uri (the key is just its file name).
 
-entity = file.to_entity()
-print(entity.schema.name, entity.first("contentHash"))
+```python
+from anystore.store.resource import UriResource
+
+from ftm_lakehouse import get_entities
+from ftm_lakehouse.helpers.file import make_file_entities
+
+uri = "/path/to/document.pdf"
+checksum = archive.store(uri)
 
 entities = get_entities("my_dataset")
-entities.add(entity, origin="archive")
+info = UriResource(uri).info()
+entities.add_many(make_file_entities(info, checksum, "my_dataset"), origin="archive")
 entities.flush()
 ```
 
 ## CLI Usage
 
 ```bash
-# List all files (one json line per File), or only checksums / keys
+# List the checksums of all files
 ftm-lakehouse -d my_dataset archive ls
-ftm-lakehouse -d my_dataset archive ls --checksums
-ftm-lakehouse -d my_dataset archive ls --keys
-
-# Every File of a checksum, as json lines
-ftm-lakehouse -d my_dataset archive head <checksum>
 
 # Retrieve file content
 ftm-lakehouse -d my_dataset archive get <checksum> -o output.pdf
@@ -97,7 +103,6 @@ my_dataset/
         ad/
           00deadbeef123456789012345678901234567890/
             blob                    # file blob (raw bytes)
-            {file_id}.json          # metadata (one per source path)
             {origin}.txt            # (optional) extracted text
 ```
 

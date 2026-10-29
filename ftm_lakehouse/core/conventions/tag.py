@@ -12,7 +12,7 @@ dropped. The one clock every export, statistic and diff depends on: a merge
 rewrites files but changes no content, so it does not touch it."""
 
 ARCHIVE_UPDATED = "archive/last_updated"
-"""Archive last updated (file added or removed)"""
+"""Archive last updated (file added)"""
 
 OP_CRAWL = "operations/crawl/last_run"
 """Last crawl (import files) execution"""

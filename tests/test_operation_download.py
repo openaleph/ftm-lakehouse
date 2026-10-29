@@ -7,6 +7,7 @@ from ftm_lakehouse.operation.download import (
 )
 from ftm_lakehouse.operation.export import ExportJob, ExportOperation
 from ftm_lakehouse.repository import ArchiveRepository, EntityRepository
+from tests.shared import archive_file
 
 DATASET = "download_test"
 
@@ -19,9 +20,9 @@ def test_operation_download_archive(tmp_path, fixtures_path):
 
     # Archive files and write their entities
     for key in ["utf.txt", "companies.csv"]:
-        doc = archive.store(fixtures_path / "src" / key)
+        entities = archive_file(archive, fixtures_path / "src" / key)
         with repo.writer() as writer:
-            for entity in doc.make_entities():
+            for entity in entities:
                 writer.add_entity(entity)
     repo.flush()
 

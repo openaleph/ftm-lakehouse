@@ -211,10 +211,6 @@ def test_conventions_path_layout(key, expected):
     [
         (path.ArchiveKey(CHECKSUM), f"archive/{CHECKSUM_TREE}"),
         (path.ArchiveKey(CHECKSUM).blob, f"archive/{CHECKSUM_TREE}/blob"),
-        (
-            path.ArchiveKey(CHECKSUM).meta("file-abc"),
-            f"archive/{CHECKSUM_TREE}/file-abc.json",
-        ),
         (path.ArchiveKey(CHECKSUM).txt("ocr"), f"archive/{CHECKSUM_TREE}/ocr.txt"),
     ],
 )
@@ -305,8 +301,6 @@ def test_conventions_path_validates_caller_input():
             path.EXPORTS_DOCUMENTS[bad]
         with pytest.raises(ValueError):
             path.EXPORTS_STATEMENTS + bad
-    with pytest.raises(ValueError):
-        path.ArchiveKey(CHECKSUM).meta("../escape")
 
 
 def test_conventions_path_make_ts():
