@@ -178,8 +178,7 @@ def test_export_parallel_merged_store(tmp_path):
 
     repo.merge()
     sources = repo.statements.sweep_sources()
-    partitions = [partition for source in sources for partition in source.partitions]
-    assert all(partition.presorted for partition in partitions)
+    assert all(clean for source in sources for _, clean in source.partitions)
     assert any(len(source.partitions) > 1 for source in sources)
     merged = export(DATASET, uri, make_diff=False, force=True)
 

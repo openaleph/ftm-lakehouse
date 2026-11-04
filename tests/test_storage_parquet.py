@@ -378,9 +378,9 @@ def test_storage_parquet_sweep_header(tmp_path):
     with storage_parquet.sweep_pair(source, {}, out) as rows:
         list(rows)
     sql = str(statement_csv_select().compile(compile_kwargs={"literal_binds": True}))
-    partition = source.partitions[0]
+    relation, _ = source.partitions[0]
     with storage_parquet._connect({}) as con:
-        storage_parquet.register_partition(con, partition.relation, False)
+        storage_parquet.register_partition(con, [(relation, False)])
         schema = con.execute(sql).to_arrow_reader().schema
     body = out.getvalue()
     assert body and not body.startswith(statement_csv_header())
@@ -457,9 +457,9 @@ def test_storage_parquet_sweep(tmp_path, monkeypatch):
     )
     _flush(store, [{**tombstone, "origin": "a"}])
 
-    def check(presorted: set[bool]) -> None:
+    def check(clean: set[bool]) -> None:
         sources = store.sweep_sources()
-        assert {p.presorted for s in sources for p in s.partitions} == presorted
+        assert {c for s in sources for _, c in s.partitions} == clean
         assert all(len(source.partitions) == 3 for source in sources)
         swept = []
         for source in sources:
@@ -648,9 +648,9 @@ def test_storage_parquet_lookup_queries_its_partitions(tmp_path, monkeypatch):
     executed = []
     cursor_over = store._cursor_over
 
-    def spy(source, clean):
-        executed.append(source)
-        return cursor_over(source, clean)
+    def spy(sources):
+        executed.append([relation for relation, _ in sources])
+        return cursor_over(sources)
 
     monkeypatch.setattr(store, "_cursor_over", spy)
 
@@ -662,13 +662,49 @@ def test_storage_parquet_lookup_queries_its_partitions(tmp_path, monkeypatch):
     assert {s.entity_id for s in store.query_statements(q)} == {"e1", "e2"}
     assert len(executed) == 1
     assert {entity_shard(e, SHARDS) for e in ("e1", "e2")} == {
-        shard for shard, _ in pairs if f"shard={shard}/" in executed[0]
+        shard
+        for shard, _ in pairs
+        if any(f"shard={shard}/" in relation for relation in executed[0])
     }
 
     executed.clear()
     q = Query(M(entity_id="e1") | M(entity_id="e2"))
     assert {s.entity_id for s in store.query_statements(q)} == {"e1", "e2"}
     assert len(executed) == len(pairs)
+
+
+def test_storage_parquet_reads_merged_partitions_plainly(tmp_path, monkeypatch):
+    """A pair's live view reconciles each origin partition on its own – a
+    merged one as a plain scan beside a dirty neighbour read through the
+    dedupe – and gives the rows the whole pair deduped would."""
+    store = ParquetStore(tmp_path, DATASET, shards=1)  # one pair per bucket
+    for origin in ("a", "b"):
+        _flush(store, _origin_rows(origin))
+    store.merge()
+    _flush(store, _origin_rows("a", 5))  # "a" dirty again, "b" stays clean
+    registered: list[list[tuple[str, bool]]] = []
+    register = storage_parquet.register_partition
+
+    def spy(cur, sources, *args, **kwargs):
+        registered.append(list(sources))
+        register(cur, sources, *args, **kwargs)
+        registered.append(_view_sql(cur, "statement"))
+
+    monkeypatch.setattr(storage_parquet, "register_partition", spy)
+
+    stmts = list(store.query_statements())
+    assert len(stmts) == 40  # one per statement and origin, duplicates collapsed
+    assert Counter(s.origin for s in stmts) == {"a": 20, "b": 20}
+    [sources, view] = registered  # one pair, one cursor
+    clean = {"a" if "origin=a/" in r else "b": c for r, c in sources}
+    assert clean == {"a": False, "b": True}
+    # exactly one dedupe (its two ``QUALIFY``s): the other partition is a scan
+    assert view.count("QUALIFY") == 2
+
+
+def _view_sql(cur, name: str) -> str:
+    sql = "SELECT sql FROM duckdb_views() WHERE view_name = ? AND temporary"
+    return cur.execute(sql, [name]).fetchone()[0]
 
 
 def test_storage_parquet_shard_escaped_origin(tmp_path):
@@ -823,7 +859,7 @@ def test_storage_parquet_merge_chunks(tmp_path, monkeypatch):
     assert all(f.startswith(MERGED_PREFIX) for f in files)
     assert not list((tmp_path / "statements" / STAGING_DIR).iterdir())
     (source,) = store.sweep_sources()
-    assert [p.presorted for p in source.partitions] == [True]
+    assert [clean for _, clean in source.partitions] == [True]
     ids = [row["entity_id"] for row in _swept(source)]
     assert ids == sorted(ids)
     assert len(ids) == 30
@@ -851,7 +887,7 @@ def test_storage_parquet_merge_force_resorts(tmp_path, monkeypatch):
 
     def swept() -> list[str]:
         (source,) = store.sweep_sources()
-        assert [p.presorted for p in source.partitions] == [True]
+        assert [clean for _, clean in source.partitions] == [True]
         return [row["entity_id"] for row in _swept(source)]
 
     assert swept() != sorted(swept())
@@ -926,7 +962,7 @@ def test_storage_parquet_merge_matches_the_whole_partition_query(tmp_path, monke
         assert not store.needs_merge
         assert Counter(_raw_rows(store)) == Counter(expected)
         for source in store.sweep_sources():
-            assert all(p.presorted for p in source.partitions)
+            assert all(clean for _, clean in source.partitions)
             ids = [row["entity_id"] for row in _swept(source)]
             assert ids == sorted(ids)
 

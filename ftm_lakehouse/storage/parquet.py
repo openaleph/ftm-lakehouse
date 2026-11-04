@@ -148,6 +148,10 @@ output (`MERGED_PREFIX`)."""
 Pairs = dict[tuple[str, str], list[tuple[Partition, Files, bool]]]
 """`Partitions` grouped per ``(shard, bucket)`` pair."""
 
+Sources = list[tuple[str, bool]]
+"""``(relation, clean)`` per partition of one read – what a cursor's views are
+registered over (`register_partition`)."""
+
 
 def _compile(sql: Select) -> str:
     """``sql`` as DuckDB SQL, parameters inlined."""
@@ -403,26 +407,10 @@ def _chunks(batches: Iterable[pa.RecordBatch], size: int) -> Iterator[pa.RecordB
         yield whole
 
 
-def pair_source(
-    root: str, sources: list[tuple[Partition, Files, bool]]
-) -> tuple[str, bool]:
-    """One ``(shard, bucket)`` pair's origin partitions as one relation, and
-    whether all of them are clean."""
-    sql = " UNION ALL ".join(_relation(root, p, files) for p, files, _ in sources)
-    return f"({sql})", all(clean for _, _, clean in sources)
-
-
-@dataclass(frozen=True)
-class SweepPartition:
-    """One origin partition of a pair, as the sweep reads it."""
-
-    relation: str
-    clean: bool
-    """Only `merge` output – read as a plain scan, else through the dedupe."""
-    presorted: bool
-    """Only one `merge`'s files, already in ``entity_id`` order – read unsorted."""
-    size: int
-    """Bytes of its files."""
+def pair_source(root: str, sources: list[tuple[Partition, Files, bool]]) -> Sources:
+    """One ``(shard, bucket)`` pair's origin partitions as ``(relation, clean)``
+    each."""
+    return [(_relation(root, p, files), clean) for p, files, clean in sources]
 
 
 @dataclass(frozen=True)
@@ -431,32 +419,35 @@ class SweepSource:
     pickles to a worker."""
 
     key: tuple[str, str]
-    partitions: list[SweepPartition]
-
-    @property
-    def size(self) -> int:
-        """Bytes of the pair's files."""
-        return sum(partition.size for partition in self.partitions)
+    partitions: Sources
+    """Its origin partitions as ``(relation, clean)`` – a clean one is one
+    `merge`'s files, in ``entity_id`` order."""
+    size: int
+    """Bytes of the pair's files."""
 
 
 def register_partition(
     cur: duckdb.DuckDBPyConnection,
-    source: str,
-    clean: bool,
+    sources: Sources,
     raw: str = TABLE_RAW.name,
     live: str = TABLE.name,
 ) -> None:
     """Point the ``raw`` / ``live`` temp views (``statement_raw`` /
-    ``statement``) at ``source``.
+    ``statement``) at ``sources`` – ``(relation, clean)`` per partition.
 
-    ``live`` is a plain scan over a clean source, the dedupe otherwise. The
-    footer cache is set here: at connect time it autoloads parquet too early
-    (offline).
+    ``live`` reconciles each partition on its own and unions them: a plain scan
+    of a clean one, the dedupe of any other – every dedupe key holds the
+    partition columns, so a partition deduped alone gives the rows the whole
+    would. The footer cache is set here: at connect time it autoloads parquet
+    too early (offline).
     """
     cur.execute("SET parquet_metadata_cache = true")
-    cur.execute(f"CREATE OR REPLACE TEMP VIEW {raw} AS SELECT * FROM {source}")
-    rows = live_rows_sql if clean else dedupe_rows_sql
-    cur.execute(f"CREATE OR REPLACE TEMP VIEW {live} AS {rows(raw)}")
+    physical = " UNION ALL ".join(f"SELECT * FROM {r}" for r, _ in sources)
+    reconciled = " UNION ALL ".join(
+        f"({(live_rows_sql if clean else dedupe_rows_sql)(r)})" for r, clean in sources
+    )
+    cur.execute(f"CREATE OR REPLACE TEMP VIEW {raw} AS {physical}")
+    cur.execute(f"CREATE OR REPLACE TEMP VIEW {live} AS {reconciled}")
 
 
 @contextmanager
@@ -485,23 +476,25 @@ def sweep_pair(
     every Arrow batch also written to ``out`` as headerless csv (``out`` stays
     the caller's to close).
 
-    Each partition is read on its own cursor and the streams ``heapq.merge``d –
-    never the pair as one query, whose sort DuckDB failed to spill. The cursors
-    share one instance, so they spill against one memory limit.
+    Each partition is read on its own cursor – a clean one in file order, as
+    `merge` wrote it, any other sorted through the dedupe – and the streams
+    ``heapq.merge``d: never the pair as one query, whose sort DuckDB failed to
+    spill. The cursors share one instance, so they spill against one memory
+    limit.
     """
     select = statement_csv_select()
     with ExitStack() as stack:
         con = stack.enter_context(_connect(config))
-        # presorted partitions are read without ORDER BY: turning this off (as
+        # clean partitions are read without ORDER BY: turning this off (as
         # DuckDB's OOM advice says) would silently split entities
         con.execute("SET preserve_insertion_order = true")
         # `SWEEP_BATCH_SIZE` full-text rows can hold more than 2GiB of strings
         con.execute("SET arrow_large_buffer_size = true")
         readers = []
-        for partition in source.partitions:
+        for relation, clean in source.partitions:
             cur = stack.enter_context(closing(con.cursor()))
-            register_partition(cur, partition.relation, partition.clean)
-            sql = _compile(select.order_by(None) if partition.presorted else select)
+            register_partition(cur, [(relation, clean)])
+            sql = _compile(select.order_by(None) if clean else select)
             readers.append(cur.execute(sql).to_arrow_reader(SWEEP_BATCH_SIZE))
         options = WriteOptions(include_header=False)
         writer = stack.enter_context(
@@ -1243,15 +1236,8 @@ class ParquetStore:
         return [
             SweepSource(
                 key,
-                [
-                    SweepPartition(
-                        relation=_relation(root, partition, files),
-                        clean=clean,
-                        presorted=clean,
-                        size=sum(size for _, size in files),
-                    )
-                    for partition, files, clean in pairs[key]
-                ],
+                pair_source(root, pairs[key]),
+                sum(size for _, files, _ in pairs[key] for _, size in files),
             )
             for key in sorted(pairs)
         ]
@@ -1295,12 +1281,12 @@ class ParquetStore:
 
     def _scoped_sources(
         self, prune: dict[str, set[str]] | None = None, whole: bool = False
-    ) -> Iterator[tuple[str, bool]]:
-        """One ``(relation, clean)`` per ``(shard, bucket)`` pair ``prune`` leaves in.
+    ) -> Iterator[Sources]:
+        """One `Sources` per ``(shard, bucket)`` pair ``prune`` leaves in.
 
-        A read pruned to shards puts all its pairs into one relation – an id
-        names its shard but not its bucket – and so does a ``whole`` one, which
-        sorts or slices across pairs.
+        A read pruned to shards puts all its pairs into one – an id names its
+        shard but not its bucket – and so does a ``whole`` one, which sorts or
+        slices across pairs.
         """
         root, pairs = self._pairs()
         keys = self._pruned_keys(pairs, prune)
@@ -1328,30 +1314,29 @@ class ParquetStore:
         """
         with self._snapshot_lock:
             source = delta_scan_sql(self._existing_snapshot().table_uri)
-        with self._cursor_over(source, not self.needs_merge, raw, live) as cur:
+        with self._cursor_over([(source, not self.needs_merge)], raw, live) as cur:
             yield cur
 
     @contextmanager
     def _cursor_over(
         self,
-        source: str,
-        clean: bool,
+        sources: Sources,
         raw: str = TABLE_RAW.name,
         live: str = TABLE.name,
     ) -> Iterator[duckdb.DuckDBPyConnection]:
-        """A cursor of the shared connection, its views reading ``source``
+        """A cursor of the shared connection, its views reading ``sources``
         (`register_partition`)."""
         with self._lake.cursor() as cur:
-            register_partition(cur, source, clean, raw, live)
+            register_partition(cur, sources, raw, live)
             yield cur
 
     def _rows(
-        self, sql: Select, sources: Iterable[tuple[str, bool]]
+        self, sql: Select, sources: Iterable[Sources]
     ) -> Iterator[dict[str, Any]]:
-        """``sql``'s rows over each ``(relation, clean)`` source in turn
-        (`_scoped_sources`), in Arrow batches of `SWEEP_BATCH_SIZE`."""
+        """``sql``'s rows over each `Sources` in turn (`_scoped_sources`), in
+        Arrow batches of `SWEEP_BATCH_SIZE`."""
         compiled = _compile(sql)
-        for source, clean in sources:
-            with self._cursor_over(source, clean) as cur:
+        for partitions in sources:
+            with self._cursor_over(partitions) as cur:
                 for batch in cur.execute(compiled).to_arrow_reader(SWEEP_BATCH_SIZE):
                     yield from batch.to_pylist()
