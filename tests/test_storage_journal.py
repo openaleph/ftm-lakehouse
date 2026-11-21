@@ -13,7 +13,6 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from followthemoney import EntityProxy
 from followthemoney.statement import Statement
-from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import NullPool
 
 from ftm_lakehouse.api.routes.journal import router
@@ -29,10 +28,10 @@ from ftm_lakehouse.storage.journal import (
     ApiJournalStore,
     SqlJournalStore,
     StatementTables,
+    sql_journal,
 )
 from ftm_lakehouse.storage.journal import get_journal as _get_journal_factory
 from ftm_lakehouse.storage.journal import sql as journal_sql
-from ftm_lakehouse.storage.journal import sql_journal
 from ftm_lakehouse.storage.journal.base import BaseJournalStore
 
 DATASET = "test"
@@ -778,20 +777,35 @@ def test_storage_journal_postgres_without_adbc_fails_on_creation(monkeypatch):
 
 
 @pytest.mark.skipif(not PSQL_URI, reason="needs PYTEST_POSTGRESQL_URI")
-def test_storage_journal_postgres_blocked_rotation_fails(monkeypatch):
-    """A flush behind a long transaction on the journal gives up after
-    ``lock_timeout`` rather than queueing every writer behind it; the rows stay
-    for the next flush."""
+def test_storage_journal_postgres_blocked_rotation_skips(monkeypatch):
+    """A rotation behind a long transaction on the journal gives up after
+    ``lock_timeout`` rather than queueing every writer behind it. The flush
+    retries, then leaves the live rows for the next flush – still draining the
+    segments already rotated, and raising nothing."""
     monkeypatch.setattr(journal_sql.PostgresJournalStore, "lock_timeout", "100ms")
+    monkeypatch.setattr(journal_sql.time, "sleep", lambda _: None)
     store = sql_journal(DATASET, PSQL_URI)
     store.clear()
     try:
         with store.writer() as w:
+            w.add_statement(make_statement("rotated", "name", "Rotated"))
+        store._rotate()  # a segment left by a crashed flush
+        with store.writer() as w:
             w.add_statement(make_statement("blocked", "name", "Blocked"))
+
+        attempts = []
+        rotate = store._rotate
+
+        def counted() -> None:
+            attempts.append(1)
+            rotate()
+
+        monkeypatch.setattr(store, "_rotate", counted)
         with store.engine.connect() as reader:  # holds its lock until closed
             reader.exec_driver_sql(f'SELECT 1 FROM "{store.table.name}"')
-            with pytest.raises(OperationalError, match="lock timeout"):
-                list(store.flush_batches())
+            rows = collect_rows(store.flush_batches())
+            assert [r["entity_id"] for r in rows] == ["rotated"]
+            assert len(attempts) == journal_sql.ROTATE_RETRIES
             with store.writer() as w:
                 w.add_statement(make_statement("after", "name", "After"))
         assert len(collect_rows(store.flush_batches())) == 2

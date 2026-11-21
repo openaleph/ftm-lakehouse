@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from binascii import crc32
 from contextlib import contextmanager
 from functools import cached_property, partial
@@ -15,7 +16,7 @@ from ftmq.util import datetime_iso
 from rigour.time import utc_now
 from sqlalchemy import MetaData, Table, delete, insert, inspect, select
 from sqlalchemy.engine import Engine, create_engine, make_url
-from sqlalchemy.exc import DisconnectionError
+from sqlalchemy.exc import DisconnectionError, OperationalError
 from sqlalchemy.pool import NullPool, Pool, QueuePool, StaticPool
 from sqlalchemy.schema import CreateTable
 
@@ -52,6 +53,13 @@ SEGMENT_INFIX = "-seg-"
 """Separates a journal table from its rotated segments."""
 
 ROTATE_LOCK_TIMEOUT = "5s"
+
+ROTATE_RETRIES = 3
+"""Rotation attempts a flush makes behind `lock_timeout` before it leaves the
+live rows for the next flush."""
+
+LOCK_NOT_AVAILABLE = "55P03"
+"""SQLSTATE of a `lock_timeout` cancellation."""
 
 COLUMNS = ", ".join(f'"{name}"' for name in JOURNAL_SCHEMA.names)
 
@@ -200,14 +208,32 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
 
         The rename's exclusive lock waits out in-flight inserts, so no row lands
         in the segment afterwards; blocked writers continue into the fresh table.
-        `lock_timeout` bounds the wait – every new insert queues behind it – so a
-        flush blocked by a long transaction fails, and the next flush retries.
+        `lock_timeout` bounds the wait – every new insert queues behind it.
         """
         name = self._segment_name()
         with self.engine.begin() as conn:
             self._set_lock_timeout(conn)
             conn.exec_driver_sql(f'ALTER TABLE "{self.table.name}" RENAME TO "{name}"')
             conn.execute(CreateTable(self.table))
+
+    def _try_rotate(self) -> bool:
+        """``_rotate``, retried `ROTATE_RETRIES` times on a lock timeout;
+        ``False`` when every attempt timed out."""
+        for attempt in range(1, ROTATE_RETRIES + 1):
+            try:
+                self._rotate()
+                return True
+            except OperationalError as exc:
+                if getattr(exc.orig, "sqlstate", None) != LOCK_NOT_AVAILABLE:
+                    raise
+                log.warning(
+                    "Journal rotation timed out on its lock",
+                    journal=self.table.name,
+                    attempt=attempt,
+                )
+                if attempt < ROTATE_RETRIES:
+                    time.sleep(attempt)
+        return False
 
     def _drop(self, name: str) -> None:
         with self.engine.begin() as conn:
@@ -225,7 +251,9 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
 
         Held under [`flush_lock`][SqlJournalStore.flush_lock] – a concurrent
         flush yields nothing. Segments left by a crashed flush are drained too,
-        and a consumer that fails keeps the undrained rows for the next flush.
+        and a consumer that fails keeps the undrained rows for the next flush. A
+        rotation that keeps timing out on its lock leaves the live rows for the
+        next flush too; the segments are drained regardless.
         Rows stream unordered, so a table spans shards and
         [`append`][ftm_lakehouse.storage.parquet.ParquetStore.append] writes one
         file per partition it touches.
@@ -237,8 +265,11 @@ class SqlJournalStore(BaseJournalStore[SqlJournalWriter]):
                     journal=self.table.name,
                 )
                 return
-            if self._has_rows(self.table.name):
-                self._rotate()
+            if self._has_rows(self.table.name) and not self._try_rotate():
+                log.warning(
+                    "Journal is busy – leaving its live rows for the next flush",
+                    journal=self.table.name,
+                )
             for name in self._segments():
                 yield from self._drain(name)
 

@@ -4,7 +4,7 @@ Single-purpose storage interfaces. Each store does one thing.
 
 ## SqlJournalStore
 
-Write-ahead log for statements: one append-only, keyless table per dataset in `JOURNAL_SCHEMA`. A flush renames the table to a timestamped segment, recreating it in the same DDL transaction, hands the segment over as Arrow tables and drops it once the consumer has written them – a failed write keeps its rows for the next flush. On postgres the rename waits at most `lock_timeout` (5s) for in-flight writers; a blocked flush fails and the next one retries. `flush_lock()` serializes flushes per dataset. `get_journal` picks the store: `SqliteJournalStore` / `PostgresJournalStore` by uri, or `ApiJournalStore` in api mode, which only writes – the server drains its journal.
+Write-ahead log for statements: one append-only, keyless table per dataset in `JOURNAL_SCHEMA`. A flush renames the table to a timestamped segment, recreating it in the same DDL transaction, hands the segment over as Arrow tables and drops it once the consumer has written them – a failed write keeps its rows for the next flush. On postgres the rename waits at most `lock_timeout` (5s) for in-flight writers; a blocked rotation is retried `ROTATE_RETRIES` (3) times, then the flush leaves the live rows for the next one and drains only the segments already rotated – it never fails on the lock. `flush_lock()` serializes flushes per dataset. `get_journal` picks the store: `SqliteJournalStore` / `PostgresJournalStore` by uri, or `ApiJournalStore` in api mode, which only writes – the server drains its journal.
 
 ::: ftm_lakehouse.storage.journal.sql.SqlJournalStore
     options:
