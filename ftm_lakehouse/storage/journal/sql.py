@@ -442,10 +442,13 @@ class PostgresJournalStore(SqlJournalStore):
         """Session advisory lock keyed on the journal table.
 
         Session-scoped since a flush spans many transactions; postgres drops it
-        with the connection, so a crashed flusher releases it.
+        with the connection, so a crashed flusher releases it. On autocommit: a
+        transaction left idle for the whole drain is what
+        ``idle_in_transaction_session_timeout`` kills, and the lock with it.
         """
         key = crc32(self.table.name.encode())
-        with self.engine.connect() as conn:
+        engine = self.engine.execution_options(isolation_level="AUTOCOMMIT")
+        with engine.connect() as conn:
             acquired = bool(
                 conn.exec_driver_sql(f"SELECT pg_try_advisory_lock({key})").scalar()
             )
