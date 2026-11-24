@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Generator
@@ -13,6 +14,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from followthemoney import EntityProxy
 from followthemoney.statement import Statement
+from sqlalchemy.engine import make_url
 from sqlalchemy.pool import NullPool
 
 from ftm_lakehouse.api.routes.journal import router
@@ -809,6 +811,34 @@ def test_storage_journal_postgres_blocked_rotation_skips(monkeypatch):
             with store.writer() as w:
                 w.add_statement(make_statement("after", "name", "After"))
         assert len(collect_rows(store.flush_batches())) == 2
+    finally:
+        store.clear()
+        store.dispose()
+
+
+@pytest.mark.skipif(not PSQL_URI, reason="needs PYTEST_POSTGRESQL_URI")
+def test_storage_journal_postgres_flush_outlives_idle_timeout():
+    """A drain slower than ``idle_in_transaction_session_timeout`` keeps its
+    flush lock to the end – the lock's connection holds no open transaction."""
+    uri = make_url(PSQL_URI).update_query_dict(
+        {"options": "-cidle_in_transaction_session_timeout=100ms"}
+    )
+    store = sql_journal(DATASET, uri.render_as_string(hide_password=False))
+    store.clear()
+    try:
+        with store.writer() as w:
+            w.add_statement(make_statement("slow", "name", "Slow"))
+
+        rows = 0
+        for table in store.flush_batches():
+            rows += table.num_rows
+            time.sleep(0.5)  # a slow append
+            with store.flush_lock() as acquired:
+                assert not acquired  # still held by this flush
+        assert rows == 1
+        assert store.count() == 0
+        with store.flush_lock() as acquired:
+            assert acquired  # released
     finally:
         store.clear()
         store.dispose()
