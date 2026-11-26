@@ -5,6 +5,7 @@ from typing import Callable, Generator, TypeVar
 
 import httpx
 from anystore.decorators import error_handler
+from anystore.logging import get_logger
 from anystore.logic.uri import UriHandler, join_uri
 from anystore.store.resource import UriResource
 from anystore.types import Uri
@@ -29,6 +30,9 @@ if _settings.api_key and _settings.api_secret:
 # Set default headers for all PutFSFileSystem (putfs://) instances
 _fsspec_client_kwargs = {"headers": _default_headers}
 fsspec_conf.setdefault("putfs", {})["client_kwargs"] = _fsspec_client_kwargs
+
+
+log = get_logger(__name__)
 
 
 @cache
@@ -87,7 +91,15 @@ class LakehouseApi(UriResource):
     def ensure(self) -> None:
         """Trigger ensure zfs dataset endpoint"""
         url = self.make_url("_api/ensure")
-        self.make_request(url, "POST")
+        try:
+            self.make_request(url, "POST")
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code != 405:
+                raise
+            # read-only
+            log.warning(
+                "Read-only lakehouse", dataset=self.name, uri=mask_uri(self.uri)
+            )
 
 
 @cache
