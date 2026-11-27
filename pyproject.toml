@@ -7,10 +7,9 @@ authors = [
     { name = "Simon Wörpel", email = "simon.woerpel@pm.me" },
     { name = "Friedrich Lindenberg", email = "pudo@opensanctions.org" },
 ]
-license = "AGPLv3+"
+license = "AGPL-3.0-or-later"
 readme = "README.md"
 classifiers = [
-    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
     "Programming Language :: Python",
